@@ -530,6 +530,15 @@ select, input[type="checkbox"] {
   word-break: break-word;
 }
 
+/* Assistant bubbles rendered as markdown need `white-space: normal`
+ * so headings, paragraphs, and lists reflow correctly — the base
+ * `pre-wrap` would otherwise render the raw `## Heading` source as
+ * literal text. The `--markdown` modifier is set by chat.js when the
+ * bubble content came from the LLM (vs. user input or an error). */
+.chat-message--markdown {
+  white-space: normal;
+}
+
 .chat-user {
   align-self: flex-end;
   background: rgba(88, 166, 255, 0.15);
@@ -541,6 +550,125 @@ select, input[type="checkbox"] {
   background: var(--bg);
   border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
+}
+
+/* ---- Markdown styling for assistant bubbles ----------------------------
+ * Scoped under `.chat-assistant` so user bubbles (plain text) keep the
+ * monospaced look without ever being parsed as markdown. Color tokens
+ * come from the existing `:root` palette; spacing is tightened to fit
+ * inside the bubble's modest max-width. */
+.chat-assistant > :first-child { margin-top: 0; }
+.chat-assistant > :last-child  { margin-bottom: 0; }
+
+.chat-assistant p {
+  margin: 0.4em 0;
+}
+
+.chat-assistant h1,
+.chat-assistant h2,
+.chat-assistant h3,
+.chat-assistant h4,
+.chat-assistant h5,
+.chat-assistant h6 {
+  margin: 0.8em 0 0.3em;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.chat-assistant h1 { font-size: 1.25em; }
+.chat-assistant h2 { font-size: 1.15em; }
+.chat-assistant h3 { font-size: 1.05em; }
+.chat-assistant h4,
+.chat-assistant h5,
+.chat-assistant h6 { font-size: 1em; }
+
+.chat-assistant ul,
+.chat-assistant ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+.chat-assistant li { margin: 0.15em 0; }
+.chat-assistant li > p { margin: 0.2em 0; }
+
+/* GitHub-flavored task lists: `<input type="checkbox" disabled>` is
+ * what marked emits for `- [ ] todo` / `- [x] done`. The `disabled`
+ * keeps the user from toggling them inside the chat. */
+.chat-assistant li > input[type="checkbox"] {
+  margin-right: 0.4em;
+  vertical-align: -0.15em;
+}
+
+.chat-assistant blockquote {
+  margin: 0.5em 0;
+  padding: 0.2em 0.7em;
+  border-left: 3px solid var(--border);
+  color: var(--fg-mute);
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 0 4px 4px 0;
+}
+
+.chat-assistant code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  padding: 0.05em 0.35em;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.chat-assistant pre {
+  margin: 0.5em 0;
+  padding: 0.6em 0.8em;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.88em;
+  line-height: 1.4;
+}
+.chat-assistant pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+.chat-assistant hr {
+  margin: 0.8em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.chat-assistant a {
+  color: var(--accent-2);
+  text-decoration: underline;
+  text-decoration-color: rgba(121, 192, 255, 0.4);
+  text-underline-offset: 2px;
+}
+.chat-assistant a:hover {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
+}
+
+/* GFM tables: marked emits `<table>` with `<thead>` / `<tbody>`.
+ * The bubble's small width can overflow narrow tables — let the user
+ * scroll horizontally instead of wrapping. */
+.chat-assistant table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.chat-assistant th,
+.chat-assistant td {
+  border: 1px solid var(--border);
+  padding: 0.3em 0.6em;
+  text-align: left;
+}
+.chat-assistant th {
+  background: var(--bg-elev);
+  font-weight: 600;
 }
 
 /* Inline bouncing-dots loader rendered inside the assistant bubble

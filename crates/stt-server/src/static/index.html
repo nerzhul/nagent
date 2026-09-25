@@ -23,6 +23,19 @@
   -->
   <script src="/static/vendor/ort/ort.min.js"></script>
   <script src="/static/vendor/vad/bundle.min.js"></script>
+  <!--
+    Markdown rendering for Discussion-mode assistant bubbles.
+    Vendored locally for the same reason as the VAD/ORT bundles: the
+    server has no build step, no bundler, and no npm install at runtime,
+    so we cannot rely on a CDN to satisfy a strict CSP / offline setup.
+    `marked` parses the accumulated LLM stream into HTML and `DOMPurify`
+    sanitizes the result so a prompt-injection reply can't smuggle
+    `<script>` tags or `onerror=` handlers into the chat bubble.
+    Both libraries expose globals (`window.marked`, `window.DOMPurify`)
+    and are loaded as classic scripts before the chat.js module.
+  -->
+  <script src="/static/vendor/marked/marked.min.js"></script>
+  <script src="/static/vendor/sanitize/purify.min.js"></script>
 </head>
 <body>
   <header>

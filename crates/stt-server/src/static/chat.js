@@ -33,6 +33,109 @@ import { preselectFromBrowser } from "/static/lang-preselect.js";
 const HISTORY_KEY = "nagent.chat.history";
 const HISTORY_CAP = 200;
 
+// ---- Markdown rendering ----------------------------------------------------
+//
+// The LLM replies arrive as a token stream, but the user expects nicely
+// formatted output (lists, code blocks, bold, etc.) by the time the
+// reply is done. We parse the accumulated text with `marked` and
+// sanitize the resulting HTML with `DOMPurify` before assigning it to
+// the bubble's `innerHTML`. Both libraries are vendored under
+// `static/vendor/` and exposed as globals by index.html, so we use the
+// globals directly instead of importing (they ship as classic scripts,
+// not ES modules).
+//
+// Streaming UX: re-parsing and re-sanitizing the full accumulated text
+// on every token would be wasteful and could cause visible flicker if
+// partial markdown is re-rendered into slightly different shapes. We
+// coalesce updates via `requestAnimationFrame` so each animation frame
+// sees at most one render, and we schedule the next frame lazily —
+// tokens arriving faster than 60 fps only produce one render per frame
+// anyway.
+//
+// User bubbles and error bubbles stay as plain `textContent`: we never
+// render user input as markdown (to avoid confusing the user about what
+// is "trusted"), and error messages are developer-facing text that
+// shouldn't be parsed as markdown.
+
+// Probe the vendor scripts once at module load. They are classic
+// `<script>` tags in `<head>` that run before any `<body>` content, so
+// this check is normally true — but a partial deploy / CDN failure /
+// strict CSP could leave them undefined. `renderMarkdown` then degrades
+// to a manually-escaped plain-text render instead of crashing the
+// chat on the first reply.
+const MARKDOWN_AVAILABLE =
+  typeof window.marked?.parse === "function"
+  && typeof window.DOMPurify?.sanitize === "function";
+
+function renderMarkdown(text) {
+  if (!text) return "";
+  if (!MARKDOWN_AVAILABLE) {
+    // Vendor scripts failed to load (404, blocked, parse error). Fall
+    // back to a manually-escaped, plain-text render rather than
+    // throwing on the first reply. The user still sees the reply, just
+    // without markdown formatting.
+    return escapeHtml(text).replace(/\n/g, "<br>");
+  }
+  // marked.parse returns an HTML string when called with a string input.
+  // `breaks: true` makes single newlines become `<br>` (LLMs often
+  // break lines without blank lines). `gfm: true` (default) enables
+  // GitHub-flavored features: tables, task lists, fenced code blocks.
+  const raw = window.marked.parse(text, { breaks: true, gfm: true });
+  return window.DOMPurify.sanitize(raw, {
+    // Anchor tags get forced-open in a new tab so a chat reply can't
+    // navigate the nagent UI away. DOMPurify honors `ADD_ATTR` for the
+    // `target` and `rel` we add below; everything else stays at the
+    // default-deny baseline.
+    ADD_ATTR: ["target", "rel"],
+  });
+}
+
+// Minimal HTML escaper used only when the vendor libraries fail to
+// load. We intentionally never interpolate user-controlled strings
+// into the DOM via `innerHTML` outside of `renderMarkdown`, so this
+// only ever sees the LLM's own output — but escaping it anyway keeps
+// the degraded path safe by construction.
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Patch every <a> inside the bubble so it opens in a new tab with
+// `rel="noopener noreferrer"`. We do this after DOMPurify because
+// DOMPurify would strip `target`/`rel` from otherwise unsafe URLs —
+// the post-pass keeps the sanitization guarantee but adds safe-link
+// behavior for the ones DOMPurify kept.
+function decorateSafeLinks(root) {
+  const links = root.querySelectorAll("a[href]");
+  for (const a of links) {
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+  }
+}
+
+function applyMarkdown(bubbleEl, text) {
+  bubbleEl.innerHTML = renderMarkdown(text);
+  decorateSafeLinks(bubbleEl);
+}
+
+// Schedule a markdown re-render of `bubbleEl` for the next animation
+// frame. If a render is already pending, the call is a no-op — the
+// pending render will use the latest `accumulated` text by closure.
+// This keeps the streaming path at most one render per frame even if
+// tokens arrive in bursts.
+function scheduleMarkdownRender(bubbleEl, getText) {
+  if (bubbleEl.dataset.mdPending === "1") return;
+  bubbleEl.dataset.mdPending = "1";
+  requestAnimationFrame(() => {
+    bubbleEl.dataset.mdPending = "0";
+    applyMarkdown(bubbleEl, getText());
+  });
+}
+
 const $ = (id) => document.getElementById(id);
 const messagesEl   = $("chat-messages");
 const formEl       = $("chat-form");
@@ -124,16 +227,41 @@ function renderHistory() {
   messagesEl.innerHTML = "";
   const history = loadHistory();
   for (const msg of history) {
-    appendBubble(msg.role, msg.content, { persist: false, model: msg.model });
+    // Re-render assistant history as markdown so a reload (or a
+    // client that joined the session late) sees formatted replies,
+    // not the raw `**bold**` source. User history stays plain text.
+    const markdown = msg.role === "assistant";
+    appendBubble(msg.role, msg.content, {
+      persist: false,
+      model: msg.model,
+      markdown,
+    });
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-function appendBubble(role, text, { persist = true, model = null } = {}) {
+function appendBubble(role, text, { persist = true, model = null, markdown = false } = {}) {
   const div = document.createElement("div");
-  div.className = `chat-message chat-${role}`;
+  const classes = [`chat-message`, `chat-${role}`];
+  // The `--markdown` modifier unlocks `white-space: normal` and the
+  // markdown element styling in style.css. Without it the bubble
+  // would inherit `white-space: pre-wrap` and show `## Heading`
+  // literally instead of as a heading.
+  if (markdown) classes.push("chat-message--markdown");
+  div.className = classes.join(" ");
   if (model && role === "assistant") div.dataset.model = model;
-  div.textContent = text;
+  if (markdown) {
+    // Sanitized HTML render of the assistant reply. The text source is
+    // persisted (below) — only the live bubble uses innerHTML so a
+    // prompt-injection reply cannot smuggle scripts into the chat UI.
+    applyMarkdown(div, text);
+  } else {
+    // User bubbles always render as plain text — we trust user input
+    // but never interpret it as markdown so the user sees exactly
+    // what they typed and we never try to render a hostile prompt as
+    // a link.
+    div.textContent = text;
+  }
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   if (persist) {
@@ -223,7 +351,7 @@ async function streamReply() {
   const earlier = history.slice(0, -1);
 
   const model = modelEl.value || undefined;
-  const assistantEl = appendBubble("assistant", "", { persist: false, model });
+  const assistantEl = appendBubble("assistant", "", { persist: false, model, markdown: true });
   // Render an inline bouncing-dots loader inside the assistant bubble
   // while we wait for the LLM's first token. Without this, the bubble
   // sits empty during the Ollama cold start (sometimes 30s+ on a
@@ -263,6 +391,14 @@ async function streamReply() {
   if (model) body.model = model;
 
   let accumulated = "";
+  // `finalSource` is the text persisted into history at the end of
+  // the turn. On a clean stream it equals `accumulated` (raw markdown
+  // source, so reloads re-render with the same vendor libraries). On
+  // an abort with no tokens, or a non-abort error, it is overwritten
+  // below to match whatever the live bubble ended up showing — that
+  // way a page reload reproduces what the user just saw, instead of
+  // surfacing a stale "here's the partial markdown source" entry.
+  let finalSource = "";
   // First-token arrival switches the pill from "Loading model…" to
   // "Streaming…"; the same `connecting` class keeps the spinner
   // animated so the user keeps getting live feedback.
@@ -305,26 +441,49 @@ async function streamReply() {
                 setStreamState({ text: "Streaming…", cls: "connecting" });
                 // Strip the inline loader before writing real text so
                 // the bubble transitions cleanly into the reply.
-                assistantEl.textContent = "";
+                assistantEl.innerHTML = "";
               }
               accumulated += delta;
-              assistantEl.textContent = accumulated;
+              // Re-render the accumulated text as sanitized markdown.
+              // We coalesce updates via requestAnimationFrame so a
+              // burst of small tokens only triggers one parse per
+              // animation frame, keeping the streaming path cheap.
+              scheduleMarkdownRender(assistantEl, () => accumulated);
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
           } catch (_e) { /* skip malformed line */ }
         }
       }
     }
+    finalSource = accumulated;
   } catch (e) {
     if (e?.name === "AbortError") {
-      assistantEl.textContent = accumulated || "(stopped)";
+      // Render whatever we got as markdown so the user sees the
+      // partial reply formatted the same way as a full one. If we
+      // never received any tokens, fall back to a plain "(stopped)"
+      // marker so the bubble isn't empty.
+      if (accumulated) {
+        applyMarkdown(assistantEl, accumulated);
+        finalSource = accumulated;
+      } else {
+        assistantEl.textContent = "(stopped)";
+        finalSource = "(stopped)";
+      }
     } else {
-      assistantEl.textContent = `[error] ${e?.message || e}`;
+      // Error markers stay plain text — they are developer-facing
+      // diagnostics, not part of the LLM's markdown output.
+      const errText = `[error] ${e?.message || e}`;
+      assistantEl.textContent = errText;
+      finalSource = errText;
       appendError(e?.message || String(e));
     }
   } finally {
+    // Persist the raw markdown source (or the error/stopped marker)
+    // rather than the rendered HTML, so the history stays small,
+    // portable, and re-renderable on clients that load the page
+    // later. The live bubble keeps its sanitized innerHTML.
     const h = loadHistory();
-    h.push({ role: "assistant", content: assistantEl.textContent, ts: Date.now(), model });
+    h.push({ role: "assistant", content: finalSource, ts: Date.now(), model });
     saveHistory(h);
     inflight = null;
     // Clear the streaming status so the pill falls back to the audio
