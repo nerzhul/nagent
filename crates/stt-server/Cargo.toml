@@ -10,6 +10,12 @@ description = "axum HTTP/WebSocket server for the STT pipeline."
 # falls back to an in-process mock backend (useful for tests and CI).
 default = []
 real-backend = ["stt-core/whisper-rs-backend"]
+# `web-agent` registers the server-side `web_fetch` agent (and any
+# future web-fetching tool). When off, `/v1/agents` returns an empty
+# list, the LLM proxy injects no `tools` field, and `agents::web_fetch`
+# is not compiled. Turned on by `make run-llm` so `make run` (CPU STT,
+# no LLM) stays free of the new code path.
+web-agent = []
 
 [build-dependencies]
 # sha2 is only used at build time to fingerprint the static frontend
@@ -41,6 +47,7 @@ futures-util       = "0.3"
 # Ollama's OpenAI-shaped payload; `rustls-tls` keeps the dep tree free of
 # OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+url = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -74,6 +74,7 @@ async fn start_test_server_with_rate_limit(
             request_timeout: Duration::from_secs(120),
             cors_allow_origins,
         },
+        agents: stt_server::config::AgentConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -105,6 +106,7 @@ async fn start_test_server_with_rate_limit(
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm,
+        agents: None,
         stt_rate_limiter: stt_limiter.clone(),
         llm_rate_limiter: llm_limiter.clone(),
     });

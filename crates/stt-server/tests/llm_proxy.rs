@@ -109,6 +109,7 @@ async fn start_test_server_with_llm(
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
         },
+        agents: stt_server::config::AgentConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -127,6 +128,7 @@ async fn start_test_server_with_llm(
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm: Some(llm_client),
+        agents: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),
@@ -175,6 +177,7 @@ async fn start_test_server_disabled() -> String {
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
         },
+        agents: stt_server::config::AgentConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -186,6 +189,7 @@ async fn start_test_server_disabled() -> String {
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm: None,
+        agents: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),

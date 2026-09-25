@@ -25,31 +25,32 @@ debug: ## cargo build --workspace
 .PHONY: run
 run: ## Run the server locally with the real Whisper backend on CPU (requires WHISPER_MODEL_PATH).
 	cargo run -p stt-server --release \
-	    --features stt-server/real-backend,stt-core/whisper-rs-backend
+	    --features stt-server/real-backend,stt-server/web-agent,stt-core/whisper-rs-backend
 
 .PHONY: run-vulkan
 run-vulkan: ## Run with the Vulkan GPU backend (requires libvulkan-dev at build time).
 	cargo run -p stt-server --release \
-	    --features stt-server/real-backend,stt-core/whisper-rs-vulkan
+	    --features stt-server/real-backend,stt-server/web-agent,stt-core/whisper-rs-vulkan
 
 .PHONY: run-hipblas
 run-hipblas: ## Run with the HIP/ROCm GPU backend (requires ROCm toolchain at build time).
 	cargo run -p stt-server --release \
-	    --features stt-server/real-backend,stt-core/whisper-rs-hipblas
+	    --features stt-server/real-backend,stt-server/web-agent,stt-core/whisper-rs-hipblas
 
 .PHONY: run-cuda
 run-cuda: ## Run with the CUDA GPU backend (requires CUDA toolkit at build time).
 	cargo run -p stt-server --release \
-	    --features stt-server/real-backend,stt-core/whisper-rs-cuda
+	    --features stt-server/real-backend,stt-server/web-agent,stt-core/whisper-rs-cuda
 
 .PHONY: run-mock
 run-mock: ## Run the server locally with the in-process mock backend (no model needed).
-	cargo run -p stt-server --release
+	cargo run -p stt-server --release \
+	    --features stt-server/web-agent
 
 .PHONY: run-llm
 run-llm: ## Run with the real Whisper backend on CPU and the LLM proxy enabled (LLM_ENABLED=true).
 	cargo run -p stt-server --release \
-	    --features stt-server/real-backend,stt-core/whisper-rs-backend
+	    --features stt-server/real-backend,stt-server/web-agent,stt-core/whisper-rs-backend
 
 .PHONY: smoke-llm
 smoke-llm: ## Smoke-test the LLM proxy: POST a single prompt and check the response stream contains `data:`.
