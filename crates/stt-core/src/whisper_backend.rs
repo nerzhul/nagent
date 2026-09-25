@@ -5,8 +5,9 @@
 //! replace this with a sticky per-session pool later without touching the
 //! WS layer.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use tracing::{info, warn};
@@ -55,9 +56,19 @@ impl WhisperRsBackend {
     }
 
     /// Build [`FullParams`] for the given request.
+    ///
+    /// `FullParams<'a, 'b>` carries the lifetime of any language string it
+    /// holds via `set_language(Option<&'a str>)`. The returned params are
+    /// moved into `tokio::task::spawn_blocking`, which requires a `'static`
+    /// closure, so we have to hand whisper-rs a `&'static str`. We get one
+    /// by interning the language code in a process-global [`LANGUAGE_CACHE`]
+    /// (one tiny leak per unique language, not per inference).
     fn build_params(req: &InferRequest) -> whisper_rs::FullParams<'static, 'static> {
-        // Greedy = lowest latency. Translation is opt-in from the client.
-        let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy);
+        // Greedy with `best_of = 1` is the cheapest option: pick the single
+        // most-likely token at each step. Translation is opt-in from the
+        // client.
+        let mut params =
+            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
@@ -67,11 +78,31 @@ impl WhisperRsBackend {
 
         if let Some(lang) = req.language.as_deref() {
             // Setting an explicit language hint skips auto-detection latency.
-            params.set_language(Some(lang));
+            params.set_language(Some(intern_language(lang)));
         }
 
         params
     }
+}
+
+/// Process-wide cache of language code strings that have been promoted to
+/// `'static` for use with `FullParams::set_language`. Bounded by the number
+/// of distinct language codes ever requested (≈100 for whisper); each entry
+/// is a short ASCII string, so the total leak is on the order of kilobytes.
+static LANGUAGE_CACHE: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+
+/// Promote `lang` to a `'static` reference, returning the same pointer on
+/// every call with the same input. This is the only place we leak memory
+/// intentionally; the cache keeps it bounded.
+fn intern_language(lang: &str) -> &'static str {
+    let cache = LANGUAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("language cache poisoned");
+    if let Some(&cached) = cache.get(lang) {
+        return cached;
+    }
+    let leaked: &'static str = Box::leak(lang.to_string().into_boxed_str());
+    cache.insert(lang.to_string(), leaked);
+    leaked
 }
 
 #[async_trait]
@@ -97,12 +128,22 @@ impl WhisperBackend for WhisperRsBackend {
                 let seg = guard
                     .get_segment(i)
                     .ok_or_else(|| BackendError::Inference(format!("missing segment {i}")))?;
-                let text = seg.text().to_string();
+                // `to_str_lossy` returns UTF-8 with replacement characters for
+                // any invalid byte sequences — we never want a single bad
+                // segment to fail the whole inference call. The Display impl
+                // also panics on a null pointer, which we want to avoid.
+                let text = seg
+                    .to_str_lossy()
+                    .map_err(|e| BackendError::Inference(format!("segment {i} text: {e}")))?
+                    .into_owned();
                 full_text.push_str(&text);
                 segments.push(Segment {
                     text,
-                    t0_ms: seg.start_timestamp() as u32,
-                    t1_ms: seg.end_timestamp() as u32,
+                    // whisper-rs returns timestamps in centiseconds (10s of ms)
+                    // since whisper.cpp v1.7.x — convert to milliseconds so
+                    // the wire format matches what the JS client expects.
+                    t0_ms: (seg.start_timestamp() * 10) as u32,
+                    t1_ms: (seg.end_timestamp() * 10) as u32,
                     no_speech_prob: seg.no_speech_probability(),
                 });
             }
@@ -134,23 +175,28 @@ impl WhisperBackend for WhisperRsBackend {
 }
 
 /// Pick a backend label from compile-time features, in priority order:
-/// Vulkan > CUDA > HIP > CPU.
+/// Vulkan > CUDA > HIP > CPU. The feature names match the public Cargo
+/// features on `stt-core` (see `crates/stt-core/Cargo.toml`).
 fn detect_backend_name() -> &'static str {
-    #[cfg(feature = "vulkan")]
+    #[cfg(feature = "whisper-rs-vulkan")]
     {
         return "vulkan";
     }
-    #[cfg(not(feature = "vulkan"))]
-    #[cfg(feature = "cuda")]
+    #[cfg(not(feature = "whisper-rs-vulkan"))]
+    #[cfg(feature = "whisper-rs-cuda")]
     {
         return "cuda";
     }
-    #[cfg(not(any(feature = "vulkan", feature = "cuda")))]
-    #[cfg(feature = "hipblas")]
+    #[cfg(not(any(feature = "whisper-rs-vulkan", feature = "whisper-rs-cuda")))]
+    #[cfg(feature = "whisper-rs-hipblas")]
     {
         return "hipblas";
     }
-    #[cfg(not(any(feature = "vulkan", feature = "cuda", feature = "hipblas")))]
+    #[cfg(not(any(
+        feature = "whisper-rs-vulkan",
+        feature = "whisper-rs-cuda",
+        feature = "whisper-rs-hipblas",
+    )))]
     {
         warn!("no GPU backend feature enabled; whisper will run on CPU");
         "cpu"

@@ -1,13 +1,20 @@
 // nagent STT — frontend logic.
 //
 // Wire protocol (binary WebSocket frames):
-//   tag 0x01: AudioFrame   (client -> server)  payload: Vec<f32>
-//   tag 0x10: StartSession (client -> server)  payload: { lang_hint, sample_rate }
-//   tag 0x11: StopSession  (client -> server)  payload: ()
-//   tag 0x12: Config       (client -> server)  payload: { language, translate }
-//   tag 0x21: FinalTranscript (server -> client)
-//   tag 0x30: Error        (server -> client)
-//   tag 0x31: BackendInfo  (server -> client)  payload: { model_id, gpu_backend }
+//   tag 0x01: AudioFrame        (client -> server)  payload: Vec<f32>
+//   tag 0x10: StartSession      (client -> server)  payload: { lang_hint, sample_rate }
+//   tag 0x11: StopSession       (client -> server)  payload: ()
+//   tag 0x12: Config            (client -> server)  payload: { language, translate }
+//   tag 0x20: PartialTranscript (server -> client)
+//   tag 0x21: FinalTranscript   (server -> client)
+//   tag 0x30: Error             (server -> client)
+//   tag 0x31: BackendInfo       (server -> client)  payload: { model_id, gpu_backend }
+//
+// Each frame is `[tag_byte, ..postcard_bytes]`. The tag byte is the **only**
+// type discriminator: the variant struct follows directly. (Earlier
+// versions also emitted a postcard `Payload` enum variant index, which
+// shifted every field on the JS side — see the `wire_format_is_tag_then_inner_only`
+// test in `stt-proto` for the byte-level assertion.)
 //
 // The session ID is generated server-side at upgrade time and never travels
 // on the wire, which is what guarantees per-session isolation.
@@ -33,13 +40,14 @@ const listEl      = $("transcript-list");
 // ---- Protocol tags (must match stt-proto) -----------------------------------
 
 const Tag = Object.freeze({
-  Audio:           0x01,
-  StartSession:    0x10,
-  StopSession:     0x11,
-  Config:          0x12,
-  FinalTranscript: 0x21,
-  Error:           0x30,
-  BackendInfo:     0x31,
+  Audio:            0x01,
+  StartSession:     0x10,
+  StopSession:      0x11,
+  Config:           0x12,
+  PartialTranscript: 0x20,
+  FinalTranscript:  0x21,
+  Error:            0x30,
+  BackendInfo:      0x31,
 });
 
 // ---- Minimal postcard-compatible codec --------------------------------------
@@ -196,6 +204,16 @@ function decodePayload(tag, view, state) {
       const lang = readString(view, state);
       return { kind: "final", text, segments, lang };
     }
+    case Tag.PartialTranscript: {
+      // Server emitted an incremental, non-final transcript. Decode enough
+      // to keep the cursor aligned but don't display it in the transcript
+      // list (it will be replaced by the eventual FinalTranscript).
+      const text = readString(view, state);
+      readVarint(view, state); // t0_ms
+      readVarint(view, state); // t1_ms
+      const lang = readString(view, state);
+      return { kind: "partial", text, lang };
+    }
     case Tag.Error: {
       const code = readVarint(view, state);
       const message = readString(view, state);
@@ -206,8 +224,12 @@ function decodePayload(tag, view, state) {
       const gpu_backend = readString(view, state);
       return { kind: "backend", model_id, gpu_backend };
     }
-    default:
-      throw new Error(`unknown server tag 0x${tag.toString(16)}`);
+    default: {
+      // Unknown tag — surface a warning to the dev console but don't pollute
+      // the transcript list with a noisy error line.
+      console.warn(`ignoring unknown server tag 0x${tag.toString(16)}`);
+      return { kind: "unknown", tag };
+    }
   }
 }
 
@@ -298,21 +320,36 @@ function onWsMessage(data, onBackendInfo) {
       onBackendInfo();
     } else if (p.kind === "final") {
       if (p.text) appendLine(p.text, p.lang);
+    } else if (p.kind === "partial") {
+      // Discard: the eventual FinalTranscript supersedes it.
     } else if (p.kind === "error") {
       appendLine(`[error ${p.code}] ${p.message}`, "err");
     }
+    // "unknown" was already logged via console.warn by decodePayload.
   } catch (e) {
     appendLine(`[client decode error] ${e.message}`, "err");
   }
 }
 
-function onWsClose() {
+async function onWsClose() {
   state.ws = null;
-  if (state.recording) {
-    setStatus("disconnected", "error");
-  } else {
+  if (!state.recording) {
+    // Normal idle close (user clicked Stop, or initial connect failed).
     setStatus("idle", "idle");
+    return;
   }
+  // The server dropped the connection while we were recording. The VAD
+  // would otherwise keep capturing audio and burning CPU on frames we
+  // can no longer ship, and the Record button would stay stuck on "Stop"
+  // even though no session is open. Treat any close mid-recording as a
+  // stop: pause the VAD, clear the recording flag, and put the UI back
+  // to a state where the user can re-click Record.
+  state.recording = false;
+  try {
+    await state.vad?.pause();
+  } catch {}
+  setRecordState("Record", "idle");
+  setStatus("disconnected", "error");
 }
 
 function send(bytes) {
@@ -437,21 +474,7 @@ downloadBtn.addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
-// Auto-reconnect after a brief pause if the WS drops while recording.
-let reconnectTimer = null;
-window.addEventListener("online", () => {
-  if (state.recording) tryReconnect();
-});
-
-function tryReconnect() {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    if (!state.recording) return;
-    try {
-      await connect();
-    } catch {
-      tryReconnect();
-    }
-  }, 1500);
-}
+// No automatic reconnect: a dropped WS is treated as a stop (see
+// `onWsClose`) and the user re-clicks Record to start a fresh session.
+// This keeps the UI state unambiguous — there is no "reconnecting…"
+// pseudo-state to confuse the Record/Stop button.

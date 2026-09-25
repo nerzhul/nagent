@@ -169,14 +169,46 @@ impl Payload {
             Self::Backend(_) => Tag::BackendInfo,
         }
     }
+
+    /// Deserialize the trailing bytes of a frame into the variant struct
+    /// selected by `tag`.
+    fn from_tagged(tag: Tag, tail: &[u8]) -> Result<Self, CodecError> {
+        let payload = match tag {
+            Tag::AudioFrame => Self::Audio(postcard::from_bytes(tail)?),
+            Tag::StartSession => Self::Start(postcard::from_bytes(tail)?),
+            Tag::StopSession => Self::Stop(postcard::from_bytes(tail)?),
+            Tag::Config => Self::Config(postcard::from_bytes(tail)?),
+            Tag::PartialTranscript => Self::Partial(postcard::from_bytes(tail)?),
+            Tag::FinalTranscript => Self::Final(postcard::from_bytes(tail)?),
+            Tag::Error => Self::Error(postcard::from_bytes(tail)?),
+            Tag::BackendInfo => Self::Backend(postcard::from_bytes(tail)?),
+        };
+        Ok(payload)
+    }
 }
 
 /// Encode a payload into a single WebSocket binary frame.
 ///
 /// The output is `vec![tag, ..postcard_bytes]`.
+///
+/// The byte tag is the **only** type discriminator on the wire: the inner
+/// payload is serialized as the matching variant struct (e.g.
+/// `AudioFrame`), not as the wrapping [`Payload`] enum. Encoding the enum
+/// would make postcard prepend a variant-index varint, which would shift
+/// every field in clients that only expect `[tag, payload]` (e.g. the JS
+/// frontend).
 pub fn encode_frame(payload: &Payload) -> Result<Vec<u8>, CodecError> {
     let tag = payload.tag() as u8;
-    let mut buf = postcard::to_allocvec(payload)?;
+    let mut buf = match payload {
+        Payload::Audio(p) => postcard::to_allocvec(p)?,
+        Payload::Start(p) => postcard::to_allocvec(p)?,
+        Payload::Stop(p) => postcard::to_allocvec(p)?,
+        Payload::Config(p) => postcard::to_allocvec(p)?,
+        Payload::Partial(p) => postcard::to_allocvec(p)?,
+        Payload::Final(p) => postcard::to_allocvec(p)?,
+        Payload::Error(p) => postcard::to_allocvec(p)?,
+        Payload::Backend(p) => postcard::to_allocvec(p)?,
+    };
     buf.insert(0, tag);
     Ok(buf)
 }
@@ -187,11 +219,14 @@ pub fn encode<T: Into<Payload>>(payload: T) -> Result<Vec<u8>, CodecError> {
 }
 
 /// Decode a WebSocket binary frame back into its tag and payload.
+///
+/// The byte tag selects which inner struct is deserialized from the
+/// remainder of the frame. See [`encode_frame`] for why the [`Payload`]
+/// enum itself is never on the wire.
 pub fn decode_frame(bytes: &[u8]) -> Result<Payload, CodecError> {
     let (head, tail) = bytes.split_first().ok_or(CodecError::EmptyFrame)?;
-    Tag::from_u8(*head).ok_or(CodecError::UnknownTag(*head))?;
-    let payload: Payload = postcard::from_bytes(tail)?;
-    Ok(payload)
+    let tag = Tag::from_u8(*head).ok_or(CodecError::UnknownTag(*head))?;
+    Ok(Payload::from_tagged(tag, tail)?)
 }
 
 // --- From impls so callers can `encode(audio_frame)` without the enum. -------
@@ -326,5 +361,60 @@ mod tests {
     fn payload_tag_matches_variant() {
         let p = Payload::Stop(StopSession);
         assert_eq!(p.tag() as u8, 0x11);
+    }
+
+    /// The wire format MUST be `[custom_tag, inner_payload]`. In particular,
+    /// `encode_frame` must not prepend the `Payload` enum variant index,
+    /// because that would shift every field on the receiving side (the JS
+    /// frontend does not expect it).
+    #[test]
+    fn wire_format_is_tag_then_inner_only() {
+        // AudioFrame { samples: [] } → [0x01, varint(0)]
+        let audio = Payload::Audio(AudioFrame { samples: vec![] });
+        let bytes = encode_frame(&audio).unwrap();
+        assert_eq!(bytes, vec![Tag::AudioFrame as u8, 0x00]);
+
+        // StartSession { lang_hint: None, sample_rate: 16000 }
+        //   = [0x10, 0x00 (Option::None), 0x80, 0x7D (varint 16000)]
+        let start = Payload::Start(StartSession {
+            lang_hint: None,
+            sample_rate: 16000,
+        });
+        let bytes = encode_frame(&start).unwrap();
+        assert_eq!(bytes, vec![Tag::StartSession as u8, 0x00, 0x80, 0x7D]);
+
+        // BackendInfo { model_id: "a", gpu_backend: "b" }
+        //   = [0x31, 0x01 'a', 0x01 'b']
+        let backend = Payload::Backend(BackendInfo {
+            model_id: "a".into(),
+            gpu_backend: "b".into(),
+        });
+        let bytes = encode_frame(&backend).unwrap();
+        assert_eq!(bytes, vec![Tag::BackendInfo as u8, 0x01, b'a', 0x01, b'b']);
+
+        // Error { code: 1, message: "x" }
+        //   = [0x30, 0x01 (varint code=1), 0x01 'x']
+        let err = Payload::Error(ErrorMessage {
+            code: 1,
+            message: "x".into(),
+        });
+        let bytes = encode_frame(&err).unwrap();
+        assert_eq!(bytes, vec![Tag::Error as u8, 0x01, 0x01, b'x']);
+
+        // StopSession (unit struct) → just the tag byte.
+        let bytes = encode_frame(&Payload::Stop(StopSession)).unwrap();
+        assert_eq!(bytes, vec![Tag::StopSession as u8]);
+    }
+
+    /// Decoding a frame that starts with an unknown tag must reject the
+    /// tag byte **before** touching the trailing bytes — i.e. the error
+    /// must come from `Tag::from_u8`, not from postcard.
+    #[test]
+    fn decode_rejects_unknown_tag_without_consuming_payload() {
+        let err = decode_frame(&[0xAA, 0xFF, 0xFF, 0xFF]).unwrap_err();
+        match err {
+            CodecError::UnknownTag(0xAA) => {}
+            other => panic!("expected UnknownTag(0xAA), got {other:?}"),
+        }
     }
 }

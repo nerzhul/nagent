@@ -1,26 +1,28 @@
 # Local docker-compose for stt-server.
 #
 # Profiles:
-#   - cpu          : no GPU; the in-process mock backend is used because the
-#                    image built by the default Dockerfile enables
-#                    `real-backend`. To exercise the mock, build with
-#                    `docker build --build-arg STT_FEATURES= .` instead.
-#   - gpu-vulkan   : Vulkan GPU passthrough (/dev/dri).
-#   - gpu-nvidia   : NVIDIA GPU via nvidia-container-toolkit.
-#   - gpu-amd      : AMD GPU via /dev/kfd and /dev/dri.
+#   - cpu          : no GPU, CPU-only real backend. The image is built with
+#                    `--build-arg BACKEND=cpu`. WHISPER_MODEL_PATH still has
+#                    to point at a real ggml model — there is no mock here.
+#   - gpu-vulkan   : Vulkan GPU passthrough (/dev/dri). BACKEND=vulkan.
+#   - gpu-nvidia   : NVIDIA GPU via nvidia-container-toolkit. BACKEND=cuda.
+#   - gpu-amd      : AMD GPU via /dev/kfd and /dev/dri. BACKEND=hipblas.
 #
 # Usage:
 #   docker compose --profile gpu-vulkan up
 #
-# For the cpu profile, no model is needed; the server falls back to the
-# mock backend only if the binary was built without `real-backend`.
+# For the cpu profile no GPU libs are needed at build or run time.
+# For mock-backend iteration without a model, use `make run-mock` instead.
 
 services:
   stt-server:
+    profiles: ["cpu"]
     image: nagent/stt-server:dev
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BACKEND: cpu
     container_name: stt-server
     restart: unless-stopped
     ports:
@@ -44,6 +46,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BACKEND: vulkan
     container_name: stt-server-vulkan
     restart: unless-stopped
     ports:
@@ -66,6 +70,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BACKEND: cuda
     container_name: stt-server-nvidia
     restart: unless-stopped
     runtime: nvidia
@@ -86,6 +92,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BACKEND: hipblas
     container_name: stt-server-amd
     restart: unless-stopped
     ports:

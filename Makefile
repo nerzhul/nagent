@@ -23,7 +23,27 @@ debug: ## cargo build --workspace
 	cargo build --workspace
 
 .PHONY: run
-run: ## Run the server locally (requires WHISPER_MODEL_PATH).
+run: ## Run the server locally with the real Whisper backend on CPU (requires WHISPER_MODEL_PATH).
+	cargo run -p stt-server --release \
+	    --features stt-server/real-backend,stt-core/whisper-rs-backend
+
+.PHONY: run-vulkan
+run-vulkan: ## Run with the Vulkan GPU backend (requires libvulkan-dev at build time).
+	cargo run -p stt-server --release \
+	    --features stt-server/real-backend,stt-core/whisper-rs-vulkan
+
+.PHONY: run-hipblas
+run-hipblas: ## Run with the HIP/ROCm GPU backend (requires ROCm toolchain at build time).
+	cargo run -p stt-server --release \
+	    --features stt-server/real-backend,stt-core/whisper-rs-hipblas
+
+.PHONY: run-cuda
+run-cuda: ## Run with the CUDA GPU backend (requires CUDA toolkit at build time).
+	cargo run -p stt-server --release \
+	    --features stt-server/real-backend,stt-core/whisper-rs-cuda
+
+.PHONY: run-mock
+run-mock: ## Run the server locally with the in-process mock backend (no model needed).
 	cargo run -p stt-server --release
 
 .PHONY: fmt
@@ -49,8 +69,20 @@ clean: ## cargo clean
 # ---- Docker -----------------------------------------------------------------
 
 .PHONY: docker-build
-docker-build: ## Build the Docker image (multi-stage, release).
-	docker build -f Dockerfile -t $(IMAGE) .
+docker-build: ## Build the Docker image with the CPU backend (override BACKEND=).
+	docker build -f Dockerfile --build-arg BACKEND=cpu -t $(IMAGE) .
+
+.PHONY: docker-build-vulkan
+docker-build-vulkan: ## Build the Docker image with the Vulkan backend.
+	docker build -f Dockerfile --build-arg BACKEND=vulkan -t $(IMAGE) .
+
+.PHONY: docker-build-cuda
+docker-build-cuda: ## Build the Docker image with the CUDA backend.
+	docker build -f Dockerfile --build-arg BACKEND=cuda -t $(IMAGE) .
+
+.PHONY: docker-build-hipblas
+docker-build-hipblas: ## Build the Docker image with the HIP/ROCm backend.
+	docker build -f Dockerfile --build-arg BACKEND=hipblas -t $(IMAGE) .
 
 .PHONY: docker-run-cpu
 docker-run-cpu: ## Run on CPU with a model bind-mounted.

@@ -10,7 +10,15 @@ description = "Whisper backend abstraction, inference worker and queue."
 # Off by default so CI on a plain ubuntu-latest runner can still build/test
 # the rest of the workspace using only the mock backend.
 default = []
+# CPU-only whisper-rs. Always required, even when a GPU backend is added,
+# so users get a working `make run` out of the box with no system deps.
 whisper-rs-backend = ["dep:whisper-rs"]
+# GPU backends — pick at most one. They are mutually exclusive in
+# whisper-rs itself; enabling several at once wastes build time and can
+# fight over system libraries (e.g. libvulkan + CUDA driver headers).
+whisper-rs-vulkan  = ["whisper-rs-backend", "whisper-rs/vulkan"]
+whisper-rs-cuda    = ["whisper-rs-backend", "whisper-rs/cuda"]
+whisper-rs-hipblas = ["whisper-rs-backend", "whisper-rs/hipblas"]
 
 [dependencies]
 stt-proto   = { path = "../stt-proto" }
