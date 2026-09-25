@@ -4,6 +4,16 @@
 // OpenAI-compatible endpoint). History is kept in `localStorage` only;
 // no server-side session is involved.
 //
+// Sessions:
+//   Multiple independent chat threads are supported, each with its own
+//   message history. The persistence model is still localStorage — the
+//   previous single-history layout (`nagent.chat.history`) is migrated
+//   on first boot into a single legacy session, after which every
+//   session lives under its own key. See the `SessionStore` block for
+//   the exact layout and the `migrateLegacy()` routine for the upgrade
+//   path. The wire format sent to the LLM is unchanged: only the
+//   per-session message list is in scope at any given time.
+//
 // Audio in Discussion mode:
 //   A second `AudioCapture` instance is created alongside the chat UI.
 //   When the user clicks Record, FinalTranscripts are routed as user
@@ -25,13 +35,55 @@
 //   User turns (typed or transcribed) go through a single Promise
 //   queue so two replies can never stream at the same time. A new
 //   `send()` or transcript arrival while a reply is in flight simply
-//   waits for the current reply to finish.
+//   waits for the current reply to finish. Switching sessions aborts
+//   the in-flight reply and resets the queue so queued turns from a
+//   previous session never bleed into the new one.
 
 import { AudioCapture } from "/static/audio.js";
 import { preselectFromBrowser } from "/static/lang-preselect.js";
+import {
+  DEFAULT_TITLE,
+  createSessionObj,
+  deleteSession as storeDeleteSession,
+  deriveTitle,
+  getActiveId,
+  historyKey,
+  loadHistory,
+  loadSessions,
+  migrateLegacy,
+  persistNewSession,
+  renameSession,
+  saveHistory,
+  setActiveId,
+  sortedSessions,
+  touchSession,
+} from "/static/chat-sessions.js";
 
-const HISTORY_KEY = "nagent.chat.history";
-const HISTORY_CAP = 200;
+// ---- Session storage -------------------------------------------------------
+//
+// The localStorage layout and the per-session helpers live in
+// `chat-sessions.js` (extracted so they can be unit-tested without a
+// DOM). This file owns the UI side: the sidebar rendering, the
+// session lifecycle (new / switch / delete), and the binding between
+// streamed turns and the session they belong to.
+//
+// Three localStorage keys cooperate to keep the multi-session state:
+//
+//   nagent.chat.sessions          -> JSON array of session descriptors
+//                                   [{ id, title, createdAt, updatedAt }]
+//                                   sorted by `updatedAt` descending so
+//                                   the sidebar can render in MRU order
+//                                   without re-sorting.
+//   nagent.chat.active            -> the active session id (string).
+//   nagent.chat.session.<id>      -> JSON array of message records for
+//                                   that session, the same shape the
+//                                   single-history layout used
+//                                   ({ role, content, ts, model }).
+//
+// The previous layout stored the whole message list under
+// `nagent.chat.history`. `migrateLegacy()` wraps that list into a
+// single session on first boot and removes the old key, so a reload
+// from an older build keeps the user's conversation.
 
 // ---- Markdown rendering ----------------------------------------------------
 //
@@ -252,18 +304,61 @@ const systemEl     = $("chat-system");
 const tempEl       = $("chat-temperature");
 const statusEl     = $("chat-status");
 const disabledNoticeEl = $("chat-disabled-notice");
+const sessionsListEl = $("chat-sessions");
+const newSessionBtnEl = $("chat-new-session");
+
+// The active session id is read at every operation rather than
+// cached, so a same-tab mutation (delete, new chat, switch from the
+// sidebar) immediately takes effect without bookkeeping. `loadSessions`
+// is the source of truth — if the cached `currentSessionId` is no
+// longer valid, we fall back to the most-recently-updated session or
+// create a fresh one. This keeps the invariant "there is always
+// exactly one active session" without any explicit init step.
+let currentSessionId = "";
+function activeSessionId() {
+  const sessions = loadSessions();
+  if (sessions.some((s) => s.id === currentSessionId)) return currentSessionId;
+  // Fallback: most-recent first, else create. `sortedSessions` is
+  // safe on an empty array.
+  const sorted = sortedSessions(sessions);
+  const fallback = sorted[0] || null;
+  if (fallback) {
+    currentSessionId = fallback.id;
+    setActiveId(currentSessionId);
+    return currentSessionId;
+  }
+  const fresh = createSessionObj();
+  persistNewSession(fresh);
+  currentSessionId = fresh.id;
+  setActiveId(currentSessionId);
+  renderSessionList();
+  return currentSessionId;
+}
 
 // One stream at a time. If a new turn arrives while a reply is
 // streaming, the reply continues to completion and the new turn runs
 // immediately after (no abort — the user can keep recording without
-// cutting the current reply short).
-let inflight = null; // { controller, assistantEl, model }
+// cutting the current reply short). `inflight.sessionId` records which
+// session the request belongs to so an abort persisted via the
+// `finally` block writes its "(stopped)" / partial marker into the
+// right place even after the user switched sessions.
+let inflight = null; // { controller, assistantEl, model, sessionId }
 
-// Serialize user turns so a reply never overlaps another reply.
+// Serialize user turns so a reply never overlaps another reply. The
+// queue also guards against cross-session bleed: when a session is
+// switched, `resetTurnQueue()` reassigns the head promise so anything
+// queued for the previous session is dropped before it can run.
 let turnQueue = Promise.resolve();
 function enqueueTurn(fn) {
   turnQueue = turnQueue.then(fn, fn);
   return turnQueue;
+}
+function resetTurnQueue() {
+  // Replace the chain with a fresh resolved promise. Handlers already
+  // attached to the old chain still resolve (each `then` is its own
+  // microtask), but anything queued *after* this point lands on the
+  // new chain and runs against the now-active session.
+  turnQueue = Promise.resolve();
 }
 
 // ---- Status pill -----------------------------------------------------------
@@ -308,28 +403,19 @@ function setStreamingUi(streaming) {
 }
 
 // ---- History ---------------------------------------------------------------
+//
+// Per-session message lists live under `nagent.chat.session.<id>`.
+// `loadHistory` / `saveHistory` take a session id explicitly so the
+// caller can never accidentally read from or write to the wrong
+// session — every persist path passes `currentSessionId` (or
+// `inflight.sessionId`, in the abort/finally branch) and never reads
+// `currentSessionId` lazily. The list shape is unchanged from the
+// previous single-history layout (`{ role, content, ts, model }`), so
+// a render after a reload reproduces the same view as before.
 
-function loadHistory() {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_e) {
-    return [];
-  }
-}
-
-function saveHistory(history) {
-  try {
-    const trimmed = history.slice(-HISTORY_CAP);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
-  } catch (_e) {}
-}
-
-function renderHistory() {
+function renderHistory(sessionId) {
   messagesEl.innerHTML = "";
-  const history = loadHistory();
+  const history = loadHistory(sessionId);
   for (const msg of history) {
     // Re-render assistant history as markdown so a reload (or a
     // client that joined the session late) sees formatted replies,
@@ -339,12 +425,25 @@ function renderHistory() {
       persist: false,
       model: msg.model,
       markdown,
+      sessionId,
     });
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-function appendBubble(role, text, { persist = true, model = null, markdown = false } = {}) {
+function appendBubble(role, text, {
+  persist = true, model = null, markdown = false, sessionId = null,
+} = {}) {
+  // `sessionId` is required on every persist path: a missing id is a
+  // programming error, and silently dropping into the active session
+  // is exactly the cross-session bleed this refactor is meant to
+  // prevent. Render-only callers (history hydration) pass `persist:
+  // false` and don't need a sessionId.
+  const sid = sessionId ?? (persist ? activeSessionId() : null);
+  if (persist && !sid) {
+    console.warn("appendBubble called without a sessionId; skipping persist");
+    return null;
+  }
   const div = document.createElement("div");
   const classes = [`chat-message`, `chat-${role}`];
   // The `--markdown` modifier unlocks `white-space: normal` and the
@@ -369,9 +468,23 @@ function appendBubble(role, text, { persist = true, model = null, markdown = fal
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   if (persist) {
-    const history = loadHistory();
+    const history = loadHistory(sid);
     history.push({ role, content: text, ts: Date.now(), model });
-    saveHistory(history);
+    saveHistory(sid, history);
+    // First user message of a session seeds its title. We only do
+    // this for the very first user turn so a long-running session
+    // doesn't keep rewriting its title on every subsequent message.
+    if (role === "user") {
+      const userCount = history.filter((m) => m.role === "user").length;
+      if (userCount === 1) {
+        renameSession(sid, deriveTitle(text));
+      } else {
+        touchSession(sid);
+      }
+    } else {
+      touchSession(sid);
+    }
+    renderSessionList();
   }
   return div;
 }
@@ -433,29 +546,28 @@ async function loadModels() {
   }
 }
 
-function buildMessages() {
-  const messages = [];
-  const system = systemEl.value.trim();
-  if (system) messages.push({ role: "system", content: system });
-  for (const m of loadHistory()) {
-    if (m.role !== "system") messages.push({ role: m.role, content: m.content });
-  }
-  return messages;
-}
-
 // ---- Streaming reply -------------------------------------------------------
+//
+// `streamReply(sessionId, userText)` runs the LLM request bound to a
+// specific session. The session id is captured at call time and used
+// for every read/write — never re-read from `activeSessionId()` — so a
+// mid-flight session switch can't route the assistant bubble or its
+// persisted entry into the wrong conversation.
 
-async function streamReply() {
-  // Build the request from history (minus the very last entry, which
-  // is the user turn we just appended). The last entry is re-added
-  // explicitly so we don't depend on history-load timing.
-  const history = loadHistory();
+async function streamReply(sessionId, userText) {
+  // Build the request from the captured history (the user turn was
+  // already appended by `submitUserTurn`, so the last entry IS the
+  // new user message — we re-include it explicitly so we don't depend
+  // on history-load timing).
+  const history = loadHistory(sessionId);
   const last = history[history.length - 1];
   if (!last || last.role !== "user") return; // nothing to reply to
   const earlier = history.slice(0, -1);
 
   const model = modelEl.value || undefined;
-  const assistantEl = appendBubble("assistant", "", { persist: false, model, markdown: true });
+  const assistantEl = appendBubble("assistant", "", {
+    persist: false, model, markdown: true, sessionId,
+  });
   // Render an inline bouncing-dots loader inside the assistant bubble
   // while we wait for the LLM's first token. Without this, the bubble
   // sits empty during the Ollama cold start (sometimes 30s+ on a
@@ -469,7 +581,7 @@ async function streamReply() {
     + '</span>';
 
   const controller = new AbortController();
-  inflight = { controller, assistantEl, model };
+  inflight = { controller, assistantEl, model, sessionId };
   setStreamingUi(true);
   setStreamState({ text: "Loading model…", cls: "loading" });
   // In chat mode we don't keep listening while the LLM responds:
@@ -487,7 +599,7 @@ async function streamReply() {
     ...earlier
       .filter((m) => m.role !== "system")
       .map((m) => ({ role: m.role, content: m.content })),
-    { role: "user", content: last.content },
+    { role: "user", content: userText != null ? userText : last.content },
   ];
   const body = { messages, stream: true };
   const temperature = parseFloat(tempEl.value);
@@ -585,10 +697,16 @@ async function streamReply() {
     // Persist the raw markdown source (or the error/stopped marker)
     // rather than the rendered HTML, so the history stays small,
     // portable, and re-renderable on clients that load the page
-    // later. The live bubble keeps its sanitized innerHTML.
-    const h = loadHistory();
+    // later. The live bubble keeps its sanitized innerHTML. We use
+    // `inflight.sessionId` (captured at request start) rather than
+    // `activeSessionId()` so the abort branch still writes to the
+    // correct session after a switch.
+    const targetSessionId = inflight?.sessionId || sessionId;
+    const h = loadHistory(targetSessionId);
     h.push({ role: "assistant", content: finalSource, ts: Date.now(), model });
-    saveHistory(h);
+    saveHistory(targetSessionId, h);
+    touchSession(targetSessionId);
+    renderSessionList();
     inflight = null;
     // Clear the streaming status so the pill falls back to the audio
     // state (typically "idle") before we drop the input-disable.
@@ -599,23 +717,30 @@ async function streamReply() {
 
 // ---- User turn entry points ------------------------------------------------
 
-async function submitUserTurn(text) {
+async function submitUserTurn(sessionId, text) {
   const trimmed = (text || "").trim();
   if (!trimmed) return;
-  appendBubble("user", trimmed);
-  await streamReply();
+  appendBubble("user", trimmed, { sessionId });
+  await streamReply(sessionId, trimmed);
 }
 
 function sendTyped() {
   const text = inputEl.value;
   inputEl.value = "";
-  enqueueTurn(() => submitUserTurn(text));
+  // Capture the session id at send time so the queued turn still
+  // belongs to the session the user addressed. If the user switches
+  // sessions before the queue drains, `resetTurnQueue()` in the
+  // switch handler drops this turn — that's intentional, the user
+  // explicitly moved away.
+  const sessionId = activeSessionId();
+  enqueueTurn(() => submitUserTurn(sessionId, text));
 }
 
 function receiveTranscript(text) {
   // No empty-text guard here: AudioCapture already filters empty
   // FinalTranscripts at the wire-protocol level.
-  enqueueTurn(() => submitUserTurn(text));
+  const sessionId = activeSessionId();
+  enqueueTurn(() => submitUserTurn(sessionId, text));
 }
 
 function stop() {
@@ -623,10 +748,35 @@ function stop() {
 }
 
 function clearChat() {
+  // "Clear" deletes the *active* session entirely: the message list,
+  // the sidebar entry, and the active-id pointer all go away. This
+  // matches the user's mental model — "clear" means the conversation
+  // is gone, not that an empty shell is left in the sidebar with a
+  // "New chat" placeholder. The per-session × button still exists for
+  // users who want to remove a non-active session.
+  //
+  // We tear down any in-flight reply first so a streaming LLM doesn't
+  // race the DOM clear (the abort path writes its marker into the
+  // session that was active at request start, but `deleteSession`
+  // below removes that session entirely — so the marker is persisted
+  // briefly into a session that's about to be wiped, which is the
+  // right behaviour: nothing survives).
   if (!confirm("Clear the conversation?")) return;
-  try { localStorage.removeItem(HISTORY_KEY); } catch (_e) {}
-  messagesEl.innerHTML = "";
-  inputEl.focus();
+  const sid = activeSessionId();
+  if (inflight) inflight.controller.abort();
+  resetTurnQueue();
+  // Wipe the session from the store. This removes the message key,
+  // drops the descriptor, and clears the active-id pointer (handled
+  // by `deleteSession`).
+  deleteSession(sid);
+  // Pick a replacement active session. If nothing is left we create a
+  // fresh empty one so the chat input always has somewhere to land.
+  const remaining = sortedSessions(loadSessions());
+  if (remaining.length > 0) {
+    switchToSession(remaining[0].id);
+  } else {
+    newSession();
+  }
 }
 
 // ---- Wire up the form -------------------------------------------------------
@@ -639,7 +789,20 @@ stopBtn.addEventListener("click", stop);
 clearBtn.addEventListener("click", clearChat);
 
 inputEl.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+  // Keyboard model:
+  //   Enter           -> send
+  //   Ctrl/Cmd+Enter  -> newline (fall through to textarea default)
+  //   Shift+Enter     -> newline (fall through to textarea default)
+  //   Escape          -> stop an in-flight reply
+  //
+  // We only `preventDefault` on plain Enter so the newline insertion
+  // path stays the browser's default (no manual `value += "\n"` dance).
+  // The `isComposing` guard avoids hijacking Enter while an IME is
+  // open — pressing Enter to confirm a CJK candidate must not send
+  // the half-typed composition as a message.
+  if (e.key === "Enter"
+      && !e.shiftKey && !e.ctrlKey && !e.metaKey
+      && !e.isComposing) {
     e.preventDefault();
     sendTyped();
   } else if (e.key === "Escape" && inflight) {
@@ -676,9 +839,123 @@ const audioCapture = new AudioCapture({
 // "Auto-detect" (empty value).
 preselectFromBrowser($("chat-lang-select"));
 
+// ---- Session management ---------------------------------------------------
+//
+// Sidebar primitives. `renderSessionList` is the single source of UI
+// truth for the sidebar — every mutation (new / delete / switch /
+// rename-on-first-turn) calls back into it so the DOM and the
+// `loadSessions()` snapshot can't drift apart. The active item is
+// styled via `aria-current="true"` and a dedicated class so screen
+// readers and CSS both pick it up.
+
+function deleteSession(id) {
+  // The store handles the storage side; we additionally clear the
+  // active-id pointer so a follow-up call to `activeSessionId()` picks
+  // a replacement from whatever's left.
+  storeDeleteSession(id);
+  if (currentSessionId === id) {
+    currentSessionId = "";
+    setActiveId("");
+  }
+}
+
+function switchToSession(id) {
+  if (!id || id === currentSessionId) return;
+  // Tear down the current reply (if any) and drop anything queued for
+  // the previous session. The `finally` block in `streamReply` writes
+  // the abort marker to the *previous* session via `inflight.sessionId`,
+  // so the user sees the partial reply in the conversation they
+  // actually addressed.
+  if (inflight) inflight.controller.abort();
+  resetTurnQueue();
+  currentSessionId = id;
+  setActiveId(id);
+  // Re-render the message list from the new session's history. The
+  // streaming UI is already torn down by the abort path; we just need
+  // to swap the bubbles.
+  renderHistory(id);
+  renderSessionList();
+  inputEl.focus();
+}
+
+function newSession() {
+  const session = createSessionObj();
+  persistNewSession(session);
+  // Same teardown as a switch — the user is moving away from whatever
+  // is on screen, so an in-flight reply is interrupted.
+  if (inflight) inflight.controller.abort();
+  resetTurnQueue();
+  currentSessionId = session.id;
+  setActiveId(session.id);
+  renderSessionList();
+  renderHistory(session.id);
+  inputEl.focus();
+}
+
+function renderSessionList() {
+  if (!sessionsListEl) return;
+  sessionsListEl.innerHTML = "";
+  const sessions = sortedSessions(loadSessions());
+  for (const s of sessions) {
+    const li = document.createElement("li");
+    li.className = "chat-session-item";
+    li.dataset.sessionId = s.id;
+    if (s.id === currentSessionId) {
+      li.classList.add("chat-session-item--active");
+      li.setAttribute("aria-current", "true");
+    }
+    const titleBtn = document.createElement("button");
+    titleBtn.type = "button";
+    titleBtn.className = "chat-session-title";
+    titleBtn.textContent = s.title || DEFAULT_TITLE;
+    titleBtn.title = s.title || DEFAULT_TITLE;
+    titleBtn.addEventListener("click", () => switchToSession(s.id));
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "chat-session-delete";
+    delBtn.setAttribute("aria-label", `Delete session “${s.title || DEFAULT_TITLE}”`);
+    delBtn.title = "Delete session";
+    delBtn.textContent = "×";
+    delBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (!confirm(`Delete “${s.title || DEFAULT_TITLE}”?`)) return;
+      const wasActive = s.id === currentSessionId;
+      deleteSession(s.id);
+      // Pick a replacement for the active session if we just deleted
+      // it. Otherwise the next mutation would auto-create a new one
+      // and the user would see a surprising empty entry appear.
+      if (wasActive) {
+        const remaining = sortedSessions(loadSessions());
+        if (remaining.length > 0) {
+          switchToSession(remaining[0].id);
+        } else {
+          newSession();
+        }
+      } else {
+        renderSessionList();
+      }
+    });
+    li.appendChild(titleBtn);
+    li.appendChild(delBtn);
+    sessionsListEl.appendChild(li);
+  }
+}
+
+// ---- Wire up the sidebar --------------------------------------------------
+
+newSessionBtnEl?.addEventListener("click", newSession);
+
 // ---- Boot ------------------------------------------------------------------
 
-renderHistory();
+// One-time upgrade from the old single-history layout, then resolve
+// the active session. `activeSessionId()` is self-healing — if there
+// are zero sessions after migration, it creates one — so the rest of
+// the boot path can assume a valid id.
+migrateLegacy();
+currentSessionId = getActiveId();
+activeSessionId(); // validates / falls back / creates, updates sidebar
+renderSessionList();
+renderHistory(currentSessionId);
 
 // Load the model list once on page boot. The previous version only
 // fired on `modechange`, which meant a Discussion-mode-persisted user

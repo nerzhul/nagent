@@ -404,6 +404,140 @@ select, input[type="checkbox"] {
 
 .view[hidden] { display: none; }
 
+/* Discussion mode needs a wider canvas than the default `.view`
+ * cap (920px) — the 260px sidebar eats into that, leaving the chat
+ * main column cramped on a typical desktop viewport. We override
+ * the max-width to ~1500px so the main area comfortably exceeds
+ * 50% of the viewport on any screen ≥ 1024px wide, while still
+ * capping on huge monitors so individual lines don't get
+ * unwieldy to read. */
+#view-discussion {
+  max-width: 1500px;
+}
+
+/* ---- Discussion mode layout: sidebar + main column -----------------------
+ *
+ * `#view-discussion` is a flex container: a fixed-width sidebar on
+ * the left holds the list of saved sessions and the "New chat"
+ * button, and `.chat-main` takes the rest of the width. We use flex
+ * (not grid) so the sidebar collapses naturally on narrow viewports —
+ * the mobile breakpoint at the bottom of this file stacks the two
+ * regions vertically and lets the sidebar scroll on its own.
+ */
+#view-discussion {
+  display: flex;
+  align-items: stretch;
+  gap: 1rem;
+}
+
+.chat-sidebar {
+  flex: 0 0 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  max-height: 70vh;
+  overflow-y: auto;
+  position: sticky;
+  top: 1rem;
+  align-self: flex-start;
+}
+
+.chat-new-session {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--accent);
+  color: #0b0d10;
+  border-color: var(--accent);
+  font-weight: 600;
+  padding: 0.5rem 0.9rem;
+  width: 100%;
+  justify-content: flex-start;
+}
+.chat-new-session:hover:not(:disabled) {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+.chat-new-session-icon {
+  font-size: 1.1em;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.chat-sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.chat-session-item {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.chat-session-item--active {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.1);
+}
+
+.chat-session-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  padding: 0.45rem 0.6rem;
+  font-size: 0.88rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  border-radius: 6px 0 0 6px;
+}
+.chat-session-title:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.chat-session-item--active .chat-session-title {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.chat-session-delete {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: var(--fg-mute);
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.55rem;
+  cursor: pointer;
+  border-radius: 0 6px 6px 0;
+}
+.chat-session-delete:hover {
+  color: var(--error);
+  background: var(--bg-elev);
+}
+
+.chat-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .chat-header {
   display: flex;
   align-items: center;
@@ -510,24 +644,25 @@ select, input[type="checkbox"] {
 .chat-messages {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem;
-  min-height: 320px;
-  max-height: 60vh;
+  border-radius: 10px;
+  padding: 1.25rem;
+  min-height: 360px;
+  max-height: 65vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.75rem;
   font-family: var(--font-mono);
   font-size: 0.95rem;
 }
 
 .chat-message {
-  padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  padding: 0.7rem 1rem;
+  border-radius: 10px;
   max-width: 80%;
   white-space: pre-wrap;
   word-break: break-word;
+  line-height: 1.45;
 }
 
 /* Assistant bubbles rendered as markdown need `white-space: normal`
@@ -543,6 +678,13 @@ select, input[type="checkbox"] {
   align-self: flex-end;
   background: rgba(88, 166, 255, 0.15);
   border: 1px solid rgba(88, 166, 255, 0.5);
+  /* A short reply like "ok" or "thanks" would otherwise collapse to a
+   * tiny chip that looks like a glitch next to the assistant's full-
+   * width paragraphs. `fit-content` lets the bubble hug its text while
+   * `min-width` guarantees a readable footprint. */
+  width: fit-content;
+  min-width: 4rem;
+  max-width: 80%;
 }
 
 .chat-assistant {
@@ -770,55 +912,90 @@ select, input[type="checkbox"] {
 
 #chat-form {
   display: flex;
-  flex-direction: column;
   gap: 0.5rem;
+  align-items: flex-end;
   margin-top: 0.75rem;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.75rem;
 }
 
 #chat-input {
-  resize: vertical;
-  min-height: 3rem;
-  max-height: 12rem;
-  background: var(--bg);
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
+  min-height: 2.6rem;
+  max-height: 10rem;
+  background: var(--bg-elev);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.5rem 0.7rem;
+  border-radius: 10px;
+  padding: 0.65rem 0.85rem;
   font-family: inherit;
   font-size: 0.95rem;
+  line-height: 1.4;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+#chat-input::placeholder { color: var(--fg-mute); }
+
+#chat-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.18);
 }
 
 #chat-input:disabled { opacity: 0.6; }
 
-.chat-form-actions {
-  display: flex;
-  gap: 0.5rem;
+/* Send / Stop buttons: square icon buttons that sit on the right of
+ * the textarea. Same footprint so swapping send→stop during a
+ * streaming reply doesn't reflow the row. The send icon is a paper
+ * plane, the stop icon is a filled square — both inline SVG so they
+ * inherit `currentColor` and scale crisply at any button size. */
+#chat-send,
+#chat-stop {
+  flex: 0 0 auto;
+  width: 2.6rem;
+  height: 2.6rem;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 120ms ease, transform 80ms ease, opacity 120ms ease;
 }
 
 #chat-send {
   background: var(--accent);
   color: #0b0d10;
-  border-color: var(--accent);
-  font-weight: 600;
-  padding: 0.5rem 1.2rem;
 }
 
 #chat-send:hover:not(:disabled) {
   background: var(--accent-2);
-  border-color: var(--accent-2);
+  transform: translateY(-1px);
+}
+
+#chat-send:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+#chat-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
 }
 
 #chat-stop {
   background: var(--error);
   color: #fff;
-  border-color: var(--error);
-  font-weight: 600;
-  padding: 0.5rem 1.2rem;
+}
+
+#chat-stop:hover:not(:disabled) {
+  background: #ff6b63;
+}
+
+#chat-send svg,
+#chat-stop svg {
+  display: block;
 }
 
 .chat-disabled-notice {
@@ -839,4 +1016,17 @@ select, input[type="checkbox"] {
   }
   #mode-toggle button { flex: 1 1 0; }
   .chat-message { max-width: 95%; }
+  /* Stack the discussion sidebar above the chat content on narrow
+   * viewports so a 260px sidebar doesn't crush the message area.
+   * The sidebar stops being `position: sticky` because there's no
+   * useful vertical real estate to stick to. */
+  #view-discussion {
+    flex-direction: column;
+  }
+  .chat-sidebar {
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: 220px;
+    position: static;
+  }
 }
