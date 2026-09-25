@@ -16,6 +16,15 @@ real-backend = ["stt-core/whisper-rs-backend"]
 # is not compiled. Turned on by `make run-llm` so `make run` (CPU STT,
 # no LLM) stays free of the new code path.
 web-agent = []
+# Daily-utility agents. Each is its own cargo feature so operators can
+# pick which tools ship in their binary. All three are enabled by the
+# `run*` Makefile targets (the same convention as `web-agent`). When
+# off, the corresponding agent module is not compiled and the agent
+# is not registered. `dep:chrono` is pulled by the three of them for
+# `Utc::now()` timestamping; `chrono-tz` only by the datetime agent.
+datetime-agent = ["dep:chrono", "dep:chrono-tz"]
+weather-agent = ["dep:chrono"]
+stock-agent = ["dep:chrono"]
 
 [build-dependencies]
 # sha2 is only used at build time to fingerprint the static frontend
@@ -48,6 +57,17 @@ futures-util       = "0.3"
 # OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 url = "2"
+# `chrono` powers the `datetime-agent` (`get_datetime` tool). We pull
+# only the bits the agent actually uses (`clock` for `Utc::now`,
+# `std` for the `SystemTime` plumbing). `wasmbind`/`serde`/`now`
+# remain off to keep the dependency surface minimal.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+# `chrono-tz` brings the IANA timezone database so the datetime agent
+# can resolve "Europe/Paris", "Asia/Tokyo", … without falling back to
+# the system tzdata (which isn't always present on minimal Docker
+# images). `default-features = false` drops the bundled tzfiles and
+# keeps `chrono-tz` to its `std` plumbing.
+chrono-tz = { version = "0.10", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

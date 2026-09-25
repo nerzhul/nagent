@@ -958,7 +958,7 @@ mod tests {
         // `next <= budget` check trips and the caller surfaces a
         // hard error.
         let server_cap: usize = 4096;
-        let mut budget: usize = server_cap;
+        let budget: usize = server_cap;
         let next = budget.saturating_mul(2).min(server_cap);
         assert!(
             next <= budget,

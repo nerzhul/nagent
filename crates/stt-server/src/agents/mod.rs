@@ -151,9 +151,26 @@ impl AgentRegistry {
                 cfg.web_fetch.clone(),
             )));
         }
-        #[cfg(not(feature = "web-agent"))]
+        #[cfg(feature = "datetime-agent")]
         {
-            let _ = cfg; // suppress unused warning when web-agent is off
+            agents.push(Arc::new(datetime_agent::DateTimeAgent::new()));
+        }
+        #[cfg(feature = "weather-agent")]
+        {
+            agents.push(Arc::new(weather_agent::WeatherAgent::new()));
+        }
+        #[cfg(feature = "stock-agent")]
+        {
+            agents.push(Arc::new(stock_agent::StockAgent::new()));
+        }
+        #[cfg(not(any(
+            feature = "web-agent",
+            feature = "datetime-agent",
+            feature = "weather-agent",
+            feature = "stock-agent"
+        )))]
+        {
+            let _ = cfg; // suppress unused warning when no agent features are on
         }
         Self {
             inner: Arc::new(AgentRegistryInner { agents }),
@@ -225,5 +242,11 @@ pub struct AgentSummary {
     pub description: String,
 }
 
+#[cfg(feature = "datetime-agent")]
+pub mod datetime_agent;
+#[cfg(feature = "stock-agent")]
+pub mod stock_agent;
+#[cfg(feature = "weather-agent")]
+pub mod weather_agent;
 #[cfg(feature = "web-agent")]
 pub mod web_fetch;

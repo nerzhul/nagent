@@ -57,19 +57,28 @@ the working directory is loaded automatically by `dotenvy` at startup.
 
 ### Cargo features
 
-`stt-server` exposes one feature; `stt-core` exposes four. They are combined
+`stt-server` exposes several features; `stt-core` exposes four. They are combined
 through the `make` targets and the Dockerfile `BACKEND` arg.
 
 | Feature                         | Effect                                                                                   |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
 | `stt-server/real-backend`       | Use the `whisper-rs` backend. Without it the server falls back to the in-process mock.   |
+| `stt-server/web-agent`          | Register the server-side `web_fetch` chat agent.                                         |
+| `stt-server/datetime-agent`     | Register the `get_datetime` chat agent (pulls `chrono` + `chrono-tz`).                   |
+| `stt-server/weather-agent`      | Register the `get_weather` chat agent (Open-Meteo, no API key).                          |
+| `stt-server/stock-agent`        | Register the `get_stock_quote` chat agent (Stooq CSV, no API key).                       |
 | `stt-core/whisper-rs-backend`   | Pulls in `whisper-rs` (CPU). Always required, even when a GPU backend is also selected.  |
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
 | `stt-core/whisper-rs-hipblas`   | Enable the ROCm/HIP GPU backend (needs ROCm toolchain at build time).                   |
 
 The three GPU features are mutually exclusive — enabling more than one
-wastes build time and can fight over system libraries.
+wastes build time and can fight over system libraries. The four
+`*-agent` features are independent: each adds exactly one tool to the
+LLM's `tools` array. All six `make run*` targets enable `web-agent`
+plus the three daily agents so a fresh build has the full set
+available; disable any of them by editing the target's `--features`
+list.
 
 ### Dockerfile build arguments
 
@@ -106,7 +115,7 @@ without a default and is required.
 | `OLLAMA_API_KEY`             | _(unset)_                                     | LLM proxy      | Optional bearer token forwarded as `Authorization: Bearer …`.                                                 |
 | `LLM_REQUEST_TIMEOUT_SECS`   | `120`                                         | LLM proxy      | Per-chunk idle timeout on the upstream stream.                                                                |
 | `LLM_CORS_ALLOW_ORIGINS`     | _(empty)_                                     | LLM proxy      | Comma-separated list of origins allowed to call `/v1/*` cross-origin. Empty = same-origin only (preflight blocked for others). |
-| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (currently `web_fetch`). When `false` the registry is empty.       |
+| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (`web_fetch`, `get_datetime`, `get_weather`, `get_stock_quote`). When `false` the registry is empty. |
 | `LLM_MAX_TOOL_ROUNDS`        | `4`                                           | Chat agents    | Maximum tool-call rounds per user turn before the proxy aborts.                                               |
 | `WEB_FETCH_ALLOW_PUBLIC`     | `false`                                       | `web_fetch`    | When `true`, the agent may reach public IP ranges (SSRF defence still blocks loopback/RFC1918).               |
 | `WEB_FETCH_ALLOWLIST`        | _(empty)_                                     | `web_fetch`    | Comma-separated hostname allow-list (suffix match; `*.foo` wildcards). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
@@ -233,6 +242,59 @@ keeps the fetched content in the LLM's context without re-fetching.
 | `WEB_FETCH_MAX_BYTES`     | `2097152` | Maximum response size the agent will read (2 MiB). The agent iteratively doubles the budget on overflow, capped here. |
 | `WEB_FETCH_TIMEOUT_MS`    | `30000` | Per-request timeout in milliseconds.                                                |
 
+### Daily agents (datetime, weather, stock quote)
+
+Three small, read-only, no-API-key agents complement `web_fetch` for
+everyday chat queries. They are wired by default on every `make run*`
+target through the `datetime-agent`, `weather-agent`, and
+`stock-agent` cargo features; set `AGENTS_ENABLED=false` to disable
+all agents at runtime without recompiling.
+
+**`get_datetime`** — current local time, optionally localised to an
+IANA timezone. No network.
+
+- FR: "quelle heure est-il à Tokyo ?", "date du jour"
+- EN: "what time is it in New York?", "current date"
+- Params: `timezone` (optional, e.g. `Europe/Paris`)
+
+```
+curl -s -X POST localhost:8080/v1/agents/get_datetime/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"timezone":"Europe/Paris"}}'
+```
+
+**`get_weather`** — current conditions and 1-7 day forecast for a
+location, via Open-Meteo (no API key). City names are geocoded; you
+can also pass `lat,lon` directly to skip geocoding.
+
+- FR: "météo à Paris demain", "il va pleuvoir à Londres ?"
+- EN: "weather in Tokyo", "will it rain in London"
+- Params: `location` (required), `days` (1-7, default 1)
+
+```
+curl -s -X POST localhost:8080/v1/agents/get_weather/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"location":"Paris","days":2}}'
+```
+
+**`get_stock_quote`** — latest Stooq quote for a ticker. Bare
+tickers (e.g. `AAPL`) are auto-suffixed with `.US`; European
+exchanges keep their suffix (`AIR.PA`, `MC.PA`, `SAP.DE`).
+
+- FR: "cours de NVDA", "prix action LVMH"
+- EN: "AAPL stock price", "quote for TSLA"
+- Params: `ticker` (required, 1-10 chars, `[A-Za-z0-9.\-]`)
+
+```
+curl -s -X POST localhost:8080/v1/agents/get_stock_quote/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"ticker":"AAPL"}}'
+```
+
+**Caching.** v1 ships without a cache. Both providers tolerate
+~10 req/s from a single IP, which is comfortable for a personal
+chat deployment; revisit if rate limits bite.
+
 #### Supported models
 
 The wire format is OpenAI-flavoured `tools` + `tool_calls`, so any
@@ -246,8 +308,9 @@ model that supports function calling works. Tested / known-good:
 Smaller quantisations (e.g. Qwen 2.5 3B) sometimes ignore the
 injected `tools` schema and answer from memory. If a model
 consistently skips the tool call, add a one-line nudge to the system
-prompt: *"You may use the provided `web_fetch` tool when the user asks
-for live web content."* No code change required.
+prompt: *"You may use the provided `web_fetch`, `get_datetime`,
+`get_weather`, and `get_stock_quote` tools when the user asks for
+live data."* No code change required.
 
 ### Security
 
@@ -259,7 +322,10 @@ authentication in front of it. The `web_fetch` agent defaults to
 ranges are reachable out of the box — so even a malicious prompt cannot
 trick the LLM into exfiltrating data to an attacker-controlled host
 unless an operator has explicitly opted in via
-`WEB_FETCH_ALLOW_PUBLIC=true` or `WEB_FETCH_ALLOWLIST`.
+`WEB_FETCH_ALLOW_PUBLIC=true` or `WEB_FETCH_ALLOWLIST`. The daily
+agents (`get_datetime`, `get_weather`, `get_stock_quote`) reach their
+fixed public endpoints (Open-Meteo, Stooq, and `chrono-tz`'s bundled
+IANA data); they expose no SSRF surface.
 
 ### Smoke test
 
