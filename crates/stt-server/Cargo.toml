@@ -11,6 +11,11 @@ description = "axum HTTP/WebSocket server for the STT pipeline."
 default = []
 real-backend = ["stt-core/whisper-rs-backend"]
 
+[build-dependencies]
+# sha2 is only used at build time to fingerprint the static frontend
+# assets; the runtime itself only embeds the resulting hex string.
+sha2 = "0.10"
+
 [dependencies]
 stt-proto          = { path = "../stt-proto" }
 stt-core           = { path = "../stt-core" }
@@ -21,6 +26,7 @@ dashmap            = { workspace = true }
 uuid               = { workspace = true }
 rust-embed         = { workspace = true }
 serde              = { workspace = true }
+serde_json         = "1"
 postcard           = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -34,4 +40,6 @@ futures-util       = "0.3"
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures = "0.3"
 tokio-tungstenite = "0.24"
-reqwest = { version = "0.12", default-features = false }
+# `json` is needed by the integration test that decodes the
+# /api/version payload; `rustls-tls` keeps the dep tree free of OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

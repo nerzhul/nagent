@@ -42,6 +42,54 @@ h1 {
   font-size: 0.9rem;
 }
 
+.version-line {
+  margin: 0.4rem 0 0;
+  color: var(--fg-mute);
+  font-size: 0.78rem;
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+}
+
+.version-line code {
+  color: var(--fg);
+  background: var(--bg-elev);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--fg);
+}
+
+.update-banner[hidden] { display: none; }
+
+.update-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.update-banner button {
+  flex: 0 0 auto;
+}
+
+.update-banner button.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--fg-mute);
+}
+
 main {
   max-width: 920px;
   margin: 0 auto;

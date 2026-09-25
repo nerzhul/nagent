@@ -14,10 +14,12 @@ pub mod config;
 pub mod router;
 pub mod session;
 pub mod static_assets;
+pub mod version;
 pub mod watchdog;
 pub mod ws_handler;
 
 pub use config::Config;
+pub use version::VersionInfo;
 use session::SessionMap;
 
 use std::sync::atomic::AtomicBool;
@@ -56,6 +58,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(ws_handler::index_handler))
         .route("/healthz", get(ws_handler::healthz))
+        .route("/api/version", get(ws_handler::version_handler))
         .route("/ws", get(ws_handler::ws_upgrade))
         .route("/static/*path", get(ws_handler::static_path_handler))
         .with_state(state)

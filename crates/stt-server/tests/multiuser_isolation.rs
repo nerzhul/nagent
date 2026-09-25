@@ -265,3 +265,43 @@ async fn healthz_returns_200() {
     let resp = reqwest::get(http_url).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_version_returns_expected_shape() {
+    let (url, _sessions) = start_test_server().await;
+    let http_url = url.replacen("ws://", "http://", 1).replace("/ws", "/api/version");
+
+    let resp = reqwest::get(http_url).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Version metadata must never be cached, otherwise a stale "we're
+    // up to date" answer could defeat the reload banner.
+    let cache_control = resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("no-store") || cache_control.contains("no-cache"),
+        "expected no-store / no-cache, got {cache_control:?}"
+    );
+
+    let info: stt_server::VersionInfo = resp.json().await.expect("VersionInfo json");
+    // backend version comes from CARGO_PKG_VERSION; assert non-empty and
+    // semver-shaped rather than hard-coding "0.1.0" so the test survives
+    // a future version bump.
+    assert!(!info.backend.is_empty(), "backend version is empty");
+    assert!(
+        info.backend.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c.is_ascii_alphabetic()),
+        "backend version `{info_backend}` has unexpected characters",
+        info_backend = info.backend
+    );
+
+    // frontend hash is 16 hex chars produced by build.rs.
+    assert_eq!(info.frontend.len(), 16, "frontend hash `{info}` looks wrong", info = info.frontend);
+    assert!(
+        info.frontend.chars().all(|c| c.is_ascii_hexdigit()),
+        "frontend hash `{info}` contains non-hex characters",
+        info = info.frontend
+    );
+}

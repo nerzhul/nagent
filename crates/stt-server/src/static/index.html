@@ -28,9 +28,21 @@
   <header>
     <h1>nagent STT</h1>
     <p class="subtitle">Local Whisper transcription with on-device VAD.</p>
+    <p class="version-line">
+      <span>backend <code id="backend-version">…</code></span>
+      <span>frontend <code id="frontend-version-self">…</code></span>
+    </p>
   </header>
 
   <main>
+    <div id="update-banner" class="update-banner" role="status" aria-live="polite" hidden>
+      <span class="update-banner-text">
+        A new version of the UI is available.
+      </span>
+      <button id="update-banner-reload" type="button">Reload</button>
+      <button id="update-banner-dismiss" type="button" class="ghost">Dismiss</button>
+    </div>
+
     <section class="controls">
       <button id="record-btn" type="button" data-state="idle">Record</button>
       <label>

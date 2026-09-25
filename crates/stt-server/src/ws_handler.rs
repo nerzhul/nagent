@@ -23,6 +23,7 @@ use stt_proto::{decode_frame, encode_frame, BackendInfo, ErrorMessage, Payload};
 use crate::router::send_to_session;
 use crate::session::{register, unregister, OutboundMessage};
 use crate::static_assets::{mime_for, StaticAssets};
+use crate::version::VersionInfo;
 use crate::AppState;
 
 /// Handle a WebSocket upgrade request.
@@ -262,4 +263,32 @@ pub async fn healthz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     } else {
         (axum::http::StatusCode::SERVICE_UNAVAILABLE, "starting")
     }
+}
+
+/// `GET /api/version` — reports the backend crate version and the
+/// content hash of the embedded frontend assets.
+///
+/// The browser reads `/static/version.txt` on page load to learn which
+/// frontend bundle it is currently running, then polls this endpoint to
+/// detect when the server has been rebuilt with newer assets and the
+/// page should be reloaded.
+pub async fn version_handler() -> impl IntoResponse {
+    let info = VersionInfo::current();
+    // Explicit JSON content type so a manual `curl` inspection works
+    // without having to chase down axum's default negotiation.
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    // Disable caching: a stale "everything is fine" answer would be
+    // worse than useless, it would defeat the whole point of the check.
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    let body = serde_json::to_vec(&info).unwrap_or_else(|e| {
+        panic!("VersionInfo serialization failed (this is a bug): {e}")
+    });
+    (headers, body)
 }
