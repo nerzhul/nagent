@@ -56,6 +56,13 @@ impl LlmClient {
         Ok(Self { http, cfg })
     }
 
+    /// Borrow the live config (CORS allow-list, upstream URL, etc.).
+    /// Used by the router builder to wire the CORS middleware without
+    /// keeping a duplicate `Arc<LlmConfig>` in [`crate::AppState`].
+    pub fn cfg(&self) -> &LlmConfig {
+        &self.cfg
+    }
+
     fn auth_header(&self) -> Option<(HeaderName, HeaderValue)> {
         let key = self.cfg.api_key.as_deref()?;
         let value = format!("Bearer {key}");

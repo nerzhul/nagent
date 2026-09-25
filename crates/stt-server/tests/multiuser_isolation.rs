@@ -43,6 +43,7 @@ async fn start_test_server() -> (String, SessionMap) {
         max_queue: 32,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
+        limits: stt_server::config::LimitsConfig::default(),
         // LLM is opt-in; the STT-focused multiuser test keeps it off
         // so the /v1/* routes are not registered and there is no
         // accidental dependency on a local Ollama install.
@@ -52,6 +53,7 @@ async fn start_test_server() -> (String, SessionMap) {
             default_model: "llama3.1".into(),
             api_key: None,
             request_timeout: Duration::from_secs(120),
+            cors_allow_origins: vec![],
         },
     });
 

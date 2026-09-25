@@ -23,6 +23,7 @@ use stt_proto::{decode_frame, encode_frame, BackendInfo, ErrorMessage, Payload};
 use crate::router::send_to_session;
 use crate::session::{register, unregister, OutboundMessage};
 use crate::static_assets::{mime_for, StaticAssets};
+use crate::validation::FrameError;
 use crate::version::VersionInfo;
 use crate::AppState;
 
@@ -145,11 +146,21 @@ async fn handle_inbound(
     match payload {
         Payload::Start(start) => {
             debug!(%session_id, ?start, "StartSession");
+            // Validate sample rate and language hint before mutating
+            // any session state. A bad client must not be able to
+            // sneak an oversized lang string into the worker-side
+            // language cache.
+            FrameError::validate_start(
+                &app.config.limits,
+                start.sample_rate,
+                start.lang_hint.as_deref(),
+            )
+            .map_err(InboundError::Validation)?;
             // Snapshot the Arc out of the DashMap shard before any await.
             let state_arc = app.sessions.get(&session_id).map(|s| s.value().clone());
             if let Some(state) = state_arc {
                 state.touch();
-                state.set_language(start.lang_hint);
+                state.set_language(normalize_lang_hint(start.lang_hint));
             }
         }
         Payload::Stop(_) => {
@@ -158,14 +169,18 @@ async fn handle_inbound(
         }
         Payload::Config(cfg) => {
             debug!(%session_id, ?cfg, "Config");
+            FrameError::validate_config(&app.config.limits, cfg.language.as_deref())
+                .map_err(InboundError::Validation)?;
             let state_arc = app.sessions.get(&session_id).map(|s| s.value().clone());
             if let Some(state) = state_arc {
                 state.touch();
-                state.set_language(cfg.language);
+                state.set_language(normalize_lang_hint(cfg.language));
                 state.set_translate(cfg.translate);
             }
         }
         Payload::Audio(audio) => {
+            FrameError::validate_audio(&app.config.limits, &audio.samples)
+                .map_err(InboundError::Validation)?;
             // Snapshot config from the session before we send the job;
             // never hold a DashMap shard lock across an .await.
             let snapshot = app.sessions.get(&session_id).map(|s| s.value().clone());
@@ -222,6 +237,13 @@ async fn handle_inbound(
     Ok(())
 }
 
+/// Lower-case the language hint so the worker-side cache and the
+/// wire-side `lang` field report a single canonical form. Validation
+/// already filtered out unknown codes; this is purely cosmetic.
+fn normalize_lang_hint(hint: Option<String>) -> Option<String> {
+    hint.map(|s| s.to_ascii_lowercase())
+}
+
 #[derive(Debug, thiserror::Error)]
 enum InboundError {
     #[error("codec: {0}")]
@@ -230,6 +252,8 @@ enum InboundError {
     ClientStop,
     #[error("worker queue closed")]
     WorkerUnavailable,
+    #[error("{0}")]
+    Validation(#[from] FrameError),
 }
 
 /// Static handler for `/` and `/index.html`.

@@ -3,6 +3,8 @@
 //! The server is split into:
 //! - [`config`] — env-var parsing.
 //! - [`session`] — `SessionState` and the shared `SessionMap`.
+//! - [`validation`] — input checks applied to inbound WebSocket frames.
+//! - [`middleware`] — always-on security headers and LLM CORS layer.
 //! - [`ws_handler`] — per-connection upgrade + dispatch loop.
 //! - [`router`] — `ResultRouter` that forwards worker output to the right session.
 //! - [`watchdog`] — periodic sweep that drops idle sessions.
@@ -13,9 +15,11 @@
 
 pub mod config;
 pub mod llm;
+pub mod middleware;
 pub mod router;
 pub mod session;
 pub mod static_assets;
+pub mod validation;
 pub mod version;
 pub mod watchdog;
 pub mod ws_handler;
@@ -62,19 +66,36 @@ impl std::fmt::Debug for AppState {
 
 /// Build the axum router around [`AppState`]. Exposed for tests.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    // Always-on security headers applied to *every* response (static
+    // frontend, health checks, version probe, WS upgrade, LLM proxy).
+    let security_layers = (
+        middleware::security_headers_layer(),
+        middleware::referrer_policy_layer(),
+        middleware::nosniff_layer(),
+    );
+
     // STT routes are always registered. The LLM routes are gated on
     // `LLM_ENABLED` so disabling the feature leaves no trace of it
     // (the chat view simply sees 404 on `/v1/*`).
-    let mut app = Router::new()
+    let stt_app = Router::new()
         .route("/", get(ws_handler::index_handler))
         .route("/healthz", get(ws_handler::healthz))
         .route("/api/version", get(ws_handler::version_handler))
         .route("/ws", get(ws_handler::ws_upgrade))
-        .route("/static/*path", get(ws_handler::static_path_handler));
-    if state.llm.is_some() {
-        app = app
+        .route("/static/*path", get(ws_handler::static_path_handler))
+        .layer(security_layers.clone());
+
+    if let Some(llm) = &state.llm {
+        // The LLM proxy gets its own CORS layer driven by
+        // `LLM_CORS_ALLOW_ORIGINS` plus the same security headers.
+        let cors = middleware::cors_layer(&llm.cfg().cors_allow_origins);
+        let llm_app = Router::new()
             .route("/v1/chat/completions", post(llm::chat_completions))
-            .route("/v1/models", get(llm::models_list));
+            .route("/v1/models", get(llm::models_list))
+            .layer(cors)
+            .layer(security_layers);
+        stt_app.merge(llm_app).with_state(state)
+    } else {
+        stt_app.with_state(state)
     }
-    app.with_state(state)
 }

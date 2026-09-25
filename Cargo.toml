@@ -26,7 +26,7 @@ dashmap = "6"
 anyhow = "1"
 whisper-rs = { version = "0.16", default-features = false }
 axum = { version = "0.7", features = ["ws", "macros"] }
-tower-http = { version = "0.5", features = ["fs", "trace"] }
+tower-http = { version = "0.5", features = ["fs", "trace", "set-header", "cors"] }
 rust-embed = "8"
 dotenvy = "0.15"
 

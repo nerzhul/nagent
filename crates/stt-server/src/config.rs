@@ -23,6 +23,43 @@ pub struct Config {
     /// Optional LLM/Ollama proxy config. When `llm.enabled` is `false`
     /// the `/v1/*` routes are not registered at all.
     pub llm: LlmConfig,
+    /// Limits applied to inbound WebSocket frames (defence against
+    /// malicious or buggy clients).
+    pub limits: LimitsConfig,
+}
+
+/// Limits applied to inbound WebSocket frames.
+///
+/// See [`crate::ws_handler::handle_inbound`] for the validation
+/// that consumes these knobs.
+#[derive(Debug, Clone)]
+pub struct LimitsConfig {
+    /// Maximum number of PCM Float32 samples accepted in a single
+    /// `AudioFrame`. Whisper's hard cap is 30 s of audio at 16 kHz
+    /// (= 480 000 samples); anything longer is rejected with
+    /// `ErrorCode::INVALID_FRAME`.
+    pub max_audio_frame_samples: usize,
+    /// Only `16_000` Hz audio is supported (whisper's required input
+    /// rate). A different value is rejected with
+    /// `ErrorCode::INVALID_FRAME`.
+    pub required_sample_rate: u32,
+    /// Maximum length of an accepted ISO 639-1 language hint, in
+    /// bytes. Two-letter codes plus a region suffix (`pt-BR`,
+    /// `zh-CN`) never exceed a handful of bytes; a 4 KiB string is
+    /// almost certainly an attack.
+    pub max_language_hint_bytes: usize,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        // 30 seconds at 16 kHz mono Float32.
+        const DEFAULT_MAX_AUDIO_FRAME_SAMPLES: usize = 30 * 16_000;
+        Self {
+            max_audio_frame_samples: DEFAULT_MAX_AUDIO_FRAME_SAMPLES,
+            required_sample_rate: 16_000,
+            max_language_hint_bytes: 16,
+        }
+    }
 }
 
 impl Config {
@@ -48,6 +85,7 @@ impl Config {
             Duration::from_millis(parse_env("SESSION_IDLE_TIMEOUT_MS", 30_000)?);
         let infer_timeout = Duration::from_millis(parse_env("INFER_TIMEOUT_MS", 30_000)?);
 
+        let limits = LimitsConfig::from_env()?;
         let llm = LlmConfig::from_env()?;
 
         Ok(Self {
@@ -56,7 +94,25 @@ impl Config {
             max_queue,
             session_idle_timeout,
             infer_timeout,
+            limits,
             llm,
+        })
+    }
+}
+
+impl LimitsConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            max_audio_frame_samples: parse_env(
+                "MAX_AUDIO_FRAME_SAMPLES",
+                defaults.max_audio_frame_samples,
+            )?,
+            required_sample_rate: parse_env("REQUIRED_SAMPLE_RATE", defaults.required_sample_rate)?,
+            max_language_hint_bytes: parse_env(
+                "MAX_LANGUAGE_HINT_BYTES",
+                defaults.max_language_hint_bytes,
+            )?,
         })
     }
 }
@@ -80,6 +136,11 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     /// Per-chunk idle timeout (no bytes for this long → drop the stream).
     pub request_timeout: Duration,
+    /// Comma-separated list of origins allowed to call `/v1/*` via
+    /// cross-origin requests. Empty (the default) means the proxy is
+    /// same-origin only — preflight requests from any other origin are
+    /// rejected and the browser will never even attempt the call.
+    pub cors_allow_origins: Vec<String>,
 }
 
 impl LlmConfig {
@@ -93,6 +154,15 @@ impl LlmConfig {
             .ok()
             .filter(|s| !s.is_empty());
         let request_timeout = Duration::from_secs(parse_env("LLM_REQUEST_TIMEOUT_SECS", 120)?);
+        let cors_allow_origins = std::env::var("LLM_CORS_ALLOW_ORIGINS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(Self {
             enabled,
@@ -100,6 +170,7 @@ impl LlmConfig {
             default_model,
             api_key,
             request_timeout,
+            cors_allow_origins,
         })
     }
 }

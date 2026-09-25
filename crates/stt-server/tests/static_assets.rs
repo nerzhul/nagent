@@ -29,12 +29,14 @@ async fn serve_once() -> String {
         max_queue: 32,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
+        limits: stt_server::config::LimitsConfig::default(),
         llm: stt_server::config::LlmConfig {
             enabled: false,
             base_url: "http://localhost:11434".into(),
             default_model: "llama3.1".into(),
             api_key: None,
             request_timeout: Duration::from_secs(120),
+            cors_allow_origins: vec![],
         },
     });
     let sessions = Arc::new(dashmap::DashMap::new());
