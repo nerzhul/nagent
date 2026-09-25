@@ -239,4 +239,15 @@ async fn chat_js_carries_math_bracket_normalizer() {
         body.matches(r"(?!\s*\()").count() >= 2,
         r"chat.js no longer carries the (?!\s*\() link-protection lookahead on both math regex passes"
     );
+
+    // Guard against the duplicate-declaration footgun this commit
+    // fixes: a sloppy `Edit` of the markdown layer had left two
+    // `function renderMarkdown` declarations in the file, which the
+    // browser then surfaces as `Uncaught SyntaxError: redeclaration
+    // of function renderMarkdown` and the chat dies on first reply.
+    let render_md_count = body.matches("function renderMarkdown(").count();
+    assert_eq!(
+        render_md_count, 1,
+        "chat.js declares `function renderMarkdown` {render_md_count} times (expected 1). Duplicate declarations make the chat fail with `Uncaught SyntaxError: redeclaration of function renderMarkdown` on first reply."
+    );
 }

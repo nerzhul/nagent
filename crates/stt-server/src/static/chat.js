@@ -90,29 +90,6 @@ const KATEX_RENDER_OPTIONS = {
   throwOnError: false, // bad LaTeX renders as red source, doesn't break the bubble
 };
 
-function renderMarkdown(text) {
-  if (!text) return "";
-  if (!MARKDOWN_AVAILABLE) {
-    // Vendor scripts failed to load (404, blocked, parse error). Fall
-    // back to a manually-escaped, plain-text render rather than
-    // throwing on the first reply. The user still sees the reply, just
-    // without markdown formatting.
-    return escapeHtml(text).replace(/\n/g, "<br>");
-  }
-  // marked.parse returns an HTML string when called with a string input.
-  // `breaks: true` makes single newlines become `<br>` (LLMs often
-  // break lines without blank lines). `gfm: true` (default) enables
-  // GitHub-flavored features: tables, task lists, fenced code blocks.
-  const raw = window.marked.parse(text, { breaks: true, gfm: true });
-  return window.DOMPurify.sanitize(raw, {
-    // Anchor tags get forced-open in a new tab so a chat reply can't
-    // navigate the nagent UI away. DOMPurify honors `ADD_ATTR` for the
-    // `target` and `rel` we add below; everything else stays at the
-    // default-deny baseline.
-    ADD_ATTR: ["target", "rel"],
-  });
-}
-
 // Minimal HTML escaper used only when the vendor libraries fail to
 // load. We intentionally never interpolate user-controlled strings
 // into the DOM via `innerHTML` outside of `renderMarkdown`, so this
