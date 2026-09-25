@@ -98,6 +98,39 @@
       <button id="chat-clear" type="button" class="ghost">Clear</button>
       <span id="chat-status" class="status idle">idle</span>
     </header>
+
+    <section class="chat-audio">
+      <button id="chat-record-btn" type="button" data-state="idle">Record</button>
+      <label>
+        <span class="chat-audio-label">Language</span>
+        <select id="chat-lang-select">
+          <option value="">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="de">Deutsch</option>
+          <option value="it">Italiano</option>
+          <option value="pt">Português</option>
+          <option value="ja">日本語</option>
+          <option value="zh">中文</option>
+        </select>
+      </label>
+      <label>
+        <input type="checkbox" id="chat-translate-check"> Translate to English
+      </label>
+      <span id="chat-backend-info" class="backend-info"></span>
+    </section>
+
+    <section class="voice-graph" aria-label="Live microphone waveform">
+      <div class="voice-graph-header">
+        <span class="voice-graph-label">Live input</span>
+        <span id="chat-voice-graph-level" class="voice-graph-level" title="Speech probability">
+          <span class="bar"></span>
+        </span>
+      </div>
+      <canvas id="chat-voice-graph-canvas"></canvas>
+    </section>
+
     <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
     <details class="chat-advanced">
       <summary>Advanced</summary>

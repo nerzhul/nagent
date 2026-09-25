@@ -231,6 +231,23 @@ select, input[type="checkbox"] {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.75rem 1rem 0.5rem;
+  /* Animate the show/hide transition driven by `.is-hidden`.
+     Opacity + max-height keeps the surrounding layout from jumping
+     while the rest of the view reflows. */
+  max-height: 240px;
+  opacity: 1;
+  overflow: hidden;
+  transition: opacity 180ms ease, max-height 220ms ease, margin-top 180ms ease, padding 180ms ease, border-color 180ms ease;
+}
+
+.voice-graph.is-hidden {
+  opacity: 0;
+  max-height: 0;
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-color: transparent;
+  pointer-events: none;
 }
 
 .voice-graph-header {
@@ -367,6 +384,66 @@ select, input[type="checkbox"] {
   flex-wrap: wrap;
   margin-bottom: 0.75rem;
 }
+
+.chat-audio {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.chat-audio label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--fg-mute);
+  font-size: 0.85rem;
+}
+
+.chat-audio-label {
+  color: var(--fg-mute);
+}
+
+.chat-audio select {
+  padding: 0.3rem 0.4rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+#chat-record-btn:not(:disabled) {
+  background: var(--accent);
+  color: #0b0d10;
+  border-color: var(--accent);
+  font-weight: 600;
+  min-width: 6rem;
+}
+
+#chat-record-btn:not(:disabled):hover {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+#chat-record-btn[data-state="recording"]:not(:disabled) {
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
+}
+
+#chat-record-btn[data-state="recording"]:not(:disabled):hover {
+  background: #ff6b63;
+  border-color: #ff6b63;
+}
+
+#chat-record-btn[data-state="loading"] { opacity: 0.7; }
 
 .chat-header h2 {
   margin: 0;

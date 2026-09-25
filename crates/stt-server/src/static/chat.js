@@ -4,45 +4,83 @@
 // OpenAI-compatible endpoint). History is kept in `localStorage` only;
 // no server-side session is involved.
 //
-// Streaming: a single module-level `AbortController` is the source of
-// truth for the in-flight request. A second `send()` while streaming
-// aborts the previous one and starts fresh — keeping the chat UI
-// responsive to user edits.
+// Audio in Discussion mode:
+//   A second `AudioCapture` instance is created alongside the chat UI.
+//   When the user clicks Record, FinalTranscripts are routed as user
+//   turns (same path as typed messages) and the assistant reply streams
+//   in automatically. The audio pipeline is fully independent from
+//   Transcript mode: each mode has its own `AudioCapture` (its own WS,
+//   its own recording state). The underlying MicVAD instance is shared
+//   so we do not load the Silero model twice.
+//
+// Concurrency:
+//   User turns (typed or transcribed) go through a single Promise
+//   queue so two replies can never stream at the same time. A new
+//   `send()` or transcript arrival while a reply is in flight simply
+//   waits for the current reply to finish.
+
+import { AudioCapture } from "/static/audio.js";
 
 const HISTORY_KEY = "nagent.chat.history";
 const HISTORY_CAP = 200;
 
-// One stream at a time. If the user clicks Send again mid-stream, we
-// abort the previous request before opening the new one. This is a
-// module-level singleton by design (see AGENTS.md §4: pick a strategy
-// and document it).
-let inflight = null; // { controller, assistantEl }
-
 const $ = (id) => document.getElementById(id);
-const messagesEl = $("chat-messages");
-const formEl = $("chat-form");
-const inputEl = $("chat-input");
-const sendBtn = $("chat-send");
-const stopBtn = $("chat-stop");
-const clearBtn = $("chat-clear");
-const modelEl = $("chat-model");
-const systemEl = $("chat-system");
-const tempEl = $("chat-temperature");
-const statusEl = $("chat-status");
+const messagesEl   = $("chat-messages");
+const formEl       = $("chat-form");
+const inputEl      = $("chat-input");
+const sendBtn      = $("chat-send");
+const stopBtn      = $("chat-stop");
+const clearBtn     = $("chat-clear");
+const modelEl      = $("chat-model");
+const systemEl     = $("chat-system");
+const tempEl       = $("chat-temperature");
+const statusEl     = $("chat-status");
 const disabledNoticeEl = $("chat-disabled-notice");
 
-function setStatus(text, cls) {
+// One stream at a time. If a new turn arrives while a reply is
+// streaming, the reply continues to completion and the new turn runs
+// immediately after (no abort — the user can keep recording without
+// cutting the current reply short).
+let inflight = null; // { controller, assistantEl, model }
+
+// Serialize user turns so a reply never overlaps another reply.
+let turnQueue = Promise.resolve();
+function enqueueTurn(fn) {
+  turnQueue = turnQueue.then(fn, fn);
+  return turnQueue;
+}
+
+// ---- Status pill -----------------------------------------------------------
+//
+// Two sources feed the pill: the chat streaming layer (high priority)
+// and `AudioCapture` (low priority). While a reply is streaming the
+// pill shows the streaming state; otherwise it shows the most recent
+// audio state (or "idle").
+
+let lastAudioStatus = { text: "idle", cls: "idle" };
+let lastStreamActive = false;
+function renderStatus() {
+  const { text, cls } = lastStreamActive
+    ? { text: "streaming…", cls: "connecting" }
+    : lastAudioStatus;
   statusEl.textContent = text;
   statusEl.className = "status " + cls;
 }
+function setAudioStatus(text, cls) {
+  lastAudioStatus = { text, cls };
+  renderStatus();
+}
+function setStreamActive(active) {
+  lastStreamActive = active;
+  renderStatus();
+}
 
 function setStreaming(streaming) {
-  // Toggle between the Send/Stop pair. While streaming, Send is hidden
-  // and Stop is shown (and vice-versa).
   if (streaming) {
     sendBtn.hidden = true;
     stopBtn.hidden = false;
     inputEl.disabled = true;
+    setStreamActive(true);
   } else {
     sendBtn.hidden = false;
     stopBtn.hidden = true;
@@ -50,6 +88,8 @@ function setStreaming(streaming) {
     inputEl.focus();
   }
 }
+
+// ---- History ---------------------------------------------------------------
 
 function loadHistory() {
   try {
@@ -64,13 +104,9 @@ function loadHistory() {
 
 function saveHistory(history) {
   try {
-    // Cap to the most recent N messages to stay well under the typical
-    // localStorage 5 MB quota even on long sessions.
     const trimmed = history.slice(-HISTORY_CAP);
     localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
-  } catch (_e) {
-    // Quota errors are non-fatal: the in-page log keeps working.
-  }
+  } catch (_e) {}
 }
 
 function renderHistory() {
@@ -85,9 +121,7 @@ function renderHistory() {
 function appendBubble(role, text, { persist = true, model = null } = {}) {
   const div = document.createElement("div");
   div.className = `chat-message chat-${role}`;
-  if (model && role === "assistant") {
-    div.dataset.model = model;
-  }
+  if (model && role === "assistant") div.dataset.model = model;
   div.textContent = text;
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -107,26 +141,31 @@ function appendError(text) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// ---- Models ----------------------------------------------------------------
+
 async function loadModels() {
-  // Pull the model list once on first entry to Discussion mode, then
-  // never again unless the user clears localStorage. The list is also
-  // re-fetched when the server config changes (rare in practice).
   try {
     const r = await fetch("/v1/models", { cache: "no-store" });
     if (r.status === 404) {
-      // Chat is disabled on the server; show the notice and hide the form.
       disabledNoticeEl.hidden = false;
       formEl.hidden = true;
       document.querySelector(".chat-header").hidden = true;
+      document.querySelector(".chat-audio").hidden = true;
+      document.querySelector(".voice-graph").hidden = true;
       document.querySelector(".chat-advanced").hidden = true;
-      setStatus("disabled", "idle");
+      statusEl.textContent = "disabled";
+      statusEl.className = "status idle";
       return;
     }
     if (!r.ok) throw new Error(`status ${r.status}`);
     disabledNoticeEl.hidden = true;
     formEl.hidden = false;
     document.querySelector(".chat-header").hidden = false;
+    document.querySelector(".chat-audio").hidden = false;
+    document.querySelector(".voice-graph").hidden = false;
     document.querySelector(".chat-advanced").hidden = false;
+    // Refresh the pill so a previous "disabled" state disappears.
+    renderStatus();
     const data = await r.json();
     const items = Array.isArray(data?.data) ? data.data : [];
     modelEl.innerHTML = "";
@@ -144,59 +183,51 @@ async function loadModels() {
       modelEl.appendChild(opt);
     }
   } catch (e) {
-    // Network error: leave the dropdown alone (it might already have
-    // options from a previous load) and surface the failure softly.
+    // Surface failures in the status pill so an empty dropdown is
+    // not silently confusing — the user can see *why* nothing loaded.
     console.warn("loadModels failed:", e);
+    setAudioStatus(`models: ${e?.message || e}`, "error");
   }
 }
 
 function buildMessages() {
   const messages = [];
   const system = systemEl.value.trim();
-  if (system) {
-    messages.push({ role: "system", content: system });
-  }
-  const history = loadHistory();
-  for (const m of history) {
+  if (system) messages.push({ role: "system", content: system });
+  for (const m of loadHistory()) {
     if (m.role !== "system") messages.push({ role: m.role, content: m.content });
   }
   return messages;
 }
 
-async function send() {
-  const text = inputEl.value;
-  if (!text.trim()) return;
+// ---- Streaming reply -------------------------------------------------------
 
-  // If a stream is already running, abort it before starting a new one.
-  // See the module-level `inflight` note for why this is the chosen
-  // policy (replacement rather than refusal).
-  if (inflight) {
-    inflight.controller.abort();
-    inflight = null;
-  }
+async function streamReply() {
+  // Build the request from history (minus the very last entry, which
+  // is the user turn we just appended). The last entry is re-added
+  // explicitly so we don't depend on history-load timing.
+  const history = loadHistory();
+  const last = history[history.length - 1];
+  if (!last || last.role !== "user") return; // nothing to reply to
+  const earlier = history.slice(0, -1);
 
-  // Push the user turn now so the UI reflects the pending message even
-  // if the network fails before the assistant reply starts.
-  appendBubble("user", text);
-  inputEl.value = "";
   const model = modelEl.value || undefined;
-  const assistantEl = appendBubble("assistant", "", {
-    persist: false,
-    model,
-  });
+  const assistantEl = appendBubble("assistant", "", { persist: false, model });
 
   const controller = new AbortController();
-  inflight = { controller, assistantEl };
+  inflight = { controller, assistantEl, model };
   setStreaming(true);
-  setStatus("streaming…", "connecting");
 
-  const body = {
-    messages: [
-      ...buildMessages().slice(0, -1), // drop the just-pushed user turn (it's already in history)
-      { role: "user", content: text },
-    ],
-    stream: true,
-  };
+  const messages = [
+    ...(systemEl.value.trim()
+      ? [{ role: "system", content: systemEl.value.trim() }]
+      : []),
+    ...earlier
+      .filter((m) => m.role !== "system")
+      .map((m) => ({ role: m.role, content: m.content })),
+    { role: "user", content: last.content },
+  ];
+  const body = { messages, stream: true };
   const temperature = parseFloat(tempEl.value);
   if (Number.isFinite(temperature)) body.temperature = temperature;
   if (model) body.model = model;
@@ -222,7 +253,6 @@ async function send() {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      // SSE messages are separated by a blank line.
       let sep;
       while ((sep = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, sep);
@@ -230,10 +260,7 @@ async function send() {
         for (const line of raw.split("\n")) {
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
-          if (payload === "[DONE]") {
-            reader.cancel();
-            break;
-          }
+          if (payload === "[DONE]") { reader.cancel(); break; }
           if (!payload) continue;
           try {
             const evt = JSON.parse(payload);
@@ -243,48 +270,54 @@ async function send() {
               assistantEl.textContent = accumulated;
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
-          } catch (_e) {
-            // Skip malformed lines rather than aborting the stream —
-            // one bad payload from upstream should not ruin the rest.
-          }
+          } catch (_e) { /* skip malformed line */ }
         }
       }
     }
   } catch (e) {
     if (e?.name === "AbortError") {
-      // User stopped mid-generation: keep whatever was streamed so far.
       assistantEl.textContent = accumulated || "(stopped)";
     } else {
       assistantEl.textContent = `[error] ${e?.message || e}`;
       appendError(e?.message || String(e));
     }
   } finally {
-    // Persist the final assistant turn (success, partial, or error).
-    const history = loadHistory();
-    history.push({
-      role: "assistant",
-      content: assistantEl.textContent,
-      ts: Date.now(),
-      model,
-    });
-    saveHistory(history);
+    const h = loadHistory();
+    h.push({ role: "assistant", content: assistantEl.textContent, ts: Date.now(), model });
+    saveHistory(h);
     inflight = null;
     setStreaming(false);
-    setStatus("idle", "idle");
   }
 }
 
+// ---- User turn entry points ------------------------------------------------
+
+async function submitUserTurn(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return;
+  appendBubble("user", trimmed);
+  await streamReply();
+}
+
+function sendTyped() {
+  const text = inputEl.value;
+  inputEl.value = "";
+  enqueueTurn(() => submitUserTurn(text));
+}
+
+function receiveTranscript(text) {
+  // No empty-text guard here: AudioCapture already filters empty
+  // FinalTranscripts at the wire-protocol level.
+  enqueueTurn(() => submitUserTurn(text));
+}
+
 function stop() {
-  if (inflight) {
-    inflight.controller.abort();
-  }
+  if (inflight) inflight.controller.abort();
 }
 
 function clearChat() {
   if (!confirm("Clear the conversation?")) return;
-  try {
-    localStorage.removeItem(HISTORY_KEY);
-  } catch (_e) {}
+  try { localStorage.removeItem(HISTORY_KEY); } catch (_e) {}
   messagesEl.innerHTML = "";
   inputEl.focus();
 }
@@ -293,44 +326,59 @@ function clearChat() {
 
 formEl.addEventListener("submit", (e) => {
   e.preventDefault();
-  send();
+  sendTyped();
 });
 stopBtn.addEventListener("click", stop);
 clearBtn.addEventListener("click", clearChat);
 
-// Ctrl/Cmd+Enter submits from the textarea; Esc while streaming
-// triggers Stop.
 inputEl.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
     e.preventDefault();
-    send();
+    sendTyped();
   } else if (e.key === "Escape" && inflight) {
     e.preventDefault();
     stop();
   }
 });
 
-// Hydrate the conversation immediately so reloads restore context, even
-// before the user enters Discussion mode for the first time.
+// ---- Audio capture (Discussion mode) ---------------------------------------
+
+const audioCapture = new AudioCapture({
+  buttonEl: $("chat-record-btn"),
+  statusEl: null, // merged into #chat-status via the onStatusChange callback
+  canvasEl: $("chat-voice-graph-canvas"),
+  levelEl:  $("chat-voice-graph-level"),
+  graphEl:  document.querySelector("#view-discussion .voice-graph"),
+  containerEl: document.getElementById("view-discussion"),
+  langSelectEl: $("chat-lang-select"),
+  translateCheckEl: $("chat-translate-check"),
+  backendInfoEl: $("chat-backend-info"),
+  onFinalTranscript: (text) => {
+    if (text && text.trim()) receiveTranscript(text);
+  },
+  onError: (code, message) => {
+    appendError(`audio ${code}: ${message}`);
+  },
+  onStatusChange: (text, cls) => {
+    setAudioStatus(text, cls);
+  },
+});
+
+// ---- Boot ------------------------------------------------------------------
+
 renderHistory();
 
-// Lazy-load the model list on first entry to Discussion mode (and
-// re-load when the tab becomes visible again, e.g. after the server
-// was restarted while the tab was idle).
-let modelsLoaded = false;
-async function ensureModelsLoaded() {
-  if (modelsLoaded) return;
-  await loadModels();
-  modelsLoaded = true;
-}
-document.addEventListener("modechange", (e) => {
-  if (e?.detail?.mode === "discussion") ensureModelsLoaded();
-});
+// Load the model list once on page boot. The previous version only
+// fired on `modechange`, which meant a Discussion-mode-persisted user
+// saw an empty dropdown until they clicked away and back. Loading at
+// boot keeps the dropdown warm regardless of the persisted mode, and
+// the disabled-server notice still renders correctly on 404.
+loadModels();
+
 document.addEventListener("visibilitychange", () => {
+  // Re-fetch on tab return in case the server's model list changed
+  // while the tab was backgrounded (e.g. another `ollama pull`).
   if (!document.hidden && globalThis.__nagentMode?.current() === "discussion") {
-    // Re-check models when the tab becomes visible; harmless if the
-    // dropdown is already populated.
-    modelsLoaded = false;
-    ensureModelsLoaded();
+    loadModels();
   }
 });
