@@ -38,6 +38,12 @@ pub fn mime_for(path: &str) -> &'static str {
         "image/png"
     } else if path.ends_with(".ico") {
         "image/x-icon"
+    } else if path.ends_with(".woff2") {
+        // KaTeX ships WOFF2 fonts under `vendor/katex/fonts/`. Browsers
+        // refuse to load a font declared with the wrong MIME type, so
+        // we need an explicit `font/woff2` mapping here — otherwise
+        // math glyphs fall back to the system serif and look broken.
+        "font/woff2"
     } else {
         "application/octet-stream"
     }

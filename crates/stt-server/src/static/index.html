@@ -36,6 +36,21 @@
   -->
   <script src="/static/vendor/marked/marked.min.js"></script>
   <script src="/static/vendor/sanitize/purify.min.js"></script>
+  <!--
+    Math rendering for Discussion-mode assistant bubbles. The chat model
+    frequently emits LaTeX (`\frac{a}{b}`, `\sqrt{x}`, `\int`, sums,
+    Greek letters) that marked passes through as plain text; without
+    KaTeX the user sees the raw `\frac{5000W}{500W}` source instead of
+    a stacked fraction. KaTeX is loaded as classic scripts before
+    chat.js, and `auto-render` exposes a `renderMathInElement(root)`
+    helper that we call on every assistant bubble after marked has
+    produced HTML. Fonts are vendored under `vendor/katex/fonts/` and
+    referenced by relative paths from `katex.min.css`; the static
+    handler serves them with `font/woff2` (see `static_assets.rs`).
+  -->
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+  <script src="/static/vendor/katex/katex.min.js" defer></script>
+  <script src="/static/vendor/katex/contrib/auto-render.min.js" defer></script>
 </head>
 <body>
   <header>

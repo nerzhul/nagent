@@ -67,6 +67,29 @@ const MARKDOWN_AVAILABLE =
   typeof window.marked?.parse === "function"
   && typeof window.DOMPurify?.sanitize === "function";
 
+// KaTeX auto-render is loaded as a `defer` script in `<head>`. The
+// `renderMathInElement` helper walks a DOM subtree and rewrites every
+// `$...$`, `$$...$$`, `\(...\)`, `\[...\]` block into a KaTeX span.
+// We probe at module load the same way we do for marked/DOMPurify —
+// when the math bundle fails to load (or while it is still in flight
+// on a slow connection), the markdown source falls through verbatim
+// instead of throwing.
+const KATEX_AVAILABLE =
+  typeof window.renderMathInElement === "function";
+
+// Delimiters matched by `renderMathInElement`. We keep the default
+// set: `$$…$$` and `\[…\]` for display math, `$…$` and `\(…\)` for
+// inline. `left: true` lets `\left( … \right)` auto-size braces.
+const KATEX_RENDER_OPTIONS = {
+  delimiters: [
+    { left: "$$", right: "$$", display: true },
+    { left: "$",  right: "$",  display: false },
+    { left: "\\(", right: "\\)", display: false },
+    { left: "\\[", right: "\\]", display: true },
+  ],
+  throwOnError: false, // bad LaTeX renders as red source, doesn't break the bubble
+};
+
 function renderMarkdown(text) {
   if (!text) return "";
   if (!MARKDOWN_AVAILABLE) {
@@ -117,9 +140,29 @@ function decorateSafeLinks(root) {
   }
 }
 
+// Run KaTeX's auto-render over the bubble to convert `$…$`, `$$…$$`,
+// `\(…\)`, `\[…\]` blocks into rendered math. KaTeX edits the DOM
+// in-place (replacing the source text with a `<span class="katex">`)
+// so we don't need to track the previous render — calling it again
+// on the same subtree is a no-op because the math delimiters are
+// gone after the first pass.
+function renderMath(root) {
+  if (!KATEX_AVAILABLE) return;
+  try {
+    window.renderMathInElement(root, KATEX_RENDER_OPTIONS);
+  } catch (e) {
+    // `throwOnError: false` already swallows LaTeX syntax errors, so
+    // anything that lands here is a real bug in our call (or in the
+    // library). Log it once and keep the bubble functional rather
+    // than tearing down the stream on a transient failure.
+    console.warn("KaTeX render failed:", e);
+  }
+}
+
 function applyMarkdown(bubbleEl, text) {
   bubbleEl.innerHTML = renderMarkdown(text);
   decorateSafeLinks(bubbleEl);
+  renderMath(bubbleEl);
 }
 
 // Schedule a markdown re-render of `bubbleEl` for the next animation

@@ -88,6 +88,21 @@ async fn index_html_references_markdown_vendors() {
         html.contains("/static/vendor/sanitize/purify.min.js"),
         "index.html does not include the DOMPurify vendor script tag"
     );
+    // KaTeX is loaded both as a stylesheet (must precede any math
+    // render) and as two scripts: the core library plus the
+    // `renderMathInElement` helper from `contrib/auto-render`.
+    assert!(
+        html.contains("/static/vendor/katex/katex.min.css"),
+        "index.html does not include the KaTeX stylesheet link"
+    );
+    assert!(
+        html.contains("/static/vendor/katex/katex.min.js"),
+        "index.html does not include the KaTeX core script tag"
+    );
+    assert!(
+        html.contains("/static/vendor/katex/contrib/auto-render.min.js"),
+        "index.html does not include the KaTeX auto-render script tag"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -102,6 +117,14 @@ async fn markdown_vendors_are_served_with_js_mime() {
         (
             "/static/vendor/sanitize/purify.min.js",
             "DOMPurify", // banner: "DOMPurify 3.2.4"
+        ),
+        (
+            "/static/vendor/katex/katex.min.js",
+            "katex", // banner: "@licstart KaTeX" / "katex.min.js"
+        ),
+        (
+            "/static/vendor/katex/contrib/auto-render.min.js",
+            "renderMathInElement",
         ),
     ] {
         let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
@@ -126,4 +149,60 @@ async fn markdown_vendors_are_served_with_js_mime() {
             "{path} body did not contain the expected banner `{expect_banner}` — was the file replaced?"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn katex_stylesheet_and_fonts_are_served() {
+    let base = serve_once().await;
+
+    // The CSS file must arrive with a `text/css` content type or the
+    // browser will refuse to apply it; the body must include the
+    // `.katex` class so we know the file actually contains KaTeX's
+    // styles and not an HTML 404 page.
+    let css = reqwest::get(format!("{base}/static/vendor/katex/katex.min.css"))
+        .await
+        .unwrap();
+    assert_eq!(css.status(), reqwest::StatusCode::OK);
+    let css_ctype = css
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        css_ctype.starts_with("text/css"),
+        "katex.min.css Content-Type was `{css_ctype}`"
+    );
+    let css_body = css.text().await.unwrap();
+    assert!(
+        css_body.contains(".katex"),
+        "katex.min.css does not look like a KaTeX stylesheet"
+    );
+
+    // At least one font file must be served with the correct
+    // `font/woff2` MIME type. Browsers refuse to load fonts with the
+    // wrong Content-Type, so a missing `font/woff2` mapping in
+    // `mime_for` would silently break all math glyphs.
+    let font_path = "/static/vendor/katex/fonts/KaTeX_Main-Regular.woff2";
+    let font = reqwest::get(format!("{base}{font_path}")).await.unwrap();
+    assert_eq!(font.status(), reqwest::StatusCode::OK);
+    let font_ctype = font
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        font_ctype.starts_with("font/woff2"),
+        "{font_path} Content-Type was `{font_ctype}` (expected `font/woff2`)"
+    );
+    // The body should start with the WOFF2 magic bytes (`wOF2` in
+    // ASCII). If this fails, the binary was corrupted in transit or
+    // served from the wrong path.
+    let bytes = font.bytes().await.unwrap();
+    assert!(
+        bytes.len() >= 4 && &bytes[..4] == b"wOF2",
+        "{font_path} did not start with the WOFF2 magic — got {} bytes",
+        bytes.len()
+    );
 }

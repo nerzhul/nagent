@@ -671,6 +671,32 @@ select, input[type="checkbox"] {
   font-weight: 600;
 }
 
+/* KaTeX renders live in assistant bubbles. KaTeX's own stylesheet
+ * mostly uses `currentColor`, so it inherits the bubble's foreground,
+ * but we still need to:
+ *   - cap the inline font size so a `\Huge` doesn't blow up the bubble;
+ *   - make sure display blocks ($$...$$ / \[...\]) have breathing room
+ *     and scroll horizontally when they overflow the bubble width;
+ *   - inherit color on the `.katex` root so SVG strokes match the
+ *     theme even if the bubble's text color changes. */
+.chat-assistant .katex {
+  color: inherit;
+  font-size: 1.05em;
+}
+.chat-assistant .katex-display {
+  margin: 0.7em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+/* When `throwOnError: false` is set, KaTeX renders invalid LaTeX in
+ * red text inside a `.katex-error` span. We use the existing error
+ * palette so it reads as a problem rather than decoration. */
+.chat-assistant .katex .katex-error {
+  color: var(--error);
+  border-bottom: 1px dotted var(--error);
+}
+
 /* Inline bouncing-dots loader rendered inside the assistant bubble
  * while we wait for the LLM's first token (covers the Ollama cold
  * start, which can take 30s+ on a freshly-pulled model). Replaces an
