@@ -191,16 +191,14 @@ fn select_mode(days: Option<u32>, date: Option<&str>) -> Result<Mode, AgentError
         let today = today_utc();
         let max_future = today
             .checked_add_signed(chrono::Duration::days(MAX_FORECAST_DAYS as i64))
-            .ok_or_else(|| {
-                AgentError::AgentFailed("internal: date arithmetic overflow".into())
-            })?;
+            .ok_or_else(|| AgentError::AgentFailed("internal: date arithmetic overflow".into()))?;
         // NaiveDate is good through year 9999 so the early bound
         // (1940-01-01, Open-Meteo archive start) is the only one
         // worth checking — and even that is enforced by Open-Meteo
         // returning a 4xx, but we reject it cleanly so the LLM gets
         // a friendly message.
-        let archive_start = NaiveDate::from_ymd_opt(1940, 1, 1)
-            .expect("constant date is well-formed");
+        let archive_start =
+            NaiveDate::from_ymd_opt(1940, 1, 1).expect("constant date is well-formed");
         if parsed < archive_start {
             return Err(AgentError::InvalidArguments(format!(
                 "`date` must be on or after {archive_start} (Open-Meteo archive start), got `{d}`"
@@ -648,9 +646,14 @@ mod tests {
     fn select_mode_clamps_days_to_seven() {
         assert_eq!(
             select_mode(Some(99), None).unwrap(),
-            Mode::Current { days: MAX_FORECAST_DAYS }
+            Mode::Current {
+                days: MAX_FORECAST_DAYS
+            }
         );
-        assert_eq!(select_mode(Some(0), None).unwrap(), Mode::Current { days: 1 });
+        assert_eq!(
+            select_mode(Some(0), None).unwrap(),
+            Mode::Current { days: 1 }
+        );
     }
 
     #[test]
@@ -820,7 +823,8 @@ mod tests {
                 "weather_code": [3, 61]
             }
         });
-        let payload = build_payload(&body, 48.85, 2.35, "Paris (FR)", Mode::Current { days: 2 }).unwrap();
+        let payload =
+            build_payload(&body, 48.85, 2.35, "Paris (FR)", Mode::Current { days: 2 }).unwrap();
         assert_eq!(payload["location"]["name"], "Paris (FR)");
         assert_eq!(payload["current"]["temp_c"], 18.4);
         assert_eq!(payload["current"]["condition"], "partly_cloudy");
@@ -846,7 +850,8 @@ mod tests {
             }
         });
         let date = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
-        let payload = build_payload(&body, 48.85, 2.35, "Paris (FR)", Mode::SingleDate { date }).unwrap();
+        let payload =
+            build_payload(&body, 48.85, 2.35, "Paris (FR)", Mode::SingleDate { date }).unwrap();
         assert!(payload["current"].is_null());
         assert_eq!(payload["requested_date"], "2024-06-15");
         assert_eq!(payload["daily"][0]["date"], "2024-06-15");
@@ -863,7 +868,8 @@ mod tests {
             "current": {"temperature_2m": 10.0, "weather_code": 0},
             "daily": {"date": ["2026-09-25"], "temperature_2m_max": [12.0], "temperature_2m_min": [4.0], "weather_code": [0]}
         });
-        let payload = build_payload(&body, 48.85, 2.35, "Paris", Mode::Current { days: 1 }).unwrap();
+        let payload =
+            build_payload(&body, 48.85, 2.35, "Paris", Mode::Current { days: 1 }).unwrap();
         assert!(payload["requested_date"].is_null());
     }
 }

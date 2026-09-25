@@ -277,18 +277,37 @@ curl -s -X POST localhost:8080/v1/agents/get_weather/invoke \
   -d '{"arguments":{"location":"Paris","days":2}}'
 ```
 
-**`get_stock_quote`** — latest Stooq quote for a ticker. Bare
-tickers (e.g. `AAPL`) are auto-suffixed with `.US`; European
-exchanges keep their suffix (`AIR.PA`, `MC.PA`, `SAP.DE`).
+**`get_stock_quote`** — latest Stooq quote for a ticker. Three
+resolution layers, tried in order:
 
-- FR: "cours de NVDA", "prix action LVMH"
+1. **Company-name shortcut** — a small built-in table maps
+   common European / French company names (Atos, LVMH, BNP
+   Paribas, Sanofi, Airbus, …) plus US big-tech names (Apple,
+   Microsoft, NVIDIA, …) to their Stooq ticker. The agent lands
+   on the right exchange on the first round-trip — type "Atos",
+   get the Euronext Paris quote for `ATO.PA`.
+2. **Ticker normalisation** — bare tickers (`AAPL`, `NVDA`) get
+   the `.US` suffix; already-suffixed tickers (`AIR.PA`,
+   `MC.PA`) pass through.
+3. **Multi-exchange fallback** — when the primary lookup returns
+   no data and the user did not pin an explicit exchange, the
+   agent tries the same root ticker on `.PA`, `.L`, `.DE`,
+   `.MI`, then `.US` last. The first success wins; on total
+   failure the agent reports every ticker it tried so the LLM
+   can suggest the next step.
+
+- FR: "cours de Atos", "prix action LVMH", "BNP Paribas"
 - EN: "AAPL stock price", "quote for TSLA"
-- Params: `ticker` (required, 1-10 chars, `[A-Za-z0-9.\-]`)
+- Params: `ticker` (required, ≤40 chars)
 
 ```
 curl -s -X POST localhost:8080/v1/agents/get_stock_quote/invoke \
   -H 'content-type: application/json' \
   -d '{"arguments":{"ticker":"AAPL"}}'
+
+curl -s -X POST localhost:8080/v1/agents/get_stock_quote/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"ticker":"Atos"}}'
 ```
 
 **Caching.** v1 ships without a cache. Both providers tolerate
