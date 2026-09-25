@@ -1,0 +1,18 @@
+# Resource bump for production. The base defaults are conservative; prod
+# runs more concurrent sessions and needs more memory.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stt-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: stt-server
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi

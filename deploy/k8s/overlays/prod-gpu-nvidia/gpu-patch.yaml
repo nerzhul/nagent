@@ -1,0 +1,24 @@
+# NVIDIA GPU passthrough for production. Requires the NVIDIA device plugin
+# to be installed and nodes labelled `nvidia.com/gpu.present=true`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stt-server
+spec:
+  template:
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: stt-server
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "4"
+              memory: 4Gi
+              nvidia.com/gpu: 1

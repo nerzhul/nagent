@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: stt
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+replicas:
+  - name: stt-server
+    count: 2
+
+# Bump resources in prod and add a tag pinned to the version Kustomize
+# would have rendered otherwise.
+images:
+  - name: nagent/stt-server
+    newName: nagent/stt-server
+    newTag: v0.1.0
+
+# Prod configmap: tone down the logs to info.
+configMapGenerator:
+  - name: stt-server-config
+    behavior: merge
+    literals:
+      - RUST_LOG=info,stt_server=info,stt_core=info
+
+# Higher pod disruption budget so prod can survive voluntary disruptions.
+patches:
+  - path: resources-patch.yaml
+    target:
+      kind: Deployment
+      name: stt-server

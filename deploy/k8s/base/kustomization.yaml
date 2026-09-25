@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: stt
+
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - pvc.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - model-downloader-job.yaml
+
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/name: stt-server
+      app.kubernetes.io/part-of: stt
+      app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: nagent/stt-server
+    newName: nagent/stt-server
+    newTag: latest

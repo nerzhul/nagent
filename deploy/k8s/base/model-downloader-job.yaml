@@ -1,0 +1,54 @@
+# One-shot Job that downloads the ggml model into the shared PVC.
+#
+# Runs on `kubectl apply` of the overlay. The deployment can then mount
+# the same PVC at `/models` and pick up the file. Real deployments should
+# gate the Deployment on this Job with:
+#
+#   kubectl wait --for=condition=Complete job/model-downloader -n stt
+#
+# before scaling the deployment. Kustomize doesn't express the dependency
+# directly, so it's an operational step.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-downloader
+spec:
+  ttlSecondsAfterFinished: 86400  # keep the Job around for one day for logs
+  template:
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: downloader
+          # Tiny image with curl + bash; the actual ggml model URL is the
+          # only thing we need to configure.
+          image: curlimages/curl:8.10.1
+          args:
+            - -sSL
+            - -o
+            - /models/ggml-base.bin
+            - https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: model
+              mountPath: /models
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: model
+          persistentVolumeClaim:
+            claimName: stt-model

@@ -1,0 +1,14 @@
+# Persistent volume for the ggml Whisper model.
+# The model is downloaded into this PVC by a one-shot Job (see overlays)
+# before the application Deployment starts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: stt-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # Storage class is intentionally omitted so the cluster default applies.

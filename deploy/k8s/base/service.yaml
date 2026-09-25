@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: stt-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: stt-server
+    app.kubernetes.io/component: stt-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

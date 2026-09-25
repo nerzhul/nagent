@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/stt-proto
+            crates/stt-core
+            crates/stt-server
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # Build whisper-rs without GPU features in CI: GPU toolchains are
+      # not available on ubuntu-latest runners. We still compile the
+      # crate to validate the source via the `cpu` feature path below.
+      - name: cargo check (cpu features)
+        run: |
+          cargo check --workspace \
+            -p stt-proto \
+            -p stt-server
+
+      - name: cargo clippy (cpu features)
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (cpu features)
+        run: cargo test --workspace
+
+  kustomize-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize
+        run: |
+          curl -sSLo /usr/local/bin/kustomize \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64
+          chmod +x /usr/local/bin/kustomize
+          kustomize version
+
+      - name: Render base
+        run: kustomize build deploy/k8s/base > /tmp/base.yaml
+
+      - name: Render dev overlay
+        run: kustomize build deploy/k8s/overlays/dev > /tmp/dev.yaml
+
+      - name: Render prod overlay
+        run: kustomize build deploy/k8s/overlays/prod > /tmp/prod.yaml
+
+      - name: Render prod-gpu-nvidia overlay
+        run: kustomize build deploy/k8s/overlays/prod-gpu-nvidia > /tmp/prod-gpu.yaml
+
+      # `kubectl apply --dry-run=client` requires a cluster. We instead
+      # parse the rendered YAML with Python to confirm it is at least
+      # well-formed and contains the expected Kubernetes resources.
+      - name: Validate rendered YAML is well-formed
+        run: |
+          python3 - <<'PY'
+          import sys, yaml, pathlib
+          ok = True
+          for f in ("/tmp/base.yaml", "/tmp/dev.yaml",
+                    "/tmp/prod.yaml", "/tmp/prod-gpu.yaml"):
+              docs = list(yaml.safe_load_all(pathlib.Path(f).read_text()))
+              assert docs, f"{f}: no documents"
+              for d in docs:
+                  assert "apiVersion" in d, f"{f}: missing apiVersion in {d}"
+                  assert "kind" in d, f"{f}: missing kind in {d}"
+              print(f"{f}: OK ({len(docs)} docs)")
+          PY

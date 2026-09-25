@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stt-server-config
+data:
+  BIND_ADDR: "0.0.0.0:8080"
+  WHISPER_MODEL_PATH: "/models/ggml-base.bin"
+  RUST_LOG: "info,stt_server=debug,stt_core=debug"
+  MAX_QUEUE: "32"
+  INFER_TIMEOUT_MS: "30000"
+  SESSION_IDLE_TIMEOUT_MS: "30000"

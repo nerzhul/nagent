@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nagent STT</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <!--
+    The `@ricky0123/vad-web` package ships only a UMD bundle (no ESM
+    "module" field in its package.json), so we load it via a regular
+    <script> tag. It depends on onnxruntime-web being present as the
+    `window.ort` global, so ORT must come first.
+
+    Both bundles are vendored under `static/vendor/` rather than fetched
+    from a CDN at runtime. The CDN approach hit two problems that are
+    impossible to work around without a bundler:
+      - jsdelivr does not serve `ort-wasm-simd-threaded.mjs` (returns
+        a 404 with `Content-Type: text/plain`, which `nosniff` blocks
+        from being imported as a module).
+      - Even when the ORT worker is disabled, the VAD model and WASM
+        files still have to be served from the same origin to avoid
+        CORS gymnastics with the AudioWorklet and the worker URL.
+  -->
+  <script src="/static/vendor/ort/ort.min.js"></script>
+  <script src="/static/vendor/vad/bundle.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>nagent STT</h1>
+    <p class="subtitle">Local Whisper transcription with on-device VAD.</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <button id="record-btn" type="button" data-state="idle">Record</button>
+      <label>
+        Language
+        <select id="lang-select">
+          <option value="">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="de">Deutsch</option>
+          <option value="it">Italiano</option>
+          <option value="pt">Português</option>
+          <option value="ja">日本語</option>
+          <option value="zh">中文</option>
+        </select>
+      </label>
+      <label>
+        <input type="checkbox" id="translate-check"> Translate to English
+      </label>
+      <button id="download-btn" type="button" disabled>Download .txt</button>
+      <span id="status" class="status idle">idle</span>
+      <span id="backend-info" class="backend-info"></span>
+    </section>
+
+    <section class="transcript">
+      <ol id="transcript-list" aria-live="polite"></ol>
+    </section>
+  </main>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

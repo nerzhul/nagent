@@ -1,0 +1,39 @@
+# Files excluded from the Docker build context.
+
+target/
+**/target/
+
+.git/
+.github/
+.gitignore
+
+.kilo/
+.kilocode/
+.opencode/
+
+# Local models and configs
+models/
+*.bin
+*.gguf
+
+# Kustomize build artifacts
+deploy/k8s/overlays/*/kustomization.yaml.tmp
+kustomize-build/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.iml
+
+# Docs that don't need to be in the image
+*.md
+!crates/stt-server/src/static/*.html
+!crates/stt-server/src/static/*.css
+!crates/stt-server/src/static/*.js
+!crates/stt-server/src/static/vendor/**/*.js
+!crates/stt-server/src/static/vendor/**/*.wasm
+!crates/stt-server/src/static/vendor/**/*.onnx
+
+# OS junk
+.DS_Store
+Thumbs.db

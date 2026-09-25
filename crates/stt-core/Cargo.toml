@@ -1,0 +1,23 @@
+[package]
+name = "stt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Whisper backend abstraction, inference worker and queue."
+
+[features]
+# Pulls in the real whisper-rs backend (requires GPU or CPU toolchain).
+# Off by default so CI on a plain ubuntu-latest runner can still build/test
+# the rest of the workspace using only the mock backend.
+default = []
+whisper-rs-backend = ["dep:whisper-rs"]
+
+[dependencies]
+stt-proto   = { path = "../stt-proto" }
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+uuid        = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+anyhow      = { workspace = true }
+whisper-rs  = { workspace = true, optional = true }

@@ -1,0 +1,40 @@
+# Public-facing Ingress for production.
+#
+# Requires:
+#   - the `ingress-nginx` controller (class `nginx`),
+#   - `cert-manager` with a `ClusterIssuer` named `letsencrypt-prod`.
+#
+# `getUserMedia` requires HTTPS outside of localhost, which is what this
+# Ingress provides.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: stt-server
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - stt.example.com
+      secretName: stt-tls
+  rules:
+    - host: stt.example.com
+      http:
+        paths:
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: stt-server
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: stt-server
+                port:
+                  number: 8080
