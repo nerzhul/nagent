@@ -20,6 +20,7 @@
 //   waits for the current reply to finish.
 
 import { AudioCapture } from "/static/audio.js";
+import { preselectFromBrowser } from "/static/lang-preselect.js";
 
 const HISTORY_KEY = "nagent.chat.history";
 const HISTORY_CAP = 200;
@@ -363,6 +364,11 @@ const audioCapture = new AudioCapture({
     setAudioStatus(text, cls);
   },
 });
+
+// Locale-aware defaults: preselect the discussion-mode language from
+// the browser locale if it matches one of the options; otherwise keep
+// "Auto-detect" (empty value).
+preselectFromBrowser($("chat-lang-select"));
 
 // ---- Boot ------------------------------------------------------------------
 

@@ -9,6 +9,7 @@
 // `AudioCapture` instance.
 
 import { AudioCapture } from "/static/audio.js";
+import { preselectFromBrowser } from "/static/lang-preselect.js";
 
 // ---- DOM --------------------------------------------------------------------
 
@@ -79,6 +80,12 @@ function emptyState() {
 }
 
 emptyState();
+
+// ---- Locale-aware defaults --------------------------------------------------
+
+// Preselect the transcript-mode language from the browser locale if it
+// matches one of the options; otherwise keep "Auto-detect" (empty value).
+preselectFromBrowser(langSelect);
 
 // ---- Audio pipeline --------------------------------------------------------
 
