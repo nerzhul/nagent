@@ -12,8 +12,18 @@
 // Auto-stop on view hide: if `containerEl` becomes `hidden` (e.g. the
 // user switches modes), the capture pauses itself. This is per-mode
 // cleanup with zero cross-module coordination.
+//
+// Auto-stop on silence: while recording, a watchdog fires
+// `_stop()` after `INACTIVITY_TIMEOUT_MS` of frames where the VAD
+// reports no voice activity (prob below `INACTIVITY_SPEECH_THRESHOLD`).
+// The watchdog is gated on an optional checkbox so the user can opt
+// out for long dictation sessions.
 
 const { MicVAD } = globalThis.vad;
+
+const INACTIVITY_TIMEOUT_MS = 8_000;
+const INACTIVITY_SPEECH_THRESHOLD = 0.4; // matches negativeSpeechThreshold
+const INACTIVITY_TICK_MS = 1_000;
 
 // ---- Shared VAD singleton ---------------------------------------------------
 //
@@ -198,7 +208,13 @@ function createScope(canvasEl, levelEl) {
   let filled = 0;
   let lastProb = 0;
   let rafId = 0;
+  // Cached CSS box dimensions used to detect size changes. Both start
+  // at 0 so the very first draw always resizes. We deliberately keep
+  // `cssW`/`cssH` valid across hide/show cycles (see `ensureReady`)
+  // so the bitmap doesn't snap to 1x1 while the section is collapsed
+  // by `.is-hidden { max-height: 0 }`.
   let cssW = 0;
+  let cssH = 0;
   let ctx = null;
 
   function push(frame) {
@@ -222,9 +238,16 @@ function createScope(canvasEl, levelEl) {
   function resizeIfNeeded() {
     if (!canvasEl) return;
     const cssWNow = canvasEl.clientWidth;
-    const cssH = canvasEl.clientHeight;
-    if (cssWNow === cssW && canvasEl.height !== 0) return;
+    const cssHNow = canvasEl.clientHeight;
+    // Skip the resize while the section is collapsed (`.is-hidden`
+    // sets `max-height: 0`, so the CSS box collapses to zero).
+    // Resizing then would lock the bitmap at 1x1 and stretch it
+    // back to a blurry mess on the next show. The cached values
+    // stay intact until `ensureReady()` re-invalidates them.
+    if (cssWNow === 0 || cssHNow === 0) return;
+    if (cssWNow === cssW && cssHNow === cssH && canvasEl.height !== 0) return;
     cssW = cssWNow;
+    cssH = cssHNow;
     const dpr = globalThis.devicePixelRatio || 1;
     canvasEl.width = Math.max(1, Math.floor(cssW * dpr));
     canvasEl.height = Math.max(1, Math.floor(cssH * dpr));
@@ -285,11 +308,22 @@ function createScope(canvasEl, levelEl) {
 
   function setProb(p) { lastProb = p; }
 
+  // Called when the voice-graph section becomes visible again after a
+  // hide transition. The CSS box is briefly at zero size during the
+  // transition, which can leave the bitmap at a stale (potentially
+  // 1x1) size. Invalidating the cached dimensions forces the next
+  // `draw()` to reflow the bitmap to the current CSS box.
+  function ensureReady() {
+    cssW = 0;
+    cssH = 0;
+    draw();
+  }
+
   // Initial paint so the graph shows a flat line before any audio arrives.
   if (ctx === null && canvasEl) ctx = canvasEl.getContext("2d");
   reset();
 
-  return { push, reset, scheduleDraw, setProb };
+  return { push, reset, scheduleDraw, setProb, ensureReady };
 }
 
 function getCss(name) {
@@ -326,6 +360,12 @@ export class AudioCapture {
    *                                        (e.g. audio + chat streaming).
    * @param {HTMLSelectElement} [cfg.langSelectEl]  Optional language picker.
    * @param {HTMLInputElement} [cfg.translateCheckEl]  Optional "translate to English".
+   * @param {HTMLInputElement} [cfg.inactivityCheckEl]  Optional "auto-stop on silence"
+   *                                                     toggle. When present, the
+   *                                                     inactivity watchdog only
+   *                                                     fires while the checkbox
+   *                                                     is checked. When absent,
+   *                                                     the watchdog is always on.
    * @param {HTMLElement} [cfg.backendInfoEl]  Optional element to render
    *                                           `model=… backend=…` into.
    * @param {(text:string, lang:string, latencyMs:number|undefined) => void} cfg.onFinalTranscript
@@ -341,6 +381,28 @@ export class AudioCapture {
     this.scope = createScope(cfg.canvasEl, cfg.levelEl);
     this.pendingAudioTs = [];
     this.hiddenObserver = null;
+    // `_aborted` is set by `_stop()` (and hence by the container-hide
+    // observer below) to tell `_onButtonClick` to bail out of its
+    // `await` chain instead of e.g. starting the VAD on a view the
+    // user has just left. It is reset at the top of each click.
+    this._aborted = false;
+
+    // Inactivity watchdog state. `lastSpeechAt` is bumped from the VAD
+    // frame callback whenever the speech probability clears the
+    // threshold; the watchdog tick compares it against the wall clock
+    // and calls `_stop()` if no voice was detected for the configured
+    // window. The timer always runs while recording so toggling the
+    // opt-out checkbox at runtime takes effect immediately.
+    //
+    // `inactivityPaused` is an external gate (e.g. set while a slow
+    // LLM reply is in flight) and `pendingAudioTs.length` doubles as
+    // a built-in gate: while STT frames are still in the server
+    // pipeline we must not tear down the session, otherwise the user
+    // never receives the FinalTranscript.
+    this.inactivityCheckEl = cfg.inactivityCheckEl || null;
+    this.inactivityPaused = false;
+    this.lastSpeechAt = 0;
+    this.inactivityTimerId = 0;
 
     // Voice-graph visibility: hidden until the user is recording.
     // The CSS owns the transition (opacity + max-height); we just flip
@@ -357,7 +419,12 @@ export class AudioCapture {
     }
     if (cfg.containerEl) {
       this.hiddenObserver = new MutationObserver(() => {
-        if (cfg.containerEl.hidden && this.recording) this._stop();
+        // Always tear down on hide, even when we weren't recording
+        // yet (e.g. the user clicked Record and immediately switched
+        // tabs while the VAD was still loading). `_stop` is
+        // idempotent, so calling it on an already-idle capture is a
+        // harmless no-op that still resets UI state to a clean idle.
+        if (cfg.containerEl.hidden) this._stop();
       });
       this.hiddenObserver.observe(cfg.containerEl, {
         attributes: true,
@@ -378,6 +445,77 @@ export class AudioCapture {
     const el = this.cfg.graphEl;
     if (!el) return;
     el.classList.toggle("is-hidden", !visible);
+    if (visible) {
+      // The CSS box just grew back from the collapsed (max-height: 0)
+      // state. Invalidate the scope's cached CSS dimensions so the
+      // next `draw()` reflows the bitmap to the real size, instead of
+      // displaying a stale 1x1 buffer stretched across the canvas.
+      this.scope.ensureReady?.();
+    }
+  }
+
+  // ---- Inactivity watchdog --------------------------------------------------
+  //
+  // The watchdog runs once per `INACTIVITY_TICK_MS` while recording.
+  // Each tick decides: (a) has the silence window elapsed? and (b) is
+  // the opt-out checkbox either missing or checked? If both, stop and
+  // surface a distinct status. Otherwise reschedule.
+  //
+  // We deliberately keep the timer alive when the checkbox is off so
+  // that toggling it on mid-session is honored on the next tick
+  // without having to restart the capture.
+
+  _isInactivityEnabled() {
+    return !this.inactivityCheckEl || !!this.inactivityCheckEl.checked;
+  }
+
+  _scheduleInactivityCheck() {
+    if (this.inactivityTimerId !== 0) return;
+    this.inactivityTimerId = setTimeout(
+      () => this._onInactivityTick(),
+      INACTIVITY_TICK_MS,
+    );
+  }
+
+  _cancelInactivityCheck() {
+    if (this.inactivityTimerId !== 0) {
+      clearTimeout(this.inactivityTimerId);
+      this.inactivityTimerId = 0;
+    }
+  }
+
+  _onInactivityTick() {
+    this.inactivityTimerId = 0;
+    if (!this.recording) return;
+    const silentForMs = performance.now() - this.lastSpeechAt;
+    // Skip the stop when anything is still in flight: the external
+    // pause flag covers LLM replies, and `pendingAudioTs` covers STT
+    // frames that have been sent but not yet acknowledged with a
+    // FinalTranscript. Both conditions would otherwise close the
+    // session while the user is still waiting on a response.
+    if (this._isInactivityEnabled()
+        && !this.inactivityPaused
+        && this.pendingAudioTs.length === 0
+        && silentForMs >= INACTIVITY_TIMEOUT_MS) {
+      this._stop();
+      // Override the "idle" status that `_stop` just wrote so the
+      // user can tell the watchdog fired rather than a manual stop.
+      this.setStatus("auto-stopped (no speech)", "idle");
+      return;
+    }
+    this._scheduleInactivityCheck();
+  }
+
+  /**
+   * Pause or resume the inactivity watchdog without touching the
+   * recording state. Callers that have downstream work in flight
+   * (e.g. a slow LLM streaming reply, where the user is silent and
+   * the watchdog would otherwise close the session mid-response) can
+   * hold the pipeline open until they're done. Re-entrant; safe to
+   * call before recording starts or after it stops.
+   */
+  setInactivityPaused(paused) {
+    this.inactivityPaused = !!paused;
   }
 
   setButtonLabel(label, dataState) {
@@ -398,18 +536,33 @@ export class AudioCapture {
       this._stop();
       return;
     }
+    // Fresh attempt — clear any abort flag left by a previous
+    // container-hide so the awaits below can run to completion.
+    this._aborted = false;
     this.cfg.buttonEl.disabled = true;
     this.setButtonLabel("Loading…", "loading");
     this._setGraphVisible(true);
     try {
-      this.setStatus("loading vad…", "connecting");
+      this.setStatus("Loading speech model…", "loading");
       await this._ensureVad();
+      // The user may have switched tabs while the VAD was loading;
+      // bail out before we start the audio pipeline on a hidden view.
+      if (this._aborted) return;
       await this._connect();
+      if (this._aborted) return;
       sharedVad.start();
       this.recording = true;
+      // Seed the inactivity timer with `now` so a brand-new session
+      // gets the full timeout window before the watchdog fires.
+      this.lastSpeechAt = performance.now();
+      this._scheduleInactivityCheck();
       this.setButtonLabel("Stop", "recording");
       this.setStatus("recording", "recording");
     } catch (e) {
+      // If we were aborted (e.g. the container was hidden), `_stop`
+      // already put the UI back into a clean idle state — don't
+      // overwrite that with an error and a hidden graph flip.
+      if (this._aborted) return;
       this.setStatus(`error: ${e?.message || e}`, "error");
       console.error(e);
       this.setButtonLabel("Record", "idle");
@@ -420,6 +573,11 @@ export class AudioCapture {
   }
 
   _stop() {
+    // Flag any in-flight `_onButtonClick` setup so it bails out before
+    // starting the VAD or opening a WebSocket on a view the user has
+    // just left. Reset at the top of the next click attempt.
+    this._aborted = true;
+    this._cancelInactivityCheck();
     try { sharedVad?.pause(); } catch {}
     try {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -433,6 +591,16 @@ export class AudioCapture {
     this.setStatus("idle", "idle");
     this.scope.reset();
     this._setGraphVisible(false);
+  }
+
+  /**
+   * Public, idempotent stop. Callers (e.g. the Discussion-mode chat)
+   * use this to tear down the audio session as soon as a transcript
+   * has been routed into a request, since keeping the mic open while
+   * the LLM responds is wasteful. Safe to call when already idle.
+   */
+  stop() {
+    this._stop();
   }
 
   async _ensureVad() {
@@ -451,6 +619,13 @@ export class AudioCapture {
         this.scope.setProb(prob);
         this.scope.push(frame);
         this.scope.scheduleDraw();
+        // Reset the inactivity watchdog on any frame that crosses the
+        // speech-probability threshold. Using the lower
+        // negativeSpeechThreshold keeps short vocalizations from being
+        // swallowed by `minSpeechFrames` debouncing.
+        if (this.recording && prob >= INACTIVITY_SPEECH_THRESHOLD) {
+          this.lastSpeechAt = performance.now();
+        }
       },
       onSpeechStart: () => {},
       onSpeechEnd: (audioFloat32) => {

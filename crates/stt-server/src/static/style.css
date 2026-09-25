@@ -217,7 +217,34 @@ select, input[type="checkbox"] {
 .status.idle { color: var(--fg-mute); }
 .status.recording { color: var(--ok); border-color: var(--ok); }
 .status.error { color: var(--error); border-color: var(--error); }
-.status.connecting { color: var(--accent); border-color: var(--accent); }
+
+/* `loading` and `connecting` both render with a small CSS spinner so
+ * the user has a clear "something is happening" signal while waiting
+ * for the VAD model, the WebSocket handshake, or a slow LLM cold
+ * start. The spinner is `currentColor` so it inherits the accent hue
+ * declared below. */
+.status.loading,
+.status.connecting {
+  color: var(--accent);
+  border-color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+}
+.status.loading::before,
+.status.connecting::before {
+  content: "";
+  width: 0.75em;
+  height: 0.75em;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: status-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes status-spin {
+  to { transform: rotate(360deg); }
+}
 
 .backend-info {
   font-family: var(--font-mono);
@@ -514,6 +541,33 @@ select, input[type="checkbox"] {
   background: var(--bg);
   border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
+}
+
+/* Inline bouncing-dots loader rendered inside the assistant bubble
+ * while we wait for the LLM's first token (covers the Ollama cold
+ * start, which can take 30s+ on a freshly-pulled model). Replaces an
+ * empty bubble, which the user reported looked like a frozen UI. */
+.chat-loader {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  height: 1em;
+  color: var(--fg-mute);
+  vertical-align: middle;
+}
+.chat-loader .dot {
+  width: 0.45em;
+  height: 0.45em;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.3;
+  animation: chat-loader-bounce 1.2s infinite ease-in-out both;
+}
+.chat-loader .dot:nth-child(2) { animation-delay: 0.15s; }
+.chat-loader .dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes chat-loader-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+  40%           { opacity: 1;   transform: translateY(-0.35em); }
 }
 
 .chat-error {

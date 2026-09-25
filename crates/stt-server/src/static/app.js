@@ -17,7 +17,9 @@ const $ = (id) => document.getElementById(id);
 const recordBtn   = $("record-btn");
 const langSelect  = $("lang-select");
 const translateCk = $("translate-check");
+const inactivityCk = $("inactivity-check");
 const downloadBtn = $("download-btn");
+const clearBtn    = $("clear-btn");
 const statusEl    = $("status");
 const backendEl   = $("backend-info");
 const listEl      = $("transcript-list");
@@ -62,7 +64,19 @@ function appendLine(text, lang, latencyMs) {
   listEl.appendChild(li);
   listEl.scrollTop = listEl.scrollHeight;
   downloadBtn.disabled = false;
+  clearBtn.disabled = false;
   transcript.push({ text, lang, ts, latencyMs });
+}
+
+function clearTranscript() {
+  // Confirmation guards against accidental clicks — clearing is
+  // destructive and the transcript is not persisted to disk.
+  if (!confirm("Clear the transcript?")) return;
+  transcript.length = 0;
+  listEl.innerHTML = "";
+  downloadBtn.disabled = true;
+  clearBtn.disabled = true;
+  emptyState();
 }
 
 function formatLatency(ms) {
@@ -87,6 +101,25 @@ emptyState();
 // matches one of the options; otherwise keep "Auto-detect" (empty value).
 preselectFromBrowser(langSelect);
 
+// ---- Toolbar wiring ---------------------------------------------------------
+
+// Restore the inactivity-watchdog toggle from `localStorage` so the
+// preference survives reloads; persist on every change.
+const INACTIVITY_PREF_KEY = "nagent.audio.inactivityEnabled";
+(function initInactivityPref() {
+  try {
+    const stored = localStorage.getItem(INACTIVITY_PREF_KEY);
+    if (stored === "false") inactivityCk.checked = false;
+    else if (stored === "true") inactivityCk.checked = true;
+  } catch (_e) { /* localStorage may be unavailable; default to checked */ }
+  inactivityCk.addEventListener("change", () => {
+    try { localStorage.setItem(INACTIVITY_PREF_KEY, inactivityCk.checked ? "true" : "false"); }
+    catch (_e) {}
+  });
+})();
+
+clearBtn.addEventListener("click", clearTranscript);
+
 // ---- Audio pipeline --------------------------------------------------------
 
 new AudioCapture({
@@ -98,6 +131,7 @@ new AudioCapture({
   containerEl: document.getElementById("view-transcript"),
   langSelectEl: langSelect,
   translateCheckEl: translateCk,
+  inactivityCheckEl: inactivityCk,
   backendInfoEl: backendEl,
   onFinalTranscript: (text, lang, latencyMs) => {
     if (text) appendLine(text, lang, latencyMs);

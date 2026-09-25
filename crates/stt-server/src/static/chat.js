@@ -13,6 +13,14 @@
 //   its own recording state). The underlying MicVAD instance is shared
 //   so we do not load the Silero model twice.
 //
+//   As soon as a transcript has been routed into a request, the audio
+//   session is torn down (`audioCapture.stop()`). There is no point
+//   keeping the mic open while the LLM responds — the user has to
+//   click Record again to send a follow-up voice turn, by design.
+//   This differs from Transcript mode, where the recording stays
+//   open across many utterances until the inactivity watchdog
+//   (toggleable via `#inactivity-check`) decides the user is done.
+//
 // Concurrency:
 //   User turns (typed or transcribed) go through a single Promise
 //   queue so two replies can never stream at the same time. A new
@@ -54,16 +62,19 @@ function enqueueTurn(fn) {
 // ---- Status pill -----------------------------------------------------------
 //
 // Two sources feed the pill: the chat streaming layer (high priority)
-// and `AudioCapture` (low priority). While a reply is streaming the
-// pill shows the streaming state; otherwise it shows the most recent
-// audio state (or "idle").
+// and `AudioCapture` (low priority). The streaming state carries both
+// a text and a class so we can distinguish "model is loading" (spinner)
+// from "tokens are streaming in" (spinner) and from idle / error.
+//
+// While a reply is in flight we also hold the audio watchdog open —
+// the user is silent (waiting for Ollama to finish a cold start or
+// stream tokens), and the inactivity watchdog would otherwise close
+// the audio session mid-response.
 
 let lastAudioStatus = { text: "idle", cls: "idle" };
-let lastStreamActive = false;
+let lastStreamState = null; // null when no reply in flight, else { text, cls }
 function renderStatus() {
-  const { text, cls } = lastStreamActive
-    ? { text: "streaming…", cls: "connecting" }
-    : lastAudioStatus;
+  const { text, cls } = lastStreamState ?? lastAudioStatus;
   statusEl.textContent = text;
   statusEl.className = "status " + cls;
 }
@@ -71,17 +82,16 @@ function setAudioStatus(text, cls) {
   lastAudioStatus = { text, cls };
   renderStatus();
 }
-function setStreamActive(active) {
-  lastStreamActive = active;
+function setStreamState(state) {
+  lastStreamState = state;
   renderStatus();
 }
 
-function setStreaming(streaming) {
+function setStreamingUi(streaming) {
   if (streaming) {
     sendBtn.hidden = true;
     stopBtn.hidden = false;
     inputEl.disabled = true;
-    setStreamActive(true);
   } else {
     sendBtn.hidden = false;
     stopBtn.hidden = true;
@@ -214,10 +224,29 @@ async function streamReply() {
 
   const model = modelEl.value || undefined;
   const assistantEl = appendBubble("assistant", "", { persist: false, model });
+  // Render an inline bouncing-dots loader inside the assistant bubble
+  // while we wait for the LLM's first token. Without this, the bubble
+  // sits empty during the Ollama cold start (sometimes 30s+ on a
+  // freshly-pulled model) and looks like a frozen UI. The first delta
+  // below clears the loader before any text is written.
+  assistantEl.innerHTML =
+    '<span class="chat-loader" role="status" aria-label="Loading response">'
+    + '<span class="dot"></span>'
+    + '<span class="dot"></span>'
+    + '<span class="dot"></span>'
+    + '</span>';
 
   const controller = new AbortController();
   inflight = { controller, assistantEl, model };
-  setStreaming(true);
+  setStreamingUi(true);
+  setStreamState({ text: "Loading model…", cls: "loading" });
+  // In chat mode we don't keep listening while the LLM responds:
+  // the user has nothing to add until the reply is done, and an open
+  // mic just burns CPU and risks accidental utterances being sent as
+  // a follow-up turn. They can click Record again afterwards. We call
+  // this after `setStreamState` so the chat pill (priority) doesn't
+  // briefly flash the audio idle status during the teardown.
+  audioCapture.stop();
 
   const messages = [
     ...(systemEl.value.trim()
@@ -234,6 +263,10 @@ async function streamReply() {
   if (model) body.model = model;
 
   let accumulated = "";
+  // First-token arrival switches the pill from "Loading model…" to
+  // "Streaming…"; the same `connecting` class keeps the spinner
+  // animated so the user keeps getting live feedback.
+  let streamingStarted = false;
   try {
     const resp = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -267,6 +300,13 @@ async function streamReply() {
             const evt = JSON.parse(payload);
             const delta = evt?.choices?.[0]?.delta?.content;
             if (typeof delta === "string" && delta.length > 0) {
+              if (!streamingStarted) {
+                streamingStarted = true;
+                setStreamState({ text: "Streaming…", cls: "connecting" });
+                // Strip the inline loader before writing real text so
+                // the bubble transitions cleanly into the reply.
+                assistantEl.textContent = "";
+              }
               accumulated += delta;
               assistantEl.textContent = accumulated;
               messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -287,7 +327,10 @@ async function streamReply() {
     h.push({ role: "assistant", content: assistantEl.textContent, ts: Date.now(), model });
     saveHistory(h);
     inflight = null;
-    setStreaming(false);
+    // Clear the streaming status so the pill falls back to the audio
+    // state (typically "idle") before we drop the input-disable.
+    setStreamState(null);
+    setStreamingUi(false);
   }
 }
 
