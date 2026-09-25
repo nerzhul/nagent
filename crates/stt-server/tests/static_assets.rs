@@ -206,3 +206,37 @@ async fn katex_stylesheet_and_fonts_are_served() {
         bytes.len()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_carries_math_bracket_normalizer() {
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The chat JS must define `normalizeMathDelimiters`. Without it,
+    // an LLM that wraps math in `[ ... ]` (its own LaTeX-flavoured
+    // bracket pair) leaves the source verbatim on screen because
+    // marked has no math support and KaTeX has no delimiters to match.
+    assert!(
+        body.contains("function normalizeMathDelimiters"),
+        "chat.js no longer defines normalizeMathDelimiters — bracket-wrapped math will render as raw LaTeX source again"
+    );
+
+    // Both regex passes must guard against eating the inner of a real
+    // markdown link (`(?!\s*\()`) and against re-processing the
+    // already-converted `\[...\]` blocks (the `(?<!\\)` lookbehind on
+    // the single-line pass). Without the lookbehind, the second pass
+    // double-applies and the output ends up with stray `\\` prefixes.
+    assert!(
+        body.contains("(?<!\\\\)\\[(\\s*\\\\[a-zA-Z]"),
+        "chat.js is missing the negative lookbehind on the single-line math regex — already-converted blocks will be re-processed and produce stray backslashes"
+    );
+    assert!(
+        body.matches(r"(?!\s*\()").count() >= 2,
+        r"chat.js no longer carries the (?!\s*\() link-protection lookahead on both math regex passes"
+    );
+}

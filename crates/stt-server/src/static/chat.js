@@ -127,6 +127,90 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
+// `\[ \]` → `\[\]` shorthand used by `normalizeMathDelimiters` below.
+// Kept in one place so both regexes stay in sync if we ever extend
+// the rule.
+const LATEX_CMD = /\\[a-zA-Z]+/;
+
+// Rewrite `[ ... ]` blocks that contain LaTeX commands into `\[...\]`,
+// the delimiter KaTeX's auto-render recognizes for display math.
+//
+// The chat model sometimes wraps display math in single brackets
+// (probably confusing the LaTeX bracket pair `\[...\]` with markdown
+// link syntax `[text](url)`) and produces output like:
+//
+//     [
+//     \text{foo} = \frac{a}{b}
+//     ]
+//
+// Marked has no math support, so it leaves the brackets in place —
+// KaTeX then has nothing to match against and the LaTeX source
+// renders as plain text. This pre-pass detects `[ ... ]` whose inner
+// content contains at least one `\command` and rewrites it to
+// `\[...\]`. The check on the inner content keeps real markdown links
+// like `[label](url)` untouched (their inner content has no
+// backslash) and avoids eating arbitrary bracketed prose.
+function normalizeMathDelimiters(text) {
+  // Both regexes below include a `(?!\s*\()` lookahead on the closing
+  // `]` so we don't eat the bracket pair of a real markdown link like
+  // `[\frac{a}{b}](https://example.com)` — the lookahead sees the `(`
+  // right after the `]` and refuses to rewrite.
+  //
+  // The single-line regex also carries a `(?<!\\)` lookbehind so it
+  // does not re-process the output of the multi-line regex (the
+  // multi-line pass leaves `\[...\]` blocks behind; the lookbehind
+  // sees the leading `\` and skips them).
+  //
+  // Multi-line: `[\n ... \n]` (with optional surrounding whitespace)
+  // — the format the LLM in this thread actually emits.
+  text = text.replace(
+    /\[\s*\n([\s\S]*?)\n\s*\](?!\s*\()/g,
+    (m, inner) => {
+      if (!LATEX_CMD.test(inner)) return m;
+      return `\\[\n${inner}\n\\]`;
+    },
+  );
+  // Single-line: `[\frac{a}{b}]` — defensive, in case a future model
+  // drops the newlines. Only matches when the inner starts with a
+  // backslash command so plain markdown links `[label](url)` are left
+  // alone (their inner never starts with `\`). The lookbehind skips
+  // blocks already wrapped by the multi-line pass above.
+  text = text.replace(/(?<!\\)\[(\s*\\[a-zA-Z][\s\S]*?)\](?!\s*\()/g, (m, inner) =>
+    `\\[${inner}\\]`,
+  );
+  return text;
+}
+
+function renderMarkdown(text) {
+  if (!text) return "";
+  if (!MARKDOWN_AVAILABLE) {
+    // Vendor scripts failed to load (404, blocked, parse error). Fall
+    // back to a manually-escaped, plain-text render rather than
+    // throwing on the first reply. The user still sees the reply, just
+    // without markdown formatting. Math normalization still runs so a
+    // future vendor reload benefits from a clean source — the result
+    // is just plain text but consistent.
+    const normalized = normalizeMathDelimiters(text);
+    return escapeHtml(normalized).replace(/\n/g, "<br>");
+  }
+  // Rewrite `[ ... ]`-wrapped LaTeX into `\[...\]` so KaTeX has
+  // delimiters to match. See `normalizeMathDelimiters` for the
+  // exact rules. The marked call below runs after this rewrite.
+  const normalized = normalizeMathDelimiters(text);
+  // marked.parse returns an HTML string when called with a string input.
+  // `breaks: true` makes single newlines become `<br>` (LLMs often
+  // break lines without blank lines). `gfm: true` (default) enables
+  // GitHub-flavored features: tables, task lists, fenced code blocks.
+  const raw = window.marked.parse(normalized, { breaks: true, gfm: true });
+  return window.DOMPurify.sanitize(raw, {
+    // Anchor tags get forced-open in a new tab so a chat reply can't
+    // navigate the nagent UI away. DOMPurify honors `ADD_ATTR` for the
+    // `target` and `rel` we add below; everything else stays at the
+    // default-deny baseline.
+    ADD_ATTR: ["target", "rel"],
+  });
+}
+
 // Patch every <a> inside the bubble so it opens in a new tab with
 // `rel="noopener noreferrer"`. We do this after DOMPurify because
 // DOMPurify would strip `target`/`rel` from otherwise unsafe URLs —
