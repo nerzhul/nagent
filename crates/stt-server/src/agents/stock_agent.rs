@@ -238,21 +238,17 @@ impl Agent for StockAgent {
 
         // Step 1: static company-name shortcut. When the user
         // typed a known company name, we land on the right ticker
-        // (with its exchange) and skip the fallback dance entirely.
-        let (resolved_input, explicit_suffix) =
-            if let Some(known) = resolve_known_company(&req.ticker) {
-                (known.to_string(), true)
-            } else {
-                let normalised = normalise_ticker(&req.ticker);
-                let explicit = normalised.contains('.');
-                (normalised, explicit)
-            };
+        // (with its exchange already attached).
+        let resolved_input = if let Some(known) = resolve_known_company(&req.ticker) {
+            known.to_string()
+        } else {
+            normalise_ticker(&req.ticker)
+        };
 
         // Step 2 + 3: try the resolved ticker, with multi-exchange
-        // fallback when the user didn't pin an exchange.
-        let tried_ref = tried_symbols(&resolved_input, explicit_suffix);
-        let (body, resolved_ticker) =
-            fetch_with_fallback(&self.http, &resolved_input, explicit_suffix).await?;
+        // fallback when the primary doesn't return data.
+        let tried_ref = tried_symbols(&resolved_input);
+        let (body, resolved_ticker) = fetch_with_fallback(&self.http, &resolved_input).await?;
         let payload = parse_stooq_csv(&body, &resolved_ticker)?;
 
         Ok(serde_json::to_string(&json!({
@@ -335,25 +331,44 @@ fn url_encode(s: &str) -> String {
 // ---- Step 3: multi-exchange fallback ------------------------------------
 
 /// Return the list of Stooq tickers the agent will (or did) try, in
-/// order. When the user pinned a suffix this is a one-element vec;
-/// otherwise the auto-`.US` first try is followed by the European
-/// fallbacks. Surfaced back to the caller so the LLM sees what we
+/// order. The first entry is the implied/explicit exchange
+/// (`.US` for bare tickers, `.XX` for already-suffixed ones). The
+/// remaining entries are the common European exchanges in
+/// priority order, followed by `.US` if it wasn't the implied
+/// primary. Surfaced back to the caller so the LLM sees what we
 /// searched for on `AgentFailed`.
-fn tried_symbols(resolved: &str, explicit_suffix: bool) -> Vec<String> {
-    if explicit_suffix {
-        vec![resolved.to_string()]
-    } else {
-        let root = resolved.split('.').next().unwrap_or(resolved);
-        let mut out = Vec::with_capacity(1 + FALLBACK_EXCHANGES.len());
-        out.push(resolved.to_string());
-        for suffix in FALLBACK_EXCHANGES {
-            let candidate = format!("{root}.{suffix}");
-            if !out.contains(&candidate) {
-                out.push(candidate);
+fn tried_symbols(resolved: &str) -> Vec<String> {
+    let root = resolved.split('.').next().unwrap_or(resolved);
+    let implied = resolved
+        .rsplit_once('.')
+        .map(|(_, s)| s.to_ascii_uppercase())
+        .unwrap_or_else(|| DEFAULT_EXCHANGE.to_string());
+
+    let mut order: Vec<String> = Vec::with_capacity(1 + FALLBACK_EXCHANGES.len() + 1);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let push =
+        |order: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, ex: String| {
+            if seen.insert(ex.clone()) {
+                order.push(ex);
             }
-        }
-        out
+        };
+
+    push(&mut order, &mut seen, implied);
+    for ex in FALLBACK_EXCHANGES {
+        push(&mut order, &mut seen, (*ex).to_string());
     }
+    // Always include `.US` last so an explicit-suffix request
+    // (`ATO.PA`) also tries the US OTC listing if the primary
+    // exchange has no data. Bare-ticker requests already had
+    // `.US` as the implicit primary; the dedup gate skips the
+    // duplicate here.
+    push(&mut order, &mut seen, DEFAULT_EXCHANGE.to_string());
+
+    order
+        .iter()
+        .map(|suffix| format!("{root}.{suffix}"))
+        .collect()
 }
 
 /// HTTP the resolved ticker, falling back to other exchanges if the
@@ -363,10 +378,9 @@ fn tried_symbols(resolved: &str, explicit_suffix: bool) -> Vec<String> {
 async fn fetch_with_fallback(
     http: &reqwest::Client,
     resolved: &str,
-    explicit_suffix: bool,
 ) -> Result<(String, String), AgentError> {
     let mut last_err: Option<AgentError> = None;
-    for ticker in tried_symbols(resolved, explicit_suffix) {
+    for ticker in tried_symbols(resolved) {
         let url = format!(
             "https://stooq.com/q/l/?s={}&f=sd2t2ohlcv&h&e=csv",
             url_encode(&ticker)
@@ -374,8 +388,9 @@ async fn fetch_with_fallback(
         match fetch_csv(http, &url).await {
             Ok(body) if !is_no_data(&body) => return Ok((body, ticker)),
             Ok(_) => {
-                // `N/D` or empty — the symbol doesn't have data on
-                // this exchange; try the next one.
+                // `N/D`, empty, or HTML error page — the symbol
+                // doesn't have data on this exchange; try the next
+                // one.
                 continue;
             }
             Err(e) => last_err = Some(e),
@@ -388,7 +403,7 @@ async fn fetch_with_fallback(
     if let Some(e) = last_err {
         return Err(e);
     }
-    let tried = tried_symbols(resolved, explicit_suffix).join(", ");
+    let tried = tried_symbols(resolved).join(", ");
     Err(AgentError::AgentFailed(format!(
         "no data for ticker (Stooq returned no data for any of: {tried}. \
          Try an explicit ticker like `ATO.PA` for Euronext Paris, `MC.PA` for LVMH, etc.)"
@@ -429,14 +444,31 @@ async fn fetch_csv(http: &reqwest::Client, url: &str) -> Result<String, AgentErr
         .map_err(|e| AgentError::AgentFailed(format!("upstream returned non-UTF-8 body: {e}")))
 }
 
-/// True when the body is Stooq's "no data" response: empty, or
-/// exactly one line that starts with `N/D`.
+/// True when the body is *not* a Stooq CSV quote: empty, the `N/D`
+/// sentinel, or any non-CSV payload (HTML error page, Cloudflare
+/// bot challenge, …). The HTML case is the one the original
+/// implementation missed — Cloudflare's challenge page is a valid
+/// 200 response with `<html>…</html>` content that the old
+/// `is_no_data` would have happily handed to the CSV parser, where
+/// it would then fail with a misleading "row width mismatch"
+/// message instead of letting the fallback move on.
 fn is_no_data(body: &str) -> bool {
     let body = body.trim();
     if body.is_empty() {
         return true;
     }
-    body.lines().count() == 1 && body.starts_with("N/D")
+    let first_line = body.lines().next().unwrap_or("");
+    // Single-line `N/D` — Stooq's documented "no data" sentinel.
+    if body.lines().count() == 1 && first_line.starts_with("N/D") {
+        return true;
+    }
+    // Real Stooq CSV data starts with the `Symbol,Date,Time,…`
+    // header. Anything else is treated as no data so the
+    // multi-exchange fallback can keep going.
+    if !first_line.starts_with("Symbol,") {
+        return true;
+    }
+    false
 }
 
 // ---- CSV parsing ---------------------------------------------------------
@@ -533,10 +565,7 @@ fn parse_price(s: Option<&str>) -> Value {
 fn parse_int(s: Option<&str>) -> Value {
     match s {
         Some(v) if v == "-" || v.is_empty() => Value::Null,
-        Some(v) => v
-            .parse::<i64>()
-            .map(|n| json!(n))
-            .unwrap_or(Value::Null),
+        Some(v) => v.parse::<i64>().map(|n| json!(n)).unwrap_or(Value::Null),
         None => Value::Null,
     }
 }
@@ -682,43 +711,48 @@ mod tests {
     }
 
     #[test]
-    fn tried_symbols_with_explicit_suffix_is_single() {
-        // When the user pinned the exchange, respect it; do not
-        // second-guess by trying other exchanges.
-        assert_eq!(
-            tried_symbols("ATO.PA", true),
-            vec!["ATO.PA".to_string()]
+    fn tried_symbols_explicit_pa_lists_pa_first_then_rest() {
+        // When the user pinned the exchange, that exchange goes first;
+        // the rest of the European fallbacks follow, and `.US` is
+        // appended last (for OTC listings).
+        let tried = tried_symbols("ATO.PA");
+        assert_eq!(tried[0], "ATO.PA");
+        assert!(tried.contains(&"ATO.L".to_string()));
+        assert!(tried.contains(&"ATO.DE".to_string()));
+        assert!(tried.contains(&"ATO.MI".to_string()));
+        assert!(
+            tried.last().unwrap() == "ATO.US",
+            "US fallback should be last: {tried:?}"
         );
+        // No duplicates: every entry is unique.
+        let mut seen = std::collections::HashSet::new();
+        for t in &tried {
+            assert!(seen.insert(t.clone()), "duplicate ticker {t} in {tried:?}");
+        }
     }
 
     #[test]
-    fn tried_symbols_without_suffix_lists_us_then_fallbacks() {
+    fn tried_symbols_bare_lists_us_first_then_fallbacks() {
         // The bare-ticker path: try `.US` first, then the European
         // exchanges in order. Order matters — the first hit wins.
-        let tried = tried_symbols("ATOS.US", false);
+        let tried = tried_symbols("ATOS");
         assert_eq!(tried[0], "ATOS.US");
         assert!(tried.contains(&"ATOS.PA".to_string()));
         assert!(tried.contains(&"ATOS.L".to_string()));
         assert!(tried.contains(&"ATOS.DE".to_string()));
         assert!(tried.contains(&"ATOS.MI".to_string()));
+        // `.US` is the first entry; it does not get re-appended
+        // at the end. Total length is 1 (US) + the fallback list.
         assert_eq!(tried.len(), 1 + FALLBACK_EXCHANGES.len());
     }
 
     #[test]
-    fn tried_symbols_strips_explicit_us_from_fallbacks() {
-        // If for some reason the primary ticker already has a
-        // `.XX` suffix we wouldn't auto-add `.US`, but the result
-        // should not list the primary twice.
-        let root = "ATOS";
-        let tried = tried_symbols(&format!("{root}.US"), false);
-        let counts: std::collections::HashMap<&str, usize> =
-            tried.iter().map(|t| t.as_str()).fold(Default::default(), |mut acc, t| {
-                *acc.entry(t).or_insert(0) += 1;
-                acc
-            });
-        for (_, n) in counts {
-            assert_eq!(n, 1, "duplicate ticker in `tried`: {tried:?}");
-        }
+    fn tried_symbols_for_us_already_suffixed_does_not_duplicate_us() {
+        // If for some reason the resolved input already has `.US`,
+        // the trailing `.US` fallback must not be added again.
+        let tried = tried_symbols("AAPL.US");
+        let count_us = tried.iter().filter(|t| t.ends_with(".US")).count();
+        assert_eq!(count_us, 1, "duplicate .US entry: {tried:?}");
     }
 
     #[test]
@@ -792,8 +826,17 @@ mod tests {
         assert!(is_no_data("   "));
         assert!(is_no_data("N/D"));
         assert!(is_no_data("N/D\n"));
-        // Real CSV starts with `Symbol` — must NOT be flagged.
-        assert!(!is_no_data("Symbol,Date,Time,Open,High,Low,Close,Volume\nAAPL.US,..."));
+        // Real CSV starts with `Symbol,` — must NOT be flagged.
+        assert!(!is_no_data(
+            "Symbol,Date,Time,Open,High,Low,Close,Volume\nAAPL.US,..."
+        ));
+        // HTML error page (e.g. Cloudflare bot challenge) must
+        // also be treated as no data so the fallback can move on
+        // instead of crashing the CSV parser.
+        assert!(is_no_data(
+            "<!DOCTYPE html><html><head></head><body>403</body></html>"
+        ));
+        assert!(is_no_data("<html>error</html>"));
     }
 
     #[test]

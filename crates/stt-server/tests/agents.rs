@@ -723,16 +723,21 @@ async fn stock_agent_parses_csv_with_loopback_fixture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stock_agent_rejects_invalid_ticker() {
     let agent = StockAgent::new();
+    // The runtime char whitelist rejects these specific
+    // characters even though spaces are now allowed (for
+    // company names like "BNP Paribas"). A `;` is unambiguous
+    // garbage, so the gate fires before any network call.
     let err = agent
-        .invoke(serde_json::json!({"ticker": "AA PL"}))
+        .invoke(serde_json::json!({"ticker": "AA;DROP"}))
         .await
-        .expect_err("spaces are not allowed in tickers");
+        .expect_err("semicolons are not allowed");
     match err {
         stt_server::agents::AgentError::InvalidArguments(_) => {}
         other => panic!("expected InvalidArguments, got {other:?}"),
     }
+    // Length check: anything over 40 chars is rejected up-front.
     let err = agent
-        .invoke(serde_json::json!({"ticker": "TOOLONGTICKER"}))
+        .invoke(serde_json::json!({"ticker": "x".repeat(41)}))
         .await
         .expect_err("too long");
     assert!(matches!(
@@ -753,7 +758,7 @@ async fn stock_agent_invoke_endpoint_returns_400_for_bad_ticker() {
     let resp = reqwest::Client::new()
         .post(format!("{url}/v1/agents/get_stock_quote/invoke"))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(r#"{"arguments":{"ticker":"AA PL"}}"#)
+        .body(r#"{"arguments":{"ticker":"AA;DROP"}}"#)
         .send()
         .await
         .unwrap();
