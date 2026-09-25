@@ -55,6 +55,16 @@
       <span id="backend-info" class="backend-info"></span>
     </section>
 
+    <section class="voice-graph" aria-label="Live microphone waveform">
+      <div class="voice-graph-header">
+        <span class="voice-graph-label">Live input</span>
+        <span id="voice-graph-level" class="voice-graph-level" title="Speech probability">
+          <span class="bar"></span>
+        </span>
+      </div>
+      <canvas id="voice-graph-canvas"></canvas>
+    </section>
+
     <section class="transcript">
       <ol id="transcript-list" aria-live="polite"></ol>
     </section>

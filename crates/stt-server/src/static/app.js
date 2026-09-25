@@ -36,6 +36,9 @@ const downloadBtn = $("download-btn");
 const statusEl    = $("status");
 const backendEl   = $("backend-info");
 const listEl      = $("transcript-list");
+const scopeCanvas = $("voice-graph-canvas");
+const scopeLevel  = $("voice-graph-level");
+const scopeCtx    = scopeCanvas.getContext("2d");
 
 // ---- Protocol tags (must match stt-proto) -----------------------------------
 
@@ -284,6 +287,124 @@ function emptyState() {
 
 emptyState();
 
+// ---- Live voice graph -------------------------------------------------------
+//
+// `MicVAD` exposes an `onFrameProcessed(probs, frame)` hook that fires once
+// per processed frame (~32 ms, 512 samples at 16 kHz). We use it to push
+// the audio samples into a small ring buffer and redraw an oscilloscope on
+// the next animation frame. Drawing is throttled to ~60 fps via rAF, so a
+// 30 fps mic stream never queues more than one pending frame.
+//
+// The graph renders a symmetric waveform around a dim centerline. When the
+// VAD speech probability crosses `positiveSpeechThreshold` the line flips
+// from the accent blue to the "ok" green and the small level bar fills,
+// so the user gets the same visual cue the server-side VAD is using.
+
+const SCOPE_SAMPLES = 2048; // 128 ms at 16 kHz; ~4 VAD frames worth
+const scopeRing = new Float32Array(SCOPE_SAMPLES);
+let scopeWrite = 0;     // next write index into `scopeRing`
+let scopeFilled = 0;    // how many samples have ever been pushed (<= SCOPE_SAMPLES)
+let scopeLastProb = 0;  // last speech probability (0..1) for color/level
+let scopeRafId = 0;     // pending rAF id, 0 = none
+let scopeCssW = 0;      // last CSS width in px, used for resize detection
+
+function pushScopeFrame(samples) {
+  if (!samples || samples.length === 0) return;
+  // Copy in two halves so we never split a sample across the wrap-around.
+  let n = samples.length;
+  for (let i = 0; i < n; i++) {
+    scopeRing[scopeWrite] = samples[i];
+    scopeWrite = (scopeWrite + 1) % SCOPE_SAMPLES;
+  }
+  scopeFilled = Math.min(SCOPE_SAMPLES, scopeFilled + n);
+}
+
+function resetScope() {
+  scopeRing.fill(0);
+  scopeWrite = 0;
+  scopeFilled = 0;
+  scopeLastProb = 0;
+  if (scopeLevel) scopeLevel.dataset.speaking = "false";
+  drawScope();
+}
+
+function resizeScopeIfNeeded() {
+  const cssW = scopeCanvas.clientWidth;
+  const cssH = scopeCanvas.clientHeight;
+  if (cssW === scopeCssW && scopeCanvas.height !== 0) return;
+  scopeCssW = cssW;
+  const dpr = globalThis.devicePixelRatio || 1;
+  scopeCanvas.width = Math.max(1, Math.floor(cssW * dpr));
+  scopeCanvas.height = Math.max(1, Math.floor(cssH * dpr));
+  scopeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawScope() {
+  scopeRafId = 0;
+  resizeScopeIfNeeded();
+  const cssW = scopeCanvas.clientWidth;
+  const cssH = scopeCanvas.clientHeight;
+  scopeCtx.clearRect(0, 0, cssW, cssH);
+
+  const mid = cssH / 2;
+  const accent = getCss("--accent");
+  const ok = getCss("--ok");
+  const border = getCss("--border");
+  const speaking = scopeLastProb >= 0.5;
+  const stroke = speaking ? ok : accent;
+
+  // Centerline.
+  scopeCtx.strokeStyle = border;
+  scopeCtx.lineWidth = 1;
+  scopeCtx.beginPath();
+  scopeCtx.moveTo(0, mid);
+  scopeCtx.lineTo(cssW, mid);
+  scopeCtx.stroke();
+
+  // Symmetric waveform: top half mirrors the bottom around `mid`.
+  const n = Math.min(scopeFilled, SCOPE_SAMPLES);
+  if (n > 0) {
+    scopeCtx.strokeStyle = stroke;
+    scopeCtx.lineWidth = 1.5;
+    scopeCtx.beginPath();
+    const step = cssW / Math.max(1, n - 1);
+    for (let i = 0; i < n; i++) {
+      // Read from ring buffer in chronological order: oldest sample is at
+      // (scopeWrite - n) mod SCOPE_SAMPLES, newest is at scopeWrite - 1.
+      const idx = (scopeWrite - n + i + SCOPE_SAMPLES) % SCOPE_SAMPLES;
+      const s = scopeRing[idx];
+      const y = mid - s * (mid - 1); // -1..1 maps to (mid-1)..(mid+1) ≈ full height
+      const x = i * step;
+      if (i === 0) scopeCtx.moveTo(x, y);
+      else scopeCtx.lineTo(x, y);
+    }
+    scopeCtx.stroke();
+  }
+
+  // Level bar fill.
+  if (scopeLevel) {
+    const pct = Math.max(0, Math.min(1, scopeLastProb));
+    scopeLevel.querySelector(".bar").style.width = `${(pct * 100).toFixed(1)}%`;
+    scopeLevel.dataset.speaking = speaking ? "true" : "false";
+  }
+}
+
+function scheduleScopeDraw() {
+  if (scopeRafId !== 0) return;
+  scopeRafId = requestAnimationFrame(drawScope);
+}
+
+function getCss(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#58a6ff";
+}
+
+// Initial paint so the graph shows a flat line before recording starts.
+resetScope();
+window.addEventListener("resize", () => {
+  scopeCssW = 0; // force resizeScopeIfNeeded to re-measure
+  scheduleScopeDraw();
+});
+
 // ---- WebSocket lifecycle ----------------------------------------------------
 
 function wsUrl() {
@@ -350,6 +471,7 @@ async function onWsClose() {
   } catch {}
   setRecordState("Record", "idle");
   setStatus("disconnected", "error");
+  resetScope();
 }
 
 function send(bytes) {
@@ -376,6 +498,18 @@ async function ensureVad() {
     model: "v6",
     baseAssetPath: VAD_DIST,
     onnxWASMBasePath: ORT_DIST,
+    onFrameProcessed: (probs, frame) => {
+      // Frame is a Float32Array of 16 kHz mono PCM samples (~512 per call).
+      // `probs` is whatever the Silero model returned: a bare number in v6
+      // and an `{ isSpeech }` object in earlier shapes, so accept both.
+      const prob =
+        typeof probs === "number"
+          ? probs
+          : (probs && (probs.isSpeech || probs.speechProb || 0)) || 0;
+      scopeLastProb = prob;
+      pushScopeFrame(frame);
+      scheduleScopeDraw();
+    },
     onSpeechStart: () => {
       // no-op: server only cares about completed segments
     },
@@ -429,6 +563,7 @@ recordBtn.addEventListener("click", async () => {
     state.recording = false;
     setRecordState("Record", "idle");
     setStatus("idle", "idle");
+    resetScope();
     return;
   }
 
