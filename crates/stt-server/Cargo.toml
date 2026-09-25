@@ -34,12 +34,15 @@ dotenvy            = { workspace = true }
 anyhow             = { workspace = true }
 thiserror          = { workspace = true }
 async-trait        = { workspace = true }
+bytes              = "1"
 futures-util       = "0.3"
+# `stream` lets us pipe `upstream.bytes_stream()` into `axum::body::Body`
+# without buffering the whole response; `json` lets `/v1/models` decode
+# Ollama's OpenAI-shaped payload; `rustls-tls` keeps the dep tree free of
+# OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures = "0.3"
 tokio-tungstenite = "0.24"
-# `json` is needed by the integration test that decodes the
-# /api/version payload; `rustls-tls` keeps the dep tree free of OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

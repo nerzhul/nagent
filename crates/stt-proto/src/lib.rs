@@ -226,7 +226,7 @@ pub fn encode<T: Into<Payload>>(payload: T) -> Result<Vec<u8>, CodecError> {
 pub fn decode_frame(bytes: &[u8]) -> Result<Payload, CodecError> {
     let (head, tail) = bytes.split_first().ok_or(CodecError::EmptyFrame)?;
     let tag = Tag::from_u8(*head).ok_or(CodecError::UnknownTag(*head))?;
-    Ok(Payload::from_tagged(tag, tail)?)
+    Payload::from_tagged(tag, tail)
 }
 
 // --- From impls so callers can `encode(audio_frame)` without the enum. -------

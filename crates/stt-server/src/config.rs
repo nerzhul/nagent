@@ -20,6 +20,9 @@ pub struct Config {
     pub session_idle_timeout: Duration,
     /// Per-inference timeout.
     pub infer_timeout: Duration,
+    /// Optional LLM/Ollama proxy config. When `llm.enabled` is `false`
+    /// the `/v1/*` routes are not registered at all.
+    pub llm: LlmConfig,
 }
 
 impl Config {
@@ -45,12 +48,58 @@ impl Config {
             Duration::from_millis(parse_env("SESSION_IDLE_TIMEOUT_MS", 30_000)?);
         let infer_timeout = Duration::from_millis(parse_env("INFER_TIMEOUT_MS", 30_000)?);
 
+        let llm = LlmConfig::from_env()?;
+
         Ok(Self {
             bind_addr,
             whisper_model_path,
             max_queue,
             session_idle_timeout,
             infer_timeout,
+            llm,
+        })
+    }
+}
+
+/// Configuration for the optional server-side Ollama proxy.
+///
+/// When `enabled` is `false` the `/v1/chat/completions` and `/v1/models`
+/// routes are simply not registered, so the chat view in the UI 404s
+/// gracefully and the rest of the STT server is unaffected.
+#[derive(Debug, Clone)]
+pub struct LlmConfig {
+    /// Master switch for the `/v1/*` routes.
+    pub enabled: bool,
+    /// Base URL of the upstream OpenAI-compatible server (typically
+    /// `http://localhost:11434` for Ollama).
+    pub base_url: String,
+    /// Default model id for `/v1/chat/completions` when the browser
+    /// does not specify one.
+    pub default_model: String,
+    /// Optional bearer token to forward as `Authorization: Bearer …`.
+    pub api_key: Option<String>,
+    /// Per-chunk idle timeout (no bytes for this long → drop the stream).
+    pub request_timeout: Duration,
+}
+
+impl LlmConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let enabled = parse_env::<bool>("LLM_ENABLED", false)?;
+        let base_url = std::env::var("OLLAMA_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let default_model =
+            std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
+        let api_key = std::env::var("OLLAMA_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let request_timeout = Duration::from_secs(parse_env("LLM_REQUEST_TIMEOUT_SECS", 120)?);
+
+        Ok(Self {
+            enabled,
+            base_url,
+            default_model,
+            api_key,
+            request_timeout,
         })
     }
 }

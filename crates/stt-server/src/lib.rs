@@ -7,10 +7,12 @@
 //! - [`router`] — `ResultRouter` that forwards worker output to the right session.
 //! - [`watchdog`] — periodic sweep that drops idle sessions.
 //! - [`static_assets`] — embedded frontend assets served at `/` and `/static/*`.
+//! - [`llm`] — optional OpenAI-compatible proxy to a local LLM (Ollama).
 
 #![warn(missing_debug_implementations)]
 
 pub mod config;
+pub mod llm;
 pub mod router;
 pub mod session;
 pub mod static_assets;
@@ -19,13 +21,13 @@ pub mod watchdog;
 pub mod ws_handler;
 
 pub use config::Config;
-pub use version::VersionInfo;
 use session::SessionMap;
+pub use version::VersionInfo;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::mpsc;
 
@@ -39,6 +41,10 @@ pub struct AppState {
     pub job_tx: mpsc::Sender<InferenceJob>,
     pub ready: Arc<AtomicBool>,
     pub config: Arc<Config>,
+    /// Optional LLM proxy. `None` when `LLM_ENABLED=false`; in that
+    /// case the `/v1/*` routes are not registered and the chat view
+    /// in the UI 404s gracefully.
+    pub llm: Option<llm::LlmClient>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -49,17 +55,26 @@ impl std::fmt::Debug for AppState {
             .field("job_tx", &self.job_tx)
             .field("ready", &self.ready)
             .field("config", &self.config)
+            .field("llm", &self.llm.as_ref().map(|_| "<LlmClient>"))
             .finish()
     }
 }
 
 /// Build the axum router around [`AppState`]. Exposed for tests.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // STT routes are always registered. The LLM routes are gated on
+    // `LLM_ENABLED` so disabling the feature leaves no trace of it
+    // (the chat view simply sees 404 on `/v1/*`).
+    let mut app = Router::new()
         .route("/", get(ws_handler::index_handler))
         .route("/healthz", get(ws_handler::healthz))
         .route("/api/version", get(ws_handler::version_handler))
         .route("/ws", get(ws_handler::ws_upgrade))
-        .route("/static/*path", get(ws_handler::static_path_handler))
-        .with_state(state)
+        .route("/static/*path", get(ws_handler::static_path_handler));
+    if state.llm.is_some() {
+        app = app
+            .route("/v1/chat/completions", post(llm::chat_completions))
+            .route("/v1/models", get(llm::models_list));
+    }
+    app.with_state(state)
 }

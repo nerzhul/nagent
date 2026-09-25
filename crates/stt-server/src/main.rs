@@ -5,7 +5,7 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use stt_server::{build_router, router, session, watchdog, AppState, Config};
+use stt_server::{build_router, llm, router, session, watchdog, AppState, Config};
 
 use tokio::sync::mpsc;
 use tracing::info;
@@ -50,12 +50,25 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- HTTP router -----------------------------------------------------
     let ready = Arc::new(AtomicBool::new(true));
+    let llm = if cfg.llm.enabled {
+        info!(
+            base_url = %cfg.llm.base_url,
+            default_model = %cfg.llm.default_model,
+            "LLM proxy enabled"
+        );
+        let cfg = Arc::new(cfg.llm.clone());
+        Some(llm::LlmClient::new(cfg).map_err(|e| anyhow::anyhow!("{e}"))?)
+    } else {
+        info!("LLM proxy disabled (set LLM_ENABLED=true to enable)");
+        None
+    };
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),
         job_tx,
         ready,
         config: Arc::new(cfg.clone()),
+        llm,
     });
 
     let app = build_router(state);

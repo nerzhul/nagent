@@ -43,6 +43,16 @@ async fn start_test_server() -> (String, SessionMap) {
         max_queue: 32,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
+        // LLM is opt-in; the STT-focused multiuser test keeps it off
+        // so the /v1/* routes are not registered and there is no
+        // accidental dependency on a local Ollama install.
+        llm: stt_server::config::LlmConfig {
+            enabled: false,
+            base_url: "http://localhost:11434".into(),
+            default_model: "llama3.1".into(),
+            api_key: None,
+            request_timeout: Duration::from_secs(120),
+        },
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -60,6 +70,7 @@ async fn start_test_server() -> (String, SessionMap) {
         job_tx: job_tx.clone(),
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
+        llm: None,
     });
 
     let app = build_router(state);
@@ -269,7 +280,9 @@ async fn healthz_returns_200() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_version_returns_expected_shape() {
     let (url, _sessions) = start_test_server().await;
-    let http_url = url.replacen("ws://", "http://", 1).replace("/ws", "/api/version");
+    let http_url = url
+        .replacen("ws://", "http://", 1)
+        .replace("/ws", "/api/version");
 
     let resp = reqwest::get(http_url).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -292,13 +305,20 @@ async fn api_version_returns_expected_shape() {
     // a future version bump.
     assert!(!info.backend.is_empty(), "backend version is empty");
     assert!(
-        info.backend.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c.is_ascii_alphabetic()),
+        info.backend
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c.is_ascii_alphabetic()),
         "backend version `{info_backend}` has unexpected characters",
         info_backend = info.backend
     );
 
     // frontend hash is 16 hex chars produced by build.rs.
-    assert_eq!(info.frontend.len(), 16, "frontend hash `{info}` looks wrong", info = info.frontend);
+    assert_eq!(
+        info.frontend.len(),
+        16,
+        "frontend hash `{info}` looks wrong",
+        info = info.frontend
+    );
     assert!(
         info.frontend.chars().all(|c| c.is_ascii_hexdigit()),
         "frontend hash `{info}` contains non-hex characters",

@@ -287,8 +287,7 @@ pub async fn version_handler() -> impl IntoResponse {
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
-    let body = serde_json::to_vec(&info).unwrap_or_else(|e| {
-        panic!("VersionInfo serialization failed (this is a bug): {e}")
-    });
+    let body = serde_json::to_vec(&info)
+        .unwrap_or_else(|e| panic!("VersionInfo serialization failed (this is a bug): {e}"));
     (headers, body)
 }

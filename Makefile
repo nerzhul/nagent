@@ -46,6 +46,18 @@ run-cuda: ## Run with the CUDA GPU backend (requires CUDA toolkit at build time)
 run-mock: ## Run the server locally with the in-process mock backend (no model needed).
 	cargo run -p stt-server --release
 
+.PHONY: run-llm
+run-llm: ## Run with the real Whisper backend on CPU and the LLM proxy enabled (LLM_ENABLED=true).
+	cargo run -p stt-server --release \
+	    --features stt-server/real-backend,stt-core/whisper-rs-backend
+
+.PHONY: smoke-llm
+smoke-llm: ## Smoke-test the LLM proxy: POST a single prompt and check the response stream contains `data:`.
+	@curl -sS -N -X POST "$${NAGENT_URL:-http://localhost:8080}/v1/chat/completions" \
+	    -H "Content-Type: application/json" \
+	    -d '{"messages":[{"role":"user","content":"hello"}],"stream":true}' \
+	    | grep -q '^data:' && echo "llm proxy: OK (streamed `data:` frames received)"
+
 .PHONY: fmt
 fmt: ## cargo fmt --all
 	cargo fmt --all

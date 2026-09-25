@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>nagent STT</title>
+  <title>nagent</title>
   <link rel="stylesheet" href="/static/style.css">
   <!--
     The `@ricky0123/vad-web` package ships only a UMD bundle (no ESM
@@ -26,15 +26,21 @@
 </head>
 <body>
   <header>
-    <h1>nagent STT</h1>
-    <p class="subtitle">Local Whisper transcription with on-device VAD.</p>
+    <h1>nagent</h1>
+    <p class="subtitle">Local Whisper transcription and local-model chat.</p>
     <p class="version-line">
       <span>backend <code id="backend-version">…</code></span>
       <span>frontend <code id="frontend-version-self">…</code></span>
     </p>
+    <nav id="mode-toggle" role="tablist" aria-label="Mode">
+      <button role="tab" id="mode-transcript-btn" aria-selected="true"
+              data-mode="transcript">Transcript</button>
+      <button role="tab" id="mode-discussion-btn" aria-selected="false"
+              data-mode="discussion">Discussion</button>
+    </nav>
   </header>
 
-  <main>
+  <main id="view-transcript" class="view" data-active="true">
     <div id="update-banner" class="update-banner" role="status" aria-live="polite" hidden>
       <span class="update-banner-text">
         A new version of the UI is available.
@@ -82,6 +88,49 @@
     </section>
   </main>
 
+  <main id="view-discussion" class="view" hidden>
+    <header class="chat-header">
+      <h2>Assistant</h2>
+      <label class="chat-model">
+        <span>Model</span>
+        <select id="chat-model"></select>
+      </label>
+      <button id="chat-clear" type="button" class="ghost">Clear</button>
+      <span id="chat-status" class="status idle">idle</span>
+    </header>
+    <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+    <details class="chat-advanced">
+      <summary>Advanced</summary>
+      <label class="chat-system-label">
+        System prompt
+        <textarea id="chat-system" rows="2"
+                  placeholder="You are a helpful assistant."></textarea>
+      </label>
+      <label class="chat-temperature-label">
+        Temperature
+        <input id="chat-temperature" type="number" min="0"
+               max="2" step="0.1" value="0.8">
+      </label>
+    </details>
+    <form id="chat-form">
+      <textarea id="chat-input" rows="2"
+                placeholder="Type a message…" autocomplete="off"></textarea>
+      <div class="chat-form-actions">
+        <button id="chat-send" type="submit">Send</button>
+        <button id="chat-stop" type="button" hidden>Stop</button>
+      </div>
+    </form>
+    <p id="chat-disabled-notice" class="chat-disabled-notice" hidden>
+      Chat disabled on this server.
+    </p>
+  </main>
+
+  <!-- Mode toggle is a plain script (no imports) so it can run as a
+       classic non-module script. chat.js is a module so we can use
+       top-level await + scoped imports cleanly. Both are independent
+       of the UMD globals above. -->
+  <script src="/static/mode.js" defer></script>
+  <script type="module" src="/static/chat.js"></script>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>

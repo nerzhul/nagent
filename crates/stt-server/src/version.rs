@@ -66,7 +66,8 @@ mod tests {
         let v = backend_version();
         assert!(!v.is_empty(), "backend version must not be empty");
         assert!(
-            v.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c.is_ascii_alphabetic()),
+            v.chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c.is_ascii_alphabetic()),
             "backend version `{v}` has unexpected characters"
         );
     }
