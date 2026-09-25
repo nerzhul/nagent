@@ -4,9 +4,12 @@
 // wire-protocol codec) lives in `audio.js` and is shared with
 // Discussion mode. This file is only responsible for wiring the
 // Transcript-mode DOM (`#record-btn`, `#lang-select`, `#translate-check`,
-// `#download-btn`, `#status`, `#backend-info`, `#transcript-list`,
-// `#voice-graph-canvas`, `#voice-graph-level`) on top of an
-// `AudioCapture` instance.
+// `#download-btn`, `#status`, `#backend-info`, `#transcript-list`)
+// on top of an `AudioCapture` instance.
+//
+// The voice graph (`#voice-graph-shared`) is a single DOM element
+// reused by both modes — clicking Record in either view drives the
+// same oscilloscope, so we never end up with two parallel waveforms.
 
 import { AudioCapture } from "/static/audio.js";
 import { preselectFromBrowser } from "/static/lang-preselect.js";
@@ -23,8 +26,8 @@ const clearBtn    = $("clear-btn");
 const statusEl    = $("status");
 const backendEl   = $("backend-info");
 const listEl      = $("transcript-list");
-const scopeCanvas = $("voice-graph-canvas");
-const scopeLevel  = $("voice-graph-level");
+const scopeCanvas = $("voice-graph-shared-canvas");
+const scopeLevel  = $("voice-graph-shared-level");
 const backendVersionEl    = $("backend-version");
 const frontendVersionSelf = $("frontend-version-self");
 const updateBanner        = $("update-banner");
@@ -127,7 +130,7 @@ new AudioCapture({
   statusEl,
   canvasEl: scopeCanvas,
   levelEl: scopeLevel,
-  graphEl: document.querySelector("#view-transcript .voice-graph"),
+  graphEl: $("voice-graph-shared"),
   containerEl: document.getElementById("view-transcript"),
   langSelectEl: langSelect,
   translateCheckEl: translateCk,

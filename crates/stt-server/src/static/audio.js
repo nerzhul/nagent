@@ -21,7 +21,7 @@
 
 const { MicVAD } = globalThis.vad;
 
-const INACTIVITY_TIMEOUT_MS = 8_000;
+const INACTIVITY_TIMEOUT_MS = 5_000;
 const INACTIVITY_SPEECH_THRESHOLD = 0.4; // matches negativeSpeechThreshold
 const INACTIVITY_TICK_MS = 1_000;
 
@@ -208,6 +208,19 @@ function createScope(canvasEl, levelEl) {
   let filled = 0;
   let lastProb = 0;
   let rafId = 0;
+  // Auto-gain state. The VAD hands us PCM samples in [-1, 1], but
+  // real-world speech rarely reaches ±0.5 — a raw `sample * mid`
+  // scaling leaves the waveform as a thin sliver around the centre
+  // line. We track the recent peak and scale so the loudest sample
+  // fills ~85% of the half-height, which makes both quiet and loud
+  // audio readable. The gain is smoothed frame-to-frame so the
+  // display doesn't pump on every transient.
+  let gain = 1;
+  let peakEnv = 0;
+  const PEAK_ATTACK = 0.4;  // fast rise on loud transients
+  const PEAK_DECAY  = 0.05; // slow fall so quiet moments stay readable
+  const MAX_GAIN    = 24;   // cap amplification so noise floor doesn't dominate
+  const TARGET_FILL = 0.76; // fraction of half-height the peak should reach
   // Cached CSS box dimensions used to detect size changes. Both start
   // at 0 so the very first draw always resizes. We deliberately keep
   // `cssW`/`cssH` valid across hide/show cycles (see `ensureReady`)
@@ -231,6 +244,10 @@ function createScope(canvasEl, levelEl) {
     write = 0;
     filled = 0;
     lastProb = 0;
+    // Reset the auto-gain so a fresh capture doesn't inherit the
+    // previous session's gain envelope.
+    gain = 1;
+    peakEnv = 0;
     if (levelEl) levelEl.dataset.speaking = "false";
     draw();
   }
@@ -279,13 +296,38 @@ function createScope(canvasEl, levelEl) {
 
     const n = Math.min(filled, SCOPE_SAMPLES);
     if (n > 0) {
+      // Find the peak amplitude in the current buffer so we can
+      // scale the display. This is the input to the gain envelope
+      // — we update the envelope once per draw (not per sample)
+      // because scanning the ring is cheap but doing it per pixel
+      // would be wasteful.
+      let peak = 0;
+      for (let i = 0; i < n; i++) {
+        const idx = (write - n + i + SCOPE_SAMPLES) % SCOPE_SAMPLES;
+        const a = ring[idx] < 0 ? -ring[idx] : ring[idx];
+        if (a > peak) peak = a;
+      }
+      // Asymmetric envelope: fast attack so loud transients show up
+      // immediately, slow decay so quiet moments stay readable. The
+      // gain itself is clamped so the noise floor doesn't get
+      // amplified into a full-height fuzz when the user goes silent.
+      if (peak > peakEnv) {
+        peakEnv = peakEnv + (peak - peakEnv) * PEAK_ATTACK;
+      } else {
+        peakEnv = peakEnv + (peak - peakEnv) * PEAK_DECAY;
+      }
+      if (peakEnv > 0.005) {
+        const target = Math.min(MAX_GAIN, (mid * TARGET_FILL) / peakEnv);
+        gain = gain + (target - gain) * 0.2;
+      }
+
       ctx.strokeStyle = stroke;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       const step = cssWNow / Math.max(1, n - 1);
       for (let i = 0; i < n; i++) {
         const idx = (write - n + i + SCOPE_SAMPLES) % SCOPE_SAMPLES;
-        const y = mid - ring[idx] * (mid - 1);
+        const y = mid - ring[idx] * (mid - 2) * gain;
         const x = i * step;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);

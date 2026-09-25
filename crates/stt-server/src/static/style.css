@@ -314,13 +314,28 @@ select, input[type="checkbox"] {
   background: var(--ok);
 }
 
-#voice-graph-canvas {
+#voice-graph-shared-canvas {
   display: block;
   width: 100%;
   height: 80px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
+}
+
+/* The shared oscilloscope sits at the top of the page, above the
+ * header. `max-width` keeps the canvas from stretching across
+ * ultra-wide monitors, while `margin: 0 auto` centres it. The
+ * `.is-hidden` toggle (opacity + max-height + padding + margin)
+ * drives the slide-down reveal via the existing transition. */
+#voice-graph-shared {
+  max-width: 920px;
+  margin: 0.75rem auto 0;
+  border-radius: 10px;
+}
+
+#voice-graph-shared .voice-graph-level {
+  width: 8rem;
 }
 
 .transcript {

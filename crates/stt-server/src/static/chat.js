@@ -838,9 +838,12 @@ document.addEventListener("keydown", (e) => {
 const audioCapture = new AudioCapture({
   buttonEl: $("chat-record-btn"),
   statusEl: null, // merged into #chat-status via the onStatusChange callback
-  canvasEl: $("chat-voice-graph-canvas"),
-  levelEl:  $("chat-voice-graph-level"),
-  graphEl:  document.querySelector("#view-discussion .voice-graph"),
+  // Shared oscilloscope: same DOM element as Transcript mode, so a
+  // single waveform shows up regardless of which view the user is
+  // in when they click Record.
+  canvasEl: $("voice-graph-shared-canvas"),
+  levelEl:  $("voice-graph-shared-level"),
+  graphEl:  $("voice-graph-shared"),
   containerEl: document.getElementById("view-discussion"),
   langSelectEl: $("chat-lang-select"),
   translateCheckEl: $("chat-translate-check"),

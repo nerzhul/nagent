@@ -53,6 +53,25 @@
   <script src="/static/vendor/katex/contrib/auto-render.min.js" defer></script>
 </head>
 <body>
+  <!-- Shared oscilloscope: a single DOM element reused by both modes
+       so clicking Record in either Transcript or Discussion drives
+       the same visual. Hidden by default; AudioCapture._setGraphVisible
+       toggles `.is-hidden` when recording starts/stops. Placed at the
+       top of the body so it sits above the mode toggle and the active
+       view, giving the waveform maximum horizontal room regardless of
+       which sidebar / layout the active view has. -->
+  <section class="voice-graph is-hidden" id="voice-graph-shared"
+           aria-label="Live microphone waveform">
+    <div class="voice-graph-header">
+      <span class="voice-graph-label">Live input</span>
+      <span id="voice-graph-shared-level" class="voice-graph-level"
+            title="Speech probability">
+        <span class="bar"></span>
+      </span>
+    </div>
+    <canvas id="voice-graph-shared-canvas"></canvas>
+  </section>
+
   <header>
     <h1>nagent</h1>
     <p class="subtitle">Local Whisper transcription and local-model chat.</p>
@@ -98,22 +117,12 @@
       </label>
       <label>
         <input type="checkbox" id="inactivity-check" checked>
-        Auto-stop after 8s of silence
+        Auto-stop after 5s of silence
       </label>
       <button id="download-btn" type="button" disabled>Download .txt</button>
       <button id="clear-btn" type="button" class="ghost" disabled>Clear</button>
       <span id="status" class="status idle">idle</span>
       <span id="backend-info" class="backend-info"></span>
-    </section>
-
-    <section class="voice-graph" aria-label="Live microphone waveform">
-      <div class="voice-graph-header">
-        <span class="voice-graph-label">Live input</span>
-        <span id="voice-graph-level" class="voice-graph-level" title="Speech probability">
-          <span class="bar"></span>
-        </span>
-      </div>
-      <canvas id="voice-graph-canvas"></canvas>
     </section>
 
     <section class="transcript">
@@ -159,16 +168,6 @@
         <input type="checkbox" id="chat-translate-check"> Translate to English
       </label>
       <span id="chat-backend-info" class="backend-info"></span>
-    </section>
-
-    <section class="voice-graph" aria-label="Live microphone waveform">
-      <div class="voice-graph-header">
-        <span class="voice-graph-label">Live input</span>
-        <span id="chat-voice-graph-level" class="voice-graph-level" title="Speech probability">
-          <span class="bar"></span>
-        </span>
-      </div>
-      <canvas id="chat-voice-graph-canvas"></canvas>
     </section>
 
     <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
