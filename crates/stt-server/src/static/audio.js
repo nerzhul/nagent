@@ -519,8 +519,19 @@ export class AudioCapture {
   }
 
   setButtonLabel(label, dataState) {
-    this.cfg.buttonEl.textContent = label;
     this.cfg.buttonEl.dataset.state = dataState;
+    // Only write `textContent` when the button has no child elements
+    // (Transcript mode's plain text button). The Discussion-mode
+    // record button carries inline SVG icons that swap visibility
+    // via CSS based on `data-state`; writing `textContent` would
+    // wipe the icons out on the first state transition and leave a
+    // bare "Stop" label with no icon. `childElementCount` is stable
+    // across state changes — the button either ships with icons in
+    // the HTML (chat mode) or ships plain (transcript mode), and
+    // we never add children at runtime.
+    if (this.cfg.buttonEl.childElementCount === 0) {
+      this.cfg.buttonEl.textContent = label;
+    }
   }
 
   setStatus(text, cls) {
@@ -601,6 +612,30 @@ export class AudioCapture {
    */
   stop() {
     this._stop();
+  }
+
+  /**
+   * Public toggle. Starts recording when idle, stops when active.
+   * Mirrors clicking the record button so external triggers (keyboard
+   * shortcuts, programmatic activation) go through the same
+   * validation / state-machine as a user click — in particular the
+   * container-hidden guard and the `_aborted` cleanup at the top of
+   * a fresh attempt.
+   */
+  async toggle() {
+    if (this.recording) {
+      this._stop();
+      return;
+    }
+    await this._onButtonClick();
+  }
+
+  /**
+   * Whether the capture is currently recording. Used by the chat UI
+   * to decide whether a keyboard shortcut should start or stop.
+   */
+  isRecording() {
+    return this.recording;
   }
 
   async _ensureVad() {

@@ -811,6 +811,28 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
+// Global voice shortcut: Ctrl+Shift+D (or Cmd+Shift+D on macOS)
+// toggles the voice recording session, regardless of which element
+// currently has focus. Bound at the document level so the user can
+// trigger it from the textarea, the sidebar, or anywhere else in
+// the Discussion view without first clicking the mic button.
+//
+// We gate on `globalThis.__nagentMode?.current() === "discussion"`
+// so the shortcut is a no-op while the Transcript view is active —
+// no point starting a voice capture that would land in the wrong
+// mode's transcript. `preventDefault` stops Chromium from
+// interpreting Ctrl+D as "bookmark this page", which would steal
+// focus and pop a dialog on some browsers.
+document.addEventListener("keydown", (e) => {
+  if (globalThis.__nagentMode?.current() !== "discussion") return;
+  if (e.key !== "D" && e.key !== "d") return;
+  if (!e.shiftKey) return;
+  if (!e.ctrlKey && !e.metaKey) return;
+  if (e.altKey) return;
+  e.preventDefault();
+  audioCapture.toggle();
+});
+
 // ---- Audio capture (Discussion mode) ---------------------------------------
 
 const audioCapture = new AudioCapture({

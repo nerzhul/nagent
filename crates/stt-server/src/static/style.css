@@ -580,31 +580,81 @@ select, input[type="checkbox"] {
   font-size: 0.85rem;
 }
 
-#chat-record-btn:not(:disabled) {
-  background: var(--accent);
-  color: #0b0d10;
+/* Voice record button: sits in the chat form, to the left of the
+ * send button. Same footprint as send/stop so swapping states
+ * doesn't reflow the row. The icon swaps via CSS based on the
+ * `data-state` attribute that AudioCapture sets — mic when idle,
+ * stop square when recording — so we don't need a JS-side icon
+ * swap. A subtle pulse on the recording state signals the mic is
+ * live without being distracting. */
+#chat-record-btn {
+  flex: 0 0 auto;
+  width: 2.6rem;
+  height: 2.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease,
+              transform 80ms ease, box-shadow 120ms ease;
+}
+
+#chat-record-btn:hover:not(:disabled) {
+  background: var(--bg);
   border-color: var(--accent);
-  font-weight: 600;
-  min-width: 6rem;
 }
 
-#chat-record-btn:not(:disabled):hover {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
+#chat-record-btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
-#chat-record-btn[data-state="recording"]:not(:disabled) {
+#chat-record-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Icon swap: mic visible by default, stop square visible while
+ * recording. Using a sibling selector means the JS layer doesn't
+ * have to touch the DOM to change the icon — AudioCapture already
+ * flips the `data-state` attribute. */
+#chat-record-btn .chat-record-icon-stop { display: none; }
+#chat-record-btn[data-state="recording"] .chat-record-icon-mic { display: none; }
+#chat-record-btn[data-state="recording"] .chat-record-icon-stop { display: block; }
+
+/* Recording state: red background + pulsing ring so the user can
+ * tell at a glance that the mic is live. The pulse is a single
+ * slow ease-out so it reads as "active" rather than "alert". */
+#chat-record-btn[data-state="recording"] {
   background: var(--error);
   border-color: var(--error);
   color: #fff;
+  animation: chat-record-pulse 1.8s ease-out infinite;
 }
 
-#chat-record-btn[data-state="recording"]:not(:disabled):hover {
+#chat-record-btn[data-state="recording"]:hover:not(:disabled) {
   background: #ff6b63;
   border-color: #ff6b63;
 }
 
-#chat-record-btn[data-state="loading"] { opacity: 0.7; }
+@keyframes chat-record-pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(248, 81, 73, 0.45); }
+  70%  { box-shadow: 0 0 0 8px rgba(248, 81, 73, 0);    }
+  100% { box-shadow: 0 0 0 0   rgba(248, 81, 73, 0);    }
+}
+
+#chat-record-btn[data-state="loading"] {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+#chat-record-btn svg {
+  display: block;
+}
 
 .chat-header h2 {
   margin: 0;
