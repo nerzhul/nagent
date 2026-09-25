@@ -251,3 +251,183 @@ async fn chat_js_carries_math_bracket_normalizer() {
         "chat.js declares `function renderMarkdown` {render_md_count} times (expected 1). Duplicate declarations make the chat fail with `Uncaught SyntaxError: redeclaration of function renderMarkdown` on first reply."
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audio_js_routes_shared_vad_through_active_recorder() {
+    // Both Transcript and Discussion modes create their own
+    // `AudioCapture` (each with its own WebSocket) but share a single
+    // MicVAD — there is only one microphone stream. MicVAD accepts
+    // its `onFrameProcessed` / `onSpeechEnd` callbacks *once at
+    // construction time* and offers no API to swap them later, so the
+    // shared closures must dispatch through a mutable "active
+    // recorder" pointer that the currently-recording instance sets in
+    // `_onButtonClick` and clears in `_stop`. Without this dispatch,
+    // the first instance to call `ensureVad()` permanently owns the
+    // VAD events — audio frames would keep being sent through that
+    // instance's (eventually closed) WebSocket, and the second
+    // instance would silently stop receiving FinalTranscripts after a
+    // single mode switch.
+    //
+    // This is a substring-level guard: it does not exercise the JS,
+    // it only fails if the dispatch mechanism disappears from the
+    // served file (e.g. a refactor reintroduces per-instance closures
+    // that capture `this`).
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/audio.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        body.contains("let activeRecorder = null"),
+        "audio.js is missing the module-level `activeRecorder` pointer. Without it, the first AudioCapture to initialize the VAD permanently owns the shared MicVAD callbacks and the second mode silently loses voice input."
+    );
+
+    // The shared VAD's frame and speech-end callbacks must route
+    // through `activeRecorder`, not capture `this` of whichever
+    // instance initialized the VAD first. We check for the dispatch
+    // shim inside both callbacks.
+    assert!(
+        body.contains("const rec = activeRecorder;")
+            && body.contains("rec.pendingAudioTs.push(performance.now());")
+            && body.contains("rec._sendFrame(encodeAudioFrame(audioFloat32));"),
+        "audio.js VAD closures do not dispatch through `activeRecorder`. Audio frames will be sent to the wrong instance's WebSocket on mode switches."
+    );
+
+    // The pointer must be set *before* `sharedVad.start()` so the
+    // first post-resume frame already routes to the new instance's
+    // WebSocket, and cleared in `_stop()` so stale frames between
+    // `sharedVad.pause()` and the WS close get dropped.
+    assert!(
+        body.contains("activeRecorder = this;")
+            && body.contains("if (activeRecorder === this) activeRecorder = null;"),
+        "audio.js does not set/clear `activeRecorder` on the recorder lifecycle. Either the wiring is missing or it has been moved to the wrong hook."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audio_js_yields_other_recorders_on_record_click() {
+    // Pressing Record in one mode must stop the other mode's
+    // `AudioCapture` and discard the audio it was capturing at that
+    // instant — otherwise the user gets a stray FinalTranscript in
+    // the wrong mode whenever they cross-talk between Transcript
+    // and Discussion. Implementation contract:
+    //
+    //   - Every `AudioCapture` registers itself in a module-level
+    //     set so the Record-click handler can find its siblings.
+    //   - Each click captures a generation counter, then iterates
+    //     that set and `_stop()`s every other instance.
+    //   - Each `_stop()` bumps the generation, and the in-flight
+    //     `_onButtonClick` checks it after every `await` to avoid
+    //     racing through `_connect()` after a takeover.
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/audio.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        body.contains("const allRecorders = new Set()"),
+        "audio.js is missing the module-level `allRecorders` registry. Without it, clicking Record in one mode has no way to find and stop the AudioCapture instance owned by the other mode."
+    );
+
+    // The constructor must register `this`. We check for the call site
+    // rather than the constructor line because the source has shifted
+    // around across refactors and a brittle anchor would fail
+    // unnecessarily.
+    assert!(
+        body.contains("allRecorders.add(this)"),
+        "audio.js no longer registers each AudioCapture in `allRecorders` from its constructor. Cross-instance takeover is impossible."
+    );
+
+    // The Record-click handler must iterate the registry and `_stop()`
+    // every peer before starting its own session.
+    assert!(
+        body.contains("for (const other of allRecorders)")
+            && body.contains("if (other !== this) other._stop()"),
+        "audio.js Record-click handler no longer tears down peer AudioCapture instances. Pressing Record in one mode leaves the other mode's session running, and audio captured at that instant still ends up in its transcript/chat."
+    );
+
+    // Generation counter: each click must capture its own generation,
+    // and each `_stop()` must bump it, so an in-flight setup bails out
+    // after a takeover instead of clobbering `activeRecorder`.
+    assert!(
+        body.contains("this._clickGeneration = 0")
+            && body.contains("++this._clickGeneration")
+            && body.contains("myGen !== this._clickGeneration"),
+        "audio.js is missing the click-generation guard. After a takeover, the losing click can race past `await this._connect()` and overwrite `activeRecorder`, breaking the new owner."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_aborts_inflight_reply_on_mode_toggle() {
+    // Switching modes is symmetric in the visual layer (`.view[hidden]
+    // { display: none }` hides the inactive view), but the in-flight
+    // LLM reply in Discussion is owned by `chat.js` and has no DOM
+    // hook — it needs an explicit `modechange` listener that aborts
+    // the controller and resets the turn queue. Without it, tokens
+    // keep streaming into a hidden view and any queued turns (typed
+    // or transcribed) wake up against a session the user just left.
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        body.contains(r#"document.addEventListener("modechange""#),
+        "chat.js does not listen for `modechange`. Switching to the Transcript tab while a chat reply is streaming leaves tokens flowing into the hidden Discussion view."
+    );
+
+    // The listener must (a) only act on the way *out* of Discussion
+    // (otherwise switching back would abort nothing-and-everything),
+    // and (b) actually abort the controller + drop the queue — same
+    // teardown shape as `switchToSession` / `newSession` / `clearChat`.
+    assert!(
+        body.contains("e?.detail?.mode === \"discussion\"")
+            && body.contains("if (inflight) inflight.controller.abort()")
+            && body.contains("resetTurnQueue()"),
+        "chat.js modechange handler does not call both `inflight.controller.abort()` and `resetTurnQueue()`, or it does not guard against firing when switching back to Discussion. Without both calls the in-flight reply or the queued turns survive a mode switch."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn css_hides_inactive_view_with_higher_specificity() {
+    // Both mode views are `<main>` elements. The Transcript tab sets
+    // `hidden` on `#view-discussion` (and vice versa) to swap the
+    // active panel. CSS specificity is the catch: `#view-discussion
+    // { display: flex; ... }` has specificity (1, 0, 0), so a plain
+    // `.view[hidden] { display: none; }` rule at (0, 2, 0) loses and
+    // the Discussion panel keeps showing — the user clicks Transcript
+    // and nothing visibly changes (besides the in-flight abort path).
+    //
+    // The fix raises the hide rule's specificity by including the ID,
+    // so `(1, 1, 0)` beats the flex override. This test guards the
+    // served CSS for both halves of that contract: the selector list
+    // mentions both view IDs, and it really is `display: none`.
+    let base = serve_once().await;
+    let css = reqwest::get(format!("{base}/static/style.css"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The hide rule must mention both view IDs together with the
+    // `[hidden]` attribute and `display: none`. We don't pin the
+    // exact line layout (single-line vs multi-line) — a brittle
+    // anchor would just force a future formatter refactor to fight
+    // this test.
+    assert!(
+        css.contains("#view-transcript[hidden]")
+            && css.contains("#view-discussion[hidden]")
+            && css.contains("display: none"),
+        "style.css no longer carries the high-specificity `[hidden] {{ display: none }}` rule for both view IDs. Without it, the `#view-discussion {{ display: flex }}` rule wins on specificity and the inactive view stays visible after a mode switch."
+    );
+}

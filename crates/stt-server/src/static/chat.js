@@ -996,3 +996,32 @@ document.addEventListener("visibilitychange", () => {
     loadModels();
   }
 });
+
+// Mode-toggle abort: when the user clicks the Transcript tab while a
+// chat reply is streaming (or a turn is queued behind it), tear the
+// work down. The voice recording is already stopped by the
+// `MutationObserver` inside `AudioCapture` — the view going `hidden`
+// triggers `_stop()` on the Discussion instance, which sends
+// `StopSession`, closes the WS, pauses the shared VAD, and resets the
+// pill. The LLM streaming reply is owned by this module, though, so
+// it has no equivalent hook. Without this listener, tokens keep
+// arriving on the now-hidden Discussion view, and any user turn that
+// was queued (typed and not yet sent through, or transcribed and
+// waiting on the in-flight reply) wakes up against a session the
+// user has just left.
+//
+// Symmetry: this mirrors what `switchToSession` / `newSession` /
+// `clearChat` already do for intra-mode navigation. Same two-step
+// (abort the controller, then `resetTurnQueue`), same rationale for
+// writing the "(stopped)" marker via `inflight.sessionId` so the
+// partial reply is preserved against the session that was active at
+// request start.
+//
+// We only act on the way *out* of Discussion. Switching back to it
+// is a no-op — we already cancelled the in-flight reply on the way
+// out, and there is no new work to interrupt.
+document.addEventListener("modechange", (e) => {
+  if (e?.detail?.mode === "discussion") return;
+  if (inflight) inflight.controller.abort();
+  resetTurnQueue();
+});

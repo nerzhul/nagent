@@ -30,13 +30,84 @@ const INACTIVITY_TICK_MS = 1_000;
 // The Silero model is a ~3 MB download; we do not want to fetch it
 // twice when the user toggles between Transcript and Discussion.
 // `ensureVad` is idempotent: the second caller gets the same instance.
+//
+// The two modes each own their own `AudioCapture` (its own WebSocket,
+// its own recording state, its own pending-frames queue) but share the
+// underlying MicVAD — there is only one microphone stream.
+//
+// **Cross-mode dispatch**: MicVAD accepts `onFrameProcessed` and
+// `onSpeechEnd` callbacks *once at construction time* and offers no
+// API to swap them later. The Transcript and Discussion instances are
+// created independently, so a naive implementation would let the
+// *first* instance to call `ensureVad()` permanently own those
+// closures: every VAD event would be sent through that instance's
+// (eventually closed) WebSocket, and the second instance would
+// silently stop receiving FinalTranscripts after a single mode
+// switch — without any visible error.
+//
+// To route VAD events to whichever instance is currently recording,
+// the shared closures dispatch through `activeRecorder`, a
+// module-level pointer the active instance sets in `_onButtonClick`
+// and clears in `_stop`. The closures themselves capture no
+// `AudioCapture` `this`, only `activeRecorder`, so the wiring stays
+// valid across mode switches for the lifetime of the page.
 let sharedVad = null;
 let sharedVadPromise = null;
+let activeRecorder = null;
+// Every AudioCapture instance registers itself here at construction
+// time so a Record click can tear down any *other* instance before
+// starting. The Transcript and Discussion `AudioCapture`s are
+// constructed in independent modules (`app.js` and `chat.js`) and
+// don't know about each other — this set is the single source of
+// truth for "every audio recorder that exists on this page". Set
+// membership is constant for the page lifetime (instances are
+// module-level and never replaced), so iteration stays cheap.
+const allRecorders = new Set();
 
-function ensureVad(opts) {
+function ensureVad() {
   if (sharedVad) return Promise.resolve(sharedVad);
   if (sharedVadPromise) return sharedVadPromise;
-  sharedVadPromise = MicVAD.new(opts).then((v) => {
+  const VAD_DIST = "/static/vendor/vad/";
+  sharedVadPromise = MicVAD.new({
+    model: "v6",
+    baseAssetPath: VAD_DIST,
+    onnxWASMBasePath: VAD_DIST,
+    onFrameProcessed: (probs, frame) => {
+      const rec = activeRecorder;
+      if (!rec) return;
+      const prob =
+        typeof probs === "number"
+          ? probs
+          : (probs && (probs.isSpeech || probs.speechProb || 0)) || 0;
+      rec.scope.setProb(prob);
+      rec.scope.push(frame);
+      rec.scope.scheduleDraw();
+      // Reset the inactivity watchdog on any frame that crosses the
+      // speech-probability threshold. Using the lower
+      // negativeSpeechThreshold keeps short vocalizations from being
+      // swallowed by `minSpeechFrames` debouncing.
+      if (rec.recording && prob >= INACTIVITY_SPEECH_THRESHOLD) {
+        rec.lastSpeechAt = performance.now();
+      }
+    },
+    onSpeechStart: () => {},
+    onSpeechEnd: (audioFloat32) => {
+      const rec = activeRecorder;
+      if (!rec) return;
+      rec.pendingAudioTs.push(performance.now());
+      rec._sendFrame(encodeAudioFrame(audioFloat32));
+    },
+    positiveSpeechThreshold: 0.6,
+    negativeSpeechThreshold: 0.4,
+    minSpeechFrames: 6,
+    preSpeechPadFrames: 1,
+    postSpeechPadFrames: 3,
+    ortConfig: (ort) => {
+      ort.env.logLevel = "error";
+      ort.env.wasm.proxy = false;
+      ort.env.wasm.numThreads = 1;
+    },
+  }).then((v) => {
     sharedVad = v;
     sharedVadPromise = null;
     return v;
@@ -428,6 +499,17 @@ export class AudioCapture {
     // `await` chain instead of e.g. starting the VAD on a view the
     // user has just left. It is reset at the top of each click.
     this._aborted = false;
+    // Click-generation counter. Bumped on every `_stop()` and at the
+    // top of every `_onButtonClick`. Each `_onButtonClick` captures
+    // its own generation at entry and checks it after every `await`:
+    // if a concurrent click (or a takeover by the other mode's
+    // Record button) called our `_stop()` while we were suspended,
+    // the generation changed and we bail out instead of clobbering
+    // the new owner of `activeRecorder`. Pairs with `_aborted`:
+    // `_aborted` is the in-band signal inside our own state machine,
+    // `_clickGeneration` is the cross-instance "your setup is stale"
+    // signal.
+    this._clickGeneration = 0;
 
     // Inactivity watchdog state. `lastSpeechAt` is bumped from the VAD
     // frame callback whenever the speech probability clears the
@@ -481,6 +563,11 @@ export class AudioCapture {
     if (cfg.canvasEl) {
       globalThis.addEventListener("resize", () => this.scope.scheduleDraw());
     }
+
+    // Register for cross-instance takeover. Done last so a
+    // constructor exception above doesn't leave a stale entry in the
+    // set that another Record click would try to `_stop()`.
+    allRecorders.add(this);
   }
 
   _setGraphVisible(visible) {
@@ -589,8 +676,39 @@ export class AudioCapture {
       this._stop();
       return;
     }
+    // Capture our generation at entry. Every `_stop()` bumps it (see
+    // below), so any await that resumes after a stop on this same
+    // instance will see the mismatch and bail out instead of
+    // proceeding to clobber the new owner of `activeRecorder`.
+    const myGen = ++this._clickGeneration;
+    // Cross-mode takeover: when the user presses Record in this
+    // mode, the *other* mode's `AudioCapture` (if any) must yield
+    // immediately. We call `_stop()` on every other instance up
+    // front, regardless of its current state. Three cases:
+    //
+    //   1. The other mode is fully recording → `_stop` sends
+    //      `StopSession` (so the server discards any in-flight STT
+    //      inference for that session), closes its WS, pauses the
+    //      shared VAD, and resets its UI. The audio that was being
+    //      captured at the moment of the click is dropped — exactly
+    //      the "don't process what was being said" semantics the
+    //      user asked for.
+    //
+    //   2. The other mode is mid-loading (VAD still loading, WS not
+    //      yet open) → `_stop` is mostly a no-op (the WS close is a
+    //      null-safe no-op), but it sets `_aborted` and bumps the
+    //      generation, so the other instance's in-flight
+    //      `_onButtonClick` bails at its next checkpoint instead of
+    //      opening a competing WS.
+    //
+    //   3. The other mode is idle → `_stop` is a no-op.
+    for (const other of allRecorders) {
+      if (other !== this) other._stop();
+    }
     // Fresh attempt — clear any abort flag left by a previous
-    // container-hide so the awaits below can run to completion.
+    // container-hide or a takeover so the awaits below can run to
+    // completion. (Our own `_stop()` from the loop above ran on the
+    // *other* instance; ours is still false.)
     this._aborted = false;
     this.cfg.buttonEl.disabled = true;
     this.setButtonLabel("Loading…", "loading");
@@ -598,11 +716,26 @@ export class AudioCapture {
     try {
       this.setStatus("Loading speech model…", "loading");
       await this._ensureVad();
-      // The user may have switched tabs while the VAD was loading;
-      // bail out before we start the audio pipeline on a hidden view.
+      // The user may have switched tabs while the VAD was loading,
+      // or the other mode's Record button may have just stomped us
+      // — either way, bail before we start the audio pipeline.
+      if (myGen !== this._clickGeneration) return;
       if (this._aborted) return;
       await this._connect();
+      if (myGen !== this._clickGeneration) return;
       if (this._aborted) return;
+      // Belt-and-braces: even though the takeover loop above ran
+      // before the awaits, defend against a future change that lets
+      // a third click come in mid-flight. `activeRecorder` must be
+      // either null (idle) or us, otherwise someone else owns the
+      // shared VAD callbacks and we'd be sending frames nowhere.
+      if (activeRecorder && activeRecorder !== this) return;
+      // Become the active VAD consumer *before* resuming `sharedVad`,
+      // so the first post-resume frames already route to this
+      // instance's WebSocket — not to whatever instance held the
+      // pointer last. Set `recording` for the same reason: the VAD
+      // frame callback gates the inactivity-watchdog reset on it.
+      activeRecorder = this;
       sharedVad.start();
       this.recording = true;
       // Seed the inactivity timer with `now` so a brand-new session
@@ -616,6 +749,7 @@ export class AudioCapture {
       // already put the UI back into a clean idle state — don't
       // overwrite that with an error and a hidden graph flip.
       if (this._aborted) return;
+      if (myGen !== this._clickGeneration) return;
       this.setStatus(`error: ${e?.message || e}`, "error");
       console.error(e);
       this.setButtonLabel("Record", "idle");
@@ -630,6 +764,19 @@ export class AudioCapture {
     // starting the VAD or opening a WebSocket on a view the user has
     // just left. Reset at the top of the next click attempt.
     this._aborted = true;
+    // Bump the generation so any concurrent `_onButtonClick` on
+    // this same instance (e.g. a double-click that slipped past the
+    // disabled-button guard) sees its checkpoint fail and bails out
+    // instead of racing us through `await this._connect()`.
+    this._clickGeneration++;
+    // Release the shared VAD's `activeRecorder` slot *only* if we
+    // still own it — otherwise a fresh instance that already took over
+    // would get its pointer yanked out from under it. Any frames that
+    // were already in flight when `sharedVad.pause()` ran below will
+    // see `activeRecorder === null` and be dropped, which is the
+    // correct behaviour: this session is gone, the user explicitly
+    // asked to stop (or the container is being hidden).
+    if (activeRecorder === this) activeRecorder = null;
     this._cancelInactivityCheck();
     try { sharedVad?.pause(); } catch {}
     try {
@@ -681,45 +828,14 @@ export class AudioCapture {
   }
 
   async _ensureVad() {
+    // The shared VAD's callbacks are registered once (by whichever
+    // instance first reached this method) and dispatch through the
+    // module-level `activeRecorder` pointer. By the time we get here,
+    // `ensureVad()` is a no-op for every caller after the first, so
+    // there is nothing per-instance to configure — just guard against
+    // re-entering on the same instance.
     if (this.vadReady) return;
-    const VAD_DIST = "/static/vendor/vad/";
-    const ORT_DIST = "/static/vendor/vad/";
-    await ensureVad({
-      model: "v6",
-      baseAssetPath: VAD_DIST,
-      onnxWASMBasePath: ORT_DIST,
-      onFrameProcessed: (probs, frame) => {
-        const prob =
-          typeof probs === "number"
-            ? probs
-            : (probs && (probs.isSpeech || probs.speechProb || 0)) || 0;
-        this.scope.setProb(prob);
-        this.scope.push(frame);
-        this.scope.scheduleDraw();
-        // Reset the inactivity watchdog on any frame that crosses the
-        // speech-probability threshold. Using the lower
-        // negativeSpeechThreshold keeps short vocalizations from being
-        // swallowed by `minSpeechFrames` debouncing.
-        if (this.recording && prob >= INACTIVITY_SPEECH_THRESHOLD) {
-          this.lastSpeechAt = performance.now();
-        }
-      },
-      onSpeechStart: () => {},
-      onSpeechEnd: (audioFloat32) => {
-        this.pendingAudioTs.push(performance.now());
-        this._sendFrame(encodeAudioFrame(audioFloat32));
-      },
-      positiveSpeechThreshold: 0.6,
-      negativeSpeechThreshold: 0.4,
-      minSpeechFrames: 6,
-      preSpeechPadFrames: 1,
-      postSpeechPadFrames: 3,
-      ortConfig: (ort) => {
-        ort.env.logLevel = "error";
-        ort.env.wasm.proxy = false;
-        ort.env.wasm.numThreads = 1;
-      },
-    });
+    await ensureVad();
     this.vadReady = true;
   }
 

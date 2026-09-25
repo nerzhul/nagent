@@ -417,7 +417,18 @@ select, input[type="checkbox"] {
   padding: 1rem 1.5rem 4rem;
 }
 
-.view[hidden] { display: none; }
+/* Hide the inactive mode's `<main>` when `hidden` is set on it by
+ * `applyMode()`. Specificity is *deliberately* raised to (1, 1, 0)
+ * via the ID so it beats the `#view-discussion { display: flex; ... }`
+ * rule below (specificity 1, 0, 0). Without the ID in the selector,
+ * the flex display wins and the Discussion view stays visible after
+ * the user clicks the Transcript tab — a subtle regression where
+ * switching modes appears to do nothing visually. The Transcript
+ * view has no `display` override, so it never hit the bug, but it is
+ * listed here for symmetry and so a future flex layout for it
+ * inherits the same guarantee. */
+#view-transcript[hidden],
+#view-discussion[hidden] { display: none; }
 
 /* Discussion mode needs a wider canvas than the default `.view`
  * cap (920px) — the 260px sidebar eats into that, leaving the chat
