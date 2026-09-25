@@ -26,6 +26,44 @@ pub struct Config {
     /// Limits applied to inbound WebSocket frames (defence against
     /// malicious or buggy clients).
     pub limits: LimitsConfig,
+    /// Per-source-IP rate limits. Applied at the HTTP layer for the
+    /// LLM proxy (`/v1/*`) and at the WebSocket upgrade + per-frame
+    /// layer for the STT pipeline. Loopback IPs always bypass.
+    pub rate_limit: RateLimitConfig,
+}
+
+/// Rate-limit knobs applied per source IP.
+///
+/// Two independent buckets are exposed because the STT pipeline and
+/// the LLM proxy have very different cost profiles: STT is bounded by
+/// the inference queue and should be relatively permissive (default
+/// 120 frames/min ≈ 2 per second, enough for live VAD-driven speech);
+/// the LLM proxy can saturate an external Ollama install much faster
+/// and stays at 30 req/min by default.
+///
+/// See [`crate::rate_limit`] for the implementation.
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum STT WS frames per source IP per minute. A token is
+    /// consumed per inbound `AudioFrame` / `StartSession` / `Config`
+    /// payload (and one at the WS upgrade).
+    pub stt_per_min: u32,
+    /// Maximum LLM HTTP requests per source IP per minute. Applied
+    /// to `/v1/chat/completions` and `/v1/models`.
+    pub llm_per_min: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        // Defaults match the values committed in the plan:
+        // 120 STT frames/min, 30 LLM req/min.
+        const DEFAULT_STT_PER_MIN: u32 = 120;
+        const DEFAULT_LLM_PER_MIN: u32 = 30;
+        Self {
+            stt_per_min: DEFAULT_STT_PER_MIN,
+            llm_per_min: DEFAULT_LLM_PER_MIN,
+        }
+    }
 }
 
 /// Limits applied to inbound WebSocket frames.
@@ -87,6 +125,7 @@ impl Config {
 
         let limits = LimitsConfig::from_env()?;
         let llm = LlmConfig::from_env()?;
+        let rate_limit = RateLimitConfig::from_env()?;
 
         Ok(Self {
             bind_addr,
@@ -95,6 +134,7 @@ impl Config {
             session_idle_timeout,
             infer_timeout,
             limits,
+            rate_limit,
             llm,
         })
     }
@@ -113,6 +153,16 @@ impl LimitsConfig {
                 "MAX_LANGUAGE_HINT_BYTES",
                 defaults.max_language_hint_bytes,
             )?,
+        })
+    }
+}
+
+impl RateLimitConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            stt_per_min: parse_env("STT_RATE_PER_MIN", defaults.stt_per_min)?,
+            llm_per_min: parse_env("LLM_RATE_PER_MIN", defaults.llm_per_min)?,
         })
     }
 }
@@ -197,4 +247,25 @@ pub enum ConfigError {
     InvalidBindAddr(String),
     #[error("invalid env var {0}: {1}")]
     InvalidEnv(String, String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_defaults_match_plan() {
+        // We test the `Default` impl directly rather than round-tripping
+        // through `from_env()`: mutating process-global env vars from
+        // unit tests is racy under `cargo test`'s parallel harness and
+        // would race with the WS-validation tests that also rely on
+        // env state. The env-var wiring is covered end-to-end by the
+        // `rate_limit` integration tests' `start_test_server_with` helper.
+        let cfg = RateLimitConfig::default();
+        assert_eq!(
+            cfg.stt_per_min, 120,
+            "STT_RATE_PER_MIN default should be 120"
+        );
+        assert_eq!(cfg.llm_per_min, 30, "LLM_RATE_PER_MIN default should be 30");
+    }
 }

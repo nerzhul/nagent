@@ -19,8 +19,12 @@ use axum::routing::{get, post};
 use axum::Router;
 use stt_core::{MockBackend, WhisperBackend};
 use stt_server::{
-    build_router, config::LlmConfig, llm::LlmClient, session::SessionMap, AppState,
-    Config as ServerConfig,
+    build_router,
+    config::{LlmConfig, RateLimitConfig},
+    llm::LlmClient,
+    rate_limit::{RateLimitPolicy, RateLimiter},
+    session::SessionMap,
+    AppState, Config as ServerConfig,
 };
 use tokio::net::TcpListener;
 
@@ -96,6 +100,7 @@ async fn start_test_server_with_llm(
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
+        rate_limit: RateLimitConfig::default(),
         llm: LlmConfig {
             enabled: true,
             base_url: upstream_url,
@@ -122,6 +127,12 @@ async fn start_test_server_with_llm(
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm: Some(llm_client),
+        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
+            RateLimitConfig::default().stt_per_min,
+        )),
+        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
+            RateLimitConfig::default().llm_per_min,
+        )),
     });
 
     let app = build_router(state);
@@ -155,6 +166,7 @@ async fn start_test_server_disabled() -> String {
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
+        rate_limit: RateLimitConfig::default(),
         llm: LlmConfig {
             enabled: false,
             base_url: "http://localhost:11434".into(),
@@ -174,6 +186,12 @@ async fn start_test_server_disabled() -> String {
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm: None,
+        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
+            RateLimitConfig::default().stt_per_min,
+        )),
+        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
+            RateLimitConfig::default().llm_per_min,
+        )),
     });
 
     let app = build_router(state);

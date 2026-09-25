@@ -5,7 +5,9 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use stt_server::{build_router, llm, router, session, watchdog, AppState, Config};
+use stt_server::{
+    build_rate_limiters, build_router, llm, router, session, watchdog, AppState, Config,
+};
 
 use tokio::sync::mpsc;
 use tracing::info;
@@ -62,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         info!("LLM proxy disabled (set LLM_ENABLED=true to enable)");
         None
     };
+    let (stt_rate_limiter, llm_rate_limiter) = build_rate_limiters(&cfg);
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),
@@ -69,6 +72,8 @@ async fn main() -> anyhow::Result<()> {
         ready,
         config: Arc::new(cfg.clone()),
         llm,
+        stt_rate_limiter,
+        llm_rate_limiter,
     });
 
     let app = build_router(state);

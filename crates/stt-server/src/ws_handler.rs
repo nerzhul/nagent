@@ -10,16 +10,19 @@
 
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
+use std::net::{IpAddr, SocketAddr};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use stt_core::{InferRequest, InferenceJob};
 use stt_proto::{decode_frame, encode_frame, BackendInfo, ErrorMessage, Payload};
 
+use crate::rate_limit::RateLimitError;
 use crate::router::send_to_session;
 use crate::session::{register, unregister, OutboundMessage};
 use crate::static_assets::{mime_for, StaticAssets};
@@ -28,16 +31,62 @@ use crate::version::VersionInfo;
 use crate::AppState;
 
 /// Handle a WebSocket upgrade request.
+///
+/// One token is consumed from the STT rate limiter keyed by the peer
+/// IP. A bucket miss is reported as `429 Too Many Requests` on the
+/// HTTP upgrade handshake rather than as a WS close, so the operator
+/// can see the rejection in plain HTTP logs without having to decode
+/// the close frame.
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_connection(socket, state))
+    let peer_ip = peer.map(|ConnectInfo(addr)| addr.ip());
+    let limiter = state.stt_rate_limiter.clone();
+    let state_for_conn = Arc::clone(&state);
+
+    // Decide whether to upgrade before consuming the upgrade itself;
+    // this way a rejection is a plain 429 (no WS handshake started).
+    match peer_ip {
+        Some(ip) => match limiter.check(ip) {
+            Ok(()) => ws
+                .on_upgrade(move |socket| ws_connection(socket, state_for_conn, Some(ip)))
+                .into_response(),
+            Err(RateLimitError::Limited { retry_after_ms, .. }) => {
+                let secs = retry_after_ms.div_ceil(1000).max(1);
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate limit exceeded for STT pipeline",
+                )
+                    .into_response();
+                resp.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_str(&secs.to_string())
+                        .unwrap_or(axum::http::HeaderValue::from_static("1")),
+                );
+                resp
+            }
+        },
+        // No peer address (in-process call, some test harnesses):
+        // bypass the limiter. The rate-limit code path is unit-tested
+        // independently.
+        None => ws
+            .on_upgrade(move |socket| ws_connection(socket, state_for_conn, None))
+            .into_response(),
+    }
 }
 
 /// Per-connection task: loops between inbound frames and outbound messages.
-pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>) {
+///
+/// `peer_ip`, when present, is used by the per-frame rate-limit check
+/// to debounce flooding clients. When absent (in-process test harness
+/// without a real TCP listener), per-frame checks are skipped — the
+/// HTTP upgrade gate still applied whenever a real peer address was
+/// available.
+pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>, peer_ip: Option<IpAddr>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let limiter = app.stt_rate_limiter.clone();
 
     // Register BEFORE any send so we know our session ID and the outbound
     // channel is owned exclusively by this task.
@@ -69,6 +118,28 @@ pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>) {
             inbound = ws_rx.next() => {
                 match inbound {
                     Some(Ok(Message::Binary(buf))) => {
+                        // Consume one STT token per inbound WS frame.
+                        // The HTTP-level check at upgrade time already
+                        // deducted one token for the connection itself;
+                        // per-frame checks protect against a single
+                        // misbehaving session flooding the inference
+                        // queue after upgrade.
+                        if let Err(e) = limiter.check_opt(peer_ip) {
+                            warn!(%session_id, "ws inbound rate-limited: {e}");
+                            let err_payload = Payload::Error(ErrorMessage {
+                                code: 1,
+                                message: format!("{e}"),
+                            });
+                            if let Ok(bytes) = encode_frame(&err_payload) {
+                                let _ = ws_tx.send(Message::Binary(bytes)).await;
+                            }
+                            let close = CloseFrame {
+                                code: axum::extract::ws::close_code::POLICY,
+                                reason: "rate limit exceeded".into(),
+                            };
+                            let _ = ws_tx.send(Message::Close(Some(close))).await;
+                            break;
+                        }
                         if let Err(e) = handle_inbound(&app, session_id, &buf).await {
                             warn!(%session_id, "inbound error: {e}");
                             if matches!(e, InboundError::ClientStop) {

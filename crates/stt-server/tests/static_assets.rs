@@ -14,7 +14,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use stt_core::MockBackend;
-use stt_server::{build_router, AppState, Config as ServerConfig};
+use stt_server::{
+    build_router,
+    config::RateLimitConfig,
+    rate_limit::{RateLimitPolicy, RateLimiter},
+    AppState, Config as ServerConfig,
+};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
@@ -30,6 +35,7 @@ async fn serve_once() -> String {
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
+        rate_limit: RateLimitConfig::default(),
         llm: stt_server::config::LlmConfig {
             enabled: false,
             base_url: "http://localhost:11434".into(),
@@ -51,6 +57,12 @@ async fn serve_once() -> String {
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm: None,
+        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
+            RateLimitConfig::default().stt_per_min,
+        )),
+        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
+            RateLimitConfig::default().llm_per_min,
+        )),
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

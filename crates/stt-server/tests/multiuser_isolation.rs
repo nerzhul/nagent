@@ -24,7 +24,12 @@ use stt_proto::{
     decode_frame, encode, AudioFrame, Config, FinalTranscript, Payload, StartSession, Tag,
 };
 use stt_server::{
-    build_router, router::ResultRouter, session::SessionMap, AppState, Config as ServerConfig,
+    build_router,
+    config::RateLimitConfig,
+    rate_limit::{RateLimitPolicy, RateLimiter},
+    router::ResultRouter,
+    session::SessionMap,
+    AppState, Config as ServerConfig,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -44,6 +49,7 @@ async fn start_test_server() -> (String, SessionMap) {
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
+        rate_limit: RateLimitConfig::default(),
         // LLM is opt-in; the STT-focused multiuser test keeps it off
         // so the /v1/* routes are not registered and there is no
         // accidental dependency on a local Ollama install.
@@ -73,6 +79,12 @@ async fn start_test_server() -> (String, SessionMap) {
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm: None,
+        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
+            RateLimitConfig::default().stt_per_min,
+        )),
+        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
+            RateLimitConfig::default().llm_per_min,
+        )),
     });
 
     let app = build_router(state);

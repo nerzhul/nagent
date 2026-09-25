@@ -22,8 +22,9 @@ use stt_core::{InferenceJob, InferenceWorker, MockBackend, WhisperBackend};
 use stt_proto::{decode_frame, encode, error_code, AudioFrame, Config, Payload, StartSession, Tag};
 use stt_server::{
     build_router,
-    config::{LimitsConfig, LlmConfig},
+    config::{LimitsConfig, LlmConfig, RateLimitConfig},
     llm::LlmClient,
+    rate_limit::{RateLimitPolicy, RateLimiter},
     router::ResultRouter,
     session::SessionMap,
     AppState, Config as ServerConfig,
@@ -37,6 +38,19 @@ const SAMPLE_RATE: u32 = 16_000;
 /// Build an in-process server with the LLM proxy optionally enabled.
 /// Returns the base HTTP URL (the WS endpoint is `ws://…/ws`).
 async fn start_test_server(llm_enabled: bool, cors_allow_origins: Vec<String>) -> String {
+    start_test_server_with_rate_limit(llm_enabled, cors_allow_origins, RateLimitConfig::default())
+        .await
+        .0
+}
+
+/// Like [`start_test_server`] but lets the test pick the
+/// per-source-IP rate limits (defaulting to generous values to keep
+/// existing tests unaffected). Returns `(url, stt_limiter, llm_limiter)`.
+async fn start_test_server_with_rate_limit(
+    llm_enabled: bool,
+    cors_allow_origins: Vec<String>,
+    rate_limit: RateLimitConfig,
+) -> (String, RateLimiter, RateLimiter) {
     let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
     let limits = LimitsConfig {
         // Make the audio cap easy to exceed in tests without needing
@@ -51,6 +65,7 @@ async fn start_test_server(llm_enabled: bool, cors_allow_origins: Vec<String>) -
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits,
+        rate_limit: rate_limit.clone(),
         llm: LlmConfig {
             enabled: llm_enabled,
             base_url: "http://localhost:11434".into(),
@@ -75,6 +90,14 @@ async fn start_test_server(llm_enabled: bool, cors_allow_origins: Vec<String>) -
         None
     };
 
+    // Tests share the *same* `RateLimiter` instance with the server
+    // (via the `AppState`) so we can observe the bucket state from
+    // outside without going through HTTP. We deliberately bypass
+    // `build_rate_limiters` because the latter couples to the whole
+    // `Config` and is exercised in its own unit test.
+    let stt_limiter = RateLimiter::new(RateLimitPolicy::stt(rate_limit.stt_per_min));
+    let llm_limiter = RateLimiter::new(RateLimitPolicy::llm(rate_limit.llm_per_min));
+
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),
@@ -82,6 +105,8 @@ async fn start_test_server(llm_enabled: bool, cors_allow_origins: Vec<String>) -
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm,
+        stt_rate_limiter: stt_limiter.clone(),
+        llm_rate_limiter: llm_limiter.clone(),
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -97,7 +122,7 @@ async fn start_test_server(llm_enabled: bool, cors_allow_origins: Vec<String>) -
             .await;
     });
     std::mem::forget(tx);
-    url
+    (url, stt_limiter, llm_limiter)
 }
 
 /// Open a WS connection and skip the first `BackendInfo` frame.
