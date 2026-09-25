@@ -66,3 +66,22 @@ On the contrary, avoid comments that:
 - Repeat what the code already says ("increment i by 1" above `i++`).
 - Comment on code that has been removed or disabled for a long time.
 - Serve as a personal journal ("TODO: redo later" without context).
+
+## 5. Documentation Sync for Build, Runtime, and Environment Changes
+
+Any change that affects how the project is **built**, **run**, or **configured** at runtime must be reflected in the documentation in the **same commit**. Documentation that drifts from the actual behavior is treated as a bug.
+
+Scope — this rule applies whenever a change touches any of the following:
+
+- **Build configuration**: `Cargo.toml` features, `Makefile` / `*.mk` targets, build scripts, feature flags, toolchain pins, Dockerfiles, CI workflow files (`.github/workflows/*.yml`), kustomize or Helm manifests, generated lockfiles.
+- **Runtime configuration**: command-line arguments, configuration files (e.g. `config.toml`, YAML/JSON defaults), default ports, paths, file locations, log levels, feature toggles read at runtime.
+- **Environment variables**: any variable read by the application or its tooling (names, semantics, accepted values, defaults, required vs optional, deprecation status).
+
+Required actions when such a parameter changes:
+
+1. **Locate every documentation surface** that mentions the parameter: `README.md`, `AGENTS.md`, files under `docs/`, kustomize/k8s manifests comments, `--help` output, inline help text, and any spec or design doc.
+2. **Update each surface** to match the new name, default, type, range, or behavior. If a parameter is **removed**, also document the removal and, when reasonable, the migration path.
+3. **Mention the change in the commit body** when relevant so reviewers can spot the doc updates tied to the parameter change.
+4. **Add or update tests** that guard the documented contract (e.g. snapshot tests for `--help`, env-var parsing tests, kustomize-render checks) so a future regression is caught automatically.
+
+If a parameter change genuinely has **no documentation surface** to update (unusual but possible — e.g. an internal helper flag), state that explicitly in the commit body so reviewers know the rule was considered.
