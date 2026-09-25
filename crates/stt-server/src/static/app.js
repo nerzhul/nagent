@@ -243,7 +243,12 @@ const state = {
   vad: null,
   vadReady: false,
   mediaStream: null,
-  transcript: [], // { text, lang, ts }
+  transcript: [], // { text, lang, ts, latencyMs? }
+  // FIFO of `performance.now()` timestamps taken at the moment we send
+  // each AudioFrame, paired (in order) with the next incoming FinalTranscript.
+  // Popping on receive gives the round-trip latency the user perceives
+  // (network + queue + decode) without touching the wire protocol.
+  pendingAudioTs: [],
   recording: false,
 };
 
@@ -254,7 +259,7 @@ function setStatus(text, cls) {
   statusEl.className = "status " + cls;
 }
 
-function appendLine(text, lang) {
+function appendLine(text, lang, latencyMs) {
   const empty = listEl.querySelector(".empty-state");
   if (empty) empty.remove();
   const li = document.createElement("li");
@@ -269,11 +274,25 @@ function appendLine(text, lang) {
   tsSpan.className = "ts";
   tsSpan.textContent = ts;
   li.appendChild(tsSpan);
+  if (typeof latencyMs === "number" && Number.isFinite(latencyMs) && latencyMs >= 0) {
+    const latSpan = document.createElement("span");
+    latSpan.className = "latency";
+    latSpan.title = "Audio → FinalTranscript round-trip latency";
+    latSpan.textContent = formatLatency(latencyMs);
+    li.appendChild(latSpan);
+  }
   li.appendChild(document.createTextNode(text));
   listEl.appendChild(li);
   listEl.scrollTop = listEl.scrollHeight;
   downloadBtn.disabled = false;
-  state.transcript.push({ text, lang, ts });
+  state.transcript.push({ text, lang, ts, latencyMs });
+}
+
+function formatLatency(ms) {
+  // Sub-second: integer ms (e.g. "234ms"). Past one second: one decimal
+  // of seconds (e.g. "1.2s") so the line stays compact.
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function emptyState() {
@@ -440,7 +459,14 @@ function onWsMessage(data, onBackendInfo) {
       backendEl.textContent = `model=${p.model_id} backend=${p.gpu_backend}`;
       onBackendInfo();
     } else if (p.kind === "final") {
-      if (p.text) appendLine(p.text, p.lang);
+      // Pair this FinalTranscript with the oldest pending AudioFrame send
+      // timestamp. The server emits exactly one FinalTranscript per
+      // AudioFrame (in `ws_handler::handle_inbound`), so the FIFO stays
+      // in sync as long as the WS is healthy.
+      const sentAt = state.pendingAudioTs.shift();
+      const latencyMs =
+        typeof sentAt === "number" ? performance.now() - sentAt : undefined;
+      if (p.text) appendLine(p.text, p.lang, latencyMs);
     } else if (p.kind === "partial") {
       // Discard: the eventual FinalTranscript supersedes it.
     } else if (p.kind === "error") {
@@ -454,6 +480,9 @@ function onWsMessage(data, onBackendInfo) {
 
 async function onWsClose() {
   state.ws = null;
+  // Any in-flight AudioFrame will never get a FinalTranscript now: drop
+  // the pending timestamps so the next session starts with an empty FIFO.
+  state.pendingAudioTs.length = 0;
   if (!state.recording) {
     // Normal idle close (user clicked Stop, or initial connect failed).
     setStatus("idle", "idle");
@@ -515,6 +544,10 @@ async function ensureVad() {
     },
     onSpeechEnd: (audioFloat32) => {
       // audioFloat32 is already 16 kHz mono PCM Float32 from the VAD.
+      // Record the send timestamp *before* `send` so even a synchronous
+      // ws send failure produces a measurable (and honest) round-trip
+      // for the matching FinalTranscript when it eventually arrives.
+      state.pendingAudioTs.push(performance.now());
       send(encodeAudioFrame(audioFloat32));
     },
     positiveSpeechThreshold: 0.6,
@@ -561,6 +594,7 @@ recordBtn.addEventListener("click", async () => {
       state.ws?.close();
     } catch {}
     state.recording = false;
+    state.pendingAudioTs.length = 0;
     setRecordState("Record", "idle");
     setStatus("idle", "idle");
     resetScope();
@@ -598,7 +632,14 @@ translateCk.addEventListener("change", () => {
 
 downloadBtn.addEventListener("click", () => {
   const blob = new Blob(
-    [state.transcript.map((l) => `${l.ts} [${l.lang || "-"}] ${l.text}`).join("\n")],
+    [
+      state.transcript
+        .map((l) => {
+          const lat = typeof l.latencyMs === "number" ? ` (${formatLatency(l.latencyMs)})` : "";
+          return `${l.ts} [${l.lang || "-"}]${lat} ${l.text}`;
+        })
+        .join("\n"),
+    ],
     { type: "text/plain" },
   );
   const url = URL.createObjectURL(blob);
