@@ -23,6 +23,14 @@ pub struct Config {
     /// Optional LLM/Ollama proxy config. When `llm.enabled` is `false`
     /// the `/v1/*` routes are not registered at all.
     pub llm: LlmConfig,
+    /// Configuration for server-side chat agents (`web_fetch` and
+    /// future tools). The `enabled` flag controls whether the
+    /// `/v1/agents*` routes are wired and whether the LLM proxy
+    /// injects a `tools` array; the per-agent configs are honoured
+    /// whenever `enabled` is true, even when the LLM proxy itself is
+    /// off (so `curl /v1/agents/web_fetch/invoke` still works for
+    /// local testing).
+    pub agents: AgentConfig,
     /// Limits applied to inbound WebSocket frames (defence against
     /// malicious or buggy clients).
     pub limits: LimitsConfig,
@@ -125,6 +133,7 @@ impl Config {
 
         let limits = LimitsConfig::from_env()?;
         let llm = LlmConfig::from_env()?;
+        let agents = AgentConfig::from_env()?;
         let rate_limit = RateLimitConfig::from_env()?;
 
         Ok(Self {
@@ -136,6 +145,7 @@ impl Config {
             limits,
             rate_limit,
             llm,
+            agents,
         })
     }
 }
@@ -235,6 +245,101 @@ where
             .parse::<T>()
             .map_err(|e| ConfigError::InvalidEnv(key.into(), e.to_string())),
         Err(_) => Ok(default),
+    }
+}
+
+/// Configuration for server-side chat agents.
+///
+/// `enabled` is the master switch for the `/v1/agents*` HTTP routes
+/// and the LLM-proxy tool-loop. The per-agent sub-configs are
+/// honoured whenever `enabled` is true; each agent applies its own
+/// sandbox policy on top of the global settings.
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    /// Master switch. When `false`, no agents are registered, the LLM
+    /// proxy injects no `tools` field, and `/v1/agents` returns `[]`.
+    /// Defaults to `true` so first-time users get the wired-up
+    /// experience; set `AGENTS_ENABLED=false` to disable.
+    pub enabled: bool,
+    /// Maximum number of tool-call rounds a single user turn may
+    /// trigger before the proxy bails out and surfaces an error
+    /// bubble. Defends against models that loop on a tool call.
+    pub llm_max_tool_rounds: u32,
+    /// Sandbox + transfer knobs for the built-in `web_fetch` agent.
+    /// Always parsed; the agent is only registered when the `web-agent`
+    /// cargo feature is on AND `enabled` is true.
+    pub web_fetch: WebFetchConfig,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            llm_max_tool_rounds: 4,
+            web_fetch: WebFetchConfig::default(),
+        }
+    }
+}
+
+impl AgentConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            enabled: parse_env("AGENTS_ENABLED", defaults.enabled)?,
+            llm_max_tool_rounds: parse_env("LLM_MAX_TOOL_ROUNDS", defaults.llm_max_tool_rounds)?
+                .clamp(1, 32),
+            web_fetch: WebFetchConfig::from_env()?,
+        })
+    }
+}
+
+/// Sandbox and transfer knobs for the `web_fetch` agent.
+#[derive(Debug, Clone)]
+pub struct WebFetchConfig {
+    /// When `true`, the agent is allowed to connect to public IP
+    /// ranges. Loopback and private (RFC1918 / ULA) addresses are
+    /// still blocked as SSRF protection. Default: `false`.
+    pub allow_public: bool,
+    /// Hostname allow-list (suffix match, case-insensitive). When
+    /// non-empty, takes precedence over `allow_public` and only the
+    /// listed hosts (or their subdomains, for `*.foo` entries) may be
+    /// fetched. Default: empty.
+    pub allowlist: Vec<String>,
+    /// Maximum number of response bytes the agent will read. Hard cap
+    /// so a misbehaving server cannot exhaust memory.
+    pub max_bytes: usize,
+    /// Per-request connect+read timeout, in milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for WebFetchConfig {
+    fn default() -> Self {
+        Self {
+            allow_public: false,
+            allowlist: Vec::new(),
+            max_bytes: 2 * 1024 * 1024,
+            timeout_ms: 30_000,
+        }
+    }
+}
+
+impl WebFetchConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            allow_public: parse_env("WEB_FETCH_ALLOW_PUBLIC", defaults.allow_public)?,
+            allowlist: std::env::var("WEB_FETCH_ALLOWLIST")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            max_bytes: parse_env("WEB_FETCH_MAX_BYTES", defaults.max_bytes)?,
+            timeout_ms: parse_env("WEB_FETCH_TIMEOUT_MS", defaults.timeout_ms)?,
+        })
     }
 }
 

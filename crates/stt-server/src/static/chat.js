@@ -306,6 +306,8 @@ const statusEl     = $("chat-status");
 const disabledNoticeEl = $("chat-disabled-notice");
 const sessionsListEl = $("chat-sessions");
 const newSessionBtnEl = $("chat-new-session");
+const agentsBannerEl = $("chat-agents-banner");
+const agentsBannerNamesEl = $("chat-agents-banner-names");
 
 // The active session id is read at every operation rather than
 // cached, so a same-tab mutation (delete, new chat, switch from the
@@ -416,17 +418,84 @@ function setStreamingUi(streaming) {
 function renderHistory(sessionId) {
   messagesEl.innerHTML = "";
   const history = loadHistory(sessionId);
+  // Track the assistant bubble the *current* tool-bubble cluster
+  // should hang off. When the history contains the pattern
+  // `assistant(tool_calls) → tool → … → assistant(final)`, the
+  // tool bubbles belong under the *first* assistant so the second
+  // assistant renders after them (matching the live-streaming
+  // layout). We anchor with `toolAnchorEl`, which only advances on
+  // a non-tool_call-bearing assistant.
+  let lastUserOrFinalAssistantEl = null;
+  let toolAnchorEl = null;
   for (const msg of history) {
-    // Re-render assistant history as markdown so a reload (or a
-    // client that joined the session late) sees formatted replies,
-    // not the raw `**bold**` source. User history stays plain text.
-    const markdown = msg.role === "assistant";
-    appendBubble(msg.role, msg.content, {
+    if (msg.role === "tool") {
+      // Render each tool bubble under the current tool anchor so
+      // reloads reproduce the same DOM as the live stream.
+      if (toolAnchorEl) {
+        const id = msg.tool_call_id || "";
+        appendToolBubble(
+          null,
+          { id, name: msg.name || "tool", args: null, index: 0 },
+          toolAnchorEl,
+        );
+        resolveToolBubble(null, {
+          id,
+          name: msg.name || "tool",
+          ok: true,
+          summary: msg.content ? truncateSummary(msg.content) : "",
+          content: msg.content,
+        });
+      }
+      continue;
+    }
+    if (msg.role === "assistant") {
+      const hasToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+      const bubble = appendBubble("assistant", msg.content || "", {
+        persist: false,
+        model: msg.model,
+        markdown: true,
+        sessionId,
+      });
+      if (hasToolCalls) {
+        // Anchor subsequent tool bubbles under this assistant; do
+        // NOT update `lastUserOrFinalAssistantEl` so any later
+        // non-tool user/system message still anchors correctly.
+        toolAnchorEl = bubble;
+        for (const tc of msg.tool_calls) {
+          const args = (() => {
+            try { return JSON.parse(tc.function?.arguments || "{}"); }
+            catch (_e) { return {}; }
+          })();
+          appendToolBubble(
+            null,
+            {
+              id: tc.id,
+              name: tc.function?.name || "tool",
+              args,
+              index: 0,
+            },
+            bubble,
+          );
+        }
+        // The assistant may also have rendered text alongside the
+        // tool calls (the LLM often says "Let me check…"). Keep
+        // the bubble as the anchor.
+      } else {
+        // Final reply (no tool_calls): a new anchor.
+        lastUserOrFinalAssistantEl = bubble;
+        toolAnchorEl = bubble;
+      }
+      continue;
+    }
+    // user / system
+    const bubble = appendBubble(msg.role, msg.content || "", {
       persist: false,
       model: msg.model,
-      markdown,
+      markdown: false,
       sessionId,
     });
+    lastUserOrFinalAssistantEl = bubble;
+    toolAnchorEl = null;
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -497,7 +566,192 @@ function appendError(text) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// ---- Tool bubbles -------------------------------------------------------
+//
+// The LLM proxy emits two named SSE events mid-stream whenever an
+// agent runs:
+//
+//   event: tool_call    { id, name, args, ... }
+//   event: tool_result  { id, name, ok, summary, content }
+//
+// Each `tool_call` is rendered as a live bubble below the in-flight
+// assistant message; the corresponding `tool_result` swaps the
+// spinner for a `✓ <summary>` line and (when the assistant had
+// `tool_calls[]`) persists a `role: "assistant" + tool_calls` entry
+// followed by a `role: "tool"` entry into the chat history so a
+// reload or follow-up turn keeps the agent's result in the LLM's
+// context.
+//
+// The DOM splits the assistant message for rendering only — the
+// storage model is still OpenAI-flavoured: an assistant turn with
+// `tool_calls[]`, then a `role: "tool"` turn for each result. That
+// matches the wire format the LLM proxy already emits and what
+// Ollama expects on the next round.
+
+const TOOL_ICON = {
+  web_fetch: "\u{1F50E}", // 🔎
+};
+
+function toolIcon(name) {
+  return TOOL_ICON[name] || "\u{1F6E0}"; // 🔧 (default wrench)
+}
+
+/**
+ * Render a tool bubble under `assistantEl`. Returns the bubble so
+ * the matching `tool_result` event can swap its contents in place.
+ *
+ * `persist` defaults to true: the assistant's `tool_calls[]` entry
+ * is written to history now (so reloads see it even before the agent
+ * returns), and the matching `role: "tool"` entry is appended when
+ * the result lands.
+ */
+function appendToolBubble(
+  sessionId,
+  { id, name, args, index },
+  assistantEl,
+) {
+  const div = document.createElement("div");
+  div.className = "chat-tool-bubble chat-tool-bubble--running";
+  div.dataset.toolId = id;
+  div.dataset.toolName = name;
+
+  const icon = document.createElement("span");
+  icon.className = "chat-tool-icon";
+  icon.textContent = toolIcon(name);
+  div.appendChild(icon);
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "chat-tool-name";
+  nameEl.textContent = name;
+  div.appendChild(nameEl);
+
+  // First-line context: URL for web_fetch, raw args otherwise.
+  const detailEl = document.createElement("span");
+  detailEl.className = "chat-tool-detail";
+  if (name === "web_fetch" && args && typeof args === "object" && args.url) {
+    detailEl.textContent = String(args.url);
+  } else if (args && Object.keys(args).length > 0) {
+    detailEl.textContent = JSON.stringify(args);
+  } else {
+    detailEl.textContent = "…";
+  }
+  div.appendChild(detailEl);
+
+  const statusEl = document.createElement("span");
+  statusEl.className = "chat-tool-status";
+  statusEl.textContent = "running…";
+  div.appendChild(statusEl);
+
+  // Insert directly after the assistant bubble so the live tool
+  // appears under the message that requested it, in source order.
+  if (assistantEl && assistantEl.parentNode === messagesEl) {
+    assistantEl.insertAdjacentElement("afterend", div);
+  } else {
+    messagesEl.appendChild(div);
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  // Persist a placeholder assistant turn with `tool_calls[]` so a
+  // page reload / follow-up turn keeps the LLM context intact even
+  // before the agent returns. We only do this the first time we see
+  // the tool_call — the tool_result path appends the role:tool entry.
+  if (sessionId && !div.dataset.persisted) {
+    div.dataset.persisted = "1";
+    const h = loadHistory(sessionId);
+    const last = h[h.length - 1];
+    // If the previous entry was already an assistant turn written
+    // by the streaming layer with no content, fold the tool_calls[]
+    // into it so we don't end up with two back-to-back assistant
+    // messages. Otherwise append a fresh assistant turn.
+    if (last && last.role === "assistant"
+        && !last.tool_calls && (last.content == null || last.content === "")) {
+      last.tool_calls = [{
+        id,
+        type: "function",
+        function: { name, arguments: JSON.stringify(args || {}) },
+      }];
+      h[h.length - 1] = last;
+    } else {
+      h.push({
+        role: "assistant",
+        content: "",
+        tool_calls: [{
+          id,
+          type: "function",
+          function: { name, arguments: JSON.stringify(args || {}) },
+        }],
+        ts: Date.now(),
+      });
+    }
+    saveHistory(sessionId, h);
+  }
+  return div;
+}
+
+/**
+ * Update a tool bubble in place when the server emits the matching
+ * `tool_result` event. Also appends the `role: "tool"` history
+ * entry so the result survives reloads and rides along in future
+ * LLM turns.
+ */
+function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
+  const div = messagesEl.querySelector(`.chat-tool-bubble[data-tool-id="${CSS.escape(id)}"]`);
+  if (div) {
+    div.classList.remove("chat-tool-bubble--running");
+    div.classList.add(ok ? "chat-tool-bubble--ok" : "chat-tool-bubble--error");
+    const statusEl = div.querySelector(".chat-tool-status");
+    if (statusEl) {
+      statusEl.textContent = ok ? `✓ ${truncateSummary(summary)}` : `⚠ ${truncateSummary(summary)}`;
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  if (sessionId) {
+    const h = loadHistory(sessionId);
+    h.push({
+      role: "tool",
+      tool_call_id: id,
+      content: content == null ? "" : String(content),
+      ts: Date.now(),
+    });
+    saveHistory(sessionId, h);
+  }
+}
+
+function truncateSummary(s) {
+  if (!s) return "";
+  const str = String(s);
+  return str.length > 120 ? str.slice(0, 117) + "…" : str;
+}
+
 // ---- Models ----------------------------------------------------------------
+
+// Fetch /v1/agents on Discussion mount and surface a hint banner
+// when at least one agent is wired up. Hidden when the list is empty
+// or the server returns 404 (agents disabled). Failures are
+// swallowed silently — the chat is the primary surface, the banner
+// is cosmetic.
+async function loadAgentsBanner() {
+  if (!agentsBannerEl) return;
+  try {
+    const r = await fetch("/v1/agents", { cache: "no-store" });
+    if (!r.ok) {
+      agentsBannerEl.hidden = true;
+      return;
+    }
+    const body = await r.json();
+    const agents = Array.isArray(body?.data) ? body.data : [];
+    if (agents.length === 0) {
+      agentsBannerEl.hidden = true;
+      return;
+    }
+    if (agentsBannerNamesEl) {
+      agentsBannerNamesEl.textContent = agents.map((a) => a.name).join(", ");
+    }
+    agentsBannerEl.hidden = false;
+  } catch (_e) {
+    agentsBannerEl.hidden = true;
+  }
+}
 
 async function loadModels() {
   try {
@@ -635,6 +889,12 @@ async function streamReply(sessionId, userText) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    // Track the current SSE event name so we can route `event:
+    // tool_call` / `event: tool_result` to the tool-bubble layer
+    // instead of the `data:` parser. The SSE spec accumulates `data:`
+    // lines until a blank line, then dispatches the event named by
+    // the most recent `event:` line (or `message` if absent).
+    let currentEventName = "";
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -643,32 +903,86 @@ async function streamReply(sessionId, userText) {
       while ((sep = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, sep);
         buffer = buffer.slice(sep + 2);
+        currentEventName = "";
+        let dataPayload = "";
         for (const line of raw.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (payload === "[DONE]") { reader.cancel(); break; }
-          if (!payload) continue;
-          try {
-            const evt = JSON.parse(payload);
-            const delta = evt?.choices?.[0]?.delta?.content;
-            if (typeof delta === "string" && delta.length > 0) {
-              if (!streamingStarted) {
-                streamingStarted = true;
-                setStreamState({ text: "Streaming…", cls: "connecting" });
-                // Strip the inline loader before writing real text so
-                // the bubble transitions cleanly into the reply.
-                assistantEl.innerHTML = "";
-              }
-              accumulated += delta;
-              // Re-render the accumulated text as sanitized markdown.
-              // We coalesce updates via requestAnimationFrame so a
-              // burst of small tokens only triggers one parse per
-              // animation frame, keeping the streaming path cheap.
-              scheduleMarkdownRender(assistantEl, () => accumulated);
-              messagesEl.scrollTop = messagesEl.scrollHeight;
-            }
-          } catch (_e) { /* skip malformed line */ }
+          if (!line) continue;
+          if (line.startsWith(":")) continue; // SSE comment
+          if (line.startsWith("event:")) {
+            currentEventName = line.slice(6).trim();
+            continue;
+          }
+          if (line.startsWith("data:")) {
+            // Multi-line `data:` is concatenated with a single `\n`
+            // per the SSE spec (lines arrive individually and the
+            // parser joins them). We do NOT add a trailing newline
+            // — the assembled string must be valid JSON for
+            // `JSON.parse`, and trailing whitespace throws. JSON.parse
+            // is called on `dataPayload.trim()` at the dispatch sites
+            // below so multi-line payloads still round-trip cleanly.
+            if (dataPayload.length > 0) dataPayload += "\n";
+            dataPayload += line.slice(5).replace(/^ /, "");
+            continue;
+          }
+          // Other fields (id:, retry:, …) are ignored.
         }
+        if (currentEventName === "tool_call") {
+          if (dataPayload) {
+            try {
+              const evt = JSON.parse(dataPayload.trim());
+              appendToolBubble(sessionId, evt, assistantEl);
+              setStreamState({ text: `Working…`, cls: "connecting" });
+            } catch (e) {
+              console.warn("tool_call parse failed:", e, dataPayload);
+            }
+          }
+          continue;
+        }
+        if (currentEventName === "tool_result") {
+          if (dataPayload) {
+            try {
+              const evt = JSON.parse(dataPayload.trim());
+              resolveToolBubble(sessionId, evt);
+            } catch (e) {
+              console.warn("tool_result parse failed:", e, dataPayload);
+            }
+          }
+          continue;
+        }
+        if (currentEventName === "error") {
+          if (dataPayload) {
+            try {
+              const evt = JSON.parse(dataPayload.trim());
+              appendError(evt?.detail || evt?.error || "agent loop error");
+            } catch (_e) {
+              appendError("agent loop error");
+            }
+          }
+          continue;
+        }
+        if (!dataPayload) continue;
+        const payload = dataPayload.trim();
+        if (payload === "[DONE]") { reader.cancel(); break; }
+        try {
+          const evt = JSON.parse(payload);
+          const delta = evt?.choices?.[0]?.delta?.content;
+          if (typeof delta === "string" && delta.length > 0) {
+            if (!streamingStarted) {
+              streamingStarted = true;
+              setStreamState({ text: "Streaming…", cls: "connecting" });
+              // Strip the inline loader before writing real text so
+              // the bubble transitions cleanly into the reply.
+              assistantEl.innerHTML = "";
+            }
+            accumulated += delta;
+            // Re-render the accumulated text as sanitized markdown.
+            // We coalesce updates via requestAnimationFrame so a
+            // burst of small tokens only triggers one parse per
+            // animation frame, keeping the streaming path cheap.
+            scheduleMarkdownRender(assistantEl, () => accumulated);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+        } catch (_e) { /* skip malformed line */ }
       }
     }
     finalSource = accumulated;
@@ -988,12 +1302,16 @@ renderHistory(currentSessionId);
 // boot keeps the dropdown warm regardless of the persisted mode, and
 // the disabled-server notice still renders correctly on 404.
 loadModels();
+// Same for the agents banner: one fetch on boot. A reload on
+// /v1/agents that came back empty just hides the banner.
+loadAgentsBanner();
 
 document.addEventListener("visibilitychange", () => {
   // Re-fetch on tab return in case the server's model list changed
   // while the tab was backgrounded (e.g. another `ollama pull`).
   if (!document.hidden && globalThis.__nagentMode?.current() === "discussion") {
     loadModels();
+    loadAgentsBanner();
   }
 });
 

@@ -106,6 +106,12 @@ without a default and is required.
 | `OLLAMA_API_KEY`             | _(unset)_                                     | LLM proxy      | Optional bearer token forwarded as `Authorization: Bearer …`.                                                 |
 | `LLM_REQUEST_TIMEOUT_SECS`   | `120`                                         | LLM proxy      | Per-chunk idle timeout on the upstream stream.                                                                |
 | `LLM_CORS_ALLOW_ORIGINS`     | _(empty)_                                     | LLM proxy      | Comma-separated list of origins allowed to call `/v1/*` cross-origin. Empty = same-origin only (preflight blocked for others). |
+| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (currently `web_fetch`). When `false` the registry is empty.       |
+| `LLM_MAX_TOOL_ROUNDS`        | `4`                                           | Chat agents    | Maximum tool-call rounds per user turn before the proxy aborts.                                               |
+| `WEB_FETCH_ALLOW_PUBLIC`     | `false`                                       | `web_fetch`    | When `true`, the agent may reach public IP ranges (SSRF defence still blocks loopback/RFC1918).               |
+| `WEB_FETCH_ALLOWLIST`        | _(empty)_                                     | `web_fetch`    | Comma-separated hostname allow-list (suffix match; `*.foo` wildcards). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
+| `WEB_FETCH_MAX_BYTES`        | `2097152`                                     | `web_fetch`    | Maximum response size the agent will read (server cap). The LLM-callable `max_bytes` parameter starts the first fetch; if the page is larger the agent transparently doubles the budget and retries until the page fits or this cap is hit. |
+| `WEB_FETCH_TIMEOUT_MS`       | `30000`                                       | `web_fetch`    | Per-request timeout in milliseconds.                                                                          |
 | `RUST_LOG`                   | `info,stt_server=debug,stt_core=debug` (local); `info,stt_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
 
 Per-source-IP rate limiting applies at both layers: HTTP for the LLM proxy
@@ -176,7 +182,7 @@ server" notice.
    ```
    make run-llm
    # equivalent to: LLM_ENABLED=true cargo run -p stt-server --release \
-   #     --features stt-server/real-backend,stt-core/whisper-rs-backend
+   #     --features stt-server/real-backend,stt-server/web-agent,stt-core/whisper-rs-backend
    ```
 
 3. Open <http://localhost:8080>, click **Discussion**, type a message.
@@ -197,12 +203,63 @@ LLM-specific knobs are:
 | `LLM_CORS_ALLOW_ORIGINS`     | _(empty)_                | Comma-separated list of origins allowed to call `/v1/*` cross-origin (empty = same-origin only) |
 | `LLM_RATE_PER_MIN`           | `30`                     | Inbound LLM HTTP requests per source IP per minute                |
 
+### Agents (`web_fetch`)
+
+All `make run*` targets (`run`, `run-vulkan`, `run-hipblas`, `run-cuda`,
+`run-mock`, `run-llm`) compile the server with the `web-agent` cargo
+feature, so the LLM can call a server-side `web_fetch` agent that
+fetches an HTTP(S) URL and feeds the cleaned text back into the model
+as a `role: "tool"` message whenever the LLM proxy is also enabled
+(`LLM_ENABLED=true`, which only `make run-llm` does by default). Two
+bubbles appear inline under the assistant message while the agent
+runs:
+
+```
+assistant ┃ Sure, let me fetch that for you.
+tool      ┃ 🔎 web_fetch https://example.com
+tool      ┃ ✓ 1.2 KB — Example Domain
+assistant ┃ Example Domain is a simple illustrative page created by…
+```
+
+Tool bubbles are persisted into the chat history; a follow-up turn
+keeps the fetched content in the LLM's context without re-fetching.
+
+| Variable                  | Default | Meaning                                                                              |
+| ------------------------- | ------- | ------------------------------------------------------------------------------------ |
+| `AGENTS_ENABLED`          | `true`  | Master switch; when `false` the registry is empty and the LLM sees no `tools` array |
+| `LLM_MAX_TOOL_ROUNDS`     | `4`     | Hard cap on tool-call rounds per user turn (defends against a runaway tool loop)     |
+| `WEB_FETCH_ALLOW_PUBLIC`  | `false` | When `true`, the agent may reach public IP ranges. Loopback and RFC1918 are still blocked as SSRF protection. |
+| `WEB_FETCH_ALLOWLIST`     | _(empty)_ | Comma-separated hostname allow-list (suffix match, `*.foo` wildcards, bare `*` for everything). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
+| `WEB_FETCH_MAX_BYTES`     | `2097152` | Maximum response size the agent will read (2 MiB). The agent iteratively doubles the budget on overflow, capped here. |
+| `WEB_FETCH_TIMEOUT_MS`    | `30000` | Per-request timeout in milliseconds.                                                |
+
+#### Supported models
+
+The wire format is OpenAI-flavoured `tools` + `tool_calls`, so any
+model that supports function calling works. Tested / known-good:
+
+- Qwen 2.5 (7B / 14B / 32B) — **Qwen 2.5 14B is the recommended default**
+- Llama 3.1+
+- Mistral-Nemo
+- Firefunction-v2
+
+Smaller quantisations (e.g. Qwen 2.5 3B) sometimes ignore the
+injected `tools` schema and answer from memory. If a model
+consistently skips the tool call, add a one-line nudge to the system
+prompt: *"You may use the provided `web_fetch` tool when the user asks
+for live web content."* No code change required.
+
 ### Security
 
 The proxy relies on `stt-server` binding to localhost and Ollama being
 on the same host; there is no auth on the chat endpoint. Do not expose
 the server to the network without adding a reverse proxy with
-authentication in front of it.
+authentication in front of it. The `web_fetch` agent defaults to
+**blocking all public internet access** — only loopback and RFC1918
+ranges are reachable out of the box — so even a malicious prompt cannot
+trick the LLM into exfiltrating data to an attacker-controlled host
+unless an operator has explicitly opted in via
+`WEB_FETCH_ALLOW_PUBLIC=true` or `WEB_FETCH_ALLOWLIST`.
 
 ### Smoke test
 

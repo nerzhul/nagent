@@ -61,6 +61,7 @@ async fn start_test_server_with(
             request_timeout: Duration::from_secs(1),
             cors_allow_origins: vec![],
         },
+        agents: stt_server::config::AgentConfig::default(),
     });
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let (job_tx, job_rx) = mpsc::channel::<InferenceJob>(16);
@@ -86,6 +87,7 @@ async fn start_test_server_with(
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm,
+        agents: None,
         stt_rate_limiter: stt_limiter.clone(),
         llm_rate_limiter: llm_limiter.clone(),
     });

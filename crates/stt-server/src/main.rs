@@ -6,7 +6,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use stt_server::{
-    build_rate_limiters, build_router, llm, router, session, watchdog, AppState, Config,
+    agents, build_rate_limiters, build_router, llm, router, session, watchdog, AppState, Config,
 };
 
 use tokio::sync::mpsc;
@@ -65,6 +65,12 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let (stt_rate_limiter, llm_rate_limiter) = build_rate_limiters(&cfg);
+    let agents = agents::AgentRegistry::from_config(&cfg.agents);
+    if !agents.is_empty() {
+        info!(count = agents.len(), "agent registry built");
+    } else {
+        info!("agent registry empty (no agents compiled in or AGENTS_ENABLED=false)");
+    }
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),
@@ -72,6 +78,11 @@ async fn main() -> anyhow::Result<()> {
         ready,
         config: Arc::new(cfg.clone()),
         llm,
+        agents: if agents.is_empty() {
+            None
+        } else {
+            Some(agents)
+        },
         stt_rate_limiter,
         llm_rate_limiter,
     });

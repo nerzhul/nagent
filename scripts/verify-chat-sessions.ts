@@ -148,6 +148,38 @@ Deno.test("saveHistory / loadHistory stay isolated per session", () => {
   assertEq(loadHistory("s3").length, 0);
 });
 
+// v1 chat agents emit `role: "tool"` history entries alongside
+// assistant turns that carried `tool_calls[]`. The store is
+// deliberately schema-agnostic (it just JSON-stringifies the array)
+// but we lock that contract with a round-trip test so a future
+// refactor cannot accidentally filter out non-{user,assistant}
+// roles and silently break the LLM context.
+Deno.test("saveHistory / loadHistory preserve role:tool and tool_calls entries", () => {
+  installStorage();
+  const msgs = [
+    { role: "user", content: "fetch example.com", ts: 1 },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{
+        id: "call_x",
+        type: "function",
+        function: { name: "web_fetch", arguments: '{"url":"https://example.com"}' },
+      }],
+      ts: 2,
+    },
+    { role: "tool", tool_call_id: "call_x", content: '{"text":"hi"}', ts: 3 },
+    { role: "assistant", content: "Here you go.", ts: 4, model: "llama3.1" },
+  ];
+  saveHistory("s1", msgs);
+  const loaded = loadHistory("s1");
+  assertEq(loaded.length, 4);
+  assertDeepEq(loaded[1].tool_calls, msgs[1].tool_calls);
+  assertEq(loaded[2].role, "tool");
+  assertEq(loaded[2].tool_call_id, "call_x");
+  assertEq(loaded[2].content, '{"text":"hi"}');
+});
+
 Deno.test("saveHistory caps at HISTORY_CAP", () => {
   installStorage();
   const huge = Array.from({ length: HISTORY_CAP + 25 }, (_, i) => ({

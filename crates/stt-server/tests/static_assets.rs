@@ -44,6 +44,7 @@ async fn serve_once() -> String {
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
         },
+        agents: stt_server::config::AgentConfig::default(),
     });
     let sessions = Arc::new(dashmap::DashMap::new());
     let (job_tx, job_rx) = mpsc::channel::<stt_core::InferenceJob>(16);
@@ -57,6 +58,7 @@ async fn serve_once() -> String {
         ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         config: server_cfg,
         llm: None,
+        agents: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),
@@ -408,6 +410,48 @@ async fn chat_js_aborts_inflight_reply_on_mode_toggle() {
             && body.contains("if (inflight) inflight.controller.abort()")
             && body.contains("resetTurnQueue()"),
         "chat.js modechange handler does not call both `inflight.controller.abort()` and `resetTurnQueue()`, or it does not guard against firing when switching back to Discussion. Without both calls the in-flight reply or the queued turns survive a mode switch."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_parses_tool_call_and_tool_result_sse_events() {
+    // The LLM proxy emits named SSE events (`event: tool_call`,
+    // `event: tool_result`, `event: error`) alongside the OpenAI
+    // `data:` chunks. chat.js must route each event to the matching
+    // handler — without this, tool bubbles never render and the
+    // assistant bubble stays on its initial loader spinner.
+    //
+    // This is a substring-level guard against the SSE-routing code
+    // disappearing from a refactor.
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        body.contains("currentEventName === \"tool_call\""),
+        "chat.js no longer routes `event: tool_call` to the tool-bubble renderer. Tool calls from the LLM proxy will never render."
+    );
+    assert!(
+        body.contains("currentEventName === \"tool_result\""),
+        "chat.js no longer routes `event: tool_result` to resolveToolBubble. Tool results stay invisible and the spinner never clears."
+    );
+    assert!(
+        body.contains("appendToolBubble(") && body.contains("resolveToolBubble("),
+        "chat.js is missing appendToolBubble/resolveToolBubble — the tool-bubble DOM contract is broken."
+    );
+    // The named-event paths must call JSON.parse on a *trimmed*
+    // payload. The server emits single-line `data:` so any
+    // implementation that accumulates with a trailing `\n` will
+    // throw on `JSON.parse` and silently drop the event. The
+    // existence of `dataPayload.trim()` next to the named-event
+    // branches is what we guard here.
+    assert!(
+        body.contains("JSON.parse(dataPayload.trim())"),
+        "chat.js does not trim `dataPayload` before JSON.parse on the named-event branches (tool_call / tool_result / error). Trailing whitespace from multi-line accumulation would throw JSON.parse and silently drop the event — exactly the bug that left tool bubbles stuck on the spinner."
     );
 }
 

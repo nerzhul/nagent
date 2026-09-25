@@ -950,12 +950,107 @@ select, input[type="checkbox"] {
   background: rgba(248, 81, 73, 0.08);
 }
 
+/* ---- Tool bubbles ------------------------------------------------------
+ * Each `event: tool_call` / `event: tool_result` pair from the LLM
+ * proxy renders as one of these under the in-flight assistant
+ * message. Running state uses the same spinner palette as the
+ * status pill; OK / error swap the spinner for a glyph + summary so
+ * the user sees the agent's outcome at a glance. */
+.chat-tool-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  align-self: flex-start;
+  margin: 0.1rem 0 0.1rem 1.5rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 0.82rem;
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+  max-width: 80%;
+  word-break: break-word;
+  line-height: 1.35;
+}
+.chat-tool-bubble .chat-tool-icon {
+  flex: 0 0 auto;
+  font-size: 1em;
+}
+.chat-tool-bubble .chat-tool-name {
+  flex: 0 0 auto;
+  color: var(--fg);
+  font-weight: 600;
+}
+.chat-tool-bubble .chat-tool-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-tool-bubble .chat-tool-status {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+}
+/* Running: spinner on the right so the user sees the agent is busy. */
+.chat-tool-bubble--running .chat-tool-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  color: var(--accent);
+}
+.chat-tool-bubble--running .chat-tool-status::before {
+  content: "";
+  width: 0.65em;
+  height: 0.65em;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: status-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+/* OK / error states: green tick or red warning. */
+.chat-tool-bubble--ok {
+  border-color: var(--ok);
+}
+.chat-tool-bubble--ok .chat-tool-status {
+  color: var(--ok);
+}
+.chat-tool-bubble--error {
+  border-color: var(--error);
+}
+.chat-tool-bubble--error .chat-tool-status {
+  color: var(--error);
+}
+
 .chat-advanced {
   margin-top: 0.75rem;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.5rem 0.75rem;
+}
+
+/* Agents-available hint line, fetched once on Discussion mount
+ * (or once per visibility-flip). Hidden by default — the JS
+ * unhides it only when GET /v1/agents returns at least one entry.
+ * Sits between the message list and the advanced-settings drawer
+ * so it is visible at a glance without crowding the input. */
+.chat-agents-banner {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.82rem;
+  color: var(--fg-mute);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 6px;
+}
+.chat-agents-banner strong {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .chat-advanced summary {
