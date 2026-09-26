@@ -341,6 +341,22 @@ impl ToolCallAccumulator {
     }
 }
 
+/// Comma-separated list of tool names for log lines.
+///
+/// Names may be missing when the model emits the `arguments` delta
+/// before the `name` (the SSE spec permits either order); we surface
+/// `<unknown>` in that case so the count stays honest and the log
+/// line is unambiguous. Arguments / payloads are deliberately omitted
+/// — operators only need to know *which* agents ran, not *what they
+/// were called with*.
+fn tool_call_names(tool_calls: &[PendingToolCall]) -> String {
+    tool_calls
+        .iter()
+        .map(|tc| tc.name.as_deref().unwrap_or("<unknown>"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Type-erased upstream byte stream we feed through the SSE parser.
 /// `reqwest::Response::bytes_stream()` produces a concrete
 /// `impl Stream<...>` we cannot name; round 0 hands us that stream
@@ -460,7 +476,7 @@ async fn run_tool_loop(
         }
         info!(
             round,
-            tool_calls = outcome.tool_calls.len(),
+            tools = %tool_call_names(&outcome.tool_calls),
             "tool loop: dispatching agents"
         );
 
@@ -909,5 +925,37 @@ pub async fn agent_invoke(
             "response exceeded max_bytes={budget}"
         ))),
         Err(AgentError::AgentFailed(msg)) => Err(LlmError::BadRequest(msg)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tc(name: Option<&str>) -> PendingToolCall {
+        PendingToolCall {
+            id: "call_x".into(),
+            name: name.map(str::to_owned),
+            arguments: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn tool_call_names_joins_known_names() {
+        let calls = vec![tc(Some("web_fetch")), tc(Some("web_search"))];
+        assert_eq!(tool_call_names(&calls), "web_fetch, web_search");
+    }
+
+    #[test]
+    fn tool_call_names_marks_missing_name_as_unknown() {
+        // Parallel calls where the SSE delta order dropped the `name`
+        // before `arguments`. The log must still be unambiguous.
+        let calls = vec![tc(Some("web_fetch")), tc(None), tc(Some("weather"))];
+        assert_eq!(tool_call_names(&calls), "web_fetch, <unknown>, weather");
+    }
+
+    #[test]
+    fn tool_call_names_handles_empty_input() {
+        assert_eq!(tool_call_names(&[]), "");
     }
 }
