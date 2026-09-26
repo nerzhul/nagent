@@ -89,8 +89,26 @@ If a parameter change genuinely has **no documentation surface** to update (unus
 
 ## 6. Commit Authorization and Authorship
 
-- **Never commit automatically.** Agents must wait for an explicit user instruction before running `git add`, `git commit`, `git push`, `git tag`, or any other state-mutating Git command. Even when a task feels "done", the final commit step is always the user's decision.
+**The single most violated rule in this codebase. Read this section twice before running `git commit`.**
+
+- **The agent never pushes. Pushing is exclusively the user's manual action.** Even when the user authorises a commit, the agent must stop after `git commit` and wait for the user to run `git push` themselves. This is non-negotiable. Reasons:
+  - Pushing publishes history; the agent cannot un-publish. A bad push forces the user to rewrite published commits, which is exactly what the "no amend / no force-push" rule below forbids the agent from doing.
+  - The user owns the review-and-publish step. The agent does not get to decide when remote state changes.
+  - The agent has no way to recover from a misconfigured remote (wrong upstream, force-push to a shared branch, accidental push of a WIP commit).
+  
+  If the user says "commit and push", the correct response is to commit, **stop**, and remind the user that they need to push manually. If the user says "ship it" or "deploy", that still does not authorise a push — commit, summarise the diff, and tell the user the local branch is ready for them to push.
+- **Never commit, push, tag, or run any other state-mutating Git command without an explicit user instruction.** This holds *for every commit*, including follow-up fixes, refactors, and "obvious" next steps after a feature lands. A feature request is **not** a commit authorisation. The two are separate acts:
+  1. The user describes what they want changed.
+  2. The agent makes the change in the working tree, runs the tests, and **stops**.
+  3. The user reviews and gives a separate, explicit "commit", "commit it", "git commit", or equivalent.
+  4. Only then does the agent run `git add` / `git commit`.
+
+  When in doubt, **ask** before committing. Asking costs seconds; an unwanted commit costs the user a force-push or a manual revert.
+
+- **Default to "no commit" at the end of a task.** Even if the user said "fix X" three turns ago, and you've now finished fixing X, do not commit. Show the diff, summarise the change, and wait for the user to type the commit instruction.
 - **Preserve the existing Git identity.** Do not change `user.name` or `user.email` (locally, globally, or per-repo) to commit under an agent name. The author of the commit is the user; impersonating a different author is forbidden.
+  - This rule covers **all** ways of changing the identity of a commit, including the per-command `git -c user.name=... -c user.email=...` override flag. If a commit would be authored by anyone other than the existing `git config user.name` / `user.email`, do not run `git commit`. Use the user's configured identity, full stop.
+  - When adding a `Co-authored-by:` trailer (see below), the trailer email goes in the **trailer**, not in `user.email`. The primary `Author` line is always the user's identity; the model only appears as a co-author.
 - **Add the model as a co-author.** When the user asks an AI agent to commit, append a `Co-authored-by:` trailer identifying the model that produced the change. Use the format below; replace `<Model Name>` with the actual model identifier (e.g. `Claude Opus 4.1`, `GPT-5`, `MiniMax-M3`):
 
   ```
@@ -99,3 +117,18 @@ If a parameter change genuinely has **no documentation surface** to update (unus
 
   Use a `<Model Name>@<vendor>` address that identifies the provider (e.g. `Claude Opus 4.1 <noreply@anthropic.com>`, `GPT-5 <noreply@openai.com>`). If the exact vendor address is unknown, prefer `<Model Name> <noreply@local>` rather than fabricating a real-looking address.
 - **Do not amend, force-push, rebase, skip hooks, or rewrite published history** without an explicit user instruction. If a commit fails or hooks reject it, fix the cause and create a new commit instead.
+
+### Worked examples
+
+| Scenario | Correct response |
+|---|---|
+| User: "add feature X" | Implement X. Run tests. Show the diff. **Do not commit.** Wait. |
+| User: "add feature X and commit it" | Implement X. Run tests. **Commit** with the user-prescribed format and a `Co-authored-by:` trailer. |
+| User: "fix the bug" | Diagnose, fix, run tests, show the diff. **Do not commit.** Wait. |
+| User: "fix the bug and ship it" | Fix, run tests, **commit** with the user's `Co-authored-by:` trailer. |
+| User: "what does `commit -m` do?" | Explain the command. **Do not run it.** |
+| Agent finished a task five minutes ago, user has been silent | **Do not commit.** Resume work or wait. |
+| Agent wants to add `Co-authored-by: Kilo <...>` | Add the **trailer only**. Never pass `-c user.name=Kilo -c user.email=...` to override the primary `Author` line; that impersonates the user and produces a commit whose `Author` field is the agent's name, not the user's. |
+| Agent wonders whether to use `--amend` or `--force-push` | **Don't.** Both rewrite published history. If a commit fails or hooks reject it, fix the cause and create a new commit instead. |
+| User: "commit and push" | **Commit** and stop. Remind the user that they need to push manually — pushing is exclusively the user's action. Do not run `git push` under any circumstance. |
+| User: "ship it" or "deploy" | **Commit** (with the user's explicit instruction), summarise the diff, tell the user the local branch is ready. Do not push, do not deploy, do not run any remote-mutating command. |
