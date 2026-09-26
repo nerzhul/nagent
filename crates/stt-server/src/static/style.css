@@ -1025,6 +1025,230 @@ select, input[type="checkbox"] {
   color: var(--error);
 }
 
+/* ---- Weather widget ------------------------------------------------------
+ * Rendered under the `get_weather` tool bubble as a compact structured
+ * card so the user gets the answer at a glance instead of scanning
+ * prose. Built with createElement/textContent only (no innerHTML), so
+ * the city / condition strings stay text-safe even if the upstream
+ * ever returns unexpected characters.
+ *
+ * Layout:
+ *   - header: city · as-of local time · (forecast date when not current)
+ *   - hero: icon + temp + condition + meta row (current mode only)
+ *   - details row: prominent wind line with direction arrow
+ *   - day strip: 3 columns of weekday + icon + hi/lo + precip %
+ *
+ * Width and indent mirror the existing tool bubble so the card reads
+ * as part of the same cluster. Colors come from the `:root` palette;
+ * no new tokens introduced. */
+.chat-weather-card {
+  align-self: flex-start;
+  margin: 0.15rem 0 0.6rem 1.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  /* Subtle elevation: lighter top, deeper bottom. No new tokens. */
+  background: linear-gradient(180deg, var(--bg-elev) 0%, var(--bg) 100%);
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  color: var(--fg);
+  max-width: min(560px, 100%);
+  line-height: 1.35;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02), 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+.chat-weather-card__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.chat-weather-card__city {
+  color: var(--fg);
+  font-weight: 700;
+  font-size: 1.15rem;
+  letter-spacing: 0.01em;
+}
+.chat-weather-card__header .chat-weather-card__asof {
+  color: var(--fg-mute);
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+}
+.chat-weather-card__header .chat-weather-card__date {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  margin-left: auto;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+.chat-weather-card__hero {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem 0.9rem;
+  align-items: center;
+}
+.chat-weather-card__icon {
+  font-size: 3.4rem;
+  line-height: 1;
+  text-align: center;
+  width: 3.6rem;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+.chat-weather-card__hero-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.chat-weather-card__temp {
+  font-size: 2.4rem;
+  font-weight: 700;
+  color: var(--fg);
+  line-height: 1;
+  font-family: var(--font-sans);
+  letter-spacing: -0.02em;
+}
+.chat-weather-card__condition {
+  color: var(--fg);
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+.chat-weather-card__meta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+  color: var(--fg-mute);
+  font-size: 0.82rem;
+}
+.chat-weather-card__meta-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+.chat-weather-card__meta-label {
+  opacity: 0.7;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.chat-weather-card__meta-value {
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+/* Wind gets a dedicated row so the user sees it at a glance — it's
+ * the second-most-asked field after temperature. */
+.chat-weather-card__wind {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid rgba(88, 166, 255, 0.25);
+}
+.chat-weather-card__wind-icon {
+  font-size: 1.2rem;
+}
+.chat-weather-card__wind-dir {
+  font-size: 1.4rem;
+  line-height: 1;
+  display: inline-block;
+  /* Rotate the up-arrow to match the wind direction. CSS writes the
+   * rotation per instance via inline style. */
+  transition: transform 200ms ease;
+}
+.chat-weather-card__wind-value {
+  font-weight: 600;
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+.chat-weather-card__wind-cardinal {
+  color: var(--fg-mute);
+  font-size: 0.85rem;
+}
+.chat-weather-card__days {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.55rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+.chat-weather-card__day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  text-align: center;
+  padding: 0.5rem 0.25rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+}
+.chat-weather-card__day-label {
+  color: var(--fg-mute);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.chat-weather-card__day-icon {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+.chat-weather-card__day-hi {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.chat-weather-card__day-precip {
+  color: var(--fg-mute);
+  font-size: 0.78rem;
+}
+.chat-weather-card__day-precip--wet {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* Below ~520px the 3-column strip fits poorly — collapse to a vertical
+ * stack so each day has its own line. The hero keeps its icon+text grid
+ * because it stays readable down to ~280px. */
+@media (max-width: 520px) {
+  .chat-weather-card__days {
+    grid-template-columns: 1fr;
+  }
+  .chat-weather-card__meta {
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+}
+
+/* ---- Suppressed assistant bubble (weather) ------------------------------
+ * When `get_weather` returns successfully, replace the assistant prose
+ * with this compact italic hint pointing at the card. Persistence stays
+ * untouched (the full prose is still in localStorage) — only the
+ * visual rendering changes so the user gets a clean widget-as-answer. */
+.chat-message--weather-replaced.chat-assistant {
+  padding: 0.35rem 0.75rem;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-left: 2px solid var(--accent);
+  font-style: italic;
+  font-size: 0.82rem;
+  color: var(--fg-mute);
+}
+.chat-message__weather-hint {
+  white-space: normal;
+}
+
 .chat-advanced {
   margin-top: 0.75rem;
   background: var(--bg-elev);

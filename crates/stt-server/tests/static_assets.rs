@@ -520,3 +520,95 @@ async fn css_hides_inactive_view_with_higher_specificity() {
         "style.css no longer carries the high-specificity `[hidden] {{ display: none }}` rule for both view IDs. Without it, the `#view-discussion {{ display: flex }}` rule wins on specificity and the inactive view stays visible after a mode switch."
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_renders_weather_widget_for_get_weather() {
+    // `get_weather` returns a structured JSON payload. chat.js is
+    // expected to detect that in `resolveToolBubble`, parse the JSON,
+    // and call `renderWeatherWidget` so the user gets a compact card
+    // instead of scanning a prose paragraph. This substring-level
+    // guard catches a refactor that drops the wiring silently — the
+    // helper function, the detection branch, and the icon map entry
+    // all have to be present together for the widget to render.
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        body.contains("function renderWeatherWidget("),
+        "chat.js is missing `renderWeatherWidget(...)`. The get_weather tool will fall back to the summary-only tool bubble and the structured card never renders."
+    );
+    assert!(
+        body.contains("function conditionEmoji("),
+        "chat.js is missing `conditionEmoji(...)`. Without the emoji lookup the widget has no icons."
+    );
+    assert!(
+        body.contains("name === \"get_weather\""),
+        "chat.js no longer keys the weather widget path on `name === \"get_weather\"`. The widget will not render (or will render for every tool)."
+    );
+    assert!(
+        body.contains("renderWeatherWidget(div,"),
+        "chat.js does not call `renderWeatherWidget(div, ...)` from inside the `name === \"get_weather\"` branch. The card is wired but never attached."
+    );
+    assert!(
+        body.contains("get_weather: \""),
+        "TOOL_ICON map is missing the get_weather icon. The header bubble falls back to the generic wrench glyph."
+    );
+    // The widget replaces the assistant prose bubble with a one-liner
+    // when `get_weather` succeeds so the card is the visible answer
+    // instead of a long LLM-rendered restatement. The helper + the
+    // wiring in resolveToolBubble + the deferred path in streamReply's
+    // `finally` must all be present together.
+    assert!(
+        body.contains("function suppressAssistantForWeather("),
+        "chat.js is missing `suppressAssistantForWeather(...)`. The assistant prose bubble stays full-length after a successful get_weather and the widget loses visibility behind it."
+    );
+    assert!(
+        body.contains("inflight.weatherSuppressEl"),
+        "chat.js no longer defers weather suppression to stream end. Mid-stream suppression would clobber tokens the LLM is still writing after the tool result."
+    );
+    assert!(
+        body.contains("chat-message--weather-replaced"),
+        "chat.js no longer marks the suppressed assistant bubble with `chat-message--weather-replaced`. The CSS rule in style.css loses its target and the bubble re-renders the prose."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn css_carries_weather_card_rules() {
+    // The weather widget relies on `.chat-weather-card` and the
+    // responsive collapse to a single-column day strip below 520px.
+    // A future CSS refactor that drops either rule would leave the
+    // widget unstyled or horizontally scrolling on narrow viewports.
+    let base = serve_once().await;
+    let css = reqwest::get(format!("{base}/static/style.css"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        css.contains(".chat-weather-card"),
+        "style.css no longer defines `.chat-weather-card`. The widget has no styling and renders as an unstyled block."
+    );
+    assert!(
+        css.contains("chat-weather-card__days"),
+        "style.css is missing the `.chat-weather-card__days` rule. The 3-day forecast strip is unstyled."
+    );
+    assert!(
+        css.contains("chat-weather-card__wind"),
+        "style.css is missing the dedicated `.chat-weather-card__wind` row. The user can't see wind at a glance."
+    );
+    assert!(
+        css.contains("@media (max-width: 520px)") && css.contains("grid-template-columns: 1fr"),
+        "style.css is missing the <=520px collapse to a single-column day strip. Mobile users see a horizontally scrolling widget."
+    );
+    assert!(
+        css.contains("chat-message--weather-replaced"),
+        "style.css is missing the `.chat-message--weather-replaced` rule. The suppressed assistant bubble reverts to the full prose look after a get_weather success."
+    );
+}

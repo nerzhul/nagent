@@ -210,6 +210,164 @@ function normalizeMathDelimiters(text) {
   return text;
 }
 
+// ---- Weather widget helpers ------------------------------------------------
+//
+// `get_weather` returns a rich JSON blob (see weather_agent.rs:349-440) that
+// the chat would otherwise render as a long prose paragraph. We build a
+// compact "hero + 3-day strip" card out of that JSON instead. Helpers live
+// near the other rendering primitives so the live stream (`resolveToolBubble`)
+// and the session-rehydration path (`renderHistory`) can share them.
+
+// Map the upstream WeatherAPI `condition.code` integers to a small emoji
+// set. Unknown codes fall back to the thermometer glyph so the card still
+// renders cleanly for codes the upstream adds later. Pure function, no
+// side effects, no DOM access — candidate first target for a JS test
+// harness if the repo ever adopts one.
+function conditionEmoji(code) {
+  const map = {
+    1000: "\u2600",  // ☀️ Clear / Sunny
+    1003: "\u{1F324}", // 🌤️ Partly cloudy
+    1006: "\u2601",  // ☁️ Cloudy
+    1009: "\u2601",  // ☁️ Overcast
+    1030: "\u{1F32B}", // 🌫 Mist
+    1063: "\u{1F326}", // 🌦 Patchy rain
+    1066: "\u{1F328}", // 🌨 Patchy snow
+    1069: "\u{1F328}", // 🌨 Patchy sleet
+    1074: "\u{1F328}", // 🌨 Patchy freezing drizzle
+    1087: "\u26C8",  // ⛈ Thundery outbreaks
+    1114: "\u{1F328}", // 🌨 Blowing snow
+    1117: "\u2744",  // ❄️ Blizzard
+    1135: "\u{1F32B}", // 🌫 Fog
+    1147: "\u{1F32B}", // 🌫 Freezing fog
+    1150: "\u{1F326}", // 🌦 Patchy light drizzle
+    1153: "\u{1F326}", // 🌦 Light drizzle
+    1168: "\u{1F327}", // 🌧 Freezing drizzle
+    1171: "\u{1F327}", // 🌧 Heavy freezing drizzle
+    1180: "\u{1F326}", // 🌦 Patchy light rain
+    1183: "\u{1F327}", // 🌧 Light rain
+    1186: "\u{1F327}", // 🌧 Moderate rain at times
+    1189: "\u{1F327}", // 🌧 Moderate rain
+    1192: "\u{1F327}", // 🌧 Heavy rain at times
+    1195: "\u{1F327}", // 🌧 Heavy rain
+    1198: "\u{1F327}", // 🌧 Light freezing rain
+    1201: "\u{1F327}", // 🌧 Moderate / heavy freezing rain
+    1204: "\u{1F328}", // 🌨 Light sleet
+    1207: "\u{1F328}", // 🌨 Moderate / heavy sleet
+    1208: "\u{1F328}", // 🌨 Light freezing drizzle
+    1210: "\u2744",  // ❄️ Patchy light snow
+    1213: "\u2744",  // ❄️ Light snow
+    1216: "\u{1F328}", // 🌨 Patchy moderate snow
+    1219: "\u{1F328}", // 🌨 Moderate snow
+    1222: "\u{1F328}", // 🌨 Patchy heavy snow
+    1225: "\u2744",  // ❄️ Heavy snow
+    1237: "\u{1F328}", // 🌨 Ice pellets
+    1240: "\u{1F326}", // 🌦 Light rain shower
+    1243: "\u{1F327}", // 🌧 Rain shower
+    1246: "\u{1F327}", // 🌧 Torrential rain shower
+    1249: "\u{1F328}", // 🌨 Light sleet showers
+    1252: "\u2744",  // ❄️ Light snow showers
+    1255: "\u{1F328}", // 🌨 Snow showers
+    1258: "\u{1F328}", // 🌨 Heavy snow showers
+    1261: "\u{1F328}", // 🌨 Light ice pellet showers
+    1264: "\u2744",  // ❄️ Moderate / heavy ice pellet showers
+    1273: "\u26C8",  // ⛈ Light rain with thunder
+    1276: "\u26C8",  // ⛈ Rain with thunder
+    1279: "\u26C8",  // ⛈ Snow with thunder
+    1282: "\u26C8",  // ⛈ Heavy thunderstorms
+  };
+  return map[code] || "\u{1F321}"; // 🌡 fallback for unknown codes
+}
+
+// Format a YYYY-MM-DD date string as a short weekday label ("Wed") in the
+// location's timezone. Returns the input unchanged when parsing fails so
+// the rest of the widget keeps rendering even on a malformed date.
+function formatDayShort(dateStr, tz) {
+  if (!dateStr) return "";
+  // `YYYY-MM-DD HH:MM` parses as local-time; appending `T00:00:00` and a
+  // timezone would let `Intl.DateTimeFormat` give us the right weekday
+  // even when the user's browser is in a different zone. Strip any time
+  // component first.
+  const datePart = String(dateStr).slice(0, 10);
+  const parts = datePart.split("-");
+  if (parts.length !== 3) return datePart;
+  const [y, m, d] = parts;
+  const isoUtc = `${y}-${m}-${d}T12:00:00Z`; // noon avoids DST flips
+  const dt = new Date(isoUtc);
+  if (isNaN(dt.getTime())) return datePart;
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      weekday: "short",
+      timeZone: tz || undefined,
+    }).format(dt);
+  } catch (_e) {
+    return new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(dt);
+  }
+}
+
+// Format `localtime` ("YYYY-MM-DD HH:MM" in the location's tz) as
+// "Tue 26 Sep 14:00" — a compact header that fits both on desktop and on
+// narrow viewports.
+function formatLocalTimestamp(localtime) {
+  if (!localtime) return "";
+  const trimmed = String(localtime).trim();
+  const dayLabel = formatDayShort(trimmed);
+  // Keep just the HH:MM portion of the time-of-day field for the as-of line.
+  const timePart = trimmed.slice(11, 16);
+  return timePart ? `${dayLabel} ${timePart}` : dayLabel;
+}
+
+// Read a string field off an arbitrary object/JSON value. `data.current`
+// and `data.forecast[].date` are wrapped defensively so a partial or
+// schema-drift payload doesn't throw the stream into a crash loop.
+function safeStr(value, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+function safeNum(value, fallback = 0) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Pick the three forecast days to display. Current mode = today's slice
+// plus the next two (the agent already returns forecast[0..N] in source
+// order). Forecast mode with an explicit `requested_date` finds the
+// matching slice and returns it plus the next two (or fewer if the
+// forecast is shorter). Historical mode with `requested_date` returns
+// just the matching single day so the card header can read "On …".
+function pickWeatherDays(data, mode) {
+  const list = Array.isArray(data?.forecast) ? data.forecast : [];
+  if (list.length === 0) return [];
+  if (mode === "historical") {
+    const target = safeStr(data.requested_date);
+    return target ? list.filter((d) => safeStr(d.date) === target).slice(0, 1) : list.slice(0, 1);
+  }
+  if (mode === "forecast") {
+    const target = safeStr(data.requested_date);
+    if (target) {
+      const idx = list.findIndex((d) => safeStr(d.date) === target);
+      if (idx >= 0) return list.slice(idx, idx + 3);
+    }
+    return list.slice(0, 3);
+  }
+  // current mode — first three entries (today, tomorrow, day after).
+  return list.slice(0, 3);
+}
+
+// Inspect `requested_date` / `location.localtime` to decide which mode
+// the query fell into. The agent only emits `requested_date` for the
+// SingleDate arm of `Mode` (weather_agent.rs:432-437), so absence implies
+// a current-snapshot query.
+function detectWeatherMode(data) {
+  const requested = safeStr(data?.requested_date);
+  if (!requested) return "current";
+  const localtime = safeStr(data?.location?.localtime);
+  const today = localtime.slice(0, 10);
+  if (requested === today) return "current";
+  // Distinguishing past from future is cheaper than sorting: compare
+  // the YYYY-MM-DD strings lexicographically (ISO format sorts cleanly).
+  if (requested < today) return "historical";
+  return "forecast";
+}
+
 function renderMarkdown(text) {
   if (!text) return "";
   if (!MARKDOWN_AVAILABLE) {
@@ -594,7 +752,8 @@ function appendError(text) {
 // Ollama expects on the next round.
 
 const TOOL_ICON = {
-  web_fetch: "\u{1F50E}", // 🔎
+  web_fetch: "\u{1F50E}",       // 🔎
+  get_weather: "\u{1F324}",      // 🌤️ — matches the card's condition icon family
 };
 
 function toolIcon(name) {
@@ -709,6 +868,31 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
       statusEl.textContent = ok ? `✓ ${truncateSummary(summary)}` : `⚠ ${truncateSummary(summary)}`;
     }
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    // `get_weather` carries a structured JSON payload already — build
+    // the compact card out of it. Wrapped in try/catch so a malformed
+    // payload degrades gracefully (summary line is still rendered) and
+    // never tears down the live stream.
+    if (ok && name === "get_weather") {
+      try {
+        const data = parseWeatherPayload(content);
+        if (data) {
+          const mode = detectWeatherMode(data);
+          renderWeatherWidget(div, data, mode);
+          // Suppress the assistant bubble that emitted the tool call so
+          // the widget is the visible answer. Defer to stream end via
+          // `inflight.weatherSuppressEl`: suppressing mid-stream would
+          // clobber tokens the LLM is still writing. On renderHistory
+          // `inflight` is null, so we suppress immediately.
+          if (inflight && inflight.sessionId === sessionId) {
+            inflight.weatherSuppressEl = div;
+          } else if (div.parentNode === messagesEl) {
+            suppressAssistantForWeather(div);
+          }
+        }
+      } catch (e) {
+        console.warn("weather widget render failed:", e);
+      }
+    }
   }
   if (sessionId) {
     const h = loadHistory(sessionId);
@@ -720,6 +904,253 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
     });
     saveHistory(sessionId, h);
   }
+}
+
+// Build the structured weather card and inject it immediately after
+// `parentEl` (the corresponding `.chat-tool-bubble`). Built with
+// `createElement` + `textContent` only — no `innerHTML` / DOMPurify
+// pass, mirroring the existing tool-bubble detail line at chat.js:634-642.
+// The card is purely additive: it never replaces the existing tool
+// bubble, which already shows the city + tick so the card visually
+// hangs off a familiar header.
+function renderWeatherWidget(parentEl, data, mode) {
+  if (!parentEl || !messagesEl.contains(parentEl)) return null;
+  // Idempotency: if a previous render already attached a card under
+  // this tool bubble (e.g. a session rehydration racing the live
+  // stream), replace it in place rather than stacking duplicates.
+  const existing = parentEl.nextElementSibling;
+  if (existing && existing.classList?.contains("chat-weather-card")) {
+    existing.remove();
+  }
+  const location = data?.location || {};
+  const current = data?.current || null;
+  const days = pickWeatherDays(data, mode);
+
+  const card = document.createElement("div");
+  card.className = `chat-weather-card chat-weather-card--${mode}`;
+
+  // Header line: city · as-of · date. Always present so the card is
+  // scannable even when the forecast is empty (e.g. an unexpected
+  // empty `forecast[]` from the upstream).
+  const header = document.createElement("div");
+  header.className = "chat-weather-card__header";
+  const cityEl = document.createElement("span");
+  cityEl.className = "chat-weather-card__city";
+  cityEl.textContent = safeStr(location.name) || "—";
+  header.appendChild(cityEl);
+  const asOf = document.createElement("span");
+  asOf.className = "chat-weather-card__asof";
+  asOf.textContent = `· ${formatLocalTimestamp(safeStr(location.localtime))}`;
+  header.appendChild(asOf);
+  if (mode !== "current" && safeStr(location.localtime)) {
+    const dateLabel = document.createElement("span");
+    dateLabel.className = "chat-weather-card__date";
+    const requested = safeStr(data.requested_date);
+    dateLabel.textContent = requested
+      || formatDayShort(safeStr(location.localtime), safeStr(location.timezone));
+    header.appendChild(dateLabel);
+  }
+  card.appendChild(header);
+
+  // Hero block: only in current mode. Skipped for historical / pure
+  // forecast queries where we don't have a now-cast — the days strip
+  // tells the whole story there.
+  if (mode === "current" && current) {
+    const hero = document.createElement("div");
+    hero.className = "chat-weather-card__hero";
+    const iconEl = document.createElement("span");
+    iconEl.className = "chat-weather-card__icon";
+    iconEl.textContent = conditionEmoji(safeNum(current.condition_code));
+    hero.appendChild(iconEl);
+    const body = document.createElement("div");
+    body.className = "chat-weather-card__hero-body";
+    const tempEl = document.createElement("div");
+    tempEl.className = "chat-weather-card__temp";
+    tempEl.textContent = `${safeNum(current.temp_c)} °C`;
+    body.appendChild(tempEl);
+    const condEl = document.createElement("div");
+    condEl.className = "chat-weather-card__condition";
+    condEl.textContent = safeStr(current.condition) || "—";
+    body.appendChild(condEl);
+    hero.appendChild(body);
+    // Meta row beneath the hero: feels-like, humidity, UV.
+    // Wind gets its own dedicated row below — it's the second-most-
+    // asked field after the temperature and visually combining it
+    // with humidity/UV made it easy to miss.
+    const metaEl = document.createElement("div");
+    metaEl.className = "chat-weather-card__meta";
+    const feelsItem = makeMetaItem("Ressenti", `${safeNum(current.feels_like_c)} °C`);
+    if (feelsItem) metaEl.appendChild(feelsItem);
+    if (current.humidity) {
+      metaEl.appendChild(makeMetaItem("Humidité", `${safeNum(current.humidity)} %`));
+    }
+    if (current.uv) {
+      metaEl.appendChild(makeMetaItem("UV", String(safeNum(current.uv))));
+    }
+    if (current.pressure_mb) {
+      metaEl.appendChild(makeMetaItem("Pression", `${safeNum(current.pressure_mb)} hPa`));
+    }
+    card.appendChild(hero);
+    if (metaEl.childElementCount > 0) card.appendChild(metaEl);
+
+    // Dedicated wind row — visually prominent so a glance tells the
+    // user the conditions include wind speed and direction. The
+    // arrow rotates to match the compass heading.
+    if (current.wind_kmh) {
+      const windEl = document.createElement("div");
+      windEl.className = "chat-weather-card__wind";
+      const windIcon = document.createElement("span");
+      windIcon.className = "chat-weather-card__wind-icon";
+      windIcon.textContent = "\u{1F32C}"; // 🌬
+      windEl.appendChild(windIcon);
+      const dir = safeStr(current.wind_dir);
+      if (dir && cardinalToDegrees(dir) != null) {
+        const arrow = document.createElement("span");
+        arrow.className = "chat-weather-card__wind-dir";
+        arrow.textContent = "\u2191"; // ↑
+        arrow.setAttribute("style", `transform: rotate(${cardinalToDegrees(dir)}deg); display:inline-block;`);
+        windEl.appendChild(arrow);
+      }
+      const valEl = document.createElement("span");
+      valEl.className = "chat-weather-card__wind-value";
+      valEl.textContent = `${safeNum(current.wind_kmh)} km/h`;
+      windEl.appendChild(valEl);
+      if (dir) {
+        const cardinal = document.createElement("span");
+        cardinal.className = "chat-weather-card__wind-cardinal";
+        cardinal.textContent = dir;
+        windEl.appendChild(cardinal);
+      }
+      card.appendChild(windEl);
+    }
+  }
+
+  // Day strip: always shown (up to 3 days) when forecast[] is non-empty.
+  // Even in historical mode the strip renders the single matching day so
+  // the layout doesn't shift between modes.
+  if (days.length > 0) {
+    const strip = document.createElement("div");
+    strip.className = "chat-weather-card__days";
+    for (const day of days) {
+      const cell = document.createElement("div");
+      cell.className = "chat-weather-card__day";
+      const label = document.createElement("div");
+      label.className = "chat-weather-card__day-label";
+      label.textContent = formatDayShort(safeStr(day.date), safeStr(location.timezone));
+      cell.appendChild(label);
+      const dayIcon = document.createElement("div");
+      dayIcon.className = "chat-weather-card__day-icon";
+      dayIcon.textContent = conditionEmoji(safeNum(day.condition_code));
+      cell.appendChild(dayIcon);
+      const hi = document.createElement("div");
+      hi.className = "chat-weather-card__day-hi";
+      hi.textContent = `${safeNum(day.t_max_c)}° / ${safeNum(day.t_min_c)}°`;
+      cell.appendChild(hi);
+      const precip = document.createElement("div");
+      const rainPct = safeNum(day.chance_of_rain);
+      precip.className = "chat-weather-card__day-precip" + (rainPct >= 30 ? " chat-weather-card__day-precip--wet" : "");
+      precip.textContent = rainPct > 0 ? `pluie ${rainPct}%` : "—";
+      cell.appendChild(precip);
+      strip.appendChild(cell);
+    }
+    card.appendChild(strip);
+  }
+
+  parentEl.insertAdjacentElement("afterend", card);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return card;
+}
+
+// Build a single label + value pair for the meta row. Caller is
+// responsible for not invoking this with a falsy underlying number —
+// the truthy guards at the call site (`if (current.humidity) ...`)
+// hide the row entirely when the field is missing or zero.
+function makeMetaItem(label, value) {
+  const wrap = document.createElement("span");
+  wrap.className = "chat-weather-card__meta-item";
+  const lbl = document.createElement("span");
+  lbl.className = "chat-weather-card__meta-label";
+  lbl.textContent = label;
+  const val = document.createElement("span");
+  val.className = "chat-weather-card__meta-value";
+  val.textContent = value;
+  wrap.appendChild(lbl);
+  wrap.appendChild(val);
+  return wrap;
+}
+
+// Map the WeatherAPI compass heading string ("N", "WSW", …) to degrees
+// so the wind arrow can be rotated to face the actual wind direction.
+// Returns null for unrecognised inputs (the arrow is omitted in that
+// case, the speed still shows).
+const CARDINAL_TO_DEG = {
+  N: 0, NNE: 22.5, NE: 45, ENE: 67.5,
+  E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
+  S: 180, SSW: 202.5, SW: 225, WSW: 247.5,
+  W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
+};
+function cardinalToDegrees(s) {
+  return Object.prototype.hasOwnProperty.call(CARDINAL_TO_DEG, s)
+    ? CARDINAL_TO_DEG[s]
+    : null;
+}
+
+// Collapse the assistant bubble that called the weather tool down to a
+// short italic hint pointing at the card. Without this the LLM streams
+// a long prose restatement of every field the card already shows.
+//
+// Walks back through `previousElementSibling` to skip any sibling tool
+// bubbles that landed before us. Multiple tool calls can chain off
+// the same assistant bubble, so the chain has to be skipped over.
+//
+// Defer to stream end via `inflight.weatherSuppressEl`: suppressing
+// mid-stream would clobber tokens that the LLM is still writing after
+// the tool result. When renderHistory re-creates the bubble from
+// storage no stream is in flight, so we suppress immediately.
+function suppressAssistantForWeather(toolBubble) {
+  let cur = toolBubble.previousElementSibling;
+  while (cur && !cur.classList.contains("chat-assistant")) {
+    cur = cur.previousElementSibling;
+  }
+  if (!cur) return;
+  cur.classList.add("chat-message--weather-replaced");
+  // Replace the (possibly huge) rendered HTML with a one-liner hint.
+  // The full prose survives in localStorage so the LLM context keeps
+  // it on reload — we just don't render it visually.
+  while (cur.firstChild) cur.removeChild(cur.firstChild);
+  const hint = document.createElement("span");
+  hint.className = "chat-message__weather-hint";
+  hint.textContent = "\u{1F324} Détails dans la carte météo ci-dessous.";
+  cur.appendChild(hint);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// Best-effort parse of a `tool_result` content payload into a structured
+// weather object. Returns `null` when the payload is missing, malformed,
+// or doesn't look like the `get_weather` shape — callers fall back to the
+// summary-only rendering in that case. Wrapped in try/catch because the
+// content string is server-generated JSON and we never want a parse
+// failure to throw out of `resolveToolBubble`.
+//
+// Wire shape: the weather agent wraps its payload as
+//   {"ok": true, "data": {"location": {...}, "current": {...}, "forecast": [...]}, "source": "...", "fetched_at": "..."}
+// We accept both the wrapped (current SSE `tool_result` content) and the
+// unwrapped (caller-side / test fixture) shapes so the parser stays
+// robust against future refactors that drop the envelope.
+function parseWeatherPayload(content) {
+  if (!content) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(String(content));
+  } catch (_e) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const inner = (parsed.data && typeof parsed.data === "object")
+    ? parsed.data
+    : parsed;
+  if (!inner.location || typeof inner.location !== "object") return null;
+  return inner;
 }
 
 function truncateSummary(s) {
@@ -1013,6 +1444,20 @@ async function streamReply(sessionId, userText) {
       appendError(e?.message || String(e));
     }
   } finally {
+    // If a `get_weather` tool result came back successfully during
+    // this reply, swap the assistant prose bubble for a compact
+    // "details in the card below" hint. Done here (not in
+    // resolveToolBubble) so we never clobber tokens that the LLM is
+    // still streaming after the tool result — the full prose survives
+    // in localStorage, so the LLM context and any future reload keep
+    // it.
+    if (inflight?.weatherSuppressEl) {
+      try {
+        suppressAssistantForWeather(inflight.weatherSuppressEl);
+      } catch (e) {
+        console.warn("weather suppression failed:", e);
+      }
+    }
     // Persist the raw markdown source (or the error/stopped marker)
     // rather than the rendered HTML, so the history stays small,
     // portable, and re-renderable on clients that load the page
