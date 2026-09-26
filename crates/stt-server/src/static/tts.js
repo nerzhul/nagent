@@ -22,13 +22,43 @@
 
 // Maximum length of the sentence buffer before we force a flush,
 // so an LLM that streams a 50 KB comma-separated clause does not
-  // hold it forever.
-  var MAX_BUFFER_CHARS = 500;
+// hold it forever.
+var MAX_BUFFER_CHARS = 500;
 
-  // Regex matching sentence terminators followed by whitespace, or
-  // paragraph breaks. Captures the terminator so the split keeps it
-  // attached to the previous sentence.
-  var SPLIT_REGEX = /([.!?]+[\s\u00a0]+|\n{2,})/;
+// Find the earliest flush boundary in `buffer`, in priority order:
+//
+//   1. Sentence terminator `[.!?]+` followed by whitespace -- the
+//      most common case, always a sentence boundary.
+//   2. Paragraph break `\n\n+` (two or more newlines) -- explicit
+//      paragraph break.
+//   3. Newline followed by an uppercase letter, digit, or opening
+//      punctuation (`[A-ZÀ-ÖØ-Ý\d«»"'(\[]`) -- lookahead at the
+//      next line; if it starts a new sentence, flush at the `\n`.
+//
+// Returns `{ idx, kind }` where `idx` is the position AT WHICH the
+// caller should split (the boundary character IS included in the
+// left side, never in the right). Returns `null` when no boundary
+// is found and the buffer should keep growing.
+function findBoundary(buffer) {
+  var sent = /[.!?]+[\s\u00a0]+/.exec(buffer);
+  if (sent) {
+    return { idx: sent.index + sent[0].length, kind: 'sentence' };
+  }
+  var para = /\n\n+/.exec(buffer);
+  if (para) {
+    return { idx: para.index + para[0].length, kind: 'paragraph' };
+  }
+  // Lookahead: `\n` followed by uppercase / digit / opening punct.
+  // The `\n` itself is consumed (length 1) so the resulting phrase
+  // carries the trailing `\n` -- the next call sees the new
+  // sentence's first char at position 0 and won't re-flush on the
+  // same boundary.
+  var newline = /\n(?=[A-ZÀ-ÖØ-Ý\d«»"'(\[])/u.exec(buffer);
+  if (newline) {
+    return { idx: newline.index + 1, kind: 'newline-caps' };
+  }
+  return null;
+}
 
   /**
    * Decode a 16-bit PCM mono WAV blob into an `AudioBuffer`.
@@ -96,34 +126,51 @@
     return Promise.resolve(buf);
   }
 
-  /**
-   * Split `buffer` on the first sentence terminator. Returns
-   * `{ rest, phrase }`: `phrase` is the complete sentence (suitable
-   * to send for synthesis) and `rest` is whatever trailing characters
-   * should stay in the buffer for the next call.
-   *
-   * If no terminator exists, `phrase` is `null` and `rest` is the
-   * whole buffer (capped at `MAX_BUFFER_CHARS`, after which the
-   * buffer is force-emitted regardless).
-   */
-  function splitSentence(buffer) {
-    if (!buffer) return { rest: '', phrase: null };
-    var m = SPLIT_REGEX.exec(buffer);
-    if (m) {
-      var idx = m.index + m[0].length;
-      return {
-        phrase: buffer.slice(0, idx),
-        rest: buffer.slice(idx),
-      };
-    }
-    if (buffer.length >= MAX_BUFFER_CHARS) {
-      // No terminator for a while — flush the whole buffer to avoid
-      // unbounded growth. The browser will say it slightly awkwardly
-      // (mid-clause) but never loses words.
-      return { phrase: buffer, rest: '' };
-    }
-    return { rest: buffer, phrase: null };
+/**
+ * Split `buffer` on the earliest flush boundary. Returns
+ * `{ rest, phrase }`: `phrase` is the complete sentence (suitable
+ * to send for synthesis after `phraseForTts`) and `rest` is what
+ * stays in the buffer for the next call.
+ *
+ * If no boundary exists, `phrase` is `null` and `rest` is the
+ * whole buffer (capped at `MAX_BUFFER_CHARS`, after which the
+ * buffer is force-emitted regardless).
+ */
+function splitSentence(buffer) {
+  if (!buffer) return { rest: '', phrase: null };
+  var boundary = findBoundary(buffer);
+  if (boundary) {
+    return {
+      phrase: buffer.slice(0, boundary.idx),
+      rest: buffer.slice(boundary.idx),
+      kind: boundary.kind,
+    };
   }
+  if (buffer.length >= MAX_BUFFER_CHARS) {
+    // No terminator for a while -- flush the whole buffer to avoid
+    // unbounded growth. The browser will say it slightly awkwardly
+    // (mid-clause) but never loses words.
+    return { phrase: buffer, rest: '' };
+  }
+  return { rest: buffer, phrase: null };
+}
+
+/**
+ * Normalise a phrase for the Piper TTS pipeline:
+ *
+ *   - Collapse runs of whitespace (including newlines and tabs) into
+ *     a single space. espeak-ng treats `\n` as a paragraph break (an
+ *     audible silence), which sounds awkward when the newline appears
+ *     mid-sentence as a result of streaming-token boundaries.
+ *   - Trim leading / trailing whitespace.
+ *
+ * The visible bubble still renders the original markdown via
+ * `marked.parse` + `DOMPurify`; only the audio path gets this
+ * normalised variant.
+ */
+function phraseForTts(phrase) {
+  return phrase.replace(/\s+/g, ' ').trim();
+}
 
   function TtsPlayer(settings) {
     this._settings = settings; // { endpoint, voice, speed }
@@ -168,16 +215,24 @@
 
   /**
    * Force-emit whatever is currently buffered (called on `[DONE]`).
-   * Trims trailing whitespace to avoid synthesising an empty chunk.
+   * `_enqueue` normalises whitespace internally so we just hand the
+   * raw buffer over and let it decide whether there's anything
+   * worth synthesising.
    */
   TtsPlayer.prototype.flush = function () {
-    var tail = this._buffer.trim();
+    var tail = this._buffer;
     this._buffer = '';
-    if (tail) this._enqueue(tail);
+    if (tail.trim()) this._enqueue(tail);
   };
 
   TtsPlayer.prototype._enqueue = function (phrase) {
     if (this._stopped) return;
+    // Normalise whitespace before sending to Piper (see
+    // `phraseForTts` rationale). The `\n` carried over from the
+    // lookahead boundary would otherwise insert an unwanted
+    // paragraph pause mid-sentence.
+    phrase = phraseForTts(phrase);
+    if (!phrase) return;
     var self = this;
     // Cancel any in-flight fetch for a previous phrase (only one is
     // allowed at a time so we don't race the server).
@@ -328,6 +383,11 @@
   TtsPlayer.prototype.speak = function (text, opts) {
     var self = this;
     opts = opts || {};
+    // Normalise whitespace: espeak-ng treats `\n` as a paragraph
+    // break (audible silence) so a replay of a multi-line bubble
+    // would otherwise pause at every newline. `phraseForTts` also
+    // trims leading / trailing whitespace.
+    text = phraseForTts(text);
     if (!text) return Promise.reject(new Error("speak: empty text"));
     this.stopAll();
     return new Promise(function (resolve, reject) {
@@ -399,7 +459,6 @@
       });
     });
   };
-  };
 
   /**
    * Public factory. `settings` keys:
@@ -416,8 +475,14 @@
   // so the surface is a namespace object with `create` as its main
   // entry point. Also re-export the helpers (`splitSentence`,
   // `decodeWav`) for ad-hoc debugging in devtools.
+  // Named export matching `chat.js`'s `import { NagentTts } from
+  // '/static/tts.js'`. `chat.js` calls `NagentTts.create(settings)`
+  // so the surface is a namespace object with `create` as its main
+  // entry point. Also re-export the helpers (`splitSentence`,
+  // `decodeWav`, `phraseForTts`) for ad-hoc debugging in devtools.
   export const NagentTts = {
     create,
     _splitSentence: splitSentence,
     _decodeWav: decodeWav,
+    _phraseForTts: phraseForTts,
   };
