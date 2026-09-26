@@ -76,6 +76,7 @@ Scope — this rule applies whenever a change touches any of the following:
 - **Build configuration**: `Cargo.toml` features, `Makefile` / `*.mk` targets, build scripts, feature flags, toolchain pins, Dockerfiles, CI workflow files (`.github/workflows/*.yml`), kustomize or Helm manifests, generated lockfiles.
 - **Runtime configuration**: command-line arguments, configuration files (e.g. `config.toml`, YAML/JSON defaults), default ports, paths, file locations, log levels, feature toggles read at runtime.
 - **Environment variables**: any variable read by the application or its tooling (names, semantics, accepted values, defaults, required vs optional, deprecation status).
+- **Configuration file**: any variable read by the application or its tooling in examples/*.toml
 
 Required actions when such a parameter changes:
 
