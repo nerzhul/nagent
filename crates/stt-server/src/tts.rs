@@ -217,6 +217,25 @@ impl Synthesizer for MockSynthesizer {
 /// the feature) avoid the espeak-ng / libclang / libssl-dev build
 /// dependencies that `piper-rs` transitively pulls in.
 #[cfg(feature = "tts")]
+// `piper_rs::Piper` does not implement Debug upstream, so a plain
+// `#[derive(Debug)]` fails. Manual impl that omits the `models`
+// field (the only non-Debug one) via `finish_non_exhaustive`.
+#[cfg(feature = "tts")]
+impl std::fmt::Debug for PiperSynthesizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PiperSynthesizer")
+            .field("voices", &self.voices)
+            .field("model_dir", &self.model_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `piper_rs::Piper` only resolves when the `tts` cargo feature is
+/// on (the `piper-rs` optional dep). The struct itself references
+/// that type, so we gate the whole definition -- not just the impl
+/// blocks -- otherwise `--no-default-features` builds fail with
+/// E0433 (use of unresolved module).
+#[cfg(feature = "tts")]
 pub struct PiperSynthesizer {
     voices: Vec<VoiceMeta>,
     /// Directory the voices were discovered in. Re-derived here so the
