@@ -466,13 +466,35 @@ browser just plays the resulting WAV through Web Audio.
 ### Prerequisites
 
 Install the `espeak-ng` C library + headers — `piper-rs` calls into it
-for phonemisation. On Debian/Ubuntu:
+for phonemisation — plus `libsonic`, which espeak-ng links against for
+audio time-stretching. On Debian/Ubuntu:
 
 ```
-sudo apt install espeak-ng
+sudo apt install espeak-ng libsonic-dev
 ```
 
-On Arch Linux the package is `espeak-ng`; on Fedora it's `espeak-ng`.
+On Arch Linux:
+
+```
+sudo pacman -S espeak-ng libsonic
+```
+
+On Fedora:
+
+```
+sudo dnf install espeak-ng libsonic
+```
+
+> **Why `libsonic`?** espeak-ng with `COMPILE_INTONATIONS=ON` (the
+> default) calls into libsonic for pitch / time-stretch control.
+> `piper-rs` 0.2's build script bundles espeak-ng + libsonic via
+> CMake but has a packaging bug where it forgets to relay the
+> `-lsonic` link directive to Cargo. `stt-server`'s own build script
+> (`build.rs`) re-injects the directive whenever the `tts` cargo
+> feature is enabled, so the link step resolves against the system
+> `libsonic.so` you just installed. If you want a fully static
+> link (no runtime `libsonic.so` dependency), set
+> `SONIC_LINK_KIND=static` at build time.
 
 ### Download voices
 
