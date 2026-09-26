@@ -58,6 +58,7 @@
 # api_key = ""                              # optional bearer token
 # request_timeout_secs = 120
 # cors_allow_origins = []                   # empty = same-origin only
+# system_prompt = "You are a strict, concise assistant."   # mirrors LLM_SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
 # Chat agents — master switches + one sub-table per tool

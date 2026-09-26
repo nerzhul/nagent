@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::agents::{AgentError, AgentRegistry};
 use crate::config::LlmConfig;
+use crate::llm_prompt::inject_default_system_prompt;
 use crate::AppState;
 
 /// Shared, cheaply-clonable HTTP client.
@@ -194,6 +195,14 @@ pub async fn chat_completions(
             obj.insert("tools".into(), Value::Array(merged));
         }
     }
+
+    // Prepend the admin-configured system prompt (env `LLM_SYSTEM_PROMPT`
+    // or TOML `[llm].system_prompt`) as `messages[0]`. The browser's
+    // "Additional instructions" textarea is appended *after* this by
+    // `chat.js`, so the admin's prompt stays authoritative. Done once
+    // here; the tool loop below reuses the same `forward_body` for
+    // every round, so the prepend propagates automatically.
+    inject_default_system_prompt(&mut forward_body, llm.cfg.system_prompt.as_deref());
 
     // Forward a few well-known request headers. `Authorization` is
     // handled separately so we never leak the server-side key when it

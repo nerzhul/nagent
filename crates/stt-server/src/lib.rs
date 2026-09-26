@@ -20,6 +20,7 @@ pub mod agents;
 pub mod config;
 pub mod config_file;
 pub mod llm;
+pub mod llm_prompt;
 pub mod middleware;
 pub mod rate_limit;
 pub mod router;

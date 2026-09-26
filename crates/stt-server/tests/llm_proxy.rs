@@ -17,6 +17,7 @@ use std::time::Duration;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
+use serde_json::Value;
 use stt_core::{MockBackend, WhisperBackend};
 use stt_server::{
     build_router,
@@ -91,6 +92,21 @@ async fn start_test_server_with_llm(
     String,
     Arc<tokio::sync::Mutex<Option<axum::http::HeaderMap>>>,
 ) {
+    start_test_server_with_llm_and_system_prompt(upstream_url, api_key, None).await
+}
+
+/// Same as [`start_test_server_with_llm`] but lets the caller set the
+/// admin-configured system prompt (used by the new
+/// `proxy_prepends_default_system_prompt_when_configured` /
+/// `proxy_is_passthrough_when_system_prompt_unset` tests).
+async fn start_test_server_with_llm_and_system_prompt(
+    upstream_url: String,
+    api_key: Option<String>,
+    system_prompt: Option<String>,
+) -> (
+    String,
+    Arc<tokio::sync::Mutex<Option<axum::http::HeaderMap>>>,
+) {
     let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
 
     let server_cfg = Arc::new(ServerConfig {
@@ -108,6 +124,7 @@ async fn start_test_server_with_llm(
             api_key,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
+            system_prompt,
         },
         agents: stt_server::config::AgentConfig::default(),
     });
@@ -176,6 +193,7 @@ async fn start_test_server_disabled() -> String {
             api_key: None,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
+            system_prompt: None,
         },
         agents: stt_server::config::AgentConfig::default(),
     });
@@ -406,4 +424,128 @@ async fn disabled_returns_404_on_v1_routes() {
         .await
         .expect("get models");
     assert_eq!(models.status(), StatusCode::NOT_FOUND);
+}
+
+/// Mock upstream that captures the *request body* alongside the
+/// headers so tests can assert on `messages[0]` after the proxy
+/// prepends the admin-configured system prompt.
+async fn spawn_capturing_upstream(
+    body: String,
+) -> (
+    String,
+    Arc<tokio::sync::Mutex<Option<axum::http::HeaderMap>>>,
+    Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+) {
+    let on_request = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
+    let on_body = Arc::new(tokio::sync::Mutex::new(None::<serde_json::Value>));
+
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let on_request = Arc::clone(&on_request);
+            let on_body = Arc::clone(&on_body);
+            let body = body.clone();
+            move |headers: axum::http::HeaderMap, req_body: axum::body::Bytes| {
+                let on_request = Arc::clone(&on_request);
+                let on_body = Arc::clone(&on_body);
+                let body = body.clone();
+                async move {
+                    *on_request.lock().await = Some(headers);
+                    *on_body.lock().await =
+                        Some(serde_json::from_slice(&req_body).unwrap_or(Value::Null));
+                    (
+                        StatusCode::OK,
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("text/event-stream"),
+                        )],
+                        body,
+                    )
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), on_request, on_body)
+}
+
+const SERVER_PROMPT: &str = "You are a strict, concise assistant.";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_prepends_default_system_prompt_when_configured() {
+    let (_upstream_url, _on_headers, on_body) =
+        spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let (chat_url, _) = start_test_server_with_llm_and_system_prompt(
+        _upstream_url,
+        None,
+        Some(SERVER_PROMPT.into()),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{chat_url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#,
+        )
+        .send()
+        .await
+        .expect("post chat");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+
+    let captured = on_body.lock().await.take().expect("captured body");
+    let messages = captured["messages"]
+        .as_array()
+        .expect("upstream received a `messages` array");
+    assert_eq!(
+        messages.len(),
+        2,
+        "admin system prompt + client user message, got: {captured}"
+    );
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], SERVER_PROMPT);
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "hi");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_is_passthrough_when_system_prompt_unset() {
+    // Backwards-compatibility guard: when the admin has not set
+    // `LLM_SYSTEM_PROMPT` (and the field defaults to `None`), the
+    // proxy must inject nothing. Without this assertion a future
+    // regression could silently start adding a default system message
+    // and break every deployment that relies on the passthrough.
+    let (_upstream_url, _on_headers, on_body) =
+        spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let (chat_url, _) =
+        start_test_server_with_llm_and_system_prompt(_upstream_url, None, None).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{chat_url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#,
+        )
+        .send()
+        .await
+        .expect("post chat");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+
+    let captured = on_body.lock().await.take().expect("captured body");
+    let messages = captured["messages"]
+        .as_array()
+        .expect("upstream received a `messages` array");
+    assert_eq!(
+        messages.len(),
+        1,
+        "no admin prompt → only the client message, got: {captured}"
+    );
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"], "hi");
 }

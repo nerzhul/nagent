@@ -60,6 +60,7 @@ async fn start_test_server() -> (String, SessionMap) {
             api_key: None,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
+            system_prompt: None,
         },
         agents: stt_server::config::AgentConfig::default(),
     });

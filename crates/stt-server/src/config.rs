@@ -501,6 +501,17 @@ pub struct LlmConfig {
     /// same-origin only — preflight requests from any other origin are
     /// rejected and the browser will never even attempt the call.
     pub cors_allow_origins: Vec<String>,
+    /// Server-default system prompt prepended to every
+    /// `/v1/chat/completions` request. The browser-supplied
+    /// "Additional instructions" textarea is appended *after* this so
+    /// the admin's intent stays authoritative. Env var
+    /// `LLM_SYSTEM_PROMPT`, TOML key `[llm].system_prompt`. An empty
+    /// or whitespace-only value is treated as unset (no injection),
+    /// keeping the proxy a perfect passthrough by default. Note that
+    /// the prompt is sent on every round of the tool loop, so very
+    /// long custom prompts multiply with the round count and may
+    /// exhaust the model's context window.
+    pub system_prompt: Option<String>,
 }
 
 impl LlmConfig {
@@ -540,6 +551,10 @@ impl LlmConfig {
             toml.cors_allow_origins,
             defaults.cors_allow_origins,
         );
+        let system_prompt = resolve_opt_string(
+            env_opt("LLM_SYSTEM_PROMPT").as_deref(),
+            toml.system_prompt.as_deref(),
+        );
 
         Ok(Self {
             enabled,
@@ -548,6 +563,7 @@ impl LlmConfig {
             api_key,
             request_timeout,
             cors_allow_origins,
+            system_prompt,
         })
     }
 }
@@ -561,6 +577,7 @@ impl Default for LlmConfig {
             api_key: None,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: Vec::new(),
+            system_prompt: None,
         }
     }
 }
@@ -887,6 +904,47 @@ mod tests {
         );
         // env unset, TOML unset → None
         assert_eq!(resolve_opt_string(None, None), None);
+    }
+
+    /// Helper: build a `LlmConfig` directly with the `system_prompt`
+    /// resolution short-circuited to a single `resolve_opt_string`
+    /// call. Avoids mutating process-global env vars (see the comment
+    /// on `rate_limit_defaults_match_plan` for why).
+    fn llm_system_prompt_resolved(env: Option<&str>, toml: Option<&str>) -> Option<String> {
+        resolve_opt_string(env, toml)
+    }
+
+    #[test]
+    fn llm_system_prompt_env_overrides_toml() {
+        assert_eq!(
+            llm_system_prompt_resolved(Some("from-env"), Some("from-toml")),
+            Some("from-env".to_string())
+        );
+    }
+
+    #[test]
+    fn llm_system_prompt_toml_used_when_env_unset() {
+        assert_eq!(
+            llm_system_prompt_resolved(None, Some("from-toml")),
+            Some("from-toml".to_string())
+        );
+    }
+
+    #[test]
+    fn llm_system_prompt_defaults_to_none() {
+        assert_eq!(llm_system_prompt_resolved(None, None), None);
+    }
+
+    #[test]
+    fn llm_system_prompt_empty_env_string_falls_back_to_toml() {
+        // Empty env vars (e.g. `LLM_SYSTEM_PROMPT=""` in a container
+        // manifest) must NOT silently override the TOML value.
+        assert_eq!(
+            llm_system_prompt_resolved(Some(""), Some("from-toml")),
+            Some("from-toml".to_string())
+        );
+        // Both empty / unset → None (no injection).
+        assert_eq!(llm_system_prompt_resolved(Some(""), None), None);
     }
 
     #[test]
