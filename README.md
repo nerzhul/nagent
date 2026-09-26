@@ -608,6 +608,24 @@ integration tests inject a mock synthesizer that produces a sine
 wave, so the test harness never touches `espeak-ng` or loads an
 `.onnx` file.
 
+At runtime, `espeak-ng` needs its phoneme + voice tables under an
+`espeak-ng-data/` directory. `main.rs` auto-detects this directory
+at boot by trying, in order:
+
+1. The bundled build output (`target/release/build/espeak-rs-sys-*/
+   out/share/espeak-ng-data/`) — picked up when you run via
+   `cargo run`.
+2. A system-installed `espeak-ng` (`/usr/share/espeak-ng-data/` on
+   Arch / Debian / Fedora) — picked up when you run from
+   `cargo install` and the package is present.
+3. `${PIPER_ESPEAKNG_DATA_DIRECTORY}/espeak-ng-data/` and the
+   current working directory + executable directory — handled by
+   `espeak-rs` itself.
+
+Operators who install the binary into a non-standard layout can
+override the auto-detect by setting `PIPER_ESPEAKNG_DATA_DIRECTORY`
+explicitly in their environment.
+
 ## License
 
 Dual-licensed under MIT or Apache-2.0, at your option. Piper voices are
