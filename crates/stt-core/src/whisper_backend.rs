@@ -28,6 +28,7 @@ use crate::job::{InferRequest, InferResponse};
 ///
 /// Inference is serialized internally. Callers should still wrap this in
 /// `Arc<dyn WhisperBackend>` and feed it to an [`crate::InferenceWorker`].
+#[derive(Debug)]
 pub struct WhisperRsBackend {
     state: Arc<Mutex<whisper_rs::WhisperState>>,
     model_id: String,

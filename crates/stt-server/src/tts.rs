@@ -31,8 +31,13 @@ use crate::config::TtsConfig;
 use std::collections::HashMap;
 #[cfg(feature = "tts")]
 use std::path::{Path, PathBuf};
+// `std::sync::Mutex` (not `tokio::sync::Mutex`) — piper-rs's
+// `Piper::create` takes `&mut self` and is CPU-bound, so we can hold
+// the lock across the inference call without blocking the tokio
+// runtime. TtsEngine's outer `synth_lock` already serializes concurrent
+// requests on the same engine, so this single mutex is sufficient.
 #[cfg(feature = "tts")]
-use std::sync::RwLock;
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Public error type
@@ -218,9 +223,11 @@ pub struct PiperSynthesizer {
     /// lazy [`PiperSynthesizer::load_voice`] can rebuild the full
     /// `<voice>.onnx.json` path for piper-rs.
     model_dir: PathBuf,
-    /// One slot per voice id; the inner `Option` is `Some` after the
-    /// first call to that voice, `None` until then.
-    models: RwLock<HashMap<String, Arc<piper_rs::Piper>>>,
+    /// One slot per voice id. The `Mutex` covers the lazy-load
+    /// + mutable-`&mut self` inference path (piper-rs's
+    /// `Piper::create` needs `&mut self`); entries are inserted on
+    /// first use and stay for the lifetime of the engine.
+    models: Mutex<HashMap<String, piper_rs::Piper>>,
 }
 
 #[cfg(feature = "tts")]
@@ -286,7 +293,7 @@ impl PiperSynthesizer {
         Ok(Self {
             voices,
             model_dir: model_dir.to_path_buf(),
-            models: RwLock::new(HashMap::new()),
+            models: Mutex::new(HashMap::new()),
         })
     }
 
@@ -332,41 +339,48 @@ impl PiperSynthesizer {
         }
     }
 
-    /// Lazily load (and cache) the Piper model for `voice_id`.
-    fn load_voice(
-        &self,
+    /// Lazily load (and cache) the Piper model for `voice_id`. Each
+    /// voice owns its own ONNX session (the underlying weights are
+    /// ~50 MB) so we hold at most `len(self.voices)` loaded
+    /// instances for the lifetime of the engine. `piper-rs` 0.2
+    /// exposes a single `Piper` type whose `create()` method handles
+    /// phonemisation + inference + sample-rate reporting in one
+    /// call.
+    ///
+    /// The caller passes a `&mut HashMap` borrowed out of the
+    /// engine's voice cache `Mutex`, so we can return a `&mut Piper`
+    /// for the caller to drive `create()` on without re-entering the
+    /// lock. The outer `TtsEngine::synth_lock` already serialises
+    /// concurrent requests on the same engine, so the only contention
+    /// on this inner `Mutex` is between the lazy load and the
+    /// inference -- safe to hold across both.
+    fn load_voice<'a>(
+        &'a self,
         voice_id: &str,
-    ) -> Result<Arc<piper_rs::Piper>, TtsError> {
-        {
-            let cache = self.models.read().expect("piper voice cache poisoned");
-            if let Some(model) = cache.get(voice_id) {
-                return Ok(Arc::clone(model));
+        cache: &'a mut HashMap<String, piper_rs::Piper>,
+    ) -> Result<&'a mut piper_rs::Piper, TtsError> {
+        use std::collections::hash_map::Entry;
+        match cache.entry(voice_id.to_string()) {
+            Entry::Occupied(e) => Ok(e.into_mut()),
+            Entry::Vacant(v) => {
+                // Sanity check: the voice id must be in the discovered list.
+                if !self.voices.iter().any(|v| v.id == voice_id) {
+                    return Err(TtsError::VoiceNotFound(voice_id.to_string()));
+                }
+                let config_path = self.voice_config_path(voice_id);
+                let onnx_path = config_path.with_extension("onnx");
+                // piper-rs 0.2's constructor takes (model_path,
+                // config_path) in that order. We pass the `.onnx`
+                // path first and the matching `.onnx.json` second.
+                let model = piper_rs::Piper::new(&onnx_path, &config_path).map_err(|e| {
+                    TtsError::Synth(format!(
+                        "could not load Piper voice {voice_id} from {}: {e}",
+                        config_path.display()
+                    ))
+                })?;
+                Ok(v.insert(model))
             }
         }
-        let mut cache = self.models.write().expect("piper voice cache poisoned");
-        // Double-checked: another task may have loaded it while we
-        // were upgrading the lock.
-        if let Some(model) = cache.get(voice_id) {
-            return Ok(Arc::clone(model));
-        }
-        // Sanity check: the voice id must be in the discovered list.
-        if !self.voices.iter().any(|v| v.id == voice_id) {
-            return Err(TtsError::VoiceNotFound(voice_id.to_string()));
-        }
-        let config_path = self.voice_config_path(voice_id);
-        let onnx_path = config_path.with_extension("onnx");
-        // piper-rs 0.2's constructor takes (model_path, config_path)
-        // in that order. We pass the `.onnx` path first and the
-        // matching `.onnx.json` second.
-        let model = piper_rs::Piper::new(&onnx_path, &config_path).map_err(|e| {
-            TtsError::Synth(format!(
-                "could not load Piper voice {voice_id} from {}: {e}",
-                config_path.display()
-            ))
-        })?;
-        let model = Arc::new(model);
-        cache.insert(voice_id.to_string(), Arc::clone(&model));
-        Ok(model)
     }
 }
 
@@ -380,7 +394,13 @@ impl Synthesizer for PiperSynthesizer {
         // a sync trait. The HTTP handler runs inside
         // `tokio::task::spawn_blocking` (see the route implementation),
         // which removes the need for a runtime-aware lock here.
-        let mut model = self.load_voice(voice_id)?;
+        // We hold the per-engine voice cache mutex for the entire
+        // call: piper-rs's `Piper::create` needs `&mut self`, and
+        // `TtsEngine::synth_lock` already serialises concurrent
+        // requests on the same engine, so this is uncontended in
+        // practice.
+        let mut cache = self.models.lock().expect("piper voice cache poisoned");
+        let model = self.load_voice(voice_id, &mut cache)?;
 
         // piper-rs 0.2 bundles phonemisation (espeak-ng) + inference
         // + sample-rate reporting into a single `create` call. The
@@ -393,20 +413,19 @@ impl Synthesizer for PiperSynthesizer {
         // from the per-request `TtsEngine::synth_wav` step (which
         // already held `synth_lock`), so we do not need to re-set it
         // here.
-        let (samples, sample_rate) =
-            model
-                .create(text, false, None, None, None, None)
-                .map_err(|e| {
-                    let msg = e.to_string();
-                    let hint = if msg.to_lowercase().contains("espeak")
-                        || msg.to_lowercase().contains("phonem")
-                    {
-                        " (is `espeak-ng` installed on this host?)"
-                    } else {
-                        ""
-                    };
-                    TtsError::Synth(format!("piper inference failed: {msg}{hint}"))
-                })?;
+        let (samples, sample_rate) = model
+            .create(text, false, None, None, None, None)
+            .map_err(|e| {
+                let msg = e.to_string();
+                let hint = if msg.to_lowercase().contains("espeak")
+                    || msg.to_lowercase().contains("phonem")
+                {
+                    " (is `espeak-ng` installed on this host?)"
+                } else {
+                    ""
+                };
+                TtsError::Synth(format!("piper inference failed: {msg}{hint}"))
+            })?;
 
         Ok(SynthOutput {
             samples,
