@@ -86,3 +86,16 @@ Required actions when such a parameter changes:
 4. **Add or update tests** that guard the documented contract (e.g. snapshot tests for `--help`, env-var parsing tests, kustomize-render checks) so a future regression is caught automatically.
 
 If a parameter change genuinely has **no documentation surface** to update (unusual but possible — e.g. an internal helper flag), state that explicitly in the commit body so reviewers know the rule was considered.
+
+## 6. Commit Authorization and Authorship
+
+- **Never commit automatically.** Agents must wait for an explicit user instruction before running `git add`, `git commit`, `git push`, `git tag`, or any other state-mutating Git command. Even when a task feels "done", the final commit step is always the user's decision.
+- **Preserve the existing Git identity.** Do not change `user.name` or `user.email` (locally, globally, or per-repo) to commit under an agent name. The author of the commit is the user; impersonating a different author is forbidden.
+- **Add the model as a co-author.** When the user asks an AI agent to commit, append a `Co-authored-by:` trailer identifying the model that produced the change. Use the format below; replace `<Model Name>` with the actual model identifier (e.g. `Claude Opus 4.1`, `GPT-5`, `MiniMax-M3`):
+
+  ```
+  Co-authored-by: <Model Name> <noreply@anthropic.com>
+  ```
+
+  Use a `<Model Name>@<vendor>` address that identifies the provider (e.g. `Claude Opus 4.1 <noreply@anthropic.com>`, `GPT-5 <noreply@openai.com>`). If the exact vendor address is unknown, prefer `<Model Name> <noreply@local>` rather than fabricating a real-looking address.
+- **Do not amend, force-push, rebase, skip hooks, or rewrite published history** without an explicit user instruction. If a commit fails or hooks reject it, fix the cause and create a new commit instead.

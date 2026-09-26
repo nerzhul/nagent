@@ -383,7 +383,14 @@ impl PiperSynthesizer {
                     return Err(TtsError::VoiceNotFound(voice_id.to_string()));
                 }
                 let config_path = self.voice_config_path(voice_id);
-                let onnx_path = config_path.with_extension("onnx");
+                // Re-build the weights path from the voice id, NOT
+                // from `config_path.with_extension("onnx")` — the
+                // latter would strip only `.json` and turn
+                // `fr_FR-upmc-medium.onnx.json` into
+                // `fr_FR-upmc-medium.onnx.onnx` (double suffix
+                // bug, same root cause as the `discover` regression
+                // fixed in commit 82b8487).
+                let onnx_path = config_path.with_file_name(format!("{voice_id}.onnx"));
                 // piper-rs 0.2's constructor takes (model_path,
                 // config_path) in that order. We pass the `.onnx`
                 // path first and the matching `.onnx.json` second.
