@@ -8,6 +8,8 @@ Multiple WebSocket clients are isolated from each other: a session ID is
 generated server-side at upgrade time and never accepted from the client, so
 no audio or transcript can ever leak across sessions.
 
+![nagent web UI: STT transcript and Discussion chat views side by side](docs/screenshots/example_app.png)
+
 ## Workspace layout
 
 - `crates/stt-proto` — wire types and `postcard` codec for the WS protocol.
