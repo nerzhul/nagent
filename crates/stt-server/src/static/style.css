@@ -1548,43 +1548,45 @@ select, input[type="checkbox"] {
   }
 }
 
-/* Text-to-Speech settings panel. Sits next to the chat-advanced
- * drawer with the same visual treatment so it does not look like a
- * separate UI surface. The `#chat-tts-advanced[hidden]` element is
- * hidden by the user-agent default (`[hidden] { display: none }`); the
- * selectors below only apply when the parent `#chat-tts-check`
- * checkbox is checked and the disclosure is open. */
-.chat-tts-advanced {
-  margin-top: 0.75rem;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.5rem 0.75rem;
+/* Text-to-Speech settings panel, folded into the `.chat-advanced`
+ * `<details>` drawer. Hidden until the master `#chat-tts-check`
+ * checkbox is on (chat.js toggles the `[hidden]` attribute). The
+ * surrounding `.chat-advanced` already provides background / border
+ * / radius / padding, so this rule only styles the inner block
+ * (top divider, title, and per-row spacing). */
+.chat-tts-settings {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.5rem 0 0.25rem;
+  border-top: 1px solid var(--border);
 }
-.chat-tts-advanced summary {
-  cursor: pointer;
-  font-weight: 500;
+.chat-tts-settings-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
-.chat-tts-advanced label {
+.chat-tts-settings label {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   margin-top: 0.4rem;
   flex-wrap: wrap;
 }
-.chat-tts-advanced select,
-.chat-tts-advanced input[type="range"] {
+.chat-tts-settings select,
+.chat-tts-settings input[type="range"] {
   flex: 1 1 auto;
   min-width: 8rem;
 }
-.chat-tts-advanced #chat-tts-speed-display {
+.chat-tts-settings #chat-tts-speed-display {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
   min-width: 3rem;
   text-align: right;
   color: var(--muted);
 }
-.chat-tts-advanced button#chat-tts-test {
+.chat-tts-settings button#chat-tts-test {
   margin-top: 0.6rem;
 }
 

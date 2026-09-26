@@ -2171,7 +2171,7 @@ async function replayMessage(div, btn) {
 // are persisted on every change so a reload restores them.
 function wireTtsControls() {
   const check  = $("chat-tts-check");
-  const adv    = $("chat-tts-advanced");
+  const settings = $("chat-tts-settings");
   const voiceEnEl = $("chat-tts-voice-en");
   const voiceFrEl = $("chat-tts-voice-fr");
   const speedEl   = $("chat-tts-speed");
@@ -2179,7 +2179,13 @@ function wireTtsControls() {
   const autoEl    = $("chat-tts-autoplay");
   const stopEl    = $("chat-tts-stop-on-send");
   const testBtn   = $("chat-tts-test");
-  if (!check || !adv) return; // server may not have rendered these
+  // `check` may be absent if the server didn't render the controls
+  // (TTS disabled, or older HTML). `settings` may be absent if the
+  // HTML still uses the pre-refactor `<details>` wrapper. Either
+  // being missing is fatal for TTS wiring -- bail out cleanly so the
+  // rest of the discussion view still works.
+  if (!check) return;
+  if (!settings) return;
 
   // Seed from localStorage. We always read the saved value first so
   // the UI is immediately consistent with the user's last choice.
@@ -2195,9 +2201,11 @@ function wireTtsControls() {
   if (autoEl) autoEl.checked = lsGetBool(TTS_LS_AUTOPLAY, true);
   if (stopEl) stopEl.checked = lsGetBool(TTS_LS_STOPSEND, true);
 
-  // Show / hide the Advanced disclosure based on the master toggle.
+  // Show / hide the TTS settings block (folded into the main
+  // `.chat-advanced` drawer) based on the master toggle. The block
+  // is hidden by default; we toggle the `[hidden]` attribute here.
   function syncAdvancedVisibility() {
-    adv.hidden = !check.checked;
+    settings.hidden = !check.checked;
   }
   syncAdvancedVisibility();
 
