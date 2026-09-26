@@ -336,7 +336,7 @@ impl PiperSynthesizer {
     fn load_voice(
         &self,
         voice_id: &str,
-    ) -> Result<Arc<dyn piper_rs::PiperModel + Send + Sync>, TtsError> {
+    ) -> Result<Arc<piper_rs::Piper>, TtsError> {
         {
             let cache = self.models.read().expect("piper voice cache poisoned");
             if let Some(model) = cache.get(voice_id) {

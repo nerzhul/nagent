@@ -10,7 +10,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(not(any(
+    feature = "whisper-rs-vulkan",
+    feature = "whisper-rs-cuda",
+    feature = "whisper-rs-hipblas",
+)))]
+use tracing::warn;
 use uuid::Uuid;
 
 use stt_proto::Segment;
