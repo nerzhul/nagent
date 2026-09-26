@@ -47,4 +47,3 @@ fn main() {
         println!("cargo:rustc-link-lib={pcaudio_kind}=pcaudio");
     }
 }
-

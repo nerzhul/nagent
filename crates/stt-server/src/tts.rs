@@ -435,19 +435,20 @@ impl Synthesizer for PiperSynthesizer {
         // from the per-request `TtsEngine::synth_wav` step (which
         // already held `synth_lock`), so we do not need to re-set it
         // here.
-        let (samples, sample_rate) = model
-            .create(text, false, None, None, None, None)
-            .map_err(|e| {
-                let msg = e.to_string();
-                let hint = if msg.to_lowercase().contains("espeak")
-                    || msg.to_lowercase().contains("phonem")
-                {
-                    " (is `espeak-ng` installed on this host?)"
-                } else {
-                    ""
-                };
-                TtsError::Synth(format!("piper inference failed: {msg}{hint}"))
-            })?;
+        let (samples, sample_rate) =
+            model
+                .create(text, false, None, None, None, None)
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    let hint = if msg.to_lowercase().contains("espeak")
+                        || msg.to_lowercase().contains("phonem")
+                    {
+                        " (is `espeak-ng` installed on this host?)"
+                    } else {
+                        ""
+                    };
+                    TtsError::Synth(format!("piper inference failed: {msg}{hint}"))
+                })?;
 
         Ok(SynthOutput {
             samples,

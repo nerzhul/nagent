@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     if !agents.is_empty() {
         info!(count = agents.len(), "agent registry built");
     } else {
-         info!("agent registry empty (no agents compiled in or AGENTS_ENABLED=false)");
+        info!("agent registry empty (no agents compiled in or AGENTS_ENABLED=false)");
     }
     // espeak-rs reads `PIPER_ESPEAKNG_DATA_DIRECTORY` once at first
     // init. Set it BEFORE constructing any `Piper` so the bundled
