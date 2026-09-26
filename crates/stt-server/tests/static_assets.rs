@@ -558,22 +558,31 @@ async fn chat_js_renders_weather_widget_for_get_weather() {
         body.contains("get_weather: \""),
         "TOOL_ICON map is missing the get_weather icon. The header bubble falls back to the generic wrench glyph."
     );
-    // The widget replaces the assistant prose bubble with a one-liner
-    // when `get_weather` succeeds so the card is the visible answer
-    // instead of a long LLM-rendered restatement. The helper + the
-    // wiring in resolveToolBubble + the deferred path in streamReply's
-    // `finally` must all be present together.
+    // The widget finalizes the assistant bubble on `get_weather`
+    // success: a short one-line acknowledgment ("Voici les
+    // informations demandées.") is left visible; a long restatement
+    // of the card's fields is replaced with a one-liner hint. The
+    // helper + the tool-pending hide + the deferral wiring in
+    // streamReply must all be present together.
     assert!(
-        body.contains("function suppressAssistantForWeather("),
-        "chat.js is missing `suppressAssistantForWeather(...)`. The assistant prose bubble stays full-length after a successful get_weather and the widget loses visibility behind it."
+        body.contains("function finalizeAssistantForToolResult("),
+        "chat.js is missing `finalizeAssistantForToolResult(...)`. The assistant prose bubble stays full-length after a successful get_weather and the widget loses visibility behind it."
     );
     assert!(
-        body.contains("inflight.weatherSuppressEl"),
-        "chat.js no longer defers weather suppression to stream end. Mid-stream suppression would clobber tokens the LLM is still writing after the tool result."
+        body.contains("function setAssistantToolPending("),
+        "chat.js is missing `setAssistantToolPending(...)`. The 'let me check…' LLM preamble bleeds through during the tool run; the widget should be the visual focus."
+    );
+    assert!(
+        body.contains("inflight.weatherFinalizeEl"),
+        "chat.js no longer defers weather finalization to stream end. Mid-stream judging of the LLM's prose would clobber tokens still being written after the tool result."
     );
     assert!(
         body.contains("chat-message--weather-replaced"),
-        "chat.js no longer marks the suppressed assistant bubble with `chat-message--weather-replaced`. The CSS rule in style.css loses its target and the bubble re-renders the prose."
+        "chat.js no longer marks the finalized assistant bubble with `chat-message--weather-replaced`. The CSS rule in style.css loses its target and the bubble re-renders the prose."
+    );
+    assert!(
+        body.contains("chat-message--tool-pending"),
+        "chat.js no longer marks the assistant bubble with `chat-message--tool-pending` while the tool runs. The 'Préparation…' placeholder no longer hides the streaming prose."
     );
 }
 
@@ -610,5 +619,11 @@ async fn css_carries_weather_card_rules() {
     assert!(
         css.contains("chat-message--weather-replaced"),
         "style.css is missing the `.chat-message--weather-replaced` rule. The suppressed assistant bubble reverts to the full prose look after a get_weather success."
+    );
+    assert!(
+        css.contains("chat-message--tool-pending")
+            && css.contains("display: none")
+            && css.contains("chat-message__tool-loading"),
+        "style.css is missing the `.chat-message--tool-pending` rule that hides the LLM's accumulating prose while a tool runs. The 'let me check…' preamble bleeds through."
     );
 }
