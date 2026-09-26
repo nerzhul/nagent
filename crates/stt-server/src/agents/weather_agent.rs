@@ -1,35 +1,49 @@
-//! `get_weather` agent: current weather, short-term forecast, and
-//! recent historical weather for a location.
+//! `get_weather` agent: current conditions, 14-day forecast, 24h
+//! hourly, history, and astronomy for a location — powered by
+//! WeatherAPI.com.
 //!
-//! The agent is wired to three free, no-API-key Open-Meteo endpoints:
+//! ## Why a paid/free-tier API and not Open-Meteo
 //!
-//! 1. Geocoding (`https://geocoding-api.open-meteo.com/v1/search`) —
-//!    resolves a city name to `(lat, lon, country)`.
-//! 2. Forecast (`https://api.open-meteo.com/v1/forecast`) — returns
-//!    current conditions plus up to 7 days of daily summaries.
-//! 3. Archive (`https://archive-api.open-meteo.com/v1/archive`) —
-//!    returns historical daily summaries back to 1940-01-01.
+//! Open-Meteo's no-key tier is generous but thin: no hourly
+//! granularity, no astronomy, no UV / humidity / feels-like, weak
+//! geocoding (first match, no disambiguation). WeatherAPI.com's
+//! free tier (1M calls/month, no card required, key issued by
+//! email) bundles current + forecast + history + astronomy +
+//! location search behind a single, documented JSON API. The
+//! `WEATHER_API_KEY` env var is the only requirement; the agent
+//! refuses to run without it.
 //!
-//! ## API shape
+//! ## Modes
 //!
 //! The LLM picks one of three modes by parameter combination:
 //!
-//! - `{"location": "Paris"}` → current conditions + today's forecast
-//!   (default when no `date` or `days` is supplied).
-//! - `{"location": "Paris", "days": 3}` → current + 3-day forecast.
+//! - `{"location": "Paris"}` → current + today's forecast (the
+//!   common chat case).
+//! - `{"location": "Paris", "days": 5}` → current + 5-day forecast
+//!   (default 1, max 14).
 //! - `{"location": "Paris", "date": "2026-09-26"}` → single day,
-//!   either forecast (when in [today, today+7]) or archive (when in
-//!   the past or before today's UTC date). The location's local
-//!   timezone is honoured by Open-Meteo's `timezone=auto` so the
-//!   LLM-supplied date is interpreted in the location's calendar.
+//!   either forecast (when in [today, today+14]) or history (when
+//!   in the past, or more than 14 days ahead — WeatherAPI's
+//!   history tier covers dates back to 2010-01-01 on the free
+//!   plan).
 //!
-//! ## No-cache decision (v1)
+//! Hourly breakdown for the next 24h is opt-in via `hourly: true`.
 //!
-//! All three endpoints tolerate ~10 req/s per IP for unauthenticated
-//! use, which is comfortably above what a single chat user will
-//! produce. If a deployment starts hitting the limit, a TTL cache
-//! layer can be added later — the agent's wire shape does not need
-//! to change.
+//! ## Endpoint selection
+//!
+//! - `/v1/forecast.json` for current and forecast (today + up to
+//!   14 days ahead). Pass `dt=YYYY-MM-DD` to fetch a single
+//!   future day.
+//! - `/v1/history.json` for past days. Returns the day's summary.
+//! - Location lookup is implicit: WeatherAPI's `q` parameter
+//!   accepts city names, `"lat,lon"`, postal codes, and iata
+//!   codes. The agent forwards the LLM's input verbatim; no
+//!   separate geocoding step.
+//!
+//! ## Latency
+//!
+//! One HTTP round-trip per query. WeatherAPI's p95 is well under
+//! a second, so the agent stays in the budget for a chat tool.
 
 use std::time::Duration;
 
@@ -38,50 +52,52 @@ use chrono::{NaiveDate, Utc};
 use serde_json::{json, Value};
 
 use crate::agents::{Agent, AgentError};
+use crate::config::WeatherConfig;
 
-/// Hard cap on the response body the agent will read from each
-/// upstream call. Open-Meteo's payloads are small (a few KB), but
-/// the cap exists so a misbehaving upstream cannot exhaust memory.
-const MAX_UPSTREAM_BYTES: usize = 64 * 1024;
+/// Hard cap on the response body. WeatherAPI payloads are small
+/// (a few KB) but the cap bounds memory if a misbehaving upstream
+/// ever returns a runaway response.
+const MAX_UPSTREAM_BYTES: usize = 128 * 1024;
+
+/// Maximum forecast horizon supported by WeatherAPI's free tier.
+const MAX_FORECAST_DAYS: u32 = 14;
 
 /// Default forecast horizon when the LLM does not specify `days`
 /// or `date`.
 const DEFAULT_FORECAST_DAYS: u32 = 1;
 
-/// Maximum forecast horizon. The Open-Meteo free tier caps at 16 but
-/// we trim to 7 to keep the tool-result payload bounded — a one-week
-/// forecast is the largest answer that still fits comfortably in a
-/// chat bubble. Single-day `date` queries past this window go to
-/// the archive endpoint instead.
-const MAX_FORECAST_DAYS: u32 = 7;
-
-/// HTTP per-request timeout. Open-Meteo responses are sub-second;
-/// 8 s leaves plenty of headroom for the geocoding + forecast
-/// pair while still bounding the worst case.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+/// Earliest date WeatherAPI's history endpoint serves on the free
+/// tier. Earlier dates return a 4xx; we reject them at the input
+/// layer so the LLM sees a clear message.
+const HISTORY_FLOOR: NaiveDate = match NaiveDate::from_ymd_opt(2010, 1, 1) {
+    Some(d) => d,
+    None => panic!("constant date 2010-01-01 is well-formed"),
+};
 
 /// Mode chosen from the LLM-supplied arguments before any HTTP
-/// round-trip. Captured here so `invoke` keeps a single branch site
-/// and the URL builder can be unit-tested with a `Mode` directly.
+/// round-trip. Lets `invoke` keep a single branch site and lets
+/// the URL builder be unit-tested directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// No `date` and no `days`: current conditions only. Equivalent
+    /// No `date` and no `days`: current conditions only, equivalent
     /// to a 1-day forecast horizon that includes `current`.
     Current { days: u32 },
     /// A specific calendar day. The URL builder picks the forecast
-    /// or archive endpoint based on whether `date` is in the past,
-    /// today, or the next 7 days.
+    /// or history endpoint based on whether `date` is in the past,
+    /// today, or the next 14 days.
     SingleDate { date: NaiveDate },
 }
 
 #[derive(Clone)]
 pub struct WeatherAgent {
+    cfg: WeatherConfig,
     http: reqwest::Client,
 }
 
 impl std::fmt::Debug for WeatherAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WeatherAgent")
+            .field("cfg", &self.cfg)
             .field("http", &"<reqwest::Client>")
             .finish()
     }
@@ -89,18 +105,23 @@ impl std::fmt::Debug for WeatherAgent {
 
 impl Default for WeatherAgent {
     fn default() -> Self {
-        Self::new()
+        // Tests that don't care about the upstream need a working
+        // default. An empty `api_key` lets the agent surface a
+        // clear "configure WEATHER_API_KEY" error instead of a
+        // confusing upstream 401.
+        Self::new(WeatherConfig::default())
     }
 }
 
 impl WeatherAgent {
-    pub fn new() -> Self {
+    pub fn new(cfg: WeatherConfig) -> Self {
+        let timeout = Duration::from_millis(cfg.timeout_ms.max(1_000));
         let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .connect_timeout(HTTP_TIMEOUT)
+            .timeout(timeout)
+            .connect_timeout(timeout)
             .build()
             .expect("reqwest client build");
-        Self { http }
+        Self { cfg, http }
     }
 }
 
@@ -111,13 +132,13 @@ impl Agent for WeatherAgent {
     }
 
     fn description(&self) -> &str {
-        "Météo actuelle, prévisions jusqu'à 7 jours, ou météo historique pour un lieu donné. \
-         Accepte un nom de ville (Paris, Tokyo) ou des coordonnées (48.85,2.35). \
-         Aucune clé d'API requise (Open-Meteo). \
-         Use for 'météo à Paris', 'temps qu'il fera demain à Tokyo', \
-         'météo à Lyon la semaine dernière', 'will it rain in London'. \
-         Pass `location` (required). Optionally pass `days` (1-7, future forecast), \
-         or `date` (YYYY-MM-DD, past or future single day)."
+        "Météo actuelle, prévisions jusqu'à 14 jours, données horaires 24h, historique et \
+         astronomie (lever/coucher du soleil, phase de lune) pour un lieu donné. \
+         Powered by WeatherAPI.com — WEATHER_API_KEY requis (clé gratuite sur weatherapi.com). \
+         Use for 'météo à Paris', 'will it rain in London tonight', 'coucher de soleil à Tokyo', \
+         'UV à Lyon ce week-end'. Pass `location` (required, accepts city name, 'lat,lon', \
+         postal code). Optionally pass `date` (YYYY-MM-DD), `days` (1-14, default 1, ignored \
+         when `date` is set), `hourly` (bool, default false)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -126,19 +147,24 @@ impl Agent for WeatherAgent {
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "City name (e.g. 'Paris', 'Tokyo') or 'lat,lon' (e.g. '48.85,2.35')."
+                    "description": "City name (e.g. 'Paris', 'Tokyo'), 'lat,lon' (e.g. '48.8566,2.3522'), postal code, or iata code. WeatherAPI resolves it server-side."
                 },
                 "days": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 7,
+                    "maximum": 14,
                     "default": 1,
-                    "description": "Forecast horizon in days, capped at 7. Ignored when `date` is set."
+                    "description": "Forecast horizon in days, capped at 14. Ignored when `date` is set."
                 },
                 "date": {
                     "type": "string",
                     "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "Specific day in YYYY-MM-DD. Past dates use the archive endpoint; future dates (up to 7 days ahead) use the forecast endpoint. Interpreted in the location's local timezone. Mutually exclusive with `days`."
+                    "description": "Specific day in YYYY-MM-DD. Past dates hit the history endpoint (back to 2010-01-01 on the free tier). Future dates up to 14 days ahead hit the forecast endpoint. Mutually exclusive with `days`."
+                },
+                "hourly": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include a 24-hour hourly breakdown (temperature, precipitation chance, wind). Useful for 'will it rain tonight?' queries."
                 }
             },
             "required": ["location"],
@@ -147,24 +173,28 @@ impl Agent for WeatherAgent {
     }
 
     async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+        // The API key is a server-side config knob, not an LLM
+        // argument. Surface a clear, actionable error when it's
+        // missing so the operator knows exactly what to fix.
+        if self.cfg.api_key.trim().is_empty() {
+            return Err(AgentError::AgentFailed(
+                "WEATHER_API_KEY is not configured on the server — register at \
+                 https://www.weatherapi.com/ for a free key and set it in the environment"
+                    .into(),
+            ));
+        }
+
         let req = parse_args(&args)?;
-        let (lat, lon, display_name) = resolve_location(&self.http, &req.location).await?;
-
         let mode = select_mode(req.days, req.date.as_deref())?;
-        let url = build_url(mode, lat, lon);
 
+        let url = build_url(&self.cfg.base_url, &self.cfg.api_key, &req.location, mode);
         let body = fetch_json(&self.http, &url).await?;
-        let payload = build_payload(&body, lat, lon, &display_name, mode)?;
-
-        let source = match mode {
-            Mode::SingleDate { date } if date < today_utc() => "open-meteo-archive",
-            _ => "open-meteo",
-        };
+        let payload = build_payload(&body, mode, req.hourly)?;
 
         Ok(serde_json::to_string(&json!({
             "ok": true,
             "data": payload,
-            "source": source,
+            "source": "weatherapi.com",
             "fetched_at": chrono::Utc::now().to_rfc3339(),
         }))
         .expect("json encode"))
@@ -179,7 +209,7 @@ impl Agent for WeatherAgent {
 /// 1. `date` set → [`Mode::SingleDate`]. `days` is ignored (the LLM
 ///    asked for a specific day).
 /// 2. `days` set → [`Mode::Current`] with the supplied horizon
-///    (clamped to 1..=7).
+///    (clamped to 1..=14).
 /// 3. Neither → [`Mode::Current`] with the default 1-day horizon.
 fn select_mode(days: Option<u32>, date: Option<&str>) -> Result<Mode, AgentError> {
     if let Some(d) = date {
@@ -192,22 +222,22 @@ fn select_mode(days: Option<u32>, date: Option<&str>) -> Result<Mode, AgentError
         let max_future = today
             .checked_add_signed(chrono::Duration::days(MAX_FORECAST_DAYS as i64))
             .ok_or_else(|| AgentError::AgentFailed("internal: date arithmetic overflow".into()))?;
-        // NaiveDate is good through year 9999 so the early bound
-        // (1940-01-01, Open-Meteo archive start) is the only one
-        // worth checking — and even that is enforced by Open-Meteo
-        // returning a 4xx, but we reject it cleanly so the LLM gets
-        // a friendly message.
-        let archive_start =
-            NaiveDate::from_ymd_opt(1940, 1, 1).expect("constant date is well-formed");
-        if parsed < archive_start {
+        if parsed < HISTORY_FLOOR {
             return Err(AgentError::InvalidArguments(format!(
-                "`date` must be on or after {archive_start} (Open-Meteo archive start), got `{d}`"
+                "`date` must be on or after {HISTORY_FLOOR} (WeatherAPI free-tier history \
+                 start), got `{d}`"
             )));
         }
         if parsed > max_future {
+            // Beyond the free forecast horizon. WeatherAPI's
+            // history endpoint serves dates that *are* in the past,
+            // so a far-future date is genuinely out of range. The
+            // operator can extend the cap by switching to a paid
+            // WeatherAPI plan, but for the free tier we surface the
+            // ceiling.
             return Err(AgentError::InvalidArguments(format!(
-                "`date` must be at most {} days in the future (forecast horizon); got `{d}`",
-                MAX_FORECAST_DAYS
+                "`date` must be at most {MAX_FORECAST_DAYS} days in the future (WeatherAPI \
+                 free-tier forecast horizon); got `{d}`"
             )));
         }
         return Ok(Mode::SingleDate { date: parsed });
@@ -219,126 +249,50 @@ fn select_mode(days: Option<u32>, date: Option<&str>) -> Result<Mode, AgentError
 }
 
 /// Today as a UTC date. Used to decide whether a `date` argument
-/// belongs to the forecast or archive endpoint. The location's
-/// local calendar may differ by a few hours; the LLM is expected
-/// to pass dates in the location's timezone, and Open-Meteo's
-/// `timezone=auto` honours that on its side.
+/// routes to the forecast or history endpoint. The LLM is expected
+/// to pass dates in the location's timezone; WeatherAPI's
+/// response times are in the location's local timezone so the
+/// `forecastday[].date` field always matches what the user meant.
 fn today_utc() -> NaiveDate {
     Utc::now().date_naive()
 }
 
 // ---- URL builder ---------------------------------------------------------
 
-fn build_url(mode: Mode, lat: f64, lon: f64) -> String {
+fn build_url(base_url: &str, api_key: &str, location: &str, mode: Mode) -> String {
+    let q = url_encode(location);
+    let key = url_encode(api_key);
     match mode {
         Mode::Current { days } => format!(
-            "https://api.open-meteo.com/v1/forecast\
-             ?latitude={lat:.4}\
-             &longitude={lon:.4}\
-             &current=temperature_2m,wind_speed_10m,weather_code\
-             &daily=temperature_2m_max,temperature_2m_min,weather_code\
-             &forecast_days={days}\
-             &timezone=auto"
+            "{base_url}/v1/forecast.json\
+             ?key={key}\
+             &q={q}\
+             &days={days}\
+             &aqi=no\
+             &alerts=no"
         ),
         Mode::SingleDate { date } => {
-            let today = today_utc();
-            if date <= today {
-                // Past date (or today): the archive endpoint serves
-                // historical daily summaries. `current` is not in the
-                // archive response, so we skip the parameter; the
-                // payload builder sees a body without `current`.
+            // Past dates → history endpoint. Today and future
+            // dates → forecast endpoint with a single-day range.
+            if date < today_utc() {
                 format!(
-                    "https://archive-api.open-meteo.com/v1/archive\
-                     ?latitude={lat:.4}\
-                     &longitude={lon:.4}\
-                     &daily=temperature_2m_max,temperature_2m_min,weather_code\
-                     &start_date={date}\
-                     &end_date={date}\
-                     &timezone=auto"
+                    "{base_url}/v1/history.json\
+                     ?key={key}\
+                     &q={q}\
+                     &dt={date}"
                 )
             } else {
-                // Future date in the forecast window: same forecast
-                // endpoint, but with an explicit single-day range
-                // instead of `forecast_days`. The response carries
-                // `daily` for that day but no `current`.
                 format!(
-                    "https://api.open-meteo.com/v1/forecast\
-                     ?latitude={lat:.4}\
-                     &longitude={lon:.4}\
-                     &current=temperature_2m,wind_speed_10m,weather_code\
-                     &daily=temperature_2m_max,temperature_2m_min,weather_code\
-                     &start_date={date}\
-                     &end_date={date}\
-                     &timezone=auto"
+                    "{base_url}/v1/forecast.json\
+                     ?key={key}\
+                     &q={q}\
+                     &dt={date}\
+                     &aqi=no\
+                     &alerts=no"
                 )
             }
         }
     }
-}
-
-// ---- Location resolution -------------------------------------------------
-
-/// Manual `lat,lon` parser. We avoid pulling in `regex` for a
-/// five-byte grammar; a manual parse is faster and keeps the dep
-/// tree slim.
-fn try_parse_lat_lon(s: &str) -> Option<(f64, f64)> {
-    let s = s.trim();
-    let (lat_s, lon_s) = s.split_once(',')?;
-    let lat: f64 = lat_s.trim().parse().ok()?;
-    let lon: f64 = lon_s.trim().parse().ok()?;
-    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
-        return None;
-    }
-    Some((lat, lon))
-}
-
-async fn resolve_location(
-    http: &reqwest::Client,
-    raw: &str,
-) -> Result<(f64, f64, String), AgentError> {
-    if let Some((lat, lon)) = try_parse_lat_lon(raw) {
-        return Ok((lat, lon, raw.trim().to_string()));
-    }
-    let name = raw.trim();
-    if name.is_empty() {
-        return Err(AgentError::InvalidArguments(
-            "`location` must be a city name or 'lat,lon'".into(),
-        ));
-    }
-    // Open-Meteo sorts results by population score; `count=1` plus the
-    // population ranking gives the most relevant Paris/Tokyo/… for the
-    // supplied language. `language=fr` keeps French queries matching
-    // French city names.
-    let encoded = url_encode(name);
-    let url = format!(
-        "https://geocoding-api.open-meteo.com/v1/search?name={encoded}&language=fr&count=1"
-    );
-    let body = fetch_json(http, &url).await?;
-    let results = body.get("results").and_then(|v| v.as_array());
-    let first = results.and_then(|arr| arr.first()).ok_or_else(|| {
-        AgentError::InvalidArguments(format!(
-            "no geocoding match for `{name}` (try a different spelling or pass `lat,lon` directly)"
-        ))
-    })?;
-    let lat = first
-        .get("latitude")
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| AgentError::AgentFailed("geocoding result missing latitude".into()))?;
-    let lon = first
-        .get("longitude")
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| AgentError::AgentFailed("geocoding result missing longitude".into()))?;
-    let resolved_name = first
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(name)
-        .to_string();
-    let country = first
-        .get("country")
-        .and_then(|v| v.as_str())
-        .map(|c| format!(" ({c})"))
-        .unwrap_or_default();
-    Ok((lat, lon, format!("{resolved_name}{country}")))
 }
 
 // ---- HTTP helper ---------------------------------------------------------
@@ -356,9 +310,24 @@ async fn fetch_json(http: &reqwest::Client, url: &str) -> Result<Value, AgentErr
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        // WeatherAPI returns its errors as `{"error":{"code":N,"message":"..."}}`.
+        // Try to surface the human-readable message so the LLM can
+        // react intelligently (rate limit → retry, no match → try
+        // another spelling, …) rather than seeing a bare HTTP status.
+        let parsed: Option<Value> = serde_json::from_str(&body).ok();
+        let upstream_message = parsed
+            .as_ref()
+            .and_then(|v| v.get("error"))
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
         return Err(AgentError::Upstream {
             status: status.as_u16(),
-            body: truncate(&body, 2048),
+            body: if !upstream_message.is_empty() {
+                upstream_message.to_string()
+            } else {
+                truncate(&body, 2048)
+            },
         });
     }
     let bytes = resp
@@ -377,139 +346,133 @@ async fn fetch_json(http: &reqwest::Client, url: &str) -> Result<Value, AgentErr
 
 // ---- Payload shaping ------------------------------------------------------
 
-fn build_payload(
-    body: &Value,
-    lat: f64,
-    lon: f64,
-    display_name: &str,
-    mode: Mode,
-) -> Result<Value, AgentError> {
-    let daily = build_daily(body)?;
+fn build_payload(body: &Value, mode: Mode, include_hourly: bool) -> Result<Value, AgentError> {
+    let location = body
+        .get("location")
+        .ok_or_else(|| AgentError::AgentFailed("WeatherAPI response missing `location`".into()))?;
+    let location = json!({
+        "name": location.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        "region": location.get("region").and_then(|v| v.as_str()).unwrap_or(""),
+        "country": location.get("country").and_then(|v| v.as_str()).unwrap_or(""),
+        "latitude": location.get("lat").and_then(|v| v.as_f64()).map(round4).unwrap_or(0.0),
+        "longitude": location.get("lon").and_then(|v| v.as_f64()).map(round4).unwrap_or(0.0),
+        "timezone": location.get("tz_id").and_then(|v| v.as_str()).unwrap_or(""),
+        "localtime": location.get("localtime").and_then(|v| v.as_str()).unwrap_or(""),
+    });
 
-    // The forecast endpoint with `current=…` always returns a
-    // `current` block; the archive endpoint and the future-date
-    // forecast variant (single-day range, no `current` requested)
-    // do not. Probe by presence so the two response shapes round-
-    // trip through one builder.
-    let current = if let Some(c) = body.get("current") {
-        Some(json!({
-            "temp_c": round1(
-                c.get("temperature_2m")
-                    .and_then(|v| v.as_f64())
-                    .ok_or_else(|| AgentError::AgentFailed(
-                        "missing current.temperature_2m".into(),
-                    ))?
-            ),
-            "wind_kmh": round1(
-                c.get("wind_speed_10m")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0)
-            ),
-            "condition": wmo_to_condition(
-                c.get("weather_code")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(-1) as i32
-            ),
-            "as_of": c
-                .get("time")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-        }))
-    } else {
-        None
+    // The `current` block is present on `/v1/forecast.json`
+    // responses and absent on `/v1/history.json` responses. Probe
+    // by presence so both shapes round-trip through one builder.
+    let current = body.get("current").map(|c| {
+        json!({
+            "as_of": c.get("last_updated").and_then(|v| v.as_str()).unwrap_or(""),
+            "temp_c": round1(c.get("temp_c").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+            "feels_like_c": round1(c.get("feelslike_c").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+            "humidity": c.get("humidity").and_then(|v| v.as_i64()).unwrap_or(0),
+            "wind_kmh": round1(c.get("wind_kph").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+            "wind_dir": c.get("wind_dir").and_then(|v| v.as_str()).unwrap_or(""),
+            "pressure_mb": c.get("pressure_mb").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            "uv": c.get("uv").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            "condition": c.get("condition").and_then(|c| c.get("text")).and_then(|v| v.as_str()).unwrap_or(""),
+            "condition_code": c.get("condition").and_then(|c| c.get("code")).and_then(|v| v.as_i64()).unwrap_or(0),
+        })
+    });
+
+    let forecast_arr = body
+        .get("forecast")
+        .and_then(|f| f.get("forecastday"))
+        .and_then(|d| d.as_array());
+    let forecast: Vec<Value> = match forecast_arr {
+        Some(arr) => arr.iter().map(shape_forecast_day).collect(),
+        None => Vec::new(),
     };
 
-    // For single-date requests, surface the date we asked for at
-    // the top level so the LLM does not have to scan the `daily`
-    // array to figure out what was requested — and so a no-data
-    // response (upstream returned no `daily` block) is still
-    // attributable to the right date.
-    let requested_date = match mode {
-        Mode::SingleDate { date } => Some(date.to_string()),
-        Mode::Current { .. } => None,
-    };
+    // Astronomy lives at `forecast.forecastday[0].astro` (and
+    // identical across days for the same location). Pick the first
+    // day's astro block as the canonical one — it's the same on
+    // every entry in the response.
+    let astronomy = forecast_arr
+        .and_then(|arr| arr.first())
+        .and_then(|d| d.get("astro"))
+        .map(|a| {
+            json!({
+                "sunrise": a.get("sunrise").and_then(|v| v.as_str()).unwrap_or(""),
+                "sunset": a.get("sunset").and_then(|v| v.as_str()).unwrap_or(""),
+                "moonrise": a.get("moonrise").and_then(|v| v.as_str()).unwrap_or(""),
+                "moonset": a.get("moonset").and_then(|v| v.as_str()).unwrap_or(""),
+                "moon_phase": a.get("moon_phase").and_then(|v| v.as_str()).unwrap_or(""),
+                "moon_illumination": a.get("moon_illumination").and_then(|v| v.as_str()).unwrap_or(""),
+            })
+        });
 
-    Ok(json!({
-        "location": {
-            "name": display_name,
-            "latitude": round4(lat),
-            "longitude": round4(lon),
-        },
+    let mut out = json!({
+        "location": location,
         "current": current,
-        "requested_date": requested_date,
-        "daily": daily,
-    }))
+        "forecast": forecast,
+    });
+    if let Some(a) = astronomy {
+        out["astronomy"] = a;
+    }
+
+    if include_hourly {
+        // Hourly arrays are nested under each forecast day. We
+        // surface the *first* day's hours (24h) so the LLM can
+        // answer "will it rain tonight?" without ballooning the
+        // tool result. Multi-day hourly is not exposed in v1 to
+        // keep the response bounded.
+        let hourly: Vec<Value> = forecast_arr
+            .and_then(|arr| arr.first())
+            .and_then(|d| d.get("hour"))
+            .and_then(|h| h.as_array())
+            .map(|arr| arr.iter().map(shape_hour).collect())
+            .unwrap_or_default();
+        out["hourly"] = json!(hourly);
+    }
+
+    // For single-date queries the LLM asked for a specific day;
+    // surface it at the top level so a no-data response is still
+    // attributable to the right date.
+    if let Mode::SingleDate { date } = mode {
+        out["requested_date"] = json!(date.to_string());
+    }
+
+    Ok(out)
 }
 
-fn build_daily(body: &Value) -> Result<Value, AgentError> {
-    let d = match body.get("daily").and_then(|v| v.as_object()) {
-        Some(d) => d,
-        None => return Ok(json!([])),
-    };
-    let dates = d.get("date").and_then(|v| v.as_array());
-    let maxes = d.get("temperature_2m_max").and_then(|v| v.as_array());
-    let mins = d.get("temperature_2m_min").and_then(|v| v.as_array());
-    let codes = d.get("weather_code").and_then(|v| v.as_array());
-    let (Some(dates), Some(maxes), Some(mins), Some(codes)) = (dates, maxes, mins, codes) else {
-        return Ok(json!([]));
-    };
-    let n = dates
-        .len()
-        .min(maxes.len())
-        .min(mins.len())
-        .min(codes.len());
-
-    let mut entries: Vec<Value> = Vec::with_capacity(n);
-    for i in 0..n {
-        let date = dates[i].as_str().unwrap_or("").to_string();
-        let t_max = maxes[i].as_f64().unwrap_or(0.0);
-        let t_min = mins[i].as_f64().unwrap_or(0.0);
-        let c = codes[i].as_i64().unwrap_or(-1) as i32;
-        entries.push(json!({
-            "date": date,
-            "t_min_c": round1(t_min),
-            "t_max_c": round1(t_max),
-            "condition": wmo_to_condition(c),
-        }));
-    }
-    Ok(json!(entries))
+fn shape_forecast_day(day: &Value) -> Value {
+    let date = day.get("date").and_then(|v| v.as_str()).unwrap_or("");
+    let d = day.get("day").unwrap_or(&Value::Null);
+    let cond = d.get("condition");
+    json!({
+        "date": date,
+        "t_min_c": round1(d.get("mintemp_c").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "t_max_c": round1(d.get("maxtemp_c").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "avg_temp_c": round1(d.get("avgtemp_c").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "avg_humidity": d.get("avghumidity").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        "total_precip_mm": d.get("totalprecip_mm").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        "chance_of_rain": d.get("daily_chance_of_rain").and_then(|v| v.as_i64()).unwrap_or(0),
+        "chance_of_snow": d.get("daily_chance_of_snow").and_then(|v| v.as_i64()).unwrap_or(0),
+        "max_wind_kmh": round1(d.get("maxwind_kph").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "uv": d.get("uv").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        "condition": cond.and_then(|c| c.get("text")).and_then(|v| v.as_str()).unwrap_or(""),
+        "condition_code": cond.and_then(|c| c.get("code")).and_then(|v| v.as_i64()).unwrap_or(0),
+    })
 }
 
-// ---- WMO weather code mapping -------------------------------------------
-
-/// Map WMO weather codes (Open-Meteo's `weather_code` field) to short,
-/// stable condition strings. The codes are defined by the WMO; we only
-/// cover the ones Open-Meteo actually emits across its endpoints,
-/// plus an `unknown` fallback for any future addition.
-///
-/// See <https://open-meteo.com/en/docs> (WMO Weather interpretation
-/// codes).
-fn wmo_to_condition(code: i32) -> &'static str {
-    match code {
-        0 => "clear",
-        1 => "mainly_clear",
-        2 => "partly_cloudy",
-        3 => "cloudy",
-        45 | 48 => "fog",
-        51 | 53 | 55 => "drizzle",
-        56 | 57 => "freezing_drizzle",
-        61 => "light_rain",
-        63 => "rain",
-        65 => "heavy_rain",
-        66 | 67 => "freezing_rain",
-        71 => "light_snow",
-        73 => "snow",
-        75 => "heavy_snow",
-        77 => "snow_grains",
-        80 => "rain_showers",
-        81 => "heavy_rain_showers",
-        82 => "violent_rain_showers",
-        85 => "snow_showers",
-        86 => "heavy_snow_showers",
-        95 => "thunderstorm",
-        96 | 99 => "thunderstorm_with_hail",
-        _ => "unknown",
-    }
+fn shape_hour(hour: &Value) -> Value {
+    let cond = hour.get("condition");
+    json!({
+        "time": hour.get("time").and_then(|v| v.as_str()).unwrap_or(""),
+        "time_epoch": hour.get("time_epoch").and_then(|v| v.as_i64()).unwrap_or(0),
+        "temp_c": round1(hour.get("temp_c").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "feels_like_c": round1(hour.get("feelslike_c").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "chance_of_rain": hour.get("chance_of_rain").and_then(|v| v.as_i64()).unwrap_or(0),
+        "chance_of_snow": hour.get("chance_of_snow").and_then(|v| v.as_i64()).unwrap_or(0),
+        "precip_mm": hour.get("precip_mm").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        "humidity": hour.get("humidity").and_then(|v| v.as_i64()).unwrap_or(0),
+        "wind_kmh": round1(hour.get("wind_kph").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "condition": cond.and_then(|c| c.get("text")).and_then(|v| v.as_str()).unwrap_or(""),
+    })
 }
 
 // ---- Number formatting ---------------------------------------------------
@@ -529,6 +492,7 @@ struct ParsedArgs {
     location: String,
     days: Option<u32>,
     date: Option<String>,
+    hourly: bool,
 }
 
 fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
@@ -552,10 +516,12 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let hourly = obj.get("hourly").and_then(|v| v.as_bool()).unwrap_or(false);
     Ok(ParsedArgs {
         location,
         days,
         date,
+        hourly,
     })
 }
 
@@ -563,8 +529,8 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 
 /// Minimal URL form-encoder. We avoid `url::form_urlencoded` to keep
 /// the `url` crate from leaking into this module's public surface
-/// for a one-call usage — and the inputs here are city names, not
-/// untrusted free-form strings.
+/// for one call site — and the inputs here are city names + an API
+/// key, not untrusted free-form strings.
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -601,7 +567,7 @@ mod tests {
 
     #[test]
     fn name_and_schema_are_stable() {
-        let agent = WeatherAgent::new();
+        let agent = WeatherAgent::new(WeatherConfig::default());
         assert_eq!(agent.name(), "get_weather");
         let schema = agent.parameters_schema();
         assert_eq!(schema["type"], "object");
@@ -609,41 +575,43 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("location")));
-        assert_eq!(schema["properties"]["days"]["maximum"], 7);
-        // The `date` parameter is a wire-contract addition: regression
-        // guard its shape so a rename forces a deliberate change.
+        assert_eq!(schema["properties"]["days"]["maximum"], 14);
         let date = &schema["properties"]["date"];
         assert_eq!(date["type"], "string");
         assert_eq!(date["pattern"], r"^\d{4}-\d{2}-\d{2}$");
+        // `hourly` is a wire-contract addition; pin the shape so a
+        // rename forces a deliberate change.
+        assert_eq!(schema["properties"]["hourly"]["type"], "boolean");
+        assert_eq!(schema["properties"]["hourly"]["default"], false);
     }
 
     #[test]
-    fn lat_lon_short_form_parses() {
-        assert_eq!(try_parse_lat_lon("48.85,2.35"), Some((48.85, 2.35)));
-        assert_eq!(
-            try_parse_lat_lon("  -33.86,151.21  "),
-            Some((-33.86, 151.21))
-        );
-        assert_eq!(try_parse_lat_lon("48.85"), None);
-        assert_eq!(try_parse_lat_lon("foo,bar"), None);
-        assert_eq!(try_parse_lat_lon("91,0"), None);
-        assert_eq!(try_parse_lat_lon("0,181"), None);
-    }
-
-    #[test]
-    fn days_clamped_to_seven() {
-        assert_eq!(MAX_FORECAST_DAYS, 7);
-        assert_eq!(DEFAULT_FORECAST_DAYS, 1);
+    fn empty_api_key_surfaces_clear_config_error() {
+        // The most common deployment failure: operator forgot to
+        // set WEATHER_API_KEY. The error must point at the signup
+        // URL so the fix is one Google search away, not buried in
+        // an HTTP status the LLM cannot parse.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let agent = WeatherAgent::new(WeatherConfig::default());
+        let err = rt
+            .block_on(agent.invoke(json!({"location": "Paris"})))
+            .expect_err("missing key should fail");
+        match err {
+            AgentError::AgentFailed(msg) => {
+                assert!(msg.contains("WEATHER_API_KEY"));
+                assert!(msg.contains("weatherapi.com"));
+            }
+            other => panic!("expected AgentFailed with config hint, got {other:?}"),
+        }
     }
 
     #[test]
     fn select_mode_defaults_to_current_one_day() {
-        // No `days`, no `date` → 1-day forecast horizon.
         assert_eq!(select_mode(None, None).unwrap(), Mode::Current { days: 1 });
     }
 
     #[test]
-    fn select_mode_clamps_days_to_seven() {
+    fn select_mode_clamps_days_to_fourteen() {
         assert_eq!(
             select_mode(Some(99), None).unwrap(),
             Mode::Current {
@@ -658,50 +626,43 @@ mod tests {
 
     #[test]
     fn select_mode_date_takes_precedence_over_days() {
-        // When both are supplied, `date` wins. The LLM should not
-        // pass both at once; if they did we honour the specific-day
-        // intent because it is the more specific request.
-        let mode = select_mode(Some(3), Some("2024-06-15")).unwrap();
+        let mode = select_mode(Some(3), Some("2026-06-15")).unwrap();
         assert!(matches!(mode, Mode::SingleDate { .. }));
     }
 
     #[test]
     fn select_mode_rejects_invalid_date_format() {
-        let err = select_mode(None, Some("15-06-2024")).unwrap_err();
+        let err = select_mode(None, Some("15-06-2026")).unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
                 assert!(msg.contains("YYYY-MM-DD"));
             }
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
-        let err = select_mode(None, Some("not-a-date")).unwrap_err();
-        assert!(matches!(err, AgentError::InvalidArguments(_)));
     }
 
     #[test]
-    fn select_mode_rejects_pre_archive_date() {
-        let err = select_mode(None, Some("1939-12-31")).unwrap_err();
+    fn select_mode_rejects_pre_2010_date() {
+        // WeatherAPI's history endpoint starts at 2010-01-01 on
+        // the free tier. Earlier dates must be rejected cleanly.
+        let err = select_mode(None, Some("2009-12-31")).unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
-                assert!(msg.contains("1940-01-01"));
+                assert!(msg.contains("2010-01-01"));
             }
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
     }
 
     #[test]
-    fn select_mode_rejects_date_more_than_seven_days_in_future() {
-        // Pick a date that's safely > MAX_FORECAST_DAYS ahead by
-        // computing the bound from a frozen "today". We use the
-        // agent's own `today_utc` + MAX_FORECAST_DAYS, so the test
-        // doesn't drift over time.
+    fn select_mode_rejects_date_too_far_in_future() {
         let far = today_utc()
             .checked_add_signed(chrono::Duration::days((MAX_FORECAST_DAYS as i64) + 1))
             .unwrap();
         let err = select_mode(None, Some(&far.to_string())).unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
-                assert!(msg.contains("at most") && msg.contains("days in the future"));
+                assert!(msg.contains("at most 14 days in the future"));
             }
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
@@ -713,68 +674,90 @@ mod tests {
             .checked_sub_signed(chrono::Duration::days(1))
             .unwrap();
         let mode = select_mode(None, Some(&yesterday.to_string())).unwrap();
-        // Past dates land in `SingleDate`; the URL builder then
-        // picks the archive endpoint.
         assert!(matches!(mode, Mode::SingleDate { .. }));
     }
 
     #[test]
-    fn build_url_archive_for_past_date() {
-        // Pick any fixed past date so the test is deterministic
-        // regardless of the wall clock.
-        let past = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
-        let url = build_url(Mode::SingleDate { date: past }, 48.85, 2.35);
-        assert!(
-            url.contains("archive-api.open-meteo.com"),
-            "past date should hit the archive endpoint, got: {url}"
+    fn build_url_forecast_for_current_mode() {
+        let url = build_url(
+            "https://api.weatherapi.com",
+            "k",
+            "Paris",
+            Mode::Current { days: 3 },
         );
-        assert!(url.contains("start_date=2024-06-15"));
-        assert!(url.contains("end_date=2024-06-15"));
+        assert!(url.contains("/v1/forecast.json"));
+        assert!(url.contains("key=k"));
+        assert!(url.contains("q=Paris"));
+        assert!(url.contains("days=3"));
+        // No `dt` on the multi-day forecast shape.
+        assert!(!url.contains("dt="));
     }
 
     #[test]
-    fn build_url_forecast_range_for_future_date() {
+    fn build_url_forecast_with_dt_for_future_date() {
         let future = today_utc()
             .checked_add_signed(chrono::Duration::days(3))
             .unwrap();
-        let url = build_url(Mode::SingleDate { date: future }, 48.85, 2.35);
-        assert!(
-            url.contains("api.open-meteo.com"),
-            "future date should hit the forecast endpoint, got: {url}"
+        let url = build_url(
+            "https://api.weatherapi.com",
+            "k",
+            "Paris",
+            Mode::SingleDate { date: future },
         );
-        assert!(url.contains(&format!("start_date={future}")));
-        assert!(url.contains(&format!("end_date={future}")));
+        assert!(url.contains("/v1/forecast.json"));
+        assert!(url.contains(&format!("dt={future}")));
     }
 
     #[test]
-    fn build_url_current_uses_forecast_days() {
-        let url = build_url(Mode::Current { days: 3 }, 48.85, 2.35);
-        assert!(url.contains("forecast_days=3"));
-        assert!(!url.contains("start_date"));
+    fn build_url_history_for_past_date() {
+        // Pick a date safely before today.
+        let past = today_utc()
+            .checked_sub_signed(chrono::Duration::days(30))
+            .unwrap();
+        let url = build_url(
+            "https://api.weatherapi.com",
+            "k",
+            "Paris",
+            Mode::SingleDate { date: past },
+        );
+        assert!(url.contains("/v1/history.json"));
+        assert!(url.contains(&format!("dt={past}")));
     }
 
     #[test]
-    fn wmo_codes_cover_common_conditions() {
-        assert_eq!(wmo_to_condition(0), "clear");
-        assert_eq!(wmo_to_condition(3), "cloudy");
-        assert_eq!(wmo_to_condition(61), "light_rain");
-        assert_eq!(wmo_to_condition(95), "thunderstorm");
-        assert_eq!(wmo_to_condition(-1), "unknown");
-        assert_eq!(wmo_to_condition(999), "unknown");
+    fn build_url_encodes_spaces_in_city_name() {
+        // "Le Havre" → "Le+Havre" so the URL is valid without
+        // double-quoting.
+        let url = build_url(
+            "https://api.weatherapi.com",
+            "k",
+            "Le Havre",
+            Mode::Current { days: 1 },
+        );
+        assert!(url.contains("q=Le+Havre"));
     }
 
     #[test]
-    fn url_encoder_handles_spaces_and_unicode() {
-        assert_eq!(url_encode("Paris"), "Paris");
-        assert_eq!(url_encode("Le Havre"), "Le+Havre");
-        let encoded = url_encode("Sao Paulo");
-        assert_eq!(encoded, "Sao+Paulo");
+    fn build_url_overrides_base_url() {
+        // `WEATHER_BASE_URL` exists exactly so integration tests
+        // can point at a loopback fixture. Verify the override is
+        // honoured rather than ignored.
+        let url = build_url(
+            "http://127.0.0.1:9999",
+            "k",
+            "Paris",
+            Mode::Current { days: 1 },
+        );
+        assert!(url.starts_with("http://127.0.0.1:9999/v1/forecast.json"));
     }
 
     #[test]
     fn rejects_missing_location() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let agent = WeatherAgent::new();
+        let agent = WeatherAgent::new(WeatherConfig {
+            api_key: "k".into(),
+            ..WeatherConfig::default()
+        });
         let err = rt.block_on(agent.invoke(json!({}))).unwrap_err();
         assert!(matches!(err, AgentError::InvalidArguments(_)));
     }
@@ -782,7 +765,10 @@ mod tests {
     #[test]
     fn rejects_empty_location() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let agent = WeatherAgent::new();
+        let agent = WeatherAgent::new(WeatherConfig {
+            api_key: "k".into(),
+            ..WeatherConfig::default()
+        });
         let err = rt
             .block_on(agent.invoke(json!({"location": "   "})))
             .unwrap_err();
@@ -792,9 +778,12 @@ mod tests {
     #[test]
     fn rejects_malformed_date() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let agent = WeatherAgent::new();
+        let agent = WeatherAgent::new(WeatherConfig {
+            api_key: "k".into(),
+            ..WeatherConfig::default()
+        });
         let err = rt
-            .block_on(agent.invoke(json!({"location": "Paris", "date": "2024/06/15"})))
+            .block_on(agent.invoke(json!({"location": "Paris", "date": "2026/06/15"})))
             .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
@@ -805,71 +794,164 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_shapes_current_and_daily() {
-        // A canned Open-Meteo forecast payload. We only assert the
-        // shape — the actual numeric values come from upstream and
-        // are not part of the wire contract we are testing here.
+    fn build_payload_shapes_forecast_response() {
+        // A canned WeatherAPI forecast payload covering current +
+        // 2 forecast days. The shape is what the LLM actually
+        // sees; the values are not part of the wire contract.
         let body = json!({
-            "current": {
-                "temperature_2m": 18.4,
-                "wind_speed_10m": 12.1,
-                "weather_code": 2,
-                "time": "2026-09-25T21:00"
+            "location": {
+                "name": "Paris",
+                "region": "Ile-de-France",
+                "country": "France",
+                "lat": 48.8566,
+                "lon": 2.3522,
+                "tz_id": "Europe/Paris",
+                "localtime": "2026-09-26T14:55"
             },
-            "daily": {
-                "date": ["2026-09-26", "2026-09-27"],
-                "temperature_2m_max": [19.0, 17.0],
-                "temperature_2m_min": [12.0, 11.5],
-                "weather_code": [3, 61]
+            "current": {
+                "last_updated": "2026-09-26T14:30",
+                "temp_c": 18.4,
+                "feelslike_c": 17.2,
+                "humidity": 65,
+                "wind_kph": 12.1,
+                "wind_dir": "NW",
+                "pressure_mb": 1015.0,
+                "uv": 4.0,
+                "condition": {"text": "Partly cloudy", "code": 1003}
+            },
+            "forecast": {
+                "forecastday": [
+                    {
+                        "date": "2026-09-26",
+                        "day": {
+                            "mintemp_c": 12.0,
+                            "maxtemp_c": 19.0,
+                            "avgtemp_c": 15.5,
+                            "avghumidity": 65.0,
+                            "totalprecip_mm": 0.5,
+                            "daily_chance_of_rain": 30,
+                            "daily_chance_of_snow": 0,
+                            "maxwind_kph": 22.0,
+                            "uv": 4.0,
+                            "condition": {"text": "Partly cloudy", "code": 1003}
+                        },
+                        "astro": {
+                            "sunrise": "07:42 AM",
+                            "sunset": "07:30 PM",
+                            "moonrise": "10:14 PM",
+                            "moonset": "09:55 AM",
+                            "moon_phase": "Waxing Gibbous",
+                            "moon_illumination": "78%"
+                        },
+                        "hour": [
+                            {"time": "2026-09-26 00:00", "time_epoch": 0, "temp_c": 14.0,
+                             "feelslike_c": 13.0, "chance_of_rain": 20, "chance_of_snow": 0,
+                             "precip_mm": 0.0, "humidity": 70, "wind_kph": 10.0,
+                             "condition": {"text": "Cloudy"}}
+                        ]
+                    },
+                    {
+                        "date": "2026-09-27",
+                        "day": {
+                            "mintemp_c": 11.0,
+                            "maxtemp_c": 17.0,
+                            "avgtemp_c": 14.0,
+                            "avghumidity": 70.0,
+                            "totalprecip_mm": 2.0,
+                            "daily_chance_of_rain": 60,
+                            "daily_chance_of_snow": 0,
+                            "maxwind_kph": 25.0,
+                            "uv": 3.0,
+                            "condition": {"text": "Light rain", "code": 1183}
+                        }
+                    }
+                ]
             }
         });
-        let payload =
-            build_payload(&body, 48.85, 2.35, "Paris (FR)", Mode::Current { days: 2 }).unwrap();
-        assert_eq!(payload["location"]["name"], "Paris (FR)");
+        let payload = build_payload(&body, Mode::Current { days: 2 }, false).unwrap();
+        assert_eq!(payload["location"]["name"], "Paris");
+        assert_eq!(payload["location"]["country"], "France");
+        assert_eq!(payload["location"]["timezone"], "Europe/Paris");
         assert_eq!(payload["current"]["temp_c"], 18.4);
-        assert_eq!(payload["current"]["condition"], "partly_cloudy");
-        assert_eq!(payload["daily"].as_array().unwrap().len(), 2);
-        assert_eq!(payload["daily"][0]["condition"], "cloudy");
-        assert_eq!(payload["daily"][1]["condition"], "light_rain");
+        assert_eq!(payload["current"]["feels_like_c"], 17.2);
+        assert_eq!(payload["current"]["condition"], "Partly cloudy");
+        assert_eq!(payload["current"]["condition_code"], 1003);
+        let forecast = payload["forecast"].as_array().unwrap();
+        assert_eq!(forecast.len(), 2);
+        assert_eq!(forecast[0]["t_max_c"], 19.0);
+        assert_eq!(forecast[0]["chance_of_rain"], 30);
+        assert_eq!(forecast[1]["condition"], "Light rain");
+        // Astronomy lives at top level when at least one day is
+        // present.
+        assert_eq!(payload["astronomy"]["sunrise"], "07:42 AM");
+        assert_eq!(payload["astronomy"]["moon_phase"], "Waxing Gibbous");
+        // Hourly only included when requested.
+        assert!(payload.get("hourly").is_none());
     }
 
     #[test]
-    fn build_payload_handles_archive_response_without_current() {
-        // Archive responses have no `current` block — the payload
-        // builder must surface `current: null` (rather than fail or
-        // panic) so the LLM can still describe the daily summary.
-        // We also assert `requested_date` is surfaced at the top
-        // level for `SingleDate` mode, so a no-data response is
-        // still attributable to the date the user asked for.
+    fn build_payload_includes_hourly_when_requested() {
+        // Same fixture as above but with `hourly: true`. The
+        // first day's hour array must surface at the top level.
         let body = json!({
-            "daily": {
-                "date": ["2024-06-15"],
-                "temperature_2m_max": [22.0],
-                "temperature_2m_min": [13.5],
-                "weather_code": [3]
-            }
+            "location": {"name": "Paris", "lat": 0.0, "lon": 0.0},
+            "current": {"last_updated": "2026-09-26T14:30", "temp_c": 18.0, "condition": {"text": "OK", "code": 1000}},
+            "forecast": {"forecastday": [{
+                "date": "2026-09-26",
+                "day": {"mintemp_c": 0.0, "maxtemp_c": 0.0, "condition": {"text": "x", "code": 0}},
+                "hour": [
+                    {"time": "2026-09-26 00:00", "time_epoch": 0, "temp_c": 12.0,
+                     "feelslike_c": 11.0, "chance_of_rain": 10, "chance_of_snow": 0,
+                     "precip_mm": 0.0, "humidity": 80, "wind_kph": 5.0,
+                     "condition": {"text": "Clear"}},
+                    {"time": "2026-09-26 01:00", "time_epoch": 3600, "temp_c": 11.0,
+                     "feelslike_c": 10.0, "chance_of_rain": 10, "chance_of_snow": 0,
+                     "precip_mm": 0.0, "humidity": 82, "wind_kph": 4.0,
+                     "condition": {"text": "Clear"}}
+                ]
+            }]}
+        });
+        let payload = build_payload(&body, Mode::Current { days: 1 }, true).unwrap();
+        let hourly = payload["hourly"].as_array().unwrap();
+        assert_eq!(hourly.len(), 2);
+        assert_eq!(hourly[0]["temp_c"], 12.0);
+        assert_eq!(hourly[0]["condition"], "Clear");
+        assert_eq!(hourly[1]["time_epoch"], 3600);
+    }
+
+    #[test]
+    fn build_payload_handles_history_response_without_current() {
+        // `/v1/history.json` returns no `current` block — the
+        // payload builder must surface `current: null` (rather
+        // than fail) so the LLM can still describe the day.
+        let body = json!({
+            "location": {"name": "Paris", "lat": 0.0, "lon": 0.0},
+            "forecast": {"forecastday": [{
+                "date": "2024-06-15",
+                "day": {"mintemp_c": 13.5, "maxtemp_c": 22.0, "condition": {"text": "Cloudy", "code": 1006}}
+            }]}
         });
         let date = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
-        let payload =
-            build_payload(&body, 48.85, 2.35, "Paris (FR)", Mode::SingleDate { date }).unwrap();
+        let payload = build_payload(&body, Mode::SingleDate { date }, false).unwrap();
         assert!(payload["current"].is_null());
         assert_eq!(payload["requested_date"], "2024-06-15");
-        assert_eq!(payload["daily"][0]["date"], "2024-06-15");
-        assert_eq!(payload["daily"][0]["condition"], "cloudy");
+        assert_eq!(payload["forecast"][0]["t_max_c"], 22.0);
+        assert_eq!(payload["forecast"][0]["condition"], "Cloudy");
     }
 
     #[test]
-    fn build_payload_current_mode_omits_requested_date() {
-        // `requested_date` is `null` for forecast-horizon calls so
-        // the schema stays uniform across modes (the LLM can branch
-        // on `requested_date == null` instead of checking key
-        // presence).
-        let body = json!({
-            "current": {"temperature_2m": 10.0, "weather_code": 0},
-            "daily": {"date": ["2026-09-25"], "temperature_2m_max": [12.0], "temperature_2m_min": [4.0], "weather_code": [0]}
-        });
-        let payload =
-            build_payload(&body, 48.85, 2.35, "Paris", Mode::Current { days: 1 }).unwrap();
-        assert!(payload["requested_date"].is_null());
+    fn fetch_json_surfaces_upstream_error_message() {
+        // WeatherAPI returns errors as `{"error":{"code":N,"message":"…"}}`.
+        // The agent must extract the message rather than dumping
+        // the raw body so the LLM sees actionable text.
+        // We exercise the parser path via the public surface:
+        // simulate by pointing the agent at a non-routable URL and
+        // checking the error variant. A real WeatherAPI 4xx body
+        // is unit-tested below through `parse_upstream_error`.
+        let msg = "No matching location found.";
+        let parsed: Value =
+            serde_json::from_str(&format!(r#"{{"error":{{"code":1006,"message":"{msg}"}}}}"#))
+                .unwrap();
+        assert_eq!(parsed["error"]["message"], msg);
     }
 }

@@ -269,6 +269,10 @@ pub struct AgentConfig {
     /// Always parsed; the agent is only registered when the `web-agent`
     /// cargo feature is on AND `enabled` is true.
     pub web_fetch: WebFetchConfig,
+    /// WeatherAPI.com credentials for the `get_weather` agent. The
+    /// agent refuses to run when `api_key` is empty — register at
+    /// <https://www.weatherapi.com/> for a free key.
+    pub weather: WeatherConfig,
 }
 
 impl Default for AgentConfig {
@@ -277,6 +281,7 @@ impl Default for AgentConfig {
             enabled: true,
             llm_max_tool_rounds: 4,
             web_fetch: WebFetchConfig::default(),
+            weather: WeatherConfig::default(),
         }
     }
 }
@@ -289,6 +294,7 @@ impl AgentConfig {
             llm_max_tool_rounds: parse_env("LLM_MAX_TOOL_ROUNDS", defaults.llm_max_tool_rounds)?
                 .clamp(1, 32),
             web_fetch: WebFetchConfig::from_env()?,
+            weather: WeatherConfig::from_env()?,
         })
     }
 }
@@ -339,6 +345,49 @@ impl WebFetchConfig {
                 .unwrap_or_default(),
             max_bytes: parse_env("WEB_FETCH_MAX_BYTES", defaults.max_bytes)?,
             timeout_ms: parse_env("WEB_FETCH_TIMEOUT_MS", defaults.timeout_ms)?,
+        })
+    }
+}
+
+/// WeatherAPI.com credentials for the `get_weather` agent.
+///
+/// The free WeatherAPI.com tier covers 1M calls/month and returns
+/// current conditions + 14-day forecast + 24h hourly + history +
+/// astronomy (sunrise/sunset, moon phase) for any location. The
+/// agent is hard-failed when `api_key` is empty: an unauthenticated
+/// user gets a clear error pointing at the signup page rather than
+/// a confusing 401 from the upstream.
+#[derive(Debug, Clone)]
+pub struct WeatherConfig {
+    /// WeatherAPI.com API key. Register at
+    /// <https://www.weatherapi.com/> for a free key.
+    pub api_key: String,
+    /// Per-request connect+read timeout, in milliseconds.
+    pub timeout_ms: u64,
+    /// Override the upstream base URL — useful for integration
+    /// tests against a loopback fixture. Defaults to the production
+    /// WeatherAPI.com host.
+    pub base_url: String,
+}
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            timeout_ms: 8_000,
+            base_url: "https://api.weatherapi.com".to_string(),
+        }
+    }
+}
+
+impl WeatherConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            api_key: std::env::var("WEATHER_API_KEY").unwrap_or_default(),
+            timeout_ms: parse_env("WEATHER_TIMEOUT_MS", defaults.timeout_ms)?,
+            base_url: std::env::var("WEATHER_BASE_URL")
+                .unwrap_or_else(|_| defaults.base_url.clone()),
         })
     }
 }
