@@ -1,0 +1,82 @@
+# Example configuration file for `stt-server`.
+#
+# Load with:
+#     stt-server --config /path/to/this.toml
+#
+# When no `--config` is given, the server layers two files (the
+# XDG-user one wins over the system one):
+#     /etc/nagent/config.toml
+#     $XDG_CONFIG_HOME/nagent/config.toml
+#     (or $HOME/.config/nagent/config.toml when XDG_CONFIG_HOME is unset)
+# Missing files are silently skipped.
+#
+# Precedence (highest wins):
+#   1. Environment variable (or `.env` value, same precedence).
+#   2. The TOML file(s) above, layered later-overrides-earlier.
+#   3. Hardcoded default baked into the binary.
+#
+# All keys are optional; unknown keys / sub-tables are rejected at load
+# time (`deny_unknown_fields`) so a typo never silently reverts to a
+# default.
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+
+# [server]
+# bind_addr = "0.0.0.0:8080"
+# whisper_model_path = "/models/ggml-base.bin"   # required (env or TOML)
+# max_queue = 32
+# session_idle_timeout_ms = 30_000
+# infer_timeout_ms = 30_000
+
+# ---------------------------------------------------------------------------
+# WebSocket frame limits
+# ---------------------------------------------------------------------------
+
+# [server.limits]
+# max_audio_frame_samples = 480_000        # 30 s × 16 kHz Float32
+# required_sample_rate = 16_000
+# max_language_hint_bytes = 16
+
+# ---------------------------------------------------------------------------
+# Per-source-IP rate limits
+# ---------------------------------------------------------------------------
+
+# [server.rate_limits]
+# stt_per_min = 120
+# llm_per_min = 30
+
+# ---------------------------------------------------------------------------
+# LLM proxy (Ollama or any OpenAI-compatible upstream)
+# ---------------------------------------------------------------------------
+
+# [llm]
+# enabled = false
+# base_url = "http://localhost:11434"
+# default_model = "llama3.1"
+# api_key = ""                              # optional bearer token
+# request_timeout_secs = 120
+# cors_allow_origins = []                   # empty = same-origin only
+
+# ---------------------------------------------------------------------------
+# Chat agents — master switches + one sub-table per tool
+# ---------------------------------------------------------------------------
+
+# [agents]
+# enabled = true
+# llm_max_tool_rounds = 4                   # hard cap, defended against loops
+
+# `web_fetch` agent — sandbox + transfer knobs
+# [agents.web_fetch]
+# allow_public = false                      # public IPs blocked by default
+# allowlist = ["*.wikipedia.org", "example.com"]
+# max_bytes = 2_097_152                     # 2 MiB hard cap
+# timeout_ms = 30_000
+
+# `get_weather` agent — WeatherAPI.com credentials
+# Register for a free key at https://www.weatherapi.com/
+# [agents.get_weather]
+# api_key = "your-weatherapi-key"
+# timeout_ms = 8_000
+# base_url = "https://api.weatherapi.com"
