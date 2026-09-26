@@ -49,6 +49,7 @@ dotenvy            = { workspace = true }
 anyhow             = { workspace = true }
 thiserror          = { workspace = true }
 async-trait        = { workspace = true }
+toml               = { workspace = true }
 bytes              = "1"
 futures-util       = "0.3"
 # `stream` lets us pipe `upstream.bytes_stream()` into `axum::body::Body`

@@ -52,8 +52,11 @@ starts. See `deploy/k8s/` for details.
 ## Configuration
 
 Every runtime setting is either a Cargo feature, a Dockerfile build argument,
-or an environment variable — no source changes are required. A `.env` file in
-the working directory is loaded automatically by `dotenvy` at startup.
+an environment variable, or a TOML file passed via `--config <path>` — no
+source changes are required. A `.env` file in the working directory is loaded
+automatically by `dotenvy` at startup, and a TOML overlay is loaded when
+`--config` is supplied. Precedence is **env > TOML > default**, so containers
+and `.env` files still override any TOML values.
 
 ### Cargo features
 
@@ -129,6 +132,85 @@ without a default and is required.
 Per-source-IP rate limiting applies at both layers: HTTP for the LLM proxy
 (`/v1/chat/completions`, `/v1/models`) and at the WebSocket upgrade +
 per-frame level for the STT pipeline. Loopback IPs always bypass.
+
+### TOML configuration file
+
+Pass `--config <path>` on the command line to load a TOML file. The
+file provides per-deployment defaults; environment variables
+(including values from `.env`) always override it. Unknown fields are
+rejected at load time (`deny_unknown_fields`) so a typo never silently
+reverts to a default.
+
+When `--config` is **omitted**, the server still tries to load two
+default files and merges them — the later one wins, missing files are
+silently skipped, and env vars still trump both:
+
+1. `/etc/nagent/config.toml` (system-wide defaults — FHS convention).
+2. `$XDG_CONFIG_HOME/nagent/config.toml` (or
+   `~/.config/nagent/config.toml` when `XDG_CONFIG_HOME` is unset/empty,
+   per the XDG Base Directory spec). This is the per-user override.
+
+A commented-out starter file lives at
+[`examples/config.toml.example`](examples/config.toml.example). Copy it,
+edit the values you want, and point the binary at it:
+
+```
+stt-server --config /etc/nagent/config.toml
+```
+
+Server knobs live under `[server]`; the two grouped sub-tables are
+`[server.limits]` for inbound WS frame limits and `[server.rate_limits]`
+for per-source-IP rate limits:
+
+| TOML key                          | Equivalent env var          | Notes                                          |
+| --------------------------------- | --------------------------- | ---------------------------------------------- |
+| `[server].bind_addr`              | `BIND_ADDR`                 |                                                |
+| `[server].whisper_model_path`     | `WHISPER_MODEL_PATH`        | Required (env or TOML).                        |
+| `[server].max_queue`              | `MAX_QUEUE`                 |                                                |
+| `[server].session_idle_timeout_ms`| `SESSION_IDLE_TIMEOUT_MS`   |                                                |
+| `[server].infer_timeout_ms`       | `INFER_TIMEOUT_MS`          |                                                |
+| `[server.limits].*`               | `MAX_*`, `REQUIRED_*`       | WebSocket frame knobs.                         |
+| `[server.rate_limits].*`          | `STT_RATE_PER_MIN`, `LLM_*` | Per-IP buckets.                                |
+| `[llm].*`                         | `LLM_*`, `OLLAMA_*`         | OpenAI-compatible proxy.                       |
+
+The `[agents]` section is a general block for chat-agent settings: it
+carries the master switches (`enabled`, `llm_max_tool_rounds`) plus
+one sub-table per tool, keyed by the agent's name:
+
+```toml
+[server]
+bind_addr = "0.0.0.0:8080"
+whisper_model_path = "/models/ggml-base.bin"
+max_queue = 32
+
+[server.limits]
+max_audio_frame_samples = 480_000
+required_sample_rate = 16_000
+
+[server.rate_limits]
+stt_per_min = 120
+llm_per_min = 30
+
+[agents]
+enabled = true
+llm_max_tool_rounds = 4
+
+[agents.web_fetch]
+allow_public = false
+allowlist = ["*.wikipedia.org", "example.com"]
+max_bytes = 2_097_152
+timeout_ms = 30_000
+
+[agents.get_weather]
+api_key = "your-weatherapi-key"
+timeout_ms = 8_000
+base_url = "https://api.weatherapi.com"
+```
+
+Unknown sub-tables under `[agents]` (e.g. `[agents.web_fetxh]`) are
+rejected at load time. Currently only `web_fetch` and `get_weather`
+have configuration; `get_datetime` and `get_stock_quote` take no
+parameters today.
 
 ### Kubernetes overlays
 

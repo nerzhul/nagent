@@ -6,7 +6,8 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use stt_server::{
-    agents, build_rate_limiters, build_router, llm, router, session, watchdog, AppState, Config,
+    agents, build_rate_limiters, build_router, llm, router, session, watchdog, AppState, CliArgs,
+    Config,
 };
 
 use tokio::sync::mpsc;
@@ -19,7 +20,11 @@ use stt_core::{InferenceJob, InferenceWorker, WhisperBackend};
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let cfg = Config::from_env()?;
+    // CLI flags must be parsed before tracing emits its first
+    // `info!` so a malformed `--config` exits cleanly without
+    // producing a half-initialised log line.
+    let cli = CliArgs::parse();
+    let cfg = Config::load(&cli).map_err(|e| anyhow::anyhow!("{e}"))?;
     info!(addr = %cfg.bind_addr, model = ?cfg.whisper_model_path, "starting nagent stt-server");
 
     // ---- Backend ---------------------------------------------------------

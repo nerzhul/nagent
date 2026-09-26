@@ -18,6 +18,7 @@
 
 pub mod agents;
 pub mod config;
+pub mod config_file;
 pub mod llm;
 pub mod middleware;
 pub mod rate_limit;
@@ -29,7 +30,7 @@ pub mod version;
 pub mod watchdog;
 pub mod ws_handler;
 
-pub use config::Config;
+pub use config::{CliArgs, Config};
 use rate_limit::{RateLimitPolicy, RateLimiter};
 use session::SessionMap;
 pub use version::VersionInfo;
