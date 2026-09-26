@@ -600,6 +600,50 @@ the "Read response aloud" checkbox. The Cargo feature only controls
 the *binary's* ability to serve TTS; the runtime knob controls
 *whether it does*.
 
+### Browser-side playback model
+
+When the Discussion-mode master TTS toggle is on, the discussion UI
+does two things:
+
+- **Autoplay (streaming)** — each SSE delta is fed to a sentence
+  buffer in `tts.js`. The buffer splits on `[.!?]+\s+` and
+  `\n\n+`, and each completed sentence triggers one
+  `POST /v1/audio/speech` round-trip. Chunks play gapless via
+  Web Audio's `AudioBufferSourceNode.start(t)` with absolute
+  timestamps. The user hears the first sentence while the LLM
+  is still generating the rest.
+- **Per-message replay** — every assistant bubble gets a small
+  speaker-icon button (top-right). Clicking it fetches the *full*
+  sanitised bubble text in one HTTP round-trip and plays the
+  whole message as a single utterance. Useful for re-listening
+  to a finished reply, or to share a specific response with
+  someone at the desk.
+
+The autoplay and replay paths share the same underlying
+`TtsPlayer` (single Web Audio `AudioContext`, single voice
+configuration) but use different API surfaces: `feed(delta)` /
+`flush()` for streaming, `speak(fullText)` for replay.
+
+### Markdown sanitization
+
+Before text reaches the Piper synth pipeline, `chat.js` runs it
+through `sanitizeForTts()` which strips the most common markdown
+markers (`**bold**`, `` `code` ``, `[link](url)`, headers,
+bullets, etc.). Without this step espeak-ng falls back to
+phonemicising the raw punctuation, which makes Piper read
+"astérisque" out loud for `*` and ruins the prose rhythm. The
+visible bubble still renders the original markdown via `marked.parse`
++ `DOMPurify`; only the audio path gets the stripped variant.
+
+The sanitizer is regex-based (not a full markdown parser) and
+applied at SSE-delta granularity. A multi-delta construct like
+`**bo` followed by `ld**` may briefly match an extra `*`
+mid-stream; in practice LLM tokens are short enough that this
+rarely matters, and a stray single `*` is far less audible than
+the doubled form would be.
+the *binary's* ability to serve TTS; the runtime knob controls
+*whether it does*.
+
 `piper-rs` depends on `ort` (ONNX Runtime) and `espeak-ng`. Building
 from source therefore requires `libclang` + `espeak-ng` development
 headers + `libssl-dev` (apt: `apt install libclang-dev libespeak-ng-dev

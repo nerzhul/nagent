@@ -306,6 +306,102 @@
   };
 
   /**
+   * Single-shot speech path: fetch the whole `text` in one HTTP
+   * round-trip, decode the returned WAV, queue it on the Web Audio
+   * context, and resolve when playback ends. Used by the per-message
+   * "Replay" button (vs the streaming `feed`/`flush` path used by
+   * autoplay).
+   *
+   * `opts`:
+   *   - voice (string): voice id sent to /v1/audio/speech.
+   *   - speed (number): Piper length_scale (>1 slower, <1 faster).
+   *   - onEnd (function): invoked when playback ends naturally or
+   *     via `stopAll()`. Not called on fetch/decode errors (those
+   *     reject the returned promise instead).
+   *
+   * Cancels any in-flight `feed()` stream by calling `stopAll()`
+   * first, then awaits one microtask so the previous fetch's
+   * AbortController settles before we start a new one. This avoids
+   * the race where two overlapping fetches would land on the same
+   * AudioContext queue out of order.
+   */
+  TtsPlayer.prototype.speak = function (text, opts) {
+    var self = this;
+    opts = opts || {};
+    if (!text) return Promise.reject(new Error("speak: empty text"));
+    this.stopAll();
+    return new Promise(function (resolve, reject) {
+      // Wait one microtask so the previous fetch's abort settles
+      // before we open a new connection. Without this, the old
+      // AbortController from the streaming autoplay could race
+      // with the replay and steal a chunk.
+      Promise.resolve().then(function () {
+        var ctrl = new AbortController();
+        self._inflight = ctrl;
+        var body = {
+          input: text,
+          voice: opts.voice || self._settings.voice,
+          speed: opts.speed != null ? opts.speed : self._settings.speed,
+        };
+        fetch(self._settings.endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: ctrl.signal,
+        })
+          .then(function (resp) {
+            if (!resp.ok) {
+              return Promise.reject(
+                new Error("HTTP " + resp.status + " " + resp.statusText)
+              );
+            }
+            return resp.arrayBuffer();
+          })
+          .then(function (buf) {
+            return decodeWav(self._ensureContext(), buf);
+          })
+          .then(function (audioBuf) {
+            if (self._stopped) {
+              // Replay was cancelled between fetch and decode;
+              // resolve silently rather than scheduling.
+              return null;
+            }
+            return new Promise(function (res) {
+              self._schedule(audioBuf);
+              // Wait for the AudioBufferSourceNode to finish.
+              // `_schedule` doesn't expose the source it created
+              // so we poll `activeSource()` until it stops, or
+              // listen to the `onended` callback by wrapping.
+              var onEnd = function () {
+                if (typeof opts.onEnd === "function") opts.onEnd();
+                res(null);
+              };
+              // Wrap activeSource's onended: replace the existing
+              // handler installed by `_schedule`.
+              var src = self.activeSource();
+              if (src) src.onended = onEnd;
+              else onEnd(); // already finished
+            });
+          })
+          .then(function () {
+            resolve();
+          })
+          .catch(function (err) {
+            if (err && err.name === "AbortError") {
+              resolve();
+              return;
+            }
+            reject(err);
+          })
+          .finally(function () {
+            if (self._inflight === ctrl) self._inflight = null;
+          });
+      });
+    });
+  };
+  };
+
+  /**
    * Public factory. `settings` keys:
    *   - endpoint: string (default '/v1/audio/speech')
    *   - voiceResolver: () => string (returns voice id based on lang)

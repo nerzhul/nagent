@@ -1587,3 +1587,55 @@ select, input[type="checkbox"] {
 .chat-tts-advanced button#chat-tts-test {
   margin-top: 0.6rem;
 }
+
+/* Per-message replay button. Renders inside each assistant bubble,
+ * top-right corner, hidden by default until the user enables TTS
+ * (see `refreshReplayButtonVisibility` in chat.js). When clicked,
+ * it fetches the full sanitised bubble text in one round-trip and
+ * plays it via the TtsPlayer.speak() path -- no per-sentence
+ * streaming, so playback is gap-free and the audio duration is
+ * predictable. */
+.chat-message-replay {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  transition: color 120ms ease, border-color 120ms ease,
+    background 120ms ease;
+}
+.chat-message-replay:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+.chat-message-replay:focus-visible {
+  outline: 2px solid var(--accent, #4a90e2);
+  outline-offset: 2px;
+}
+/* Playing state: tinted background + filled icon. We swap the SVG
+ * via a CSS-only trick using the `data-playing` attribute; chat.js
+ * also adds `chat-message-replay--playing` so the icon is replaced
+ * with a "stop" silhouette (the same path with an X overlay). */
+.chat-message-replay--playing {
+  color: var(--bg);
+  background: var(--accent, #4a90e2);
+  border-color: var(--accent, #4a90e2);
+}
+.chat-message-replay--playing svg path {
+  fill: var(--bg);
+}
+/* The assistant bubble needs `position: relative` so the absolute
+ * replay button anchors to its top-right corner. */
+.chat-message.chat-assistant {
+  position: relative;
+  padding-right: 2.4rem;
+}

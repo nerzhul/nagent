@@ -720,6 +720,27 @@ function appendBubble(role, text, {
     // a link.
     div.textContent = text;
   }
+  // Replay button: appended AFTER the markdown render so it sits
+  // outside the sanitized HTML and can't be stripped by DOMPurify.
+  // Only on assistant messages (user / error bubbles don't speak).
+  // Hidden until the TTS engine is loaded; visibility is then
+  // toggled by `refreshReplayButtonVisibility` whenever the
+  // `#chat-tts-check` state changes.
+  if (role === "assistant") {
+    const replayBtn = document.createElement("button");
+    replayBtn.type = "button";
+    replayBtn.className = "chat-message-replay";
+    replayBtn.setAttribute("aria-label", "Replay this message aloud");
+    replayBtn.title = "Replay this message aloud";
+    replayBtn.hidden = true;
+    replayBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+        <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77 0-4.28-2.99-7.86-7-8.77z" fill="currentColor"/>
+      </svg>`;
+    replayBtn.addEventListener("click", () => replayMessage(div, replayBtn));
+    div.appendChild(replayBtn);
+    refreshReplayButtonVisibility();
+  }
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   if (persist) {
@@ -1709,7 +1730,13 @@ async function streamReply(sessionId, userText) {
             // we want spoken. `feed` is a no-op when TTS is
             // disabled or autoplay is off; the player keeps a
             // sentence buffer and emits on terminators.
-            if (tts) tts.feed(delta);
+            //
+            // `sanitizeForTts` strips markdown markers so espeak-ng
+            // doesn't phonemise `*` as "astérisque", ` as "accent
+            // grave", etc. The visible bubble still renders the
+            // original markdown via `marked.parse` + `DOMPurify`,
+            // only the TTS path gets the plain-text variant.
+            if (tts) tts.feed(sanitizeForTts(delta));
           }
         } catch (_e) { /* skip malformed line */ }
       }
@@ -1955,6 +1982,65 @@ function lsGetNum(key, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/**
+ * Strip markdown syntax from `text` so espeak-ng doesn't phonemise
+ * characters that are meaningful in markdown but meaningless to a
+ * TTS engine:
+ *
+ *   `*`, `**`, `_`, `__`, `` ` ``, `#`, `>`, `[]()`, `![]()`, etc.
+ *
+ * espeak-ng's tokenizer falls back to spelling out isolated
+ * punctuation marks when it can't classify them as a known symbol,
+ * so `**bold**` becomes "astérisque astérisque bold astérisque
+ * astérisque" -- annoying and breaks the prose rhythm.
+ *
+ * The sanitisation is regex-based (not a full markdown parser) and
+ * applied at DELTA granularity, so a multi-delta construct like
+ * `**bo` + `ld**` may briefly match an extra `*` mid-stream. In
+ * practice LLM tokens are short enough that this rarely happens,
+ * and a stray single `*` is far less audible than the double form.
+ *
+ * The visible bubble still renders the original markdown via
+ * `marked.parse` + `DOMPurify` -- only the TTS path gets the
+ * plain-text variant.
+ */
+function sanitizeForTts(text) {
+  if (!text) return "";
+  return text
+    // Fenced code blocks: drop entirely. Piper would otherwise try
+    // to read identifiers and punctuation from code, which sounds
+    // awful. The markdown renderer keeps the original block for
+    // visual users.
+    .replace(/```[\s\S]*?```/g, " ")
+    // Inline code: keep content, drop backticks.
+    .replace(/`+([^`]+?)`+/g, "$1")
+    // Images: keep alt text, drop `![]()` boilerplate.
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    // Links: keep visible text, drop URL.
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    // Bold then italic (longer match first so `**` wins over `*`).
+    .replace(/\*\*([^*\n]+?)\*\*/g, "$1")
+    .replace(/__([^_\n]+?)__/g, "$1")
+    .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1$2")
+    .replace(/(^|\s)_([^_\n]+?)_(?!\w)/g, "$1$2")
+    // Strikethrough.
+    .replace(/~~([^~\n]+?)~~/g, "$1")
+    // Heading markers at line start.
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    // Blockquote markers at line start.
+    .replace(/^\s{0,3}>\s?/gm, "")
+    // Unordered list markers at line start (`-`, `*`, `+`).
+    .replace(/^\s{0,3}[-*+]\s+/gm, "")
+    // Ordered list markers (`1.`, `2.`, ...) at line start.
+    .replace(/^\s{0,3}\d+\.\s+/gm, "")
+    // Horizontal rules (3+ dashes/asterisks/underscores alone).
+    .replace(/^\s{0,3}[-*_]{3,}\s*$/gm, "")
+    // HTML-ish tags.
+    .replace(/<\/?[a-zA-Z][^>]*>/g, "")
+    // Trailing whitespace per line (keeps sentence boundaries clean).
+    .replace(/[ \t]+$/gm, "");
+}
+
 const TTS_LS_ENABLED  = "nagent.chat.ttsEnabled";
 const TTS_LS_VOICE_EN = "nagent.chat.tts.voiceEn";
 const TTS_LS_VOICE_FR = "nagent.chat.tts.voiceFr";
@@ -1996,6 +2082,91 @@ function resolveTtsVoice() {
   return s.voiceEn;
 }
 
+/**
+ * Toggle replay button visibility across every assistant bubble.
+ * Called whenever the `#chat-tts-check` state changes so the
+ * buttons appear/disappear in lock-step with the master toggle.
+ * Each individual button stores its own `hidden` attribute so
+ * bubbles appended before TTS is enabled stay hidden until they
+ * get `refreshReplayButtonVisibility()` called.
+ */
+function refreshReplayButtonVisibility() {
+  const ttsEnabled = !!$("chat-tts-check")?.checked;
+  document.querySelectorAll(".chat-message-replay").forEach((btn) => {
+    btn.hidden = !ttsEnabled;
+  });
+}
+
+/**
+ * Replay a single assistant message aloud. Unlike the streaming
+ * autoplay (`tts.feed` per SSE delta), this sends the FULL
+ * sanitised text in one HTTP round-trip, which is what the user
+ * asked for: one chunk per click, no per-sentence latency.
+ *
+ * Click semantics:
+ *   - Idle         -> speak full text
+ *   - Playing this -> stop playback
+ *   - Playing other-> stop the other, speak this one
+ *
+ * Visual state is tracked via a `playing` class on the button
+ * (icon swap is in CSS) and a global `currentReplayButton`
+ * pointer so we can clear the icon when the audio ends.
+ */
+let currentReplayButton = null;
+async function replayMessage(div, btn) {
+  // Build the plain-text version from the bubble's textContent so
+  // we don't ship innerHTML to the TTS server. We deliberately do
+  // NOT strip markdown here -- the button reads the bubble after
+  // sanitisation, but since DOMPurify already threw away scripts,
+  // textContent is safe.
+  const raw = (div.textContent || "").trim();
+  if (!raw) return;
+  // Strip markdown markers a second time so image alt text and
+  // bullet markers rendered by `marked.parse` don't get read
+  // either (e.g. a `<ul>` becomes empty lines that the TTS buffer
+  // would otherwise split on).
+  const text = sanitizeForTts(raw);
+  if (!text.trim()) return;
+
+  // Toggle: if this same button is already playing, stop.
+  if (btn.classList.contains("chat-message-replay--playing")) {
+    _ttsPlayer?.stopAll();
+    return;
+  }
+
+  // Clear any other playing button's state.
+  if (currentReplayButton && currentReplayButton !== btn) {
+    currentReplayButton.classList.remove("chat-message-replay--playing");
+  }
+  // Cancel whatever the autoplay or another replay was doing.
+  _ttsPlayer?.stopAll();
+  // Now wait one microtask so the previous fetch's AbortController
+  // settles, then start the new playback.
+  await new Promise((r) => setTimeout(r, 0));
+  _ttsPlayer = getOrCreateTtsPlayer();
+  btn.classList.add("chat-message-replay--playing");
+  currentReplayButton = btn;
+  // Use the single-shot `speak` path: one fetch, one decode, one
+  // play. We do NOT chain into the autoplay feed/flush -- this is
+  // an isolated, user-triggered utterance.
+  try {
+    await _ttsPlayer.speak(text, {
+      voice: resolveTtsVoice(),
+      speed: getTtsSettings().speed,
+      onEnd: () => {
+        if (currentReplayButton === btn) {
+          btn.classList.remove("chat-message-replay--playing");
+          currentReplayButton = null;
+        }
+      },
+    });
+  } catch (e) {
+    btn.classList.remove("chat-message-replay--playing");
+    if (currentReplayButton === btn) currentReplayButton = null;
+    appendError(`TTS replay failed: ${e?.message || e}`);
+  }
+}
+
 // Wire DOM events on the TTS controls. Done once at boot; the values
 // are persisted on every change so a reload restores them.
 function wireTtsControls() {
@@ -2033,6 +2204,10 @@ function wireTtsControls() {
   check.addEventListener("change", () => {
     lsSet(TTS_LS_ENABLED, check.checked ? "1" : "0");
     syncAdvancedVisibility();
+    // Reveal/hide the per-message replay button on every existing
+    // assistant bubble. New bubbles are wired in `appendMessage`
+    // and inherit the current state automatically.
+    refreshReplayButtonVisibility();
     // First time the user enables TTS we lazy-create the
     // AudioContext so the browser autoplay policy is satisfied.
     if (check.checked) ensureTtsAudioContext();
