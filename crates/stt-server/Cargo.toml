@@ -25,6 +25,14 @@ web-agent = []
 datetime-agent = ["dep:chrono", "dep:chrono-tz"]
 weather-agent = ["dep:chrono"]
 stock-agent = ["dep:chrono"]
+# `tts` pulls in `piper-rs` (and transitively `ort` + the espeak-ng
+# FFI crate). With this feature off the binary compiles without
+# espeak-ng / libclang / libssl-dev headers, so GPU build targets
+# (`run-cuda`, `run-hipblas`, `run-vulkan`, `run-mock`) do not pay
+# the heavy build cost when the operator has no intention of using
+# text-to-speech. The Discussion-mode UI silently hides the
+# "Read response aloud" checkbox when the feature is off.
+tts = ["dep:piper-rs"]
 
 [build-dependencies]
 # sha2 is only used at build time to fingerprint the static frontend
@@ -73,12 +81,22 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"], op
 # speech synthesis). NB: on crates.io the bare name `piper` resolves
 # to smol-rs's async pipe — the Piper TTS engine is published as
 # `piper-rs` by thewh1teagle. Requires espeak-ng C library + headers
-# on the host at build time (see README "Text-to-Speech (Piper)"
-# section). Compiled unconditionally, runtime-gated by `TTS_ENABLED`.
-piper-rs = "0.1.9"
+# on the host at build time, plus libclang and libssl-dev (transitive
+# ONNX runtime deps) — see README "Text-to-Speech (Piper)" section.
+#
+# Gated behind the `tts` cargo feature so the GPU build targets
+# (`run-cuda`, `run-hipblas`, `run-vulkan`, `run-mock`) do not have
+# to pay the heavy piper-rs / ort / espeak-ng build cost when TTS
+# is not in scope. The Python-LLM-only path (`make run-llm`) opts in
+# via `--features stt-server/tts` because the discussion view is the
+# primary TTS consumer.
+piper-rs = { version = "0.2", optional = true }
 # `hound` writes the WAV bytes served by `POST /v1/audio/speech`.
-# We emit PCM 16-bit mono at 22 050 Hz, the canonical Piper output
-# rate, and let the browser resample on playback.
+# We emit PCM 16-bit mono at the model's declared rate (typically
+# 22 050 Hz) and let the browser resample on playback. Lightweight,
+# no system deps — kept unconditional so the MockSynthesizer path
+# used by the HTTP integration tests works without the `tts`
+# feature.
 hound = "3.5"
 
 [dev-dependencies]

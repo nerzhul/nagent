@@ -131,7 +131,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // back to the empty allow-list (same-origin only) so a
     // misconfigured server does not silently expose the agents
     // endpoints cross-origin.
-    let stt_app = if state.agents.is_some() {
+    if state.agents.is_some() {
         let cors_origins = state
             .llm
             .as_ref()
@@ -148,10 +148,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             }))
             .layer(cors)
             .layer(security_layers.clone());
-        stt_app.merge(agents_app)
-    } else {
-        stt_app
-    };
+        stt_app = stt_app.merge(agents_app);
+    }
 
     if let Some(llm) = &state.llm {
         // The LLM proxy gets its own CORS layer driven by

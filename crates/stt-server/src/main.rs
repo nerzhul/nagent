@@ -78,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
     }
     let tts = tts::TtsEngine::load(&cfg.tts)
         .await
-        .map_err(|e| anyhow::anyhow!("TTS init failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("TTS init failed: {e}"))?
+        .map(Arc::new);
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),

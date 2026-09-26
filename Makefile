@@ -48,9 +48,14 @@ run-mock: ## Run the server locally with the in-process mock backend (no model n
 	    --features stt-server/web-agent,stt-server/datetime-agent,stt-server/weather-agent,stt-server/stock-agent
 
 .PHONY: run-llm
-run-llm: ## Run with the real Whisper backend on CPU and the LLM proxy enabled (LLM_ENABLED=true).
+run-llm: ## Run with the real Whisper backend on CPU, the LLM proxy, and local Piper TTS (LLM_ENABLED=true, TTS_ENABLED=true).
 	cargo run -p stt-server --release \
-	    --features stt-server/real-backend,stt-server/web-agent,stt-server/datetime-agent,stt-server/weather-agent,stt-server/stock-agent,stt-core/whisper-rs-backend
+	    --features stt-server/real-backend,stt-server/tts,stt-server/web-agent,stt-server/datetime-agent,stt-server/weather-agent,stt-server/stock-agent,stt-core/whisper-rs-backend
+
+.PHONY: run-tts
+run-tts: ## Run with the real Whisper backend on CPU and local Piper TTS (no LLM proxy needed; TTS_ENABLED=true).
+	cargo run -p stt-server --release \
+	    --features stt-server/real-backend,stt-server/tts,stt-core/whisper-rs-backend
 
 .PHONY: smoke-llm
 smoke-llm: ## Smoke-test the LLM proxy: POST a single prompt and check the response stream contains `data:`.
