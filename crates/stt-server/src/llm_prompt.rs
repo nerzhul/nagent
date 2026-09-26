@@ -29,7 +29,10 @@ enabled:
 - get_datetime: current date and time, optionally in an IANA timezone \
 (for example \"Europe/Paris\").
 - get_weather: current weather, multi-day forecast, hourly data and \
-astronomy for a location.
+astronomy for a location. The chat UI renders a structured weather card \
+from the tool's JSON response, so keep your prose to ONE short sentence \
+(\"Mostly sunny this afternoon, rain expected Thursday.\") — do not \
+re-state the temperature, condition, or fields the card already shows.
 - get_stock_quote: latest stock quote for a ticker symbol.
 - web_fetch: fetch a public URL and return its main text as Markdown.
 
@@ -187,5 +190,23 @@ mod tests {
         let original = body.clone();
         inject_default_system_prompt(&mut body, Some("admin"));
         assert_eq!(body, original);
+    }
+
+    #[test]
+    fn default_prompt_nudges_short_weather_reply() {
+        // The chat UI renders a structured weather card for
+        // get_weather; if the prompt lets the assistant write a long
+        // paragraph the card's information is duplicated in prose
+        // and the widget loses most of its value. This substring-
+        // level guard keeps the nudge visible to a future rewrite
+        // of the prompt.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("get_weather")
+                && prompt.contains("weather card")
+                && (prompt.contains("ONE short sentence")
+                    || prompt.contains("one short sentence")),
+            "DEFAULT_SYSTEM_PROMPT no longer nudges the model to keep get_weather replies short while the widget renders the detail. Card loses most of its value without the nudge."
+        );
     }
 }
