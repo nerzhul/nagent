@@ -59,6 +59,7 @@
 # request_timeout_secs = 120
 # cors_allow_origins = []                   # empty = same-origin only
 # system_prompt = "You are a strict, concise assistant."   # mirrors LLM_SYSTEM_PROMPT
+# allow_user_location = true                      # mirrors LLM_ALLOW_USER_LOCATION; strip the browser-injected location block when false
 
 # ---------------------------------------------------------------------------
 # Chat agents — master switches + one sub-table per tool

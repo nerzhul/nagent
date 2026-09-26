@@ -74,6 +74,7 @@ async fn start_test_server_with_rate_limit(
             request_timeout: Duration::from_secs(120),
             cors_allow_origins,
             system_prompt: None,
+            allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
     });

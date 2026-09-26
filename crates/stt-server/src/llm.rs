@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::agents::{AgentError, AgentRegistry};
 use crate::config::LlmConfig;
-use crate::llm_prompt::inject_default_system_prompt;
+use crate::llm_prompt::{inject_default_system_prompt, USER_LOCATION_MARKER};
 use crate::AppState;
 
 /// Shared, cheaply-clonable HTTP client.
@@ -112,6 +112,50 @@ impl IntoResponse for LlmError {
             }
         }
     }
+}
+
+/// Drop the ephemeral `User's approximate location:` system message
+/// the browser prepends when the admin has switched the feature off.
+///
+/// The browser only injects the block when the user has granted
+/// consent, but the admin may still want to forbid the upstream model
+/// from ever seeing it (compliance, sensitive deployment, …). The flag
+/// defaults to `true` so the UI is the primary gate; this helper is a
+/// defence-in-depth filter that runs after
+/// [`inject_default_system_prompt`] so the admin's prompt block always
+/// survives.
+///
+/// Matching is strict on the marker prefix to avoid clobbering an
+/// unrelated system message the user happened to type. A no-op when
+/// the flag is `true` or the body carries no location block.
+fn strip_user_location_if_disabled(forward_body: &mut Value, allow: bool) {
+    if allow {
+        return;
+    }
+    let Some(messages) = forward_body
+        .as_object_mut()
+        .and_then(|o| o.get_mut("messages"))
+        .and_then(|m| m.as_array_mut())
+    else {
+        return;
+    };
+    messages.retain(|m| {
+        let Some(role) = m.get("role").and_then(|v| v.as_str()) else {
+            return true;
+        };
+        if role != "system" {
+            return true;
+        }
+        // `content` may be a string OR a list of `{type, text}` parts
+        // per the OpenAI multimodal schema. We only support the string
+        // form (the browser always emits it); anything else is left
+        // alone so a future multimodal prompt isn't accidentally
+        // dropped by the kill-switch.
+        match m.get("content").and_then(|v| v.as_str()) {
+            Some(text) => !text.starts_with(USER_LOCATION_MARKER),
+            None => true,
+        }
+    });
 }
 
 /// Subset of the OpenAI chat request we care about.
@@ -203,6 +247,14 @@ pub async fn chat_completions(
     // here; the tool loop below reuses the same `forward_body` for
     // every round, so the prepend propagates automatically.
     inject_default_system_prompt(&mut forward_body, llm.cfg.system_prompt.as_deref());
+    // Admin kill-switch: when the operator has set
+    // `LLM_ALLOW_USER_LOCATION=false`, strip the browser-injected
+    // location block (matched on the exact `User's approximate
+    // location:` prefix) before it ever reaches the upstream model.
+    // Runs after the admin prompt injection so the admin block
+    // always survives; the tool loop reuses `forward_body` so the
+    // strip persists across rounds.
+    strip_user_location_if_disabled(&mut forward_body, llm.cfg.allow_user_location);
 
     // Forward a few well-known request headers. `Authorization` is
     // handled separately so we never leak the server-side key when it
@@ -966,5 +1018,92 @@ mod tests {
     #[test]
     fn tool_call_names_handles_empty_input() {
         assert_eq!(tool_call_names(&[]), "");
+    }
+
+    fn body_with_loc_marker() -> Value {
+        // Hand-built payload matching what `chat.js` would send when
+        // the user has shared their location: admin system prompt
+        // (already prepended by `inject_default_system_prompt`),
+        // followed by the browser-injected location block, then the
+        // user's actual turn.
+        json!({
+            "messages": [
+                { "role": "system", "content": "admin prompt" },
+                {
+                    "role": "system",
+                    "content": format!("{USER_LOCATION_MARKER} lat=48.85, lon=2.35 (±65 m, captured 2026-09-26T14:05Z).")
+                },
+                { "role": "user", "content": "what's the weather?" },
+            ]
+        })
+    }
+
+    #[test]
+    fn strip_user_location_keeps_block_when_allowed() {
+        // Default-on path: the kill-switch flag is `true`, the
+        // browser-injected block survives so the LLM can use it for
+        // location-relative queries.
+        let mut body = body_with_loc_marker();
+        let snapshot = body.clone();
+        strip_user_location_if_disabled(&mut body, true);
+        assert_eq!(body, snapshot, "allow=true must be a pure no-op");
+    }
+
+    #[test]
+    fn strip_user_location_drops_only_the_marker_block_when_disabled() {
+        // Kill-switch path: the marker-prefixed system message is
+        // dropped, but the admin prompt (different prefix) and the
+        // user turn both survive untouched.
+        let mut body = body_with_loc_marker();
+        strip_user_location_if_disabled(&mut body, false);
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2, "location block must be removed");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "admin prompt");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn strip_user_location_is_a_noop_without_marker_block() {
+        // The body never carried a location block (user hasn't shared
+        // any). The helper must not mutate the body in either mode.
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": "admin" },
+                { "role": "user", "content": "hi" },
+            ]
+        });
+        let snapshot = body.clone();
+        strip_user_location_if_disabled(&mut body, false);
+        assert_eq!(body, snapshot);
+    }
+
+    #[test]
+    fn strip_user_location_does_not_touch_non_system_or_multimodal_messages() {
+        // Defensive: a non-string `content` (OpenAI multimodal parts)
+        // is left alone, and only `role: system` messages are
+        // inspected.
+        let mut body = json!({
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        { "type": "text", "text": format!("{USER_LOCATION_MARKER} multimodal") }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": format!("{USER_LOCATION_MARKER} user-side") }
+                    ]
+                }
+            ]
+        });
+        let snapshot = body.clone();
+        strip_user_location_if_disabled(&mut body, false);
+        assert_eq!(
+            body, snapshot,
+            "non-string content must never be stripped by the kill-switch"
+        );
     }
 }

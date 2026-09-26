@@ -125,6 +125,7 @@ async fn start_test_server_with_llm_and_system_prompt(
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt,
+            allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
     });
@@ -194,6 +195,7 @@ async fn start_test_server_disabled() -> String {
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,
+            allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
     });

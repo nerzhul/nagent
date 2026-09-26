@@ -58,6 +58,16 @@ import {
   sortedSessions,
   touchSession,
 } from "/static/chat-sessions.js";
+import {
+  clearCachedLocation,
+  formatLocationMessage,
+  formatRelativeTime,
+  getLocation,
+  loadCachedLocation,
+  loadLocationEnabled,
+  saveCachedLocation,
+  setLocationEnabled,
+} from "/static/geolocation.js";
 
 // ---- Session storage -------------------------------------------------------
 //
@@ -471,6 +481,18 @@ const sessionsListEl = $("chat-sessions");
 const newSessionBtnEl = $("chat-new-session");
 const agentsBannerEl = $("chat-agents-banner");
 const agentsBannerNamesEl = $("chat-agents-banner-names");
+// Geolocation UI handles. The initial opt-in lives in the form footer;
+// the status pill in the header and the advanced-panel controls show
+// up only after a position has been cached. `null` checks protect
+// against an older `index.html` that lacks the elements.
+const locationShareBtn  = $("chat-location-share");
+const locationPill      = $("chat-location-pill");
+const locationPillText  = $("chat-location-pill-text");
+const locationAdvBox    = $("chat-location-advanced");
+const locationToggleEl  = $("chat-location-toggle");
+const locationRefresh   = $("chat-location-refresh");
+const locationForget    = $("chat-location-forget");
+const locationStatusEl  = $("chat-location-status");
 
 // The active session id is read at every operation rather than
 // cached, so a same-tab mutation (delete, new chat, switch from the
@@ -1301,6 +1323,183 @@ async function loadModels() {
 
 // ---- Streaming reply -------------------------------------------------------
 //
+// ---- User geolocation ------------------------------------------------------
+//
+// The user opts in to sharing their approximate location once via the
+// `Share location` button in the form footer. After that, every LLM
+// turn prepends an ephemeral system message carrying the cached
+// `lat,lon` + accuracy + capture time. The block is rebuilt on every
+// request (timestamp, age) but only re-acquired from the browser when
+// the cache is stale (> 7 days) or the user clicks Refresh / Forget.
+//
+// The block is never persisted to `localStorage` session history — see
+// the comment at the `messages.unshift(locBlock)` call site.
+
+/// Build the ephemeral location system message for this turn, or
+/// `null` when sharing is disabled or no position is cached.
+///
+/// The cache is refreshed once per UI load by `refreshLocationOnBoot`
+/// (silent — browser permission was granted on the original opt-in),
+/// so we trust whatever is in `localStorage` at message-build time.
+/// Long sessions where the user has not moved the page still rely on
+/// the boot-time fix; the "captured X ago" phrase in the message body
+/// lets the LLM flag obvious staleness.
+function maybeBuildLocationBlock() {
+  if (!loadLocationEnabled()) return null;
+  const cached = loadCachedLocation();
+  if (!cached) return null;
+  return {
+    role: "system",
+    content: formatLocationMessage(cached),
+  };
+}
+
+/// Update every geolocation control from the current cache + toggle.
+/// Called on boot, after every successful fetch, and on toggle /
+/// refresh / forget clicks. Kept defensive about missing elements so
+/// an older `index.html` doesn't crash the rest of the chat.
+function renderLocationUi() {
+  const cached = loadCachedLocation();
+  const enabled = loadLocationEnabled();
+  const inSecureContext = (typeof window !== "undefined"
+    && window.isSecureContext !== false);
+
+  if (locationShareBtn) {
+    if (!inSecureContext) {
+      // Insecure context (plain-HTTP LAN): the browser would refuse
+      // the geolocation call. Hide the opt-in entirely instead of
+      // looking broken; the user can still enable HTTPS / localhost.
+      locationShareBtn.hidden = true;
+      locationShareBtn.title =
+        "Geolocation requires HTTPS or localhost";
+    } else if (cached) {
+      // A position is already cached — the pill in the header takes
+      // over as the entry point.
+      locationShareBtn.hidden = true;
+    } else {
+      locationShareBtn.hidden = false;
+      locationShareBtn.title =
+        "Share your approximate location with the LLM";
+    }
+  }
+
+  const hasLoc = !!cached;
+  if (locationPill) locationPill.hidden = !hasLoc;
+  if (locationAdvBox) locationAdvBox.hidden = !hasLoc;
+
+  if (hasLoc) {
+    const acc = Math.max(0, Math.round(cached.accuracy));
+    const ageText = formatRelativeTime(Date.now() - cached.timestamp);
+    if (locationPillText) {
+      locationPillText.textContent = `±${acc} m · ${ageText} ago`;
+    }
+    if (locationStatusEl) {
+      const captured = new Date(cached.timestamp)
+        .toISOString().replace(/\.\d{3}Z$/, "Z");
+      locationStatusEl.textContent =
+        `Last updated: ${captured} · ±${acc} m · ${ageText} ago`;
+    }
+  }
+
+  if (locationToggleEl) {
+    locationToggleEl.checked = enabled;
+    locationToggleEl.disabled = !hasLoc;
+  }
+}
+
+/// Click handler for `#chat-location-share`. Asks the browser for a
+/// fresh position, caches it, flips the enabled flag, and refreshes
+/// the UI. Surfaces errors inline via the advanced status text so
+/// the user knows why nothing happened.
+async function handleShareLocationClick() {
+  try {
+    const loc = await getLocation();
+    saveCachedLocation(loc);
+    setLocationEnabled(true);
+    renderLocationUi();
+  } catch (err) {
+    // GeolocationPositionError codes map cleanly to user-facing text;
+    // the message field is set by us in the API-unavailable branch.
+    const code = err?.code;
+    let msg = err?.message || String(err);
+    if (code === 1) msg = "Permission denied";
+    else if (code === 2) msg = "Position unavailable";
+    else if (code === 3) msg = "Geolocation timed out";
+    if (locationStatusEl) {
+      locationStatusEl.textContent = `Could not share location: ${msg}`;
+    }
+  }
+}
+
+/// Click handler for the advanced-panel toggle. Disabling the toggle
+/// preserves the cache so the user can re-enable without re-granting
+/// browser permission; "Forget my location" is the destructive path.
+function handleLocationToggleChange() {
+  setLocationEnabled(!!locationToggleEl?.checked);
+  renderLocationUi();
+}
+
+/// Click handler for `Refresh my location`. Same as the initial opt-in
+/// but bypasses the cache check and updates the UI eagerly.
+async function handleLocationRefreshClick() {
+  try {
+    const loc = await getLocation();
+    saveCachedLocation(loc);
+    setLocationEnabled(true);
+    if (locationToggleEl) locationToggleEl.checked = true;
+    renderLocationUi();
+  } catch (err) {
+    if (locationStatusEl) {
+      locationStatusEl.textContent =
+        `Refresh failed: ${err?.message || err}`;
+    }
+  }
+}
+
+/// Click handler for `Forget my location`. Wipes the cache and the
+/// enabled flag; the next turn does not get a location block.
+function handleLocationForgetClick() {
+  clearCachedLocation();
+  setLocationEnabled(false);
+  if (locationToggleEl) locationToggleEl.checked = false;
+  renderLocationUi();
+}
+
+/// Page-load refresh: if the user opted in previously, ask the
+/// browser for a fresh position (no UI prompt — permission was
+/// granted on the original opt-in). The result overwrites the cache
+/// so a different day / different place reload always starts from
+/// the user's current location rather than last week's. Permission
+/// revoked / denied in the meantime clears the toggle and the cache
+/// so the UI matches reality on the next render.
+async function refreshLocationOnBoot() {
+  if (!loadLocationEnabled()) return;
+  try {
+    const loc = await getLocation();
+    saveCachedLocation(loc);
+  } catch (_err) {
+    // `getLocation` rejects with PERMISSION_DENIED (1) if the user
+    // revoked the grant in browser settings, or with
+    // POSITION_UNAVAILABLE / TIMEOUT if the device cannot produce a
+    // fix. In every case the safe behaviour is to stop pretending
+    // we have location: clear the toggle and the cache, then let
+    // `renderLocationUi` hide the controls.
+    setLocationEnabled(false);
+    clearCachedLocation();
+  }
+  renderLocationUi();
+}
+
+/// Open the Advanced `<details>` if it's collapsed so the user lands
+/// directly on the location controls. Called from the header pill.
+function openAdvancedForLocation() {
+  const adv = document.querySelector(".chat-advanced");
+  if (adv && !adv.open) adv.open = true;
+  if (locationAdvBox) {
+    locationAdvBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
 // `streamReply(sessionId, userText)` runs the LLM request bound to a
 // specific session. The session id is captured at call time and used
 // for every read/write — never re-read from `activeSessionId()` — so a
@@ -1354,6 +1553,14 @@ async function streamReply(sessionId, userText) {
       .map((m) => ({ role: m.role, content: m.content })),
     { role: "user", content: userText != null ? userText : last.content },
   ];
+  // The location block is *ephemeral*: it travels only in the
+  // request payload for this turn and is never written back to the
+  // session history (`h.push(...)` below intentionally omits it).
+  // This keeps the visible chat log free of system noise and means a
+  // follow-up turn in a future session starts with no location
+  // unless the user re-consented.
+  const locBlock = maybeBuildLocationBlock();
+  if (locBlock) messages.unshift(locBlock);
   const body = { messages, stream: true };
   const temperature = parseFloat(tempEl.value);
   if (Number.isFinite(temperature)) body.temperature = temperature;
@@ -1796,6 +2003,18 @@ function renderSessionList() {
 
 newSessionBtnEl?.addEventListener("click", newSession);
 
+// ---- Wire up the geolocation controls -------------------------------------
+//
+// Bound in the same DOMContentLoaded-equivalent path as the other
+// chat form controls so the new buttons can't end up inert if the
+// index.html is loaded from a slightly older cache.
+
+locationShareBtn?.addEventListener("click", handleShareLocationClick);
+locationPill?.addEventListener("click", openAdvancedForLocation);
+locationToggleEl?.addEventListener("change", handleLocationToggleChange);
+locationRefresh?.addEventListener("click", handleLocationRefreshClick);
+locationForget?.addEventListener("click", handleLocationForgetClick);
+
 // ---- Boot ------------------------------------------------------------------
 
 // One-time upgrade from the old single-history layout, then resolve
@@ -1807,6 +2026,16 @@ currentSessionId = getActiveId();
 activeSessionId(); // validates / falls back / creates, updates sidebar
 renderSessionList();
 renderHistory(currentSessionId);
+// Paint the geolocation controls from the cached state. Done after
+// the history render so the layout is settled before scrollIntoView
+// is ever called from a click handler.
+renderLocationUi();
+// Re-fetch the position once on boot so the user does not inherit
+// yesterday's fix. `loadLocationEnabled` early-returns when the
+// toggle was off, so this is a no-op for users who have never opted
+// in. Awaited (best-effort) so a slow device does not block other
+// boot work, but errors are swallowed inside the helper.
+refreshLocationOnBoot();
 
 // Load the model list once on page boot. The previous version only
 // fired on `modechange`, which meant a Discussion-mode-persisted user

@@ -127,6 +127,11 @@ pub struct TomlLlmConfig {
     /// `/v1/chat/completions` request. Mirrors the `LLM_SYSTEM_PROMPT`
     /// env var; env wins when both are set.
     pub system_prompt: Option<String>,
+    /// Whether the browser is allowed to forward the user's
+    /// approximate geolocation to the LLM. Mirrors the
+    /// `LLM_ALLOW_USER_LOCATION` env var; env wins when both are set.
+    /// Defaults to `true`.
+    pub allow_user_location: Option<bool>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -303,6 +308,7 @@ fn merge_toml_llm(
                 .clone()
                 .or_else(|| e.cors_allow_origins.clone()),
             system_prompt: l.system_prompt.clone().or_else(|| e.system_prompt.clone()),
+            allow_user_location: l.allow_user_location.or(e.allow_user_location),
         }),
     }
 }

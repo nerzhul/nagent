@@ -145,6 +145,19 @@
         <span>Model</span>
         <select id="chat-model"></select>
       </label>
+      <!--
+        Geolocation opt-in. Hidden until the user has granted browser
+        permission AND cached a position. Pre-grant, the entry point
+        is the `📍 Share location` button below in the form footer;
+        once enabled, this becomes a status pill that opens the
+        Advanced panel on click.
+      -->
+      <button id="chat-location-pill" type="button" class="chat-location-pill"
+              hidden
+              title="Open Advanced to manage your shared location">
+        <span class="chat-location-pill-icon" aria-hidden="true">📍</span>
+        <span id="chat-location-pill-text">…</span>
+      </button>
       <button id="chat-clear" type="button" class="ghost">Clear</button>
       <span id="chat-status" class="status idle">idle</span>
     </header>
@@ -187,12 +200,48 @@
         <input id="chat-temperature" type="number" min="0"
                max="2" step="0.1" value="0.8">
       </label>
+      <!--
+        Geolocation controls. Hidden until a position has been cached
+        in `localStorage`; the initial opt-in is the
+        `#chat-location-share` button in the form footer. The status
+        text + manual refresh / forget buttons live here so the user
+        can re-audit the choice without leaving Advanced.
+      -->
+      <div id="chat-location-advanced" class="chat-location-advanced" hidden>
+        <label class="chat-location-toggle-label">
+          <input id="chat-location-toggle" type="checkbox">
+          Include my location in LLM context
+        </label>
+        <div class="chat-location-actions">
+          <button id="chat-location-refresh" type="button" class="ghost">
+            Refresh my location
+          </button>
+          <button id="chat-location-forget" type="button" class="ghost">
+            Forget my location
+          </button>
+        </div>
+        <p id="chat-location-status" class="chat-location-status">…</p>
+      </div>
     </details>
     <form id="chat-form">
       <textarea id="chat-input" rows="1"
                 placeholder="Message… (Enter to send, Ctrl+Enter for newline, Ctrl+Shift+D to talk)"
                 title="Enter sends the message. Ctrl+Enter or Shift+Enter inserts a newline. Ctrl+Shift+D toggles voice recording."
                 autocomplete="off"></textarea>
+      <!--
+        Initial opt-in for sharing location. Hidden once a position has
+        been cached; the header pill (#chat-location-pill) and the
+        advanced controls take over from there. Hidden outright when
+        `window.isSecureContext === false` (e.g. plain-HTTP LAN
+        deploy) because `navigator.geolocation` would reject the
+        call — better to grey the button out with a tooltip than to
+        look broken.
+      -->
+      <button id="chat-location-share" type="button"
+              class="chat-location-share" title="Share your approximate location with the LLM">
+        <span aria-hidden="true">📍</span>
+        <span>Share location</span>
+      </button>
       <button id="chat-record-btn" type="button" data-state="idle"
               aria-label="Start voice recording (Ctrl+Shift+D)"
               title="Start voice recording (Ctrl+Shift+D)">

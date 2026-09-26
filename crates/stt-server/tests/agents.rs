@@ -203,6 +203,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,
+            allow_user_location: true,
         },
         agents: AgentConfig::default(),
     }
