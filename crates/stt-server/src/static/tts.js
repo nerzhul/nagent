@@ -1,7 +1,7 @@
 // Local TTS player for the discussion view.
 //
-// `NagentTts.create(settings)` returns an object with `feed(delta)`,
-// `flush()`, and `stopAll()`. Each phrase boundary triggers a
+// Loaded as an ES module by `chat.js` via `import { NagentTts } from
+// '/static/tts.js'`. Each phrase boundary triggers a
 // `fetch('/v1/audio/speech', { method:'POST', body: JSON.stringify({input, voice, speed}) })`
 // round-trip; the returned WAV bytes are decoded into an AudioBuffer
 // and queued on a single Web Audio context. Chunks play gapless
@@ -18,11 +18,10 @@
 // PCM-16 mono header directly so we don't pull a WAV library just
 // for one call site.
 
-(function () {
-  'use strict';
+'use strict';
 
-  // Maximum length of the sentence buffer before we force a flush,
-  // so an LLM that streams a 50 KB comma-separated clause does not
+// Maximum length of the sentence buffer before we force a flush,
+// so an LLM that streams a 50 KB comma-separated clause does not
   // hold it forever.
   var MAX_BUFFER_CHARS = 500;
 
@@ -316,10 +315,13 @@
     return new TtsPlayer(settings || {});
   }
 
-  window.NagentTts = {
-    create: create,
-    // Exposed for unit tests in dev — not used by chat.js.
+  // Named export matching `chat.js`'s `import { NagentTts } from
+  // '/static/tts.js'`. `chat.js` calls `NagentTts.create(settings)`
+  // so the surface is a namespace object with `create` as its main
+  // entry point. Also re-export the helpers (`splitSentence`,
+  // `decodeWav`) for ad-hoc debugging in devtools.
+  export const NagentTts = {
+    create,
     _splitSentence: splitSentence,
     _decodeWav: decodeWav,
   };
-})();
