@@ -69,6 +69,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # images). `default-features = false` drops the bundled tzfiles and
 # keeps `chrono-tz` to its `std` plumbing.
 chrono-tz = { version = "0.10", default-features = false, features = ["std"], optional = true }
+# `piper-rs` is the Rust binding to Piper TTS (ONNX-based local
+# speech synthesis). NB: on crates.io the bare name `piper` resolves
+# to smol-rs's async pipe — the Piper TTS engine is published as
+# `piper-rs` by thewh1teagle. Requires espeak-ng C library + headers
+# on the host at build time (see README "Text-to-Speech (Piper)"
+# section). Compiled unconditionally, runtime-gated by `TTS_ENABLED`.
+piper-rs = "0.1.9"
+# `hound` writes the WAV bytes served by `POST /v1/audio/speech`.
+# We emit PCM 16-bit mono at 22 050 Hz, the canonical Piper output
+# rate, and let the browser resample on playback.
+hound = "3.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

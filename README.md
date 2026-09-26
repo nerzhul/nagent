@@ -456,6 +456,124 @@ make smoke-llm
 # equivalent to: curl -N POST /v1/chat/completions | grep '^data:'
 ```
 
+## Text-to-Speech (Piper, local)
+
+The Discussion view can read the LLM's replies aloud in the browser
+default-output voice using a fully local [Piper](https://github.com/rhasspy/piper)
+ONNX model. Synthesis runs on the server (CPU, no GPU required); the
+browser just plays the resulting WAV through Web Audio.
+
+### Prerequisites
+
+Install the `espeak-ng` C library + headers — `piper-rs` calls into it
+for phonemisation. On Debian/Ubuntu:
+
+```
+sudo apt install espeak-ng
+```
+
+On Arch Linux the package is `espeak-ng`; on Fedora it's `espeak-ng`.
+
+### Download voices
+
+The engine discovers voices from `TTS_MODEL_DIR` (default
+`./models/piper`). Each voice is a `<id>.onnx` + `<id>.onnx.json` pair.
+The two voices used by default are:
+
+- `en_US-lessac-medium` — natural-sounding US English female
+- `fr_FR-upmc-medium` — natural-sounding French (UPMC/LIMSI)
+
+Fetch the official Piper voice set with:
+
+```
+./scripts/download-piper-voices.sh en_US-lessac-medium fr_FR-upmc-medium
+# → writes ./models/piper/en_US-lessac-medium.onnx{,.json}
+#        ./models/piper/fr_FR-upmc-medium.onnx{,.json}
+```
+
+Or browse the full catalogue at
+[huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/main)
+and drop the matching files into `TTS_MODEL_DIR` directly.
+
+### Configuration
+
+`[tts]` TOML section, or matching env vars:
+
+| Key | Env var | Default | Purpose |
+|---|---|---|---|
+| `enabled` | `TTS_ENABLED` | `false` | Master switch. When off, `/v1/audio/*` routes are not registered and the discussion UI hides the "Read response aloud" checkbox. |
+| `model_dir` | `TTS_MODEL_DIR` | `./models/piper` | Directory holding `<voice>.onnx` + `<voice>.onnx.json` files. |
+| `voice_en` | `TTS_VOICE_EN` | `en_US-lessac-medium` | English voice used when the request's `lang` is non-French. |
+| `voice_fr` | `TTS_VOICE_FR` | `fr_FR-upmc-medium` | French voice used when the request's `lang` starts with `fr`. |
+| `default_lang` | `TTS_DEFAULT_LANG` | `en` | Language hint when the client doesn't send one. |
+| `length_scale` | `TTS_LENGTH_SCALE` | `1.0` | Piper `length_scale`; `>1.0` = slower, `<1.0` = faster. Per-request `speed` overrides this. |
+| `noise_scale` | `TTS_NOISE_SCALE` | `0.667` | Piper upstream default; controls audio variability. |
+| `noise_w` | `TTS_NOISE_W` | `0.8` | Piper upstream default; controls phoneme variability. |
+| `max_input_chars` | `TTS_MAX_INPUT_CHARS` | `2000` | Hard cap on a single `/v1/audio/speech` request body. |
+
+Example TOML block (mirrors `examples/config.toml.example`):
+
+```toml
+[tts]
+enabled = true
+model_dir = "./models/piper"
+voice_en = "en_US-lessac-medium"
+voice_fr = "fr_FR-upmc-medium"
+default_lang = "en"
+length_scale = 1.0
+max_input_chars = 2000
+```
+
+### HTTP endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/audio/speech` | Body: `{"input": "...", "voice": "...", "lang": "...", "speed": 1.0}`. Returns `audio/wav` PCM 16-bit mono at the model's native sample rate. |
+| `GET` | `/v1/audio/voices` | Lists voices discovered in `model_dir`, plus the per-language defaults. The UI calls this on boot to populate its voice selectors. |
+
+Errors are surfaced as plain-text HTTP responses:
+
+- `400` — empty input or input over `max_input_chars`.
+- `404` — unknown voice id.
+- `429` — per-IP LLM/TTS rate limit (`LLM_RATE_PER_MIN`).
+- `503` — TTS disabled on the server, or no voices installed.
+
+### Voice attribution & license
+
+All Piper voices ship under **CC-BY-NC-SA** (some under MIT — the
+catalogue metadata on each Hugging Face page is authoritative). The
+included defaults are:
+
+- `en_US-lessac-medium` — © Lessac (https://github.com/rhasspy/piper/blob/master/VOICES.md), CC-BY-NC-SA.
+- `fr_FR-upmc-medium` — © UPMC / LIMSI, CC-BY-NC-SA.
+
+When redistributing the binary or the voice files together, you MUST
+preserve this attribution and the non-commercial clause. If you ship a
+fork with a different default voice, update this section accordingly.
+**Do not use Piper voices (or this binary configured to use them) in a
+commercial product without picking a voice with a permissive
+license.** The Chromium `Orca` offline voices bundled with modern Linux
+desktops are MIT-licensed and a drop-in alternative if you need a
+permissive-license TTS path; the engine abstraction in
+`crates/stt-server/src/tts.rs` (`Synthesizer` trait) is the seam where
+such a backend would slot in.
+
+### Build & runtime impact
+
+`piper-rs` is compiled unconditionally (no cargo feature gate), so the
+binary always includes the TTS code paths. The `/v1/audio/*` routes are
+only registered when `TTS_ENABLED=true`, so disabling TTS at runtime
+leaves zero attack surface but does not shrink the binary.
+
+`piper-rs` depends on `ort` (ONNX Runtime) and `espeak-ng`. Building
+from source therefore requires `libclang` + `espeak-ng` development
+headers (apt: `apt install libclang-dev libespeak-ng-dev`). CI / tests
+do **not** require Piper voices — the HTTP integration tests inject a
+mock synthesizer that produces a sine wave, so the test harness never
+touches `espeak-ng` or loads an `.onnx` file.
+
 ## License
 
-Dual-licensed under MIT or Apache-2.0, at your option.
+Dual-licensed under MIT or Apache-2.0, at your option. Piper voices are
+not part of this license; see the "Voice attribution & license" section
+above for their separate CC-BY-NC-SA terms.

@@ -40,6 +40,7 @@
 //   previous session never bleed into the new one.
 
 import { AudioCapture } from "/static/audio.js";
+import { NagentTts } from "/static/tts.js";
 import { preselectFromBrowser } from "/static/lang-preselect.js";
 import {
   DEFAULT_TITLE,
@@ -1544,6 +1545,21 @@ async function streamReply(sessionId, userText) {
   // briefly flash the audio idle status during the teardown.
   audioCapture.stop();
 
+  // TTS: lazily create the player on the first turn so the
+  // AudioContext is created from a user-gesture path (we cannot
+  // construct it here because `streamReply` may be called as a
+  // queued continuation that started before any user input — e.g.
+  // a voice transcript from `Ctrl+Shift+D`). The first toggle /
+  // first Test-button click has already created the context by the
+  // time the user lands here. If TTS is disabled at boot, this is
+  // a no-op and `feed` never gets called.
+  const ttsSettings = getTtsSettings();
+  const tts = ttsSettings.enabled ? getOrCreateTtsPlayer() : null;
+  // Honor the user's `stopOnSend` preference: when a new turn
+  // starts while audio from the previous reply is still playing,
+  // cut it off so the new reply isn't drowned out by the old one.
+  if (tts && ttsSettings.stopOnSend) tts.stopAll();
+
   const messages = [
     ...(systemEl.value.trim()
       ? [{ role: "system", content: systemEl.value.trim() }]
@@ -1687,11 +1703,22 @@ async function streamReply(sessionId, userText) {
             // animation frame, keeping the streaming path cheap.
             scheduleMarkdownRender(assistantEl, () => accumulated);
             messagesEl.scrollTop = messagesEl.scrollHeight;
+            // Feed the raw `delta` (NOT the markdown-rendered HTML)
+            // to TTS so it doesn't read out `**bold**`, code fences,
+            // etc. The accumulated stream's verbatim text is what
+            // we want spoken. `feed` is a no-op when TTS is
+            // disabled or autoplay is off; the player keeps a
+            // sentence buffer and emits on terminators.
+            if (tts) tts.feed(delta);
           }
         } catch (_e) { /* skip malformed line */ }
       }
     }
     finalSource = accumulated;
+    // Flush the TTS sentence buffer so the trailing partial sentence
+    // (no terminator) is also synthesised and played. No-op when TTS
+    // is disabled.
+    if (tts) tts.flush();
   } catch (e) {
     if (e?.name === "AbortError") {
       // Render whatever we got as markdown so the user sees the
@@ -1705,6 +1732,10 @@ async function streamReply(sessionId, userText) {
         assistantEl.textContent = "(stopped)";
         finalSource = "(stopped)";
       }
+      // Stop mid-reply TTS playback on user-initiated abort (the
+      // Stop button). We do NOT stop on stopOnSend because that
+      // case is handled at the top of streamReply.
+      if (tts) tts.stopAll();
     } else {
       // Error markers stay plain text — they are developer-facing
       // diagnostics, not part of the LLM's markdown output.
@@ -1712,6 +1743,9 @@ async function streamReply(sessionId, userText) {
       assistantEl.textContent = errText;
       finalSource = errText;
       appendError(e?.message || String(e));
+      // On a hard error the audio would keep talking about a stale
+      // half-answer. Stop it.
+      if (tts) tts.stopAll();
     }
   } finally {
     // If a `get_weather` tool result came back successfully during
@@ -1891,6 +1925,246 @@ const audioCapture = new AudioCapture({
     setAudioStatus(text, cls);
   },
 });
+
+// ---- Text-to-Speech (Piper, local) -----------------------------------------
+//
+// Settings are persisted to `localStorage` (with try/catch wrapping to
+// tolerate private-mode browsers) so the user's voice + speed choice
+// survives a page reload. Defaults are conservative: TTS off, neutral
+// speed, "stop on new message" on (matches typical chat UX where each
+// user turn is a fresh interaction).
+
+// localStorage helpers — try/catch wrapping because Safari private
+// mode throws on `setItem`. We never throw from these helpers; failed
+// writes silently fall back to in-memory state for the session.
+function lsGet(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) { /* ignored */ }
+}
+function lsGetBool(key, fallback) {
+  const v = lsGet(key);
+  if (v === null) return fallback;
+  return v === "1" || v === "true";
+}
+function lsGetNum(key, fallback) {
+  const v = lsGet(key);
+  if (v === null || v === "") return fallback;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+const TTS_LS_ENABLED  = "nagent.chat.ttsEnabled";
+const TTS_LS_VOICE_EN = "nagent.chat.tts.voiceEn";
+const TTS_LS_VOICE_FR = "nagent.chat.tts.voiceFr";
+const TTS_LS_SPEED    = "nagent.chat.tts.speed";
+const TTS_LS_AUTOPLAY = "nagent.chat.tts.autoplay";
+const TTS_LS_STOPSEND = "nagent.chat.tts.stopOnSend";
+
+/**
+ * Resolve the current TTS settings from the DOM controls (which are
+ * the source of truth at runtime — `localStorage` only seeds them on
+ * boot). Called by `streamReply` once per turn so a user changing the
+ * speed mid-conversation takes effect on the very next request.
+ */
+function getTtsSettings() {
+  return {
+    enabled: !!$("chat-tts-check")?.checked,
+    voiceEn: $("chat-tts-voice-en")?.value || "",
+    voiceFr: $("chat-tts-voice-fr")?.value || "",
+    // Speed slider: 0.5…1.5x where smaller = faster. Piper's
+    // `length_scale` is inverted: >1 = slower. We send the slider
+    // value directly (the server applies the mapping). 1.0x is the
+    // neutral value.
+    speed: parseFloat($("chat-tts-speed")?.value || "1.0") || 1.0,
+    autoplay: !!$("chat-tts-autoplay")?.checked,
+    stopOnSend: !!$("chat-tts-stop-on-send")?.checked,
+  };
+}
+
+/**
+ * Voice resolver used by `tts.js`. Reads the active language hint and
+ * returns the corresponding voice id from the saved settings. Defaults
+ * to English when the hint is empty / unknown — mirrors
+ * `TtsEngine::default_voice_for` server-side.
+ */
+function resolveTtsVoice() {
+  const s = getTtsSettings();
+  const lang = ($("chat-lang-select")?.value || "").toLowerCase();
+  if (lang === "fr" || lang.startsWith("fr-")) return s.voiceFr;
+  return s.voiceEn;
+}
+
+// Wire DOM events on the TTS controls. Done once at boot; the values
+// are persisted on every change so a reload restores them.
+function wireTtsControls() {
+  const check  = $("chat-tts-check");
+  const adv    = $("chat-tts-advanced");
+  const voiceEnEl = $("chat-tts-voice-en");
+  const voiceFrEl = $("chat-tts-voice-fr");
+  const speedEl   = $("chat-tts-speed");
+  const speedDisp = $("chat-tts-speed-display");
+  const autoEl    = $("chat-tts-autoplay");
+  const stopEl    = $("chat-tts-stop-on-send");
+  const testBtn   = $("chat-tts-test");
+  if (!check || !adv) return; // server may not have rendered these
+
+  // Seed from localStorage. We always read the saved value first so
+  // the UI is immediately consistent with the user's last choice.
+  check.checked = lsGetBool(TTS_LS_ENABLED, false);
+  // Default voices mirror the server defaults so the selectors are
+  // meaningful even before /v1/audio/voices responds.
+  if (voiceEnEl && !voiceEnEl.value) voiceEnEl.value = lsGet(TTS_LS_VOICE_EN) || "en_US-lessac-medium";
+  if (voiceFrEl && !voiceFrEl.value) voiceFrEl.value = lsGet(TTS_LS_VOICE_FR) || "fr_FR-upmc-medium";
+  if (speedEl) {
+    speedEl.value = String(lsGetNum(TTS_LS_SPEED, 1.0));
+    if (speedDisp) speedDisp.textContent = `${parseFloat(speedEl.value).toFixed(2)}x`;
+  }
+  if (autoEl) autoEl.checked = lsGetBool(TTS_LS_AUTOPLAY, true);
+  if (stopEl) stopEl.checked = lsGetBool(TTS_LS_STOPSEND, true);
+
+  // Show / hide the Advanced disclosure based on the master toggle.
+  function syncAdvancedVisibility() {
+    adv.hidden = !check.checked;
+  }
+  syncAdvancedVisibility();
+
+  check.addEventListener("change", () => {
+    lsSet(TTS_LS_ENABLED, check.checked ? "1" : "0");
+    syncAdvancedVisibility();
+    // First time the user enables TTS we lazy-create the
+    // AudioContext so the browser autoplay policy is satisfied.
+    if (check.checked) ensureTtsAudioContext();
+  });
+  voiceEnEl?.addEventListener("change", () => lsSet(TTS_LS_VOICE_EN, voiceEnEl.value));
+  voiceFrEl?.addEventListener("change", () => lsSet(TTS_LS_VOICE_FR, voiceFrEl.value));
+  speedEl?.addEventListener("input", () => {
+    if (speedDisp) speedDisp.textContent = `${parseFloat(speedEl.value).toFixed(2)}x`;
+    lsSet(TTS_LS_SPEED, speedEl.value);
+  });
+  autoEl?.addEventListener("change", () => lsSet(TTS_LS_AUTOPLAY, autoEl.checked ? "1" : "0"));
+  stopEl?.addEventListener("change", () => lsSet(TTS_LS_STOPSEND, stopEl.checked ? "1" : "0"));
+
+  // Test button: synthesise a fixed phrase and play it. Uses the
+  // same `tts` instance the LLM replies go through, so this is a
+  // true end-to-end check (voice, network, decoding, playback).
+  testBtn?.addEventListener("click", async () => {
+    ensureTtsAudioContext();
+    try {
+      const tts = getOrCreateTtsPlayer();
+      const resp = await fetch("/v1/audio/speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: "Hello, this is a voice test.",
+          voice: resolveTtsVoice(),
+          speed: getTtsSettings().speed,
+        }),
+      });
+      if (!resp.ok) {
+        appendError(`TTS test failed (HTTP ${resp.status})`);
+        return;
+      }
+      const buf = await resp.arrayBuffer();
+      const audioBuf = await tts.decodeExternal(buf);
+      // Stop whatever else might be playing so the test phrase is
+      // immediately audible.
+      tts.stopAll();
+      tts.schedule(audioBuf);
+    } catch (e) {
+      appendError(`TTS test failed: ${e?.message || e}`);
+    }
+  });
+}
+
+// Lazily create the AudioContext. The first call must be triggered
+// by a user gesture handler (toggle / Test button) so the browser
+// autoplay policy is satisfied. The returned context is reused for
+// every subsequent `feed()` call in the same session.
+let _ttsAudioCtx = null;
+function ensureTtsAudioContext() {
+  if (_ttsAudioCtx) return _ttsAudioCtx;
+  if (typeof AudioContext === "undefined") {
+    console.warn("Web Audio API not available; TTS will be silent.");
+    return null;
+  }
+  try {
+    _ttsAudioCtx = new AudioContext();
+  } catch (e) {
+    console.warn("AudioContext init failed:", e);
+    return null;
+  }
+  return _ttsAudioCtx;
+}
+
+// Singleton TtsPlayer. We reuse it across turns so the Web Audio
+// queue and the `AudioContext` are stable; otherwise every new reply
+// would incur the cost of a fresh context.
+let _ttsPlayer = null;
+function getOrCreateTtsPlayer() {
+  if (_ttsPlayer) return _ttsPlayer;
+  _ttsPlayer = NagentTts.create({
+    endpoint: "/v1/audio/speech",
+    voiceResolver: resolveTtsVoice,
+    // `speed` is read from settings on every `feed()` call via the
+    // closure here — we don't snapshot it at construction time so
+    // mid-conversation slider tweaks take effect immediately.
+    speed: () => getTtsSettings().speed,
+  });
+  return _ttsPlayer;
+}
+
+/**
+ * Probe `GET /v1/audio/voices`. On 200, populate the two voice
+ * selectors and reveal the `#chat-tts-label` checkbox. On 503 or any
+ * error, leave the controls hidden — the server has TTS disabled
+ * (or has no voices installed) so the user has nothing to enable.
+ */
+async function probeTtsVoices() {
+  try {
+    const resp = await fetch("/v1/audio/voices");
+    if (!resp.ok) return;
+    const body = await resp.json();
+    const label = $("chat-tts-label");
+    if (label) label.hidden = false;
+    const voiceEnEl = $("chat-tts-voice-en");
+    const voiceFrEl = $("chat-tts-voice-fr");
+    if (voiceEnEl) {
+      voiceEnEl.innerHTML = "";
+      for (const v of body.voices || []) {
+        const opt = document.createElement("option");
+        opt.value = v.id;
+        opt.textContent = `${v.id} (${v.language || "?"}, ${v.sample_rate} Hz)`;
+        voiceEnEl.appendChild(opt);
+      }
+      // Restore the saved voice if it still exists; otherwise fall
+      // back to the server-suggested default.
+      const saved = lsGet(TTS_LS_VOICE_EN);
+      const hasSaved = saved && Array.from(voiceEnEl.options).some((o) => o.value === saved);
+      voiceEnEl.value = hasSaved ? saved : (body.default_voice_en || voiceEnEl.value);
+    }
+    if (voiceFrEl) {
+      voiceFrEl.innerHTML = "";
+      for (const v of body.voices || []) {
+        const opt = document.createElement("option");
+        opt.value = v.id;
+        opt.textContent = `${v.id} (${v.language || "?"}, ${v.sample_rate} Hz)`;
+        voiceFrEl.appendChild(opt);
+      }
+      const saved = lsGet(TTS_LS_VOICE_FR);
+      const hasSaved = saved && Array.from(voiceFrEl.options).some((o) => o.value === saved);
+      voiceFrEl.value = hasSaved ? saved : (body.default_voice_fr || voiceFrEl.value);
+    }
+  } catch (_) {
+    // Network error / offline — leave controls hidden.
+  }
+}
+
+// Boot the TTS UI: probe the server, wire DOM, restore persisted
+// settings. Runs once after the AudioCapture is constructed.
+probeTtsVoices();
+wireTtsControls();
 
 // Locale-aware defaults: preselect the discussion-mode language from
 // the browser locale if it matches one of the options; otherwise keep

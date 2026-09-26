@@ -64,6 +64,7 @@ async fn start_test_server() -> (String, SessionMap) {
             allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
+        tts: stt_server::config::TtsConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -83,6 +84,7 @@ async fn start_test_server() -> (String, SessionMap) {
         config: server_cfg,
         llm: None,
         agents: None,
+        tts: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),

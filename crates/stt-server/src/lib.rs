@@ -26,6 +26,7 @@ pub mod rate_limit;
 pub mod router;
 pub mod session;
 pub mod static_assets;
+pub mod tts;
 pub mod validation;
 pub mod version;
 pub mod watchdog;
@@ -68,6 +69,13 @@ pub struct AppState {
     /// enabled (so `curl /v1/agents/web_fetch/invoke` keeps working
     /// for local testing).
     pub agents: Option<agents::AgentRegistry>,
+    /// Optional Piper TTS engine. `None` when `TTS_ENABLED=false`; in
+    /// that case the `/v1/audio/*` routes are not registered and the
+    /// discussion-mode "Read response aloud" UI shows no checkbox.
+    /// Always wrapped in an `Arc` because the engine is cloned into
+    /// the HTTP handler for each request (it holds per-voice lazy
+    /// ONNX session state).
+    pub tts: Option<Arc<tts::TtsEngine>>,
     /// Per-source-IP token bucket for the STT pipeline (consumed at
     /// WS upgrade and per inbound WS frame).
     pub stt_rate_limiter: RateLimiter,
@@ -85,6 +93,7 @@ impl std::fmt::Debug for AppState {
             .field("config", &self.config)
             .field("llm", &self.llm.as_ref().map(|_| "<LlmClient>"))
             .field("agents", &self.agents.as_ref().map(|_| "<AgentRegistry>"))
+            .field("tts", &self.tts.as_ref().map(|_| "<TtsEngine>"))
             .field("stt_rate_limiter", &self.stt_rate_limiter)
             .field("llm_rate_limiter", &self.llm_rate_limiter)
             .finish()
@@ -104,7 +113,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // STT routes are always registered. The LLM routes are gated on
     // `LLM_ENABLED` so disabling the feature leaves no trace of it
     // (the chat view simply sees 404 on `/v1/*`).
-    let stt_app = Router::new()
+    let mut stt_app = Router::new()
         .route("/", get(ws_handler::index_handler))
         .route("/healthz", get(ws_handler::healthz))
         .route("/api/version", get(ws_handler::version_handler))
@@ -158,11 +167,35 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 async move { llm_rate_limit_middleware(limiter, req, next).await }
             }))
             .layer(cors)
-            .layer(security_layers);
-        stt_app.merge(llm_app).with_state(state)
-    } else {
-        stt_app.with_state(state)
+            .layer(security_layers.clone());
+        stt_app = stt_app.merge(llm_app);
     }
+
+    // TTS routes share the LLM proxy's CORS / rate-limit envelope
+    // (same origin allow-list, same per-IP bucket). When the LLM proxy
+    // is off we fall back to the empty allow-list so a misconfigured
+    // server does not silently expose TTS cross-origin.
+    if let Some(_tts) = &state.tts {
+        let cors_origins = state
+            .llm
+            .as_ref()
+            .map(|l| l.cfg().cors_allow_origins.clone())
+            .unwrap_or_default();
+        let cors = middleware::cors_layer(&cors_origins);
+        let llm_limiter = state.llm_rate_limiter.clone();
+        let tts_app = Router::new()
+            .route("/v1/audio/speech", post(tts::audio_speech))
+            .route("/v1/audio/voices", get(tts::audio_voices))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let limiter = llm_limiter.clone();
+                async move { llm_rate_limit_middleware(limiter, req, next).await }
+            }))
+            .layer(cors)
+            .layer(security_layers);
+        stt_app = stt_app.merge(tts_app);
+    }
+
+    stt_app.with_state(state)
 }
 
 /// axum middleware that consumes one token from the supplied LLM

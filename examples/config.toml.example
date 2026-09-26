@@ -82,3 +82,24 @@
 # api_key = "your-weatherapi-key"
 # timeout_ms = 8_000
 # base_url = "https://api.weatherapi.com"
+
+# ---------------------------------------------------------------------------
+# Local text-to-speech (Piper ONNX)
+# ---------------------------------------------------------------------------
+# All voices are CC-BY-NC-SA — see README "Text-to-Speech (Piper)" section
+# for attribution. Download voices with scripts/download-piper-voices.sh.
+#
+# The model_dir must contain one <voice>.onnx + <voice>.onnx.json pair per
+# voice. When `enabled = false` the /v1/audio/* routes are not registered and
+# the discussion-mode "Read response aloud" UI shows no checkbox.
+#
+# [tts]
+# enabled = false
+# model_dir = "./models/piper"
+# voice_en = "en_US-lessac-medium"            # English voice id
+# voice_fr = "fr_FR-upmc-medium"              # French voice id
+# default_lang = "en"                          # "en" or "fr" (used when the request omits a lang)
+# length_scale = 1.0                           # >1.0 = slower, <1.0 = faster (overridable per request)
+# noise_scale = 0.667                          # Piper upstream default; controls variability
+# noise_w = 0.8                                # Piper upstream default; controls phoneme variability
+# max_input_chars = 2000                       # hard cap per /v1/audio/speech request body

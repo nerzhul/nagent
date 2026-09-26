@@ -161,6 +161,7 @@ fn make_app_state(
         config: server_cfg,
         llm: llm_client,
         agents,
+        tts: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),
@@ -206,6 +207,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             allow_user_location: true,
         },
         agents: AgentConfig::default(),
+        tts: stt_server::config::TtsConfig::default(),
     }
 }
 

@@ -180,10 +180,69 @@
       <label>
         <input type="checkbox" id="chat-translate-check"> Translate to English
       </label>
+      <!--
+        Read-aloud toggle. Hidden when the server reports TTS disabled
+        (chat.js does the visibility check on boot). Toggling it lazily
+        creates the AudioContext so we satisfy the browser's autoplay
+        policy (a user-gesture handler is required).
+      -->
+      <label id="chat-tts-label" hidden>
+        <input type="checkbox" id="chat-tts-check"> Read response aloud
+      </label>
       <span id="chat-backend-info" class="backend-info"></span>
     </section>
 
     <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+    <!--
+      TTS settings panel. Hidden by default; the parent
+      `#chat-tts-label` checkbox controls its visibility via the
+      `[hidden]` attribute. The two voice selectors are populated
+      dynamically from `GET /v1/audio/voices` on boot (see chat.js),
+      so the user only ever sees voices that are actually installed
+      in `TTS_MODEL_DIR` on the server.
+    -->
+    <details id="chat-tts-advanced" class="chat-tts-advanced" hidden>
+      <summary>Text-to-Speech</summary>
+      <label class="chat-tts-voice-label">
+        English voice
+        <select id="chat-tts-voice-en"></select>
+      </label>
+      <label class="chat-tts-voice-label">
+        French voice
+        <select id="chat-tts-voice-fr"></select>
+      </label>
+      <!--
+        Speed slider. Piper `length_scale` is INVERTED from human
+        intuition: `>1.0` = SLOWER, `<1.0` = FASTER. We label the
+        slider 0.5x…1.5x so the direction is unambiguous (smaller
+        value = faster). The actual `length_scale` sent to Piper
+        is the inverse mapping, computed in chat.js.
+      -->
+      <label class="chat-tts-speed-label">
+        Speed
+        <input id="chat-tts-speed" type="range" min="0.5" max="1.5"
+               step="0.05" value="1.0">
+        <span id="chat-tts-speed-display">1.0x</span>
+      </label>
+      <label>
+        <input type="checkbox" id="chat-tts-autoplay" checked>
+        Auto-play next response
+      </label>
+      <label>
+        <input type="checkbox" id="chat-tts-stop-on-send" checked>
+        Stop on new message
+      </label>
+      <!--
+        `Test voice` button. Clicking synthesises a fixed sample
+        phrase and plays it through the same Web Audio queue the LLM
+        replies use, without involving the LLM proxy. Useful for
+        validating the voice and audio path without sending a
+        message.
+      -->
+      <button id="chat-tts-test" type="button" class="ghost">
+        Test voice
+      </button>
+    </details>
     <details class="chat-advanced">
       <summary>Advanced</summary>
       <p id="chat-agents-banner" class="chat-agents-banner" hidden>

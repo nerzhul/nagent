@@ -6,8 +6,8 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use stt_server::{
-    agents, build_rate_limiters, build_router, llm, router, session, watchdog, AppState, CliArgs,
-    Config,
+    agents, build_rate_limiters, build_router, llm, router, session, tts, watchdog, AppState,
+    CliArgs, Config,
 };
 
 use tokio::sync::mpsc;
@@ -76,6 +76,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         info!("agent registry empty (no agents compiled in or AGENTS_ENABLED=false)");
     }
+    let tts = tts::TtsEngine::load(&cfg.tts)
+        .await
+        .map_err(|e| anyhow::anyhow!("TTS init failed: {e}"))?;
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),
@@ -88,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             Some(agents)
         },
+        tts,
         stt_rate_limiter,
         llm_rate_limiter,
     });

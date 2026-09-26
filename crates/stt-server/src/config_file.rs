@@ -66,6 +66,19 @@
 //! api_key = ""
 //! timeout_ms = 8_000
 //! base_url = "https://api.weatherapi.com"
+//!
+//! # Text-to-speech (Piper ONNX, local). See README and
+//! # scripts/download-piper-voices.sh for voice acquisition.
+//! [tts]
+//! enabled = false
+//! model_dir = "./models/piper"
+//! voice_en = "en_US-lessac-medium"
+//! voice_fr = "fr_FR-upmc-medium"
+//! default_lang = "en"
+//! length_scale = 1.0
+//! noise_scale = 0.667
+//! noise_w = 0.8
+//! max_input_chars = 2000
 //! ```
 
 use std::path::Path;
@@ -92,6 +105,9 @@ pub struct TomlConfig {
     /// sub-table per tool (`[agents.web_fetch]`, `[agents.get_weather]`).
     #[serde(default)]
     pub agents: Option<TomlAgentConfig>,
+    /// Local Piper TTS engine knobs. See [`crate::config::TtsConfig`].
+    #[serde(default)]
+    pub tts: Option<TomlTtsConfig>,
 }
 
 /// Server-side knobs grouped under `[server]`.
@@ -187,6 +203,21 @@ pub struct TomlRateLimitConfig {
     pub llm_per_min: Option<u32>,
 }
 
+/// Piper TTS engine knobs. Mirrors [`crate::config::TtsConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlTtsConfig {
+    pub enabled: Option<bool>,
+    pub model_dir: Option<String>,
+    pub voice_en: Option<String>,
+    pub voice_fr: Option<String>,
+    pub default_lang: Option<String>,
+    pub length_scale: Option<f32>,
+    pub noise_scale: Option<f32>,
+    pub noise_w: Option<f32>,
+    pub max_input_chars: Option<usize>,
+}
+
 impl TomlConfig {
     /// Read and parse a TOML config file.
     ///
@@ -223,7 +254,8 @@ pub enum ConfigFileError {
 /// file acts as a per-user override on top of the system defaults.
 ///
 /// Sub-tables (`[server]`, `[server.limits]`, `[server.rate_limits]`,
-/// `[llm]`, `[agents]`, `[agents.web_fetch]`, `[agents.get_weather]`)
+/// `[llm]`, `[agents]`, `[agents.web_fetch]`, `[agents.get_weather]`,
+/// `[tts]`)
 /// are merged recursively with the same semantics — a `Some` inside a
 /// later sub-table overrides only that specific field, leaving sibling
 /// fields from the earlier config untouched.
@@ -232,6 +264,7 @@ pub fn merge_toml_configs(earlier: &TomlConfig, later: &TomlConfig) -> TomlConfi
         server: merge_toml_server(earlier.server.as_ref(), later.server.as_ref()),
         llm: merge_toml_llm(earlier.llm.as_ref(), later.llm.as_ref()),
         agents: merge_toml_agents(earlier.agents.as_ref(), later.agents.as_ref()),
+        tts: merge_toml_tts(earlier.tts.as_ref(), later.tts.as_ref()),
     }
 }
 
@@ -363,6 +396,28 @@ fn merge_toml_weather(
     }
 }
 
+fn merge_toml_tts(
+    earlier: Option<&TomlTtsConfig>,
+    later: Option<&TomlTtsConfig>,
+) -> Option<TomlTtsConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlTtsConfig {
+            enabled: l.enabled.or(e.enabled),
+            model_dir: l.model_dir.clone().or_else(|| e.model_dir.clone()),
+            voice_en: l.voice_en.clone().or_else(|| e.voice_en.clone()),
+            voice_fr: l.voice_fr.clone().or_else(|| e.voice_fr.clone()),
+            default_lang: l.default_lang.clone().or_else(|| e.default_lang.clone()),
+            length_scale: l.length_scale.or(e.length_scale),
+            noise_scale: l.noise_scale.or(e.noise_scale),
+            noise_w: l.noise_w.or(e.noise_w),
+            max_input_chars: l.max_input_chars.or(e.max_input_chars),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +428,7 @@ mod tests {
         assert!(cfg.server.is_none());
         assert!(cfg.llm.is_none());
         assert!(cfg.agents.is_none());
+        assert!(cfg.tts.is_none());
     }
 
     #[test]
@@ -413,6 +469,12 @@ mod tests {
             api_key = "weather-key"
             timeout_ms = 4000
             base_url = "https://api.weatherapi.com"
+
+            [tts]
+            enabled = true
+            model_dir = "/var/lib/nagent/piper"
+            voice_en = "en_US-lessac-medium"
+            length_scale = 1.1
         "#;
         let cfg: TomlConfig = toml::from_str(text).unwrap();
         let server = cfg.server.expect("server section parsed");
@@ -440,6 +502,37 @@ mod tests {
         let wx = agents.get_weather.expect("agents.get_weather parsed");
         assert_eq!(wx.api_key.as_deref(), Some("weather-key"));
         assert_eq!(wx.timeout_ms, Some(4000));
+
+        let tts = cfg.tts.expect("tts section parsed");
+        assert_eq!(tts.enabled, Some(true));
+        assert_eq!(tts.model_dir.as_deref(), Some("/var/lib/nagent/piper"));
+        assert_eq!(tts.voice_en.as_deref(), Some("en_US-lessac-medium"));
+        assert_eq!(tts.length_scale, Some(1.1));
+    }
+
+    #[test]
+    fn tts_section_merges_with_overrides() {
+        let earlier: TomlConfig = toml::from_str(
+            r#"
+                [tts]
+                enabled = true
+                voice_en = "en_US-amy-low"
+                length_scale = 1.0
+            "#,
+        )
+        .unwrap();
+        let later: TomlConfig = toml::from_str(
+            r#"
+                [tts]
+                length_scale = 1.3
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml_configs(&earlier, &later);
+        let tts = merged.tts.expect("tts merged");
+        assert_eq!(tts.enabled, Some(true), "kept from earlier");
+        assert_eq!(tts.voice_en.as_deref(), Some("en_US-amy-low"), "kept");
+        assert_eq!(tts.length_scale, Some(1.3), "later wins");
     }
 
     #[test]

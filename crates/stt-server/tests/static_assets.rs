@@ -47,6 +47,7 @@ async fn serve_once() -> String {
             allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
+        tts: stt_server::config::TtsConfig::default(),
     });
     let sessions = Arc::new(dashmap::DashMap::new());
     let (job_tx, job_rx) = mpsc::channel::<stt_core::InferenceJob>(16);
@@ -61,6 +62,7 @@ async fn serve_once() -> String {
         config: server_cfg,
         llm: None,
         agents: None,
+        tts: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),

@@ -128,6 +128,7 @@ async fn start_test_server_with_llm_and_system_prompt(
             allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
+        tts: stt_server::config::TtsConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -147,6 +148,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         config: server_cfg,
         llm: Some(llm_client),
         agents: None,
+        tts: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),
@@ -198,6 +200,7 @@ async fn start_test_server_disabled() -> String {
             allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
+        tts: stt_server::config::TtsConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -210,6 +213,7 @@ async fn start_test_server_disabled() -> String {
         config: server_cfg,
         llm: None,
         agents: None,
+        tts: None,
         stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
             RateLimitConfig::default().stt_per_min,
         )),
@@ -479,8 +483,7 @@ const SERVER_PROMPT: &str = "You are a strict, concise assistant.";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn proxy_prepends_default_system_prompt_when_configured() {
-    let (_upstream_url, _on_headers, on_body) =
-        spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let (_upstream_url, _on_headers, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
     let (chat_url, _) = start_test_server_with_llm_and_system_prompt(
         _upstream_url,
         None,
@@ -491,9 +494,7 @@ async fn proxy_prepends_default_system_prompt_when_configured() {
     let resp = reqwest::Client::new()
         .post(format!("{chat_url}/v1/chat/completions"))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(
-            r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#,
-        )
+        .body(r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#)
         .send()
         .await
         .expect("post chat");
@@ -522,17 +523,14 @@ async fn proxy_is_passthrough_when_system_prompt_unset() {
     // proxy must inject nothing. Without this assertion a future
     // regression could silently start adding a default system message
     // and break every deployment that relies on the passthrough.
-    let (_upstream_url, _on_headers, on_body) =
-        spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let (_upstream_url, _on_headers, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
     let (chat_url, _) =
         start_test_server_with_llm_and_system_prompt(_upstream_url, None, None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{chat_url}/v1/chat/completions"))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(
-            r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#,
-        )
+        .body(r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#)
         .send()
         .await
         .expect("post chat");
