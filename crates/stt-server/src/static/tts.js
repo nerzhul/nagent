@@ -175,12 +175,30 @@ function phraseForTts(phrase) {
   function TtsPlayer(settings) {
     this._settings = settings; // { endpoint, voice, speed }
     this._buffer = '';
-    this._inflight = null; // AbortController for the current fetch
+    this._inflight = null; // legacy single-controller field; kept
+                            // null under the new queue scheme
     this._audioCtx = null;
     this._scheduledEnd = 0; // last scheduled source.endTime on the ctx
     this._activeSource = null;
     this._playPromise = null;
     this._stopped = false;
+    // Parallel-fetch + FIFO-playback queue. Every `_enqueue`
+    // assigns the next monotonic `idx`, starts its own fetch, and
+    // does NOT abort any in-flight fetches -- the previous design
+    // aborted phrase N when phrase N+1 was enqueued, which made
+    // phrases 1..N-1 disappear. Now all fetches run in parallel and
+    // `_playReady` schedules them in strict enqueue order, draining
+    // any out-of-order completions as they arrive.
+    this._nextIdx = 0;
+    this._nextToPlay = 0;
+    this._pending = new Map(); // idx -> AudioBuffer (decoded, waiting)
+    this._inflights = new Map(); // idx -> AbortController (for stopAll)
+    // Bumped by `stopAll`. Each `_enqueue` captures the current
+    // value and the callback checks it before scheduling, so a
+    // fetch that survived the abort (race: server already responded
+    // when we tried to abort) doesn't sneak a phrase from a
+    // previous stream into the current one.
+    this._streamVersion = 0;
   }
 
   TtsPlayer.prototype._ensureContext = function () {
@@ -234,16 +252,13 @@ function phraseForTts(phrase) {
     phrase = phraseForTts(phrase);
     if (!phrase) return;
     var self = this;
-    // Cancel any in-flight fetch for a previous phrase (only one is
-    // allowed at a time so we don't race the server).
-    if (this._inflight) {
-      try {
-        this._inflight.abort();
-      } catch (_) {}
-      this._inflight = null;
-    }
+    var idx = this._nextIdx++;
+    // Capture the stream version at fetch start. If the callback
+    // resolves after `stopAll` advanced the version, the phrase
+    // belongs to the aborted stream and is dropped.
+    var version = this._streamVersion;
     var ctrl = new AbortController();
-    this._inflight = ctrl;
+    this._inflights.set(idx, ctrl);
     var body = {
       input: phrase,
       voice: this._voiceFor(),
@@ -257,7 +272,7 @@ function phraseForTts(phrase) {
     })
       .then(function (resp) {
         if (!resp.ok) {
-          // 4xx/5xx → log and drop the chunk; the next sentence may
+          // 4xx/5xx -> log and drop the chunk; the next sentence may
           // succeed (e.g. transient 503 on a slow first inference).
           console.warn('TTS HTTP', resp.status, resp.statusText);
           return null;
@@ -265,20 +280,52 @@ function phraseForTts(phrase) {
         return resp.arrayBuffer();
       })
       .then(function (buf) {
-        if (!buf) return;
+        if (!buf) return null;
         return decodeWav(self._ensureContext(), buf);
       })
       .then(function (audioBuf) {
-        if (!audioBuf || self._stopped) return;
-        self._schedule(audioBuf);
+        if (!audioBuf) return;
+        // Drop the phrase if a `stopAll` happened while the fetch was
+        // in flight (the version counter advanced, so this fetch
+        // belongs to an aborted stream).
+        if (self._streamVersion !== version) return;
+        self._playReady(idx, audioBuf);
       })
       .catch(function (err) {
         if (err && err.name === 'AbortError') return;
         console.warn('TTS fetch failed:', err);
       })
       .finally(function () {
-        if (self._inflight === ctrl) self._inflight = null;
+        self._inflights.delete(idx);
       });
+  };
+
+  /**
+   * Schedule `audioBuf` at position `idx` in the playback queue.
+   * Out-of-order completions are stashed in `_pending` until the
+   * head of the queue catches up; in-order completions schedule
+   * immediately and drain any subsequent idxs that already arrived.
+   */
+  TtsPlayer.prototype._playReady = function (idx, audioBuf) {
+    if (this._stopped) return;
+    if (idx === this._nextToPlay) {
+      this._schedule(audioBuf);
+      this._nextToPlay++;
+      // Drain any later idxs that already arrived while we were
+      // waiting on this one. `_pending` is keyed by idx, so we walk
+      // forward until we hit a gap.
+      while (this._pending.has(this._nextToPlay)) {
+        var next = this._pending.get(this._nextToPlay);
+        this._pending.delete(this._nextToPlay);
+        this._schedule(next);
+        this._nextToPlay++;
+      }
+    } else if (idx > this._nextToPlay) {
+      // Out-of-order: stash and wait for the queue head to catch up.
+      this._pending.set(idx, audioBuf);
+    }
+    // idx < _nextToPlay means the chunk arrived after we'd already
+    // moved on (e.g. `_stopped` toggled). Drop it silently.
   };
 
   TtsPlayer.prototype._schedule = function (audioBuf) {
@@ -294,27 +341,19 @@ function phraseForTts(phrase) {
     var playAt = Math.max(ctx.currentTime, this._scheduledEnd);
     src.start(playAt);
     this._scheduledEnd = playAt + audioBuf.duration;
-    // Keep a reference so `stopAll` can stop() the live source even
-    // mid-chunk. (The next scheduled chunk's start time is already
-    // in the past after a stop, but we cancel the in-flight fetch in
-    // `stopAll` so it never reaches `_schedule` again.)
-    if (this._activeSource) {
-      // Don't double-stop; `stop` on a finished source is a no-op
-      // anyway, but skipping saves a microtask.
-      try {
-        this._activeSource.stop();
-      } catch (_) {}
-    }
+    // Hold a reference to the live source so `stopAll()` can
+    // interrupt it mid-chunk. We deliberately do NOT call `.stop()`
+    // on the previous source -- each `AudioBufferSourceNode` plays
+    // its buffer to the end on its own, and stopping the previous
+    // one would chop it off mid-word every time a new chunk arrives,
+    // leaving only the last phrase audible.
     this._activeSource = src;
     src.onended = function () {
-      // Only clear if this is still the latest source. A new chunk
-      // might have replaced us.
-      if (self_active(self, src)) self._activeSource = null;
+      // Clear the reference only if this is still the latest source;
+      // older onended callbacks fire after the queue has moved on.
+      if (self._activeSource === src) self._activeSource = null;
     };
     var self = this;
-    function self_active(self, src) {
-      return self._activeSource === src;
-    }
   };
 
   /**
@@ -324,13 +363,18 @@ function phraseForTts(phrase) {
    */
   TtsPlayer.prototype.stopAll = function () {
     this._stopped = true;
+    // Bump the stream version so any fetch that survives the abort
+    // (server already responded when we tried to cancel) drops its
+    // phrase on arrival.
+    this._streamVersion++;
     this._buffer = '';
-    if (this._inflight) {
-      try {
-        this._inflight.abort();
-      } catch (_) {}
-      this._inflight = null;
-    }
+    // Cancel every parallel fetch (each phrase had its own
+    // AbortController under the new queue scheme).
+    this._inflights.forEach(function (ctrl) {
+      try { ctrl.abort(); } catch (_) {}
+    });
+    this._inflights.clear();
+    this._pending.clear();
     if (this._activeSource) {
       try {
         this._activeSource.stop();
@@ -338,7 +382,12 @@ function phraseForTts(phrase) {
       this._activeSource = null;
     }
     this._scheduledEnd = 0;
-    // Resume playback for the next stream — the audio context stays
+    // Reset the queue head so the next stream starts a fresh idx
+    // sequence; otherwise leftover idxs from the aborted stream
+    // would be expected to arrive forever and block playback.
+    this._nextIdx = 0;
+    this._nextToPlay = 0;
+    // Resume playback for the next stream -- the audio context stays
     // alive and unlocked after the first user gesture.
     this._stopped = false;
   };
