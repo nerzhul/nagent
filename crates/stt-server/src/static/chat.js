@@ -445,6 +445,45 @@ function applyMarkdown(bubbleEl, text) {
   bubbleEl.innerHTML = renderMarkdown(text);
   decorateSafeLinks(bubbleEl);
   renderMath(bubbleEl);
+  // `innerHTML = ...` above wiped the per-bubble replay button that
+  // `appendBubble` (or the loader-removal point) attached. Re-attach
+  // it now so the button survives every streaming markdown re-render.
+  if (bubbleEl._replayBtn || bubbleEl.classList.contains("chat-message--markdown")) {
+    ensureReplayButton(bubbleEl);
+    refreshReplayButtonVisibility();
+  }
+}
+
+/**
+ * Create (or recreate) the per-bubble replay button and attach it
+ * to `bubbleEl`. Used after any operation that overwrites
+ * `bubbleEl.innerHTML` (live-stream loader, applyMarkdown,
+ * finalSource write) so the button survives.
+ *
+ * Returns the button instance; idempotent — calling twice on the
+ * same bubble returns the existing button instead of stacking
+ * duplicates.
+ */
+function ensureReplayButton(bubbleEl) {
+  let btn = bubbleEl._replayBtn;
+  if (btn && btn.isConnected) return btn;
+  btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-message-replay";
+  btn.setAttribute("aria-label", "Replay this message aloud");
+  btn.title = "Replay this message aloud";
+  // Always visible on assistant bubbles -- the click handler in
+  // `replayMessage` is what gates actual playback. Showing the
+  // button unconditionally doubles as a discoverability cue.
+  btn.hidden = false;
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77 0-4.28-2.99-7.86-7-8.77z" fill="currentColor"/>
+    </svg>`;
+  btn.addEventListener("click", () => replayMessage(bubbleEl, btn));
+  bubbleEl.appendChild(btn);
+  bubbleEl._replayBtn = btn;
+  return btn;
 }
 
 // Schedule a markdown re-render of `bubbleEl` for the next animation
@@ -723,26 +762,28 @@ function appendBubble(role, text, {
   // Replay button: appended AFTER the markdown render so it sits
   // outside the sanitized HTML and can't be stripped by DOMPurify.
   // Only on assistant messages (user / error bubbles don't speak).
-  // Hidden until the TTS engine is loaded; visibility is then
-  // toggled by `refreshReplayButtonVisibility` whenever the
-  // `#chat-tts-check` state changes.
+  // Always visible -- the click handler in `replayMessage`
+  // implicitly enables the master `#chat-tts-check` if it's off,
+  // and `probeTtsVoices` already filtered out bubbles on servers
+  // without TTS support (no `GET /v1/audio/voices` response). We
+  // use `ensureReplayButton` (rather than building the button
+  // inline) so the same helper can re-attach the button after
+  // every subsequent `innerHTML =` call on this bubble (live-
+  // stream loader, applyMarkdown, finalSource write). Those calls
+  // would otherwise destroy the button.
   if (role === "assistant") {
-    const replayBtn = document.createElement("button");
-    replayBtn.type = "button";
-    replayBtn.className = "chat-message-replay";
-    replayBtn.setAttribute("aria-label", "Replay this message aloud");
-    replayBtn.title = "Replay this message aloud";
-    replayBtn.hidden = true;
-    replayBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-        <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77 0-4.28-2.99-7.86-7-8.77z" fill="currentColor"/>
-      </svg>`;
-    replayBtn.addEventListener("click", () => replayMessage(div, replayBtn));
-    div.appendChild(replayBtn);
-    refreshReplayButtonVisibility();
+    ensureReplayButton(div);
   }
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  // Refresh replay-button visibility AFTER the bubble is in the DOM
+  // tree. `document.querySelectorAll(".chat-message-replay")` skips
+  // elements in detached sub-trees, so calling this before
+  // `messagesEl.appendChild(div)` would leave the new button at its
+  // initial `hidden = true` state until the next master-toggle event.
+  if (role === "assistant") {
+    refreshReplayButtonVisibility();
+  }
   if (persist) {
     const history = loadHistory(sid);
     history.push({ role, content: text, ts: Date.now(), model });
@@ -1547,12 +1588,18 @@ async function streamReply(sessionId, userText) {
   // sits empty during the Ollama cold start (sometimes 30s+ on a
   // freshly-pulled model) and looks like a frozen UI. The first delta
   // below clears the loader before any text is written.
-  assistantEl.innerHTML =
-    '<span class="chat-loader" role="status" aria-label="Loading response">'
+  //
+  // We use `appendChild` (NOT `innerHTML =`) so the replay button
+  // `appendBubble` just attached isn't destroyed by overwriting the
+  // bubble's innerHTML.
+  const loader = document.createElement("span");
+  loader.className = "chat-loader";
+  loader.setAttribute("role", "status");
+  loader.setAttribute("aria-label", "Loading response");
+  loader.innerHTML = '<span class="dot"></span>'
     + '<span class="dot"></span>'
-    + '<span class="dot"></span>'
-    + '<span class="dot"></span>'
-    + '</span>';
+    + '<span class="dot"></span>';
+  assistantEl.appendChild(loader);
 
   const controller = new AbortController();
   inflight = { controller, assistantEl, model, sessionId };
@@ -1709,14 +1756,20 @@ async function streamReply(sessionId, userText) {
         try {
           const evt = JSON.parse(payload);
           const delta = evt?.choices?.[0]?.delta?.content;
-          if (typeof delta === "string" && delta.length > 0) {
-            if (!streamingStarted) {
-              streamingStarted = true;
-              setStreamState({ text: "Streaming…", cls: "connecting" });
-              // Strip the inline loader before writing real text so
-              // the bubble transitions cleanly into the reply.
-              assistantEl.innerHTML = "";
-            }
+           if (typeof delta === "string" && delta.length > 0) {
+             if (!streamingStarted) {
+               streamingStarted = true;
+               setStreamState({ text: "Streaming…", cls: "connecting" });
+               // Strip the inline loader before writing real text so
+               // the bubble transitions cleanly into the reply.
+               //
+               // The `innerHTML = ""` would normally also wipe the
+               // replay button attached by `appendBubble`, but we
+               // re-attach it below via `ensureReplayButton`.
+               const loaderEl = assistantEl.querySelector(".chat-loader");
+               if (loaderEl) loaderEl.remove();
+               ensureReplayButton(assistantEl);
+             }
             accumulated += delta;
             // Re-render the accumulated text as sanitized markdown.
             // We coalesce updates via requestAnimationFrame so a
@@ -2018,6 +2071,10 @@ function sanitizeForTts(text) {
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     // Links: keep visible text, drop URL.
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    // Reference-style short links (`[text][ref]`).
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
+    // Reference-style link definitions (`[1]: https://...`).
+    .replace(/^\s{0,3}\[[^\]]+\]:\s+\S+.*$/gm, "")
     // Bold then italic (longer match first so `**` wins over `*`).
     .replace(/\*\*([^*\n]+?)\*\*/g, "$1")
     .replace(/__([^_\n]+?)__/g, "$1")
@@ -2025,11 +2082,23 @@ function sanitizeForTts(text) {
     .replace(/(^|\s)_([^_\n]+?)_(?!\w)/g, "$1$2")
     // Strikethrough.
     .replace(/~~([^~\n]+?)~~/g, "$1")
+    // Orphan asterisks (NOT between digits): `A single * is here.`
+    // and stray bullet markers mid-line. We explicitly keep `*`
+    // between digits so arithmetic like `2*3=6` reads as
+    // "deux multiplié trois égalent six" rather than collapsing to
+    // "23=6". Piper's espeak-ng reads a bare `*` as "astérisque",
+    // which is the whole point of this rule.
+    .replace(/([^\d\s]|^)\*(?=[^\d\s]|$)/g, "$1")
+    .replace(/(?<=[^\d\s]|^)\*(?=[^\d\s\s]|$)/g, "")
     // Heading markers at line start.
     .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    // Blockquote markers at line start.
+    // Blockquote markers at line start (only when at start; leave
+    // comparison `>` mid-sentence alone so espeak-ng can read
+    // "x supérieur 5" rather than collapsing to "x5").
     .replace(/^\s{0,3}>\s?/gm, "")
-    // Unordered list markers at line start (`-`, `*`, `+`).
+    // Unordered list markers at line start (`-`, `*`, `+`). The
+    // hyphen case is tricky: a real em-dash `—` is wider, so this
+    // matches ASCII `-` only and leaves prose hyphens alone.
     .replace(/^\s{0,3}[-*+]\s+/gm, "")
     // Ordered list markers (`1.`, `2.`, ...) at line start.
     .replace(/^\s{0,3}\d+\.\s+/gm, "")
@@ -2037,6 +2106,12 @@ function sanitizeForTts(text) {
     .replace(/^\s{0,3}[-*_]{3,}\s*$/gm, "")
     // HTML-ish tags.
     .replace(/<\/?[a-zA-Z][^>]*>/g, "")
+    // Stray HTML entities (`&`, `<`, `>`, `&#NNN;`).
+    // Keep named entities that may carry semantics the user typed
+    // literally (e.g. `&` in prose) but strip the common ones
+    // espeak-ng would otherwise read as "et commercial", "inférieur
+    // strict", etc.
+    .replace(/&(?:amp|lt|gt|quot|apos|nbsp);/g, " ")
     // Trailing whitespace per line (keeps sentence boundaries clean).
     .replace(/[ \t]+$/gm, "");
 }
@@ -2083,17 +2158,22 @@ function resolveTtsVoice() {
 }
 
 /**
- * Toggle replay button visibility across every assistant bubble.
- * Called whenever the `#chat-tts-check` state changes so the
- * buttons appear/disappear in lock-step with the master toggle.
- * Each individual button stores its own `hidden` attribute so
- * bubbles appended before TTS is enabled stay hidden until they
- * get `refreshReplayButtonVisibility()` called.
+ * Show / hide the per-bubble replay button. The button is visible
+ * on every assistant bubble when the server reports TTS support
+ * (`probeTtsVoices` sets `window.__ttsAvailable = true` on success).
+ * The master `#chat-tts-check` is independent — clicking the button
+ * toggles the master on if needed, so a first-time user can hear
+ * replies without having to find the Advanced drawer first.
+ *
+ * When the probe hasn't completed yet (still in flight at boot),
+ * `__ttsAvailable` is undefined and we default to showing the
+ * button optimistically; if the probe fails, the click handler's
+ * 503 / network error surfaces a toast to the user.
  */
 function refreshReplayButtonVisibility() {
-  const ttsEnabled = !!$("chat-tts-check")?.checked;
+  const available = window.__ttsAvailable !== false;
   document.querySelectorAll(".chat-message-replay").forEach((btn) => {
-    btn.hidden = !ttsEnabled;
+    btn.hidden = !available;
   });
 }
 
@@ -2114,6 +2194,16 @@ function refreshReplayButtonVisibility() {
  */
 let currentReplayButton = null;
 async function replayMessage(div, btn) {
+  // Implicit enable: if the master `#chat-tts-check` is off (the
+  // user found this button on a bubble they didn't know was
+  // gated), flip it on so the click actually does something. The
+  // change handler refreshes button visibility (no-op under the new
+  // always-visible behaviour) and persists the new state.
+  const check = $("chat-tts-check");
+  if (check && !check.checked) {
+    check.checked = true;
+    check.dispatchEvent(new Event("change", { bubbles: true }));
+  }
   // Build the plain-text version from the bubble's textContent so
   // we don't ship innerHTML to the TTS server. We deliberately do
   // NOT strip markdown here -- the button reads the bubble after
@@ -2307,7 +2397,11 @@ function getOrCreateTtsPlayer() {
 async function probeTtsVoices() {
   try {
     const resp = await fetch("/v1/audio/voices");
-    if (!resp.ok) return;
+    if (!resp.ok) return; // server has no TTS or no voices — leave hidden
+    // Server has TTS: surface the per-message replay button on every
+    // existing and future assistant bubble.
+    window.__ttsAvailable = true;
+    refreshReplayButtonVisibility();
     const body = await resp.json();
     const label = $("chat-tts-label");
     if (label) label.hidden = false;
