@@ -560,17 +560,28 @@ such a backend would slot in.
 
 ### Build & runtime impact
 
-`piper-rs` is compiled unconditionally (no cargo feature gate), so the
-binary always includes the TTS code paths. The `/v1/audio/*` routes are
-only registered when `TTS_ENABLED=true`, so disabling TTS at runtime
-leaves zero attack surface but does not shrink the binary.
+`piper-rs` is gated behind the `stt-server/tts` cargo feature. Every
+`make run*` target enables it (`run`, `run-vulkan`, `run-hipblas`,
+`run-cuda`, `run-mock`, `run-llm`, `run-tts`) so operators never have
+to think about the feature flag — TTS is part of the standard
+delivery. Without `--features stt-server/tts` the binary compiles
+without `piper-rs`, `ort`, or the espeak-ng FFI crate, so a
+downstream consumer who wants to slim their binary can opt out
+manually with `cargo build -p stt-server`.
+
+The runtime surface follows `TTS_ENABLED`: when `false`, the
+`/v1/audio/*` routes are not registered and the discussion UI hides
+the "Read response aloud" checkbox. The Cargo feature only controls
+the *binary's* ability to serve TTS; the runtime knob controls
+*whether it does*.
 
 `piper-rs` depends on `ort` (ONNX Runtime) and `espeak-ng`. Building
 from source therefore requires `libclang` + `espeak-ng` development
-headers (apt: `apt install libclang-dev libespeak-ng-dev`). CI / tests
-do **not** require Piper voices — the HTTP integration tests inject a
-mock synthesizer that produces a sine wave, so the test harness never
-touches `espeak-ng` or loads an `.onnx` file.
+headers + `libssl-dev` (apt: `apt install libclang-dev libespeak-ng-dev
+libssl-dev`). CI / tests do **not** require Piper voices — the HTTP
+integration tests inject a mock synthesizer that produces a sine
+wave, so the test harness never touches `espeak-ng` or loads an
+`.onnx` file.
 
 ## License
 
