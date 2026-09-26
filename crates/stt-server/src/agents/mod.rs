@@ -157,7 +157,9 @@ impl AgentRegistry {
         }
         #[cfg(feature = "weather-agent")]
         {
-            agents.push(Arc::new(weather_agent::WeatherAgent::new()));
+            agents.push(Arc::new(weather_agent::WeatherAgent::new(
+                cfg.weather.clone(),
+            )));
         }
         #[cfg(feature = "stock-agent")]
         {

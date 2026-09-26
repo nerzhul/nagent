@@ -48,7 +48,7 @@ use stt_server::agents::web_fetch::WebFetchAgent;
 use stt_server::{
     agents::{Agent, AgentRegistry},
     build_router,
-    config::{AgentConfig, LlmConfig, RateLimitConfig, WebFetchConfig},
+    config::{AgentConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig},
     llm::LlmClient,
     rate_limit::{RateLimitPolicy, RateLimiter},
     session::SessionMap,
@@ -80,6 +80,69 @@ async fn spawn_static_page_server(body: String, content_type: &'static str) -> S
         let _ = axum::serve(listener, app).await;
     });
     format!("http://{addr}/page")
+}
+
+/// Spawn a loopback WeatherAPI fixture that serves the same canned
+/// body for every endpoint (forecast and history). Returns the base
+/// URL the agent's `WeatherConfig::base_url` should point at — the
+/// agent appends `/v1/forecast.json` / `/v1/history.json`.
+#[cfg(feature = "weather-agent")]
+async fn spawn_weatherapi_fixture(body: serde_json::Value) -> String {
+    // The fixture decides its own status code from the payload
+    // shape: a top-level `error` key becomes a 400 (matches
+    // WeatherAPI's actual behaviour), anything else is a 200. We
+    // clone once per route so each handler owns its own copy.
+    let forecast_body = body.clone();
+    let history_body = body.clone();
+    let forecast_app = Router::new().route(
+        "/v1/forecast.json",
+        get(move || {
+            let canned = forecast_body.clone();
+            async move {
+                if canned.get("error").is_some() {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        )],
+                        canned.to_string(),
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        )],
+                        canned.to_string(),
+                    )
+                }
+            }
+        }),
+    );
+    let history_app = Router::new().route(
+        "/v1/history.json",
+        get(move || {
+            let canned = history_body.clone();
+            async move {
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    canned.to_string(),
+                )
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, forecast_app.merge(history_app)).await;
+    });
+    format!("http://{addr}")
 }
 
 fn make_app_state(
@@ -625,71 +688,120 @@ async fn datetime_agent_invoke_endpoint_returns_400_for_bad_timezone() {
 
 #[cfg(feature = "weather-agent")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn weather_agent_parses_open_meteo_fixture() {
-    // The agent hardcodes the Open-Meteo hostnames, so a loopback
-    // fixture won't be reached by default. We test the parser +
-    // builder path through `WeatherAgent::invoke` indirectly by
-    // going through the loopback with `replace_url` shimmed via the
-    // public API. The simplest end-to-end check is to drive the
-    // payload builder with a canned forecast JSON, exactly the way
-    // `weather_agent::tests::build_payload_shapes_current_and_daily`
-    // does for the inner path; here we additionally verify the
-    // agent's error path for a missing geocoding match.
-    let agent = WeatherAgent::new();
-    // Without a way to swap the upstream host in v1, the simplest
-    // outer coverage is the bad-location path which doesn't touch
-    // the network: the agent fails fast on empty input.
-    let err = agent
-        .invoke(serde_json::json!({"location": "  "}))
+async fn weather_agent_parses_weatherapi_fixture() {
+    // Point the agent at a loopback axum server that returns a
+    // canned WeatherAPI-style response. The agent's base_url is
+    // configurable through `WeatherConfig`, which is what makes
+    // this kind of end-to-end test possible (the previous
+    // Open-Meteo-based agent hardcoded its host and could not be
+    // tested this way).
+    let canned = serde_json::json!({
+        "location": {
+            "name": "Paris", "region": "Ile-de-France", "country": "France",
+            "lat": 48.8566, "lon": 2.3522, "tz_id": "Europe/Paris",
+            "localtime": "2026-09-26T14:55"
+        },
+        "current": {
+            "last_updated": "2026-09-26T14:30", "temp_c": 18.4,
+            "feelslike_c": 17.2, "humidity": 65, "wind_kph": 12.1,
+            "wind_dir": "NW", "pressure_mb": 1015.0, "uv": 4.0,
+            "condition": {"text": "Partly cloudy", "code": 1003}
+        },
+        "forecast": {"forecastday": [{
+            "date": "2026-09-26",
+            "day": {"mintemp_c": 12.0, "maxtemp_c": 19.0, "avgtemp_c": 15.5,
+                     "avghumidity": 65.0, "totalprecip_mm": 0.5,
+                     "daily_chance_of_rain": 30, "daily_chance_of_snow": 0,
+                     "maxwind_kph": 22.0, "uv": 4.0,
+                     "condition": {"text": "Partly cloudy", "code": 1003}},
+            "astro": {"sunrise": "07:42 AM", "sunset": "07:30 PM",
+                      "moonrise": "10:14 PM", "moonset": "09:55 AM",
+                      "moon_phase": "Waxing Gibbous", "moon_illumination": "78%"}
+        }]}
+    });
+    let base_url = spawn_weatherapi_fixture(canned).await;
+    let agent = WeatherAgent::new(WeatherConfig {
+        api_key: "test-key".into(),
+        timeout_ms: 2_000,
+        base_url,
+    });
+    let result = agent
+        .invoke(serde_json::json!({"location": "Paris"}))
         .await
-        .expect_err("empty location should fail");
+        .expect("invoke");
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["source"], "weatherapi.com");
+    assert_eq!(parsed["data"]["location"]["name"], "Paris");
+    assert_eq!(parsed["data"]["current"]["temp_c"], 18.4);
+    assert_eq!(parsed["data"]["current"]["feels_like_c"], 17.2);
+    assert_eq!(parsed["data"]["forecast"][0]["chance_of_rain"], 30);
+    assert_eq!(parsed["data"]["astronomy"]["sunset"], "07:30 PM");
+}
+
+#[cfg(feature = "weather-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn weather_agent_surfaces_upstream_error_message() {
+    // WeatherAPI returns errors as
+    // `{"error":{"code":N,"message":"…"}}`. The agent must
+    // extract the message rather than dump the raw body so the
+    // LLM sees actionable text.
+    let canned = serde_json::json!({
+        "error": {"code": 1006, "message": "No matching location found."}
+    });
+    let base_url = spawn_weatherapi_fixture(canned).await;
+    let agent = WeatherAgent::new(WeatherConfig {
+        api_key: "test-key".into(),
+        timeout_ms: 2_000,
+        base_url,
+    });
+    let err = agent
+        .invoke(serde_json::json!({"location": "Atlantis"}))
+        .await
+        .expect_err("upstream error should surface");
     match err {
-        stt_server::agents::AgentError::InvalidArguments(msg) => {
-            assert!(msg.contains("location"));
+        stt_server::agents::AgentError::Upstream { status, body } => {
+            assert_eq!(status, 400);
+            assert!(
+                body.contains("No matching location found"),
+                "expected extracted error message, got: {body}"
+            );
         }
-        other => panic!("expected InvalidArguments, got {other:?}"),
+        other => panic!("expected Upstream, got {other:?}"),
     }
 }
 
 #[cfg(feature = "weather-agent")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn weather_agent_caps_days_to_seven() {
-    // `days` is advertised as 1-7 in the schema. The agent clamps
-    // overshoot internally before issuing the upstream call, but
-    // the LLM-supplied value is also bounded by the OpenAI
-    // validators on most models. The schema guard is what we test
-    // here — a regression to the cap would let a hostile model
-    // request a 30-day forecast and balloon the response.
-    let agent = WeatherAgent::new();
+async fn weather_agent_caps_days_to_fourteen() {
+    // The schema guard exists so the LLM cannot request a
+    // 30-day forecast and balloon the response. The cap moved
+    // from 7 (Open-Meteo) to 14 (WeatherAPI free tier).
+    let agent = WeatherAgent::new(WeatherConfig {
+        api_key: "test-key".into(),
+        ..Default::default()
+    });
     let schema = agent.parameters_schema();
     let days = &schema["properties"]["days"];
     assert_eq!(days["minimum"], 1);
-    assert_eq!(days["maximum"], 7);
+    assert_eq!(days["maximum"], 14);
 }
 
 #[cfg(feature = "weather-agent")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn weather_agent_accepts_lat_lon_form() {
-    // A real upstream call would hit the network; here we verify
-    // the parser accepts the `lat,lon` short form and produces a
-    // structured `location` field. We can't easily mock Open-Meteo
-    // from the public API surface — the agent hardcodes the host —
-    // so we only assert the input-validation path. The full
-    // network round-trip is exercised by the inline `tests` module.
-    let agent = WeatherAgent::new();
-    // A syntactically valid `lat,lon` skips geocoding and goes
-    // straight to the forecast call. We expect either a successful
-    // forecast or an `AgentFailed` (network) — but never an
-    // `InvalidArguments`, because the short form is valid input.
-    let result = agent
-        .invoke(serde_json::json!({"location": "48.8566,2.3522"}))
-        .await;
-    match result {
-        Ok(_) => { /* network reachable, lucky */ }
-        Err(stt_server::agents::AgentError::InvalidArguments(msg)) => {
-            panic!("lat,lon short form should not produce InvalidArguments, got: {msg}")
+async fn weather_agent_missing_api_key_is_a_clear_error() {
+    // The most common deployment failure. The agent must point
+    // at the signup URL rather than 401-ing confusingly.
+    let agent = WeatherAgent::new(WeatherConfig::default());
+    let err = agent
+        .invoke(serde_json::json!({"location": "Paris"}))
+        .await
+        .expect_err("missing key should fail");
+    match err {
+        stt_server::agents::AgentError::AgentFailed(msg) => {
+            assert!(msg.contains("WEATHER_API_KEY"));
+            assert!(msg.contains("weatherapi.com"));
         }
-        Err(_) => { /* upstream unreachable in test env — acceptable */ }
+        other => panic!("expected AgentFailed with config hint, got {other:?}"),
     }
 }
 

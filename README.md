@@ -121,6 +121,9 @@ without a default and is required.
 | `WEB_FETCH_ALLOWLIST`        | _(empty)_                                     | `web_fetch`    | Comma-separated hostname allow-list (suffix match; `*.foo` wildcards). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
 | `WEB_FETCH_MAX_BYTES`        | `2097152`                                     | `web_fetch`    | Maximum response size the agent will read (server cap). The LLM-callable `max_bytes` parameter starts the first fetch; if the page is larger the agent transparently doubles the budget and retries until the page fits or this cap is hit. |
 | `WEB_FETCH_TIMEOUT_MS`       | `30000`                                       | `web_fetch`    | Per-request timeout in milliseconds.                                                                          |
+| `WEATHER_API_KEY`            | _(required for `get_weather`)_                | `get_weather`  | WeatherAPI.com key. Register for a free key at <https://www.weatherapi.com/>. Without it the agent refuses to run with a clear error. |
+| `WEATHER_TIMEOUT_MS`         | `8000`                                        | `get_weather`  | Per-request timeout in milliseconds.                                                                          |
+| `WEATHER_BASE_URL`           | `https://api.weatherapi.com`                  | `get_weather`  | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
 | `RUST_LOG`                   | `info,stt_server=debug,stt_core=debug` (local); `info,stt_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
 
 Per-source-IP rate limiting applies at both layers: HTTP for the LLM proxy
@@ -263,18 +266,30 @@ curl -s -X POST localhost:8080/v1/agents/get_datetime/invoke \
   -d '{"arguments":{"timezone":"Europe/Paris"}}'
 ```
 
-**`get_weather`** — current conditions and 1-7 day forecast for a
-location, via Open-Meteo (no API key). City names are geocoded; you
-can also pass `lat,lon` directly to skip geocoding.
+**`get_weather`** — current conditions, 14-day forecast, 24h
+hourly, historical data, and astronomy (sunrise/sunset, moon phase)
+for any location. Backed by [WeatherAPI.com](https://www.weatherapi.com/);
+requires `WEATHER_API_KEY` (free tier: 1M calls/month, key issued
+by email — no card required).
 
-- FR: "météo à Paris demain", "il va pleuvoir à Londres ?"
-- EN: "weather in Tokyo", "will it rain in London"
-- Params: `location` (required), `days` (1-7, default 1)
+- FR: "météo à Paris demain", "il va pleuvoir à Londres ce soir ?",
+  "coucher de soleil à Tokyo", "UV à Lyon ce week-end"
+- EN: "weather in Tokyo", "will it rain in London tonight",
+  "sunset in Paris tomorrow"
+- Params: `location` (required — city name, `"lat,lon"`, postal
+  code, or iata code), `days` (1-14, default 1, ignored when
+  `date` is set), `date` (YYYY-MM-DD, past dates back to
+  2010-01-01), `hourly` (bool, default false — include 24h
+  hourly breakdown).
 
 ```
 curl -s -X POST localhost:8080/v1/agents/get_weather/invoke \
   -H 'content-type: application/json' \
-  -d '{"arguments":{"location":"Paris","days":2}}'
+  -d '{"arguments":{"location":"Paris","days":3}}'
+
+curl -s -X POST localhost:8080/v1/agents/get_weather/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"location":"48.8566,2.3522","hourly":true}}'
 ```
 
 **`get_stock_quote`** — latest Stooq quote for a ticker. Three
@@ -343,8 +358,8 @@ trick the LLM into exfiltrating data to an attacker-controlled host
 unless an operator has explicitly opted in via
 `WEB_FETCH_ALLOW_PUBLIC=true` or `WEB_FETCH_ALLOWLIST`. The daily
 agents (`get_datetime`, `get_weather`, `get_stock_quote`) reach their
-fixed public endpoints (Open-Meteo, Stooq, and `chrono-tz`'s bundled
-IANA data); they expose no SSRF surface.
+fixed public endpoints (WeatherAPI.com, Stooq, and `chrono-tz`'s
+bundled IANA data); they expose no SSRF surface.
 
 ### Smoke test
 
