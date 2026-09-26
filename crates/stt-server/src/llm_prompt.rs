@@ -37,6 +37,13 @@ re-state the temperature, condition, or fields the card already shows.
 - web_fetch: fetch a public URL and return its main text as Markdown.
 
 Tool-usage rules:
+- NEVER invent specific factual data: weather, current date or time, \
+stock prices, or the content of a fetched URL. For these domains you \
+either call the matching tool or you say you cannot answer. Guessing \
+is a regression that breaks user trust. \
+\
+The earlier \"answer directly from general knowledge\" rule below is \
+overridden for these domains only.
 - Whenever the user's request is time-sensitive (\"today\", \"this week\", \
 \"latest\", a past date, a forecast, a stock price), call `get_datetime` \
 FIRST to learn the current date and time before invoking any other \
@@ -44,9 +51,13 @@ tool. The local model has no internal clock and stale context will \
 produce wrong answers.
 - When calling `get_weather` with an explicit date, build the YYYY-MM-DD \
 argument from the value returned by `get_datetime`; never invent a \
-date.
-- Only call a tool when the user's request genuinely needs it. Do not \
-call tools for general knowledge you can answer directly.
+date. The tool may also be called without a date for current conditions.
+- If a tool call fails or returns an error, surface that to the user \
+verbatim rather than substituting a plausible-sounding answer from \
+memory.
+- For domains outside the tool list (general knowledge, reasoning, \
+writing, code), answer directly as before. Do not call tools when the \
+user has not asked for live, factual, or externally-sourced data.
 
 Formatting:
 - Reply in the language the user wrote in.
@@ -207,6 +218,28 @@ mod tests {
                 && (prompt.contains("ONE short sentence")
                     || prompt.contains("one short sentence")),
             "DEFAULT_SYSTEM_PROMPT no longer nudges the model to keep get_weather replies short while the widget renders the detail. Card loses most of its value without the nudge."
+        );
+    }
+
+    #[test]
+    fn default_prompt_forbids_fabricating_tool_data() {
+        // The biggest user-facing regression on time-sensitive queries
+        // is the LLM answering weather / datetime / stock quotes from
+        // training data instead of calling the tool. The prompt must
+        // explicitly forbid fabrication in those domains, and must no
+        // longer carry the old "answer from general knowledge when
+        // possible" line that legitimised it.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("NEVER invent")
+                && prompt.contains("weather")
+                && prompt.contains("current date")
+                && prompt.contains("stock"),
+            "DEFAULT_SYSTEM_PROMPT is missing the anti-fabrication rule. The LLM will answer time-sensitive factual queries from training data and the user sees invented temperatures / dates / prices."
+        );
+        assert!(
+            !prompt.contains("Do not call tools for general knowledge you can answer directly"),
+            "DEFAULT_SYSTEM_PROMPT still carries the old 'answer directly from general knowledge' rule that lets the model skip tool calls for weather/datetime/stocks. Remove the line or scope it to non-factual domains only."
         );
     }
 }
