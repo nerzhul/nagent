@@ -300,6 +300,11 @@ const sendBtn      = $("chat-send");
 const stopBtn      = $("chat-stop");
 const clearBtn     = $("chat-clear");
 const modelEl      = $("chat-model");
+// `systemEl.value` is an *extension* appended after the server's
+// default system prompt (env `LLM_SYSTEM_PROMPT` / TOML
+// `[llm].system_prompt`); the proxy prepends the admin's prompt as
+// `messages[0]`, our value goes second so the admin's intent stays
+// authoritative.
 const systemEl     = $("chat-system");
 const tempEl       = $("chat-temperature");
 const statusEl     = $("chat-status");

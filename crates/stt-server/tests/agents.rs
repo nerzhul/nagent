@@ -202,6 +202,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             api_key: None,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
+            system_prompt: None,
         },
         agents: AgentConfig::default(),
     }

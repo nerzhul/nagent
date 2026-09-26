@@ -49,6 +49,7 @@
 //! api_key = ""
 //! request_timeout_secs = 120
 //! cors_allow_origins = []
+//! # system_prompt = "You are a strict, concise assistant."    # see LLM_SYSTEM_PROMPT
 //!
 //! # Chat agents — top-level flags + per-tool sub-sections
 //! [agents]
@@ -122,6 +123,10 @@ pub struct TomlLlmConfig {
     pub api_key: Option<String>,
     pub request_timeout_secs: Option<u64>,
     pub cors_allow_origins: Option<Vec<String>>,
+    /// Server-default system prompt prepended to every
+    /// `/v1/chat/completions` request. Mirrors the `LLM_SYSTEM_PROMPT`
+    /// env var; env wins when both are set.
+    pub system_prompt: Option<String>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -297,6 +302,7 @@ fn merge_toml_llm(
                 .cors_allow_origins
                 .clone()
                 .or_else(|| e.cors_allow_origins.clone()),
+            system_prompt: l.system_prompt.clone().or_else(|| e.system_prompt.clone()),
         }),
     }
 }
@@ -385,6 +391,7 @@ mod tests {
             api_key = "abc"
             request_timeout_secs = 30
             cors_allow_origins = ["https://example.com"]
+            system_prompt = "from-toml"
 
             [agents]
             enabled = true

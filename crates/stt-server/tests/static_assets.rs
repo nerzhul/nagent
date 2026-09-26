@@ -43,6 +43,7 @@ async fn serve_once() -> String {
             api_key: None,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
+            system_prompt: None,
         },
         agents: stt_server::config::AgentConfig::default(),
     });
@@ -81,6 +82,36 @@ async fn serve_once() -> String {
     // does not exit between the test body and any later assertions.
     std::mem::forget(tx);
     format!("http://{addr}")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_relabels_system_prompt_to_additional_instructions() {
+    // The admin-configured `LLM_SYSTEM_PROMPT` is the new canonical
+    // system message; the textarea in `index.html` is an *extension*
+    // the user can append. Renaming the label is a load-bearing
+    // documentation change — the previous "System prompt" wording
+    // would mislead users into thinking their input replaces the
+    // server default. Substring guard against the rename being
+    // reverted or skipped in a future refactor.
+    let base = serve_once().await;
+    let html = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("Additional instructions"),
+        "index.html no longer carries the `Additional instructions` label \
+         for the #chat-system textarea. Users would mistake the field \
+         for a full system-prompt replacement instead of an extension \
+         appended after the server default."
+    );
+    assert!(
+        html.contains("placeholder=\"Optional. Appended to the server's default system prompt.\""),
+        "index.html #chat-system placeholder no longer mentions the server default. \
+         Without it, users have no in-UI signal that the server prepends its own prompt."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
