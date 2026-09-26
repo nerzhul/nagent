@@ -237,6 +237,11 @@ impl PiperSynthesizer {
     /// Voice entries that fail to parse the config JSON are skipped
     /// with a warning so a single bad file does not break the whole
     /// engine.
+    ///
+    /// Piper's on-disk convention is `<voice_id>.onnx` +
+    /// `<voice_id>.onnx.json`. We accept both that layout AND a
+    /// plain `<voice_id>.json` config sitting next to a
+    /// `<voice_id>.onnx` weights file.
     pub fn discover(model_dir: &Path) -> Result<Self, TtsError> {
         if !model_dir.is_dir() {
             return Err(TtsError::Synth(format!(
@@ -257,14 +262,24 @@ impl PiperSynthesizer {
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
+            // `Path::file_stem` strips only the LAST extension, so
+            // `fr_FR-upmc-medium.onnx.json` yields stem
+            // `fr_FR-upmc-medium.onnx`. We then strip the `.onnx`
+            // suffix to recover the voice id, and build the
+            // companion `.onnx` path from the same stem -- which
+            // produces `fr_FR-upmc-medium.onnx.onnx` if we naively
+            // append `.onnx`. Instead, replace the *filename* with
+            // `<voice_id>.onnx` so the result is
+            // `fr_FR-upmc-medium.onnx` (the actual weights file).
             let stem = match path.file_stem().and_then(|s| s.to_str()) {
                 Some(s) => s,
                 None => continue,
             };
-            // The Piper convention is "<id>.onnx.json" — we want the
-            // voice id "<id>". Strip the trailing ".onnx" if present.
-            let voice_id = stem.strip_suffix(".onnx").unwrap_or(stem).to_string();
-            let onnx_path = path.with_file_name(format!("{stem}.onnx"));
+            let voice_id = match stem.strip_suffix(".onnx") {
+                Some(id) => id.to_string(),
+                None => stem.to_string(),
+            };
+            let onnx_path = path.with_file_name(format!("{voice_id}.onnx"));
             if !onnx_path.exists() {
                 warn!(
                     voice = %voice_id,
@@ -983,5 +998,75 @@ mod tests {
         let p = PiperSynthesizer::discover(&dir).expect("empty dir must parse");
         assert_eq!(p.voices().len(), 0);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Regression test for a `Path::file_stem` bug that made the
+    /// scanner look for `<voice>.onnx.onnx` (with a doubled
+    /// `.onnx.onnx` suffix) instead of `<voice>.onnx`. We lay down
+    /// the canonical Piper layout (`<voice>.onnx` +
+    /// `<voice>.onnx.json`) in a tempdir and verify the voice is
+    /// picked up. Without the fix this test fails with
+    /// `voices().len() == 0` and a warning in the test output.
+    #[cfg(feature = "tts")]
+    #[test]
+    fn piper_discover_finds_voice_with_double_extension() {
+        let dir = std::env::temp_dir().join(format!(
+            "nagent-tts-voice-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Minimal valid `.onnx.json` (Piper schema: audio.sample_rate,
+        // language.code). The full inference path isn't exercised
+        // here — only the boot-time discovery.
+        let json = br#"{
+            "audio": {"sample_rate": 22050},
+            "language": {"code": "fr"}
+        }"#;
+        std::fs::write(dir.join("fr_FR-upmc-medium.onnx.json"), json).unwrap();
+        // The .onnx weights file can be empty for this test: we
+        // only assert that the discovery step finds the voice id,
+        // not that the lazy `piper_rs::Piper::new` call succeeds
+        // (that one would need a real ONNX weights file and the
+        // `tts` feature's full build deps, which CI doesn't ship).
+        std::fs::write(dir.join("fr_FR-upmc-medium.onnx"), b"").unwrap();
+        let p = PiperSynthesizer::discover(&dir).expect("discover must succeed");
+        assert_eq!(p.voices().len(), 1, "expected exactly one voice");
+        assert_eq!(p.voices()[0].id, "fr_FR-upmc-medium");
+        assert_eq!(p.voices()[0].language.as_deref(), Some("fr"));
+        assert_eq!(p.voices()[0].sample_rate, 22_050);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When the JSON config exists but the .onnx weights file is
+    /// missing, the scanner must emit a `skipping Piper voice`
+    /// warning AND not surface a half-built voice entry. This is
+    /// the mirror of `piper_discover_finds_voice_with_double_extension`
+    /// and keeps us honest about not silently registering broken
+    /// voices.
+    #[cfg(feature = "tts")]
+    #[test]
+    fn piper_discover_skips_voice_without_onnx_weights() {
+        let dir = std::env::temp_dir().join(format!(
+            "nagent-tts-missing-onnx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("en_US-lessac-medium.onnx.json"),
+            br#"{"audio":{"sample_rate":22050},"language":{"code":"en"}}"#,
+        )
+        .unwrap();
+        // Deliberately no `.onnx` companion file.
+        let p = PiperSynthesizer::discover(&dir).expect("discover must succeed");
+        assert_eq!(p.voices().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
