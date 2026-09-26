@@ -815,6 +815,17 @@ function appendToolBubble(
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 
+  // While the tool runs, hide the assistant's accumulating prose so
+  // the "let me check…" / "fetching…" preamble doesn't steal focus
+  // from the eventual widget. Only the live-stream path triggers
+  // this — rehydration (`appendToolBubble(null, ...)`) plays back
+  // already-finished tool calls and would otherwise flash a
+  // "Préparation…" placeholder on a settled reply.
+  if (sessionId && assistantEl?.classList?.contains("chat-assistant")
+      && inflight && inflight.sessionId === sessionId) {
+    setAssistantToolPending(assistantEl, true);
+  }
+
   // Persist a placeholder assistant turn with `tool_calls[]` so a
   // page reload / follow-up turn keeps the LLM context intact even
   // before the agent returns. We only do this the first time we see
@@ -868,6 +879,14 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
       statusEl.textContent = ok ? `✓ ${truncateSummary(summary)}` : `⚠ ${truncateSummary(summary)}`;
     }
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    // On tool error, undo the visual hide `appendToolBubble` applied:
+    // the assistant prose is the only signal we have for a failed
+    // tool, so it must stay readable. The success path runs the
+    // hide/show logic via the deferral below.
+    if (!ok) {
+      const assistantEl = findAssistantAbove(div);
+      setAssistantToolPending(assistantEl, false);
+    }
     // `get_weather` carries a structured JSON payload already — build
     // the compact card out of it. Wrapped in try/catch so a malformed
     // payload degrades gracefully (summary line is still rendered) and
@@ -884,9 +903,9 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
           // clobber tokens the LLM is still writing. On renderHistory
           // `inflight` is null, so we suppress immediately.
           if (inflight && inflight.sessionId === sessionId) {
-            inflight.weatherSuppressEl = div;
+            inflight.weatherFinalizeEl = div;
           } else if (div.parentNode === messagesEl) {
-            suppressAssistantForWeather(div);
+            finalizeAssistantForToolResult(div);
           }
         }
       } catch (e) {
@@ -1095,33 +1114,77 @@ function cardinalToDegrees(s) {
     : null;
 }
 
-// Collapse the assistant bubble that called the weather tool down to a
-// short italic hint pointing at the card. Without this the LLM streams
-// a long prose restatement of every field the card already shows.
+// Hide the assistant bubble that just emitted a tool call while the
+// tool is running, so the user doesn't see the LLM's "let me check…"
+// preamble stealing focus from the eventual widget. Original prose
+// stays in the DOM (CSS only hides non-placeholder children) so a
+// tool failure can unhide it without any state to roll back.
 //
-// Walks back through `previousElementSibling` to skip any sibling tool
-// bubbles that landed before us. Multiple tool calls can chain off
-// the same assistant bubble, so the chain has to be skipped over.
-//
-// Defer to stream end via `inflight.weatherSuppressEl`: suppressing
-// mid-stream would clobber tokens that the LLM is still writing after
-// the tool result. When renderHistory re-creates the bubble from
-// storage no stream is in flight, so we suppress immediately.
-function suppressAssistantForWeather(toolBubble) {
-  let cur = toolBubble.previousElementSibling;
+// Multiple chained tool calls are idempotent — calling this twice is
+// a no-op once the placeholder exists. Removing it via `loading=false`
+// restores visibility to whatever the LLM streamed in.
+function setAssistantToolPending(assistantEl, loading) {
+  if (!assistantEl) return;
+  const placeholder = assistantEl.querySelector(".chat-message__tool-loading");
+  if (loading) {
+    if (placeholder) return;
+    assistantEl.classList.add("chat-message--tool-pending");
+    const el = document.createElement("div");
+    el.className = "chat-message__tool-loading";
+    el.textContent = "\u{1F324} Préparation de la carte météo\u2026";
+    assistantEl.appendChild(el);
+    return;
+  }
+  assistantEl.classList.remove("chat-message--tool-pending");
+  if (placeholder) placeholder.remove();
+}
+
+// Walk back through `previousElementSibling` until we find the
+// assistant bubble that emitted this tool call. Multiple chained
+// tool bubbles mean we may have to skip a few.
+function findAssistantAbove(toolBubble) {
+  let cur = toolBubble?.previousElementSibling;
   while (cur && !cur.classList.contains("chat-assistant")) {
     cur = cur.previousElementSibling;
   }
-  if (!cur) return;
-  cur.classList.add("chat-message--weather-replaced");
-  // Replace the (possibly huge) rendered HTML with a one-liner hint.
-  // The full prose survives in localStorage so the LLM context keeps
-  // it on reload — we just don't render it visually.
-  while (cur.firstChild) cur.removeChild(cur.firstChild);
+  return cur || null;
+}
+
+// Finalize the assistant bubble once its tool call has produced a
+// weather widget:
+//
+//   1. Always unhide the children that `setAssistantToolPending` was
+//      hiding during the tool run, so the prose streams back into
+//      view once the tool settles.
+//   2. If the prose is a short, single-line acknowledgment (typically
+//      "Voici les informations demandées."), keep it as the answer —
+//      the model already followed the prompt's instruction.
+//   3. Otherwise replace the content with a small italic hint
+//      pointing at the card. The full prose still lives in
+//      localStorage so the LLM context and reloads aren't affected.
+//
+// Called from `resolveToolBubble` (rehydration / immediate) and from
+// `streamReply`'s finally block (live stream — deferred to avoid
+// clobbering tokens still in flight when the tool result lands).
+function finalizeAssistantForToolResult(toolBubble) {
+  const assistantEl = findAssistantAbove(toolBubble);
+  if (!assistantEl) return;
+  setAssistantToolPending(assistantEl, false);
+  const text = (assistantEl.textContent || "").trim();
+  // "Short" = non-empty, single line, ≤ 120 chars. The threshold is
+  // intentionally generous — anything that fits comfortably on one
+  // line is kept so the user sees a real acknowledgment.
+  const isShort = text.length > 0 && text.length <= 120 && !text.includes("\n");
+  if (isShort) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return;
+  }
+  assistantEl.classList.add("chat-message--weather-replaced");
+  while (assistantEl.firstChild) assistantEl.removeChild(assistantEl.firstChild);
   const hint = document.createElement("span");
   hint.className = "chat-message__weather-hint";
-  hint.textContent = "\u{1F324} Détails dans la carte météo ci-dessous.";
-  cur.appendChild(hint);
+  hint.textContent = "\u{1F324} Détails ci-dessous.";
+  assistantEl.appendChild(hint);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -1445,17 +1508,16 @@ async function streamReply(sessionId, userText) {
     }
   } finally {
     // If a `get_weather` tool result came back successfully during
-    // this reply, swap the assistant prose bubble for a compact
-    // "details in the card below" hint. Done here (not in
-    // resolveToolBubble) so we never clobber tokens that the LLM is
-    // still streaming after the tool result — the full prose survives
-    // in localStorage, so the LLM context and any future reload keep
-    // it.
-    if (inflight?.weatherSuppressEl) {
+    // this reply, run the assistant finalizer (unhide what the tool
+    // run was hiding; collapse long prose down to a one-liner, keep
+    // short acknowledgments visible). Done here, not in
+    // resolveToolBubble, so we never judge the assistant's prose while
+    // the LLM is still streaming tokens after the tool result.
+    if (inflight?.weatherFinalizeEl) {
       try {
-        suppressAssistantForWeather(inflight.weatherSuppressEl);
+        finalizeAssistantForToolResult(inflight.weatherFinalizeEl);
       } catch (e) {
-        console.warn("weather suppression failed:", e);
+        console.warn("weather finalizer failed:", e);
       }
     }
     // Persist the raw markdown source (or the error/stopped marker)

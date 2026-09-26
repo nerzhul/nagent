@@ -30,9 +30,11 @@ enabled:
 (for example \"Europe/Paris\").
 - get_weather: current weather, multi-day forecast, hourly data and \
 astronomy for a location. The chat UI renders a structured weather card \
-from the tool's JSON response, so keep your prose to ONE short sentence \
-(\"Mostly sunny this afternoon, rain expected Thursday.\") — do not \
-re-state the temperature, condition, or fields the card already shows.
+from the tool's JSON response; the assistant's prose should be a brief \
+acknowledgment in the user's language (\"Voici les informations \
+demandées.\" / \"Here are the details.\") and NOTHING ELSE — the card \
+already shows temperature, condition, wind, humidity, UV and the 3-day \
+strip, so do not re-state any of those fields in prose.
 - get_stock_quote: latest stock quote for a ticker symbol.
 - web_fetch: fetch a public URL and return its main text as Markdown.
 
@@ -215,9 +217,10 @@ mod tests {
         assert!(
             prompt.contains("get_weather")
                 && prompt.contains("weather card")
-                && (prompt.contains("ONE short sentence")
-                    || prompt.contains("one short sentence")),
-            "DEFAULT_SYSTEM_PROMPT no longer nudges the model to keep get_weather replies short while the widget renders the detail. Card loses most of its value without the nudge."
+                && prompt.contains("acknowledgment")
+                && (prompt.contains("Voici les informations")
+                    || prompt.contains("Here are the details")),
+            "DEFAULT_SYSTEM_PROMPT no longer nudges the model to keep get_weather replies to a brief acknowledgment ('Voici les informations demandées.' / 'Here are the details.') while the widget renders the detail. Card loses most of its value without the nudge."
         );
     }
 

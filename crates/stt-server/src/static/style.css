@@ -1249,6 +1249,23 @@ select, input[type="checkbox"] {
   white-space: normal;
 }
 
+/* ---- Pending-tool assistant bubble -------------------------------------
+ * While a tool runs, the assistant's streamed prose is hidden via
+ * `display: none` so the user doesn't see "let me check the weather…"
+ * stealing focus from the eventual widget. The original children
+ * stay in the DOM — only the `.chat-message__tool-loading` placeholder
+ * is visible — so the prose can stream back into view cleanly when
+ * the tool resolves. */
+.chat-message--tool-pending > :not(.chat-message__tool-loading) {
+  display: none;
+}
+.chat-message__tool-loading {
+  color: var(--fg-mute);
+  font-style: italic;
+  font-size: 0.82rem;
+  padding: 0.2rem 0;
+}
+
 .chat-advanced {
   margin-top: 0.75rem;
   background: var(--bg-elev);
