@@ -1036,17 +1036,16 @@ select, input[type="checkbox"] {
 /* Agents-available hint line, fetched once on Discussion mount
  * (or once per visibility-flip). Hidden by default — the JS
  * unhides it only when GET /v1/agents returns at least one entry.
- * Sits between the message list and the advanced-settings drawer
- * so it is visible at a glance without crowding the input. */
+ * Lives inside the .chat-advanced <details> drawer; the panel
+ * already provides background/border/radius, so this style only
+ * adds the left accent stripe and inner spacing. */
 .chat-agents-banner {
-  margin: 0.75rem 0 0;
-  padding: 0.5rem 0.85rem;
+  margin: 0.4rem 0 0.6rem;
+  padding: 0.4rem 0.6rem;
   font-size: 0.82rem;
   color: var(--fg-mute);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
-  border-radius: 6px;
+  border-radius: 4px;
 }
 .chat-agents-banner strong {
   color: var(--fg);
