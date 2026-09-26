@@ -512,6 +512,17 @@ pub struct LlmConfig {
     /// long custom prompts multiply with the round count and may
     /// exhaust the model's context window.
     pub system_prompt: Option<String>,
+    /// Whether the browser is allowed to forward the user's
+    /// approximate geolocation to the LLM as part of the request.
+    /// The browser still asks for explicit consent on every visit; this
+    /// flag is a defence-in-depth kill-switch so operators handling
+    /// sensitive deployments can strip the ephemeral `User's
+    /// approximate location:` system message before it ever reaches
+    /// the upstream model, regardless of what the browser sends. Env
+    /// var `LLM_ALLOW_USER_LOCATION`, TOML key
+    /// `[llm].allow_user_location`. Defaults to `true` — the user's
+    /// consent in the UI is the primary gate.
+    pub allow_user_location: bool,
 }
 
 impl LlmConfig {
@@ -555,6 +566,12 @@ impl LlmConfig {
             env_opt("LLM_SYSTEM_PROMPT").as_deref(),
             toml.system_prompt.as_deref(),
         );
+        let allow_user_location = resolve_primitive(
+            env_opt("LLM_ALLOW_USER_LOCATION").as_deref(),
+            toml.allow_user_location,
+            defaults.allow_user_location,
+            "LLM_ALLOW_USER_LOCATION",
+        )?;
 
         Ok(Self {
             enabled,
@@ -564,6 +581,7 @@ impl LlmConfig {
             request_timeout,
             cors_allow_origins,
             system_prompt,
+            allow_user_location,
         })
     }
 }
@@ -578,6 +596,7 @@ impl Default for LlmConfig {
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: Vec::new(),
             system_prompt: None,
+            allow_user_location: true,
         }
     }
 }
@@ -945,6 +964,35 @@ mod tests {
         );
         // Both empty / unset → None (no injection).
         assert_eq!(llm_system_prompt_resolved(Some(""), None), None);
+    }
+
+    #[test]
+    fn llm_allow_user_location_env_overrides_toml_and_default() {
+        // The kill-switch defaults to true so consent in the UI is the
+        // primary gate; the env var still beats the TOML file (defence
+        // in depth for sensitive deployments).
+        let default = LlmConfig::default().allow_user_location;
+        assert!(default, "allow_user_location must default to true");
+        let from_env = resolve_primitive(
+            Some("false"),
+            Some(true),
+            default,
+            "LLM_ALLOW_USER_LOCATION",
+        )
+        .expect("env 'false' must parse");
+        assert!(!from_env, "env var must beat TOML when both are set");
+        let from_toml = resolve_primitive(
+            None,
+            Some(false),
+            default,
+            "LLM_ALLOW_USER_LOCATION",
+        )
+        .expect("toml bool must parse");
+        assert!(!from_toml, "TOML value must apply when env is unset");
+        let from_default =
+            resolve_primitive::<bool>(None, None, default, "LLM_ALLOW_USER_LOCATION")
+                .expect("default must parse");
+        assert!(from_default, "default must win when neither is set");
     }
 
     #[test]

@@ -23,6 +23,13 @@ export const HISTORY_CAP = 200;
 export const TITLE_MAX = 60;
 export const DEFAULT_TITLE = "New chat";
 
+// User-geolocation preference keys. Shared with `geolocation.js` and
+// `chat.js` so the names live in exactly one place. The TTL lives on
+// the cached position only — the enabled flag is a free switch and
+// does not expire.
+export const LOCATION_KEY = "nagent.chat.location";
+export const LOCATION_ENABLED_KEY = "nagent.chat.locationEnabled";
+
 export function historyKey(id) {
   return HISTORY_PREFIX + id;
 }

@@ -44,6 +44,7 @@ async fn serve_once() -> String {
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,
+            allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
     });

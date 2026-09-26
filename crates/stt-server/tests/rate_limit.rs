@@ -61,6 +61,7 @@ async fn start_test_server_with(
             request_timeout: Duration::from_secs(1),
             cors_allow_origins: vec![],
             system_prompt: None,
+            allow_user_location: true,
         },
         agents: stt_server::config::AgentConfig::default(),
     });

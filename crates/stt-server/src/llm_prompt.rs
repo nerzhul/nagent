@@ -14,6 +14,15 @@
 
 use serde_json::{json, Value};
 
+/// Prefix that the browser-prepended location block always carries.
+///
+/// `chat.js::formatLocationMessage` writes this exact prefix; the
+/// server-side defensive filter in `llm.rs::strip_user_location_if_disabled`
+/// matches on it so the admin kill-switch can drop the block before it
+/// reaches the upstream model. Keep the two strings in sync — a
+/// divergence here would silently disable the filter (and vice versa).
+pub const USER_LOCATION_MARKER: &str = "User's approximate location:";
+
 /// Built-in default system prompt. English by `AGENTS.md` rule #1;
 /// admins override it via `LLM_SYSTEM_PROMPT` or `[llm].system_prompt`
 /// in TOML. The agent names match `Agent::name()` in
@@ -65,7 +74,24 @@ Formatting:
 - Reply in the language the user wrote in.
 - Use Markdown. Inline math in $...$ and block math in $$...$$ are \
 rendered with KaTeX.
-- Keep answers concise unless the user explicitly asks for more detail.";
+- Keep answers concise unless the user explicitly asks for more detail.
+
+User location (opt-in, ephemeral):
+- When the user has shared their approximate location, the request \
+carries an ephemeral system message that starts with the marker \
+\"User's approximate location:\". Treat that place as the default \
+for location-relative queries (\"here\", \"weather\", \"today\", \
+\"tonight\", \"this week\", \"near me\", …) unless the user explicitly \
+names another location in the same turn. The block is never persisted \
+in the browser session history, so it appears only on the request \
+that triggered it.
+- The block carries a \"captured\" timestamp. If the timestamp looks \
+very old (days / weeks), flag the staleness to the user instead of \
+answering as if the position were current.
+- When calling `get_weather` and the user did not name a specific \
+location, pass the coordinates as `location=\"lat,lon\"` directly. \
+The agent accepts the comma-separated form verbatim and returns a \
+weather card for that point.";
 
 /// Prepend the admin's system prompt as `messages[0]`.
 ///
@@ -243,6 +269,32 @@ mod tests {
         assert!(
             !prompt.contains("Do not call tools for general knowledge you can answer directly"),
             "DEFAULT_SYSTEM_PROMPT still carries the old 'answer directly from general knowledge' rule that lets the model skip tool calls for weather/datetime/stocks. Remove the line or scope it to non-factual domains only."
+        );
+    }
+
+    #[test]
+    fn default_prompt_documents_user_location_block() {
+        // The browser prepends an ephemeral system message starting
+        // with the `USER_LOCATION_MARKER` prefix whenever the user
+        // has consented to share their location. The prompt must
+        // describe how to use that block (default for location-
+        // relative queries, raw `lat,lon` for `get_weather`, and a
+        // staleness flag when the timestamp is old) and the marker
+        // string itself must appear so a future prompt rewrite can't
+        // quietly desync the defensive filter in `llm.rs`.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains(USER_LOCATION_MARKER),
+            "DEFAULT_SYSTEM_PROMPT must mention the '{USER_LOCATION_MARKER}' marker so the system knows it can rely on the block for location-relative queries."
+        );
+        assert!(
+            prompt.contains("location=\"lat,lon\"")
+                && prompt.contains("get_weather"),
+            "DEFAULT_SYSTEM_PROMPT must instruct the model to pass raw lat,lon to get_weather (the agent already accepts that form)."
+        );
+        assert!(
+            prompt.contains("ephemeral") || prompt.contains("never persisted"),
+            "DEFAULT_SYSTEM_PROMPT must make clear the location block is ephemeral and not persisted, so the model treats it as request-scoped context."
         );
     }
 }
