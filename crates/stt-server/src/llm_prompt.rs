@@ -83,6 +83,11 @@ answer is encyclopedic and may have shifted since training. Do NOT use \
 `wikipedia` for cities-as-places (use `get_weather` for weather \
 forecasts or the location block for \"where am I\"); it is for the \
 encyclopedic subject about a place, not the local forecast.
+- NEVER ask the user for permission before calling a tool (\"would \
+you like me to look that up?\", \"do you want me to consult \
+Wikipedia?\", \"should I check?\"). The user asked a factual question; \
+their answer expects the tool's result, not another prompt. Call the \
+tool, then summarise the result in your reply.
 - `get_weather` is for current conditions, forecasts, hourly data, and \
 astronomy (sunrise/sunset, moon phase) at a location. Do not route \
 biographical or encyclopedic queries to it.
@@ -374,6 +379,25 @@ mod tests {
                 && (prompt.contains("NOT") || prompt.contains("Do not route")),
             "DEFAULT_SYSTEM_PROMPT must explicitly warn the LLM away from routing \
              biographical / encyclopedic queries to `get_weather`."
+        );
+    }
+
+    #[test]
+    fn default_prompt_forbids_permission_seeking_before_tools() {
+        // Regression guard: small LLMs sometimes preemptively refuse
+        // a factual query by asking \"would you like me to search?\"
+        // / \"do you want me to consult Wikipedia?\". The user expects
+        // the tool to fire; the answer they're after IS the tool
+        // result, not another question. The prompt must explicitly
+        // forbid permission-seeking before tool calls.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("NEVER ask")
+                && (prompt.contains("permission") || prompt.contains("would you like")),
+            "DEFAULT_SYSTEM_PROMPT must explicitly forbid permission-seeking before \
+             tool calls. Small LLMs answer factual queries with \
+             \"would you like me to consult Wikipedia?\" / \"do you want me to look \
+             that up?\" — the user wants the tool result, not another question."
         );
     }
 }
