@@ -41,15 +41,28 @@ visible at a time.
   a Dismiss button; a `VERSION_POLL_MS = 30_000` interval re-checks the
   server version.
 
-### 1.3 Shared voice oscilloscope
+### 1.3 Voice oscilloscope (shared widget, per-mode placement)
 
-- A single `<section id="voice-graph-shared">` at the top of `<body>`
-  hosts a `<canvas>` waveform and a `speech probability` level bar.
-  Both Transcript and Discussion modes reuse the same DOM node
-  (`AudioCapture._setGraphVisible` toggles `.is-hidden`), so a single
-  Record click in either view drives the same oscilloscope.
-- Drawing, frame buffering, and the speech-probability meter are
-  implemented by `createScope` in `crates/stt-server/src/static/audio.js`.
+The voice oscilloscope — a waveform canvas + a speech-probability
+level bar — is a **reusable widget, not a single shared DOM node**.
+Its drawing, frame buffering, and level-meter logic live in
+`createScope` in `crates/stt-server/src/static/audio.js`, and both
+modes drive it through their own `AudioCapture` instance. What
+changes between modes is *where the widget is mounted in the DOM*:
+
+- **Transcript mode**: the oscillo is mounted at the top of the
+  Transcript view, above the controls. It appears as soon as the
+  user clicks Record and disappears when recording stops. The CSS
+  owns the opacity / height transition.
+- **Discussion mode**: the oscillo is mounted **inline inside the
+  conversation**, rendered as a voice bubble inside `#chat-messages`
+  (see §4.10). It follows the same visual lifecycle (appear on
+  Record, disappear on stop) but lives among the chat messages
+  rather than at the top of the page.
+
+The shared-code contract means a future mode (or a re-skin) can
+mount a third instance of the widget without touching `createScope`
+or `AudioCapture` — only the DOM anchor changes.
 
 ## 2. Audio capture pipeline (shared)
 
@@ -157,7 +170,9 @@ fronted by a chat sidebar and a chat-main area.
     a session on first boot then removed.
 - `HISTORY_CAP = 200` caps the messages persisted per session.
 - `TITLE_MAX = 60` caps the auto-derived title (first user turn,
-  collapsed whitespace, trailing ellipsis when truncated).
+  collapsed whitespace, trailing ellipsis when truncated). New
+  sessions start with the `DEFAULT_TITLE = "New chat"` placeholder
+  until `deriveTitle` produces the real title.
 
 ### 4.2 Header / model picker
 
@@ -182,7 +197,10 @@ fronted by a chat sidebar and a chat-main area.
 
 ### 4.4 Advanced panel (`<details class="chat-advanced">`)
 
-Folded into the main `<details>` rather than its own nested one:
+Folded into the main `<details>` rather than its own nested one.
+When `GET /v1/models` 404s (no LLM backend running) the whole panel
+is hidden and the `#chat-disabled-notice` is shown instead
+(chat.js:1473-1484), so the picker never offers an unusable list.
 
 - **TTS sub-panel** (`#chat-tts-settings`, hidden when read-aloud is
   off):
@@ -231,12 +249,111 @@ Folded into the main `<details>` rather than its own nested one:
 - `#chat-stop` (hidden by default): stops an in-flight LLM stream via
   `AbortController`.
 
-### 4.6 Message rendering
+### 4.6 Assistant message rendering
 
-- Each turn appends a `<div class="chat-message chat-message--user">`
-  or `chat-message--assistant` bubble into `#chat-messages`.
-- Assistant bubbles are processed by a Markdown pipeline
+Every assistant turn in `#chat-messages` follows the same rendering
+contract, regardless of which model, tools, or widgets are involved.
+The assistant bubble is a vertical stack of three optional slots and
+one post-stream affordance:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ [Tools ▶]            ← collapsed "Tools" row (only if    │
+│                       ←  the LLM emitted any tool calls) │
+├──────────────────────────────────────────────────────────┤
+│ <widget inset>       ← generic widget card (only if the  │
+│                       ←  tool emitted a renderable one)  │
+├──────────────────────────────────────────────────────────┤
+│ Markdown prose…      ← the LLM reply body                │
+│                                                          │
+│                                       🔊  ← TTS replay   │
+└──────────────────────────────────────────────────────────┘
+```
+
+The slots above are filled according to the rules below. They are
+mutually independent — a turn with no tools has no tools row, a turn
+with a tool that has no widget renderer has no widget inset, and so on.
+
+#### 4.6.1 Loading state
+
+- While the response is streaming, the assistant bubble shows a
+  `chat-loader` (three bouncing dots, `role="status"`,
+  `aria-label="Loading response"`) in place of the prose body.
+- The loader is appended via `appendChild` (not `innerHTML =`) so the
+  per-bubble replay button that `appendBubble` already attached is
+  not destroyed when the loader is later removed.
+- On the first SSE delta the loader is removed and the prose body
+  starts accumulating. If the LLM emits a `tool_call` first, the
+  loader is replaced by the tools row instead.
+
+#### 4.6.2 Tool row (when tools were used)
+
+- **Position**: the tools row lives *inside* the assistant bubble, *above*
+  the widget inset and the prose body, so the visual order matches the
+  reading order: tool call → tool result widget → LLM prose.
+- **Disclosure**: by default the row is collapsed into a small,
+  discreet per-tool caption. The `<summary>` is built from
+  `<icon> <name> <status>` (`chat.js:939-950`); the user sees e.g.
+  "🔎 web_fetch ✓ <summary>" once the tool completes. The native
+  `<details>` chevron provides the expand / collapse arrow.
+- **During a tool run**: the row is open so progress is visible
+  (running spinner, live status text). On tool success the wrapper
+  stays open until `streamReply`'s `finally` block runs and the
+  bubble is finalised (chat.js:1982-1984, which also drops
+  `chat-message--streaming`); on tool error `resolveToolBubble`
+  collapses the `<details>` eagerly (chat.js:1068-1069) so a failed
+  tool trace does not stay expanded in front of the error prose.
+- **Multiple tools**: each tool call gets its own entry inside the
+  same collapsible region. Order matches the order in which the LLM
+  emitted `tool_call` SSE events.
+- **Implementation**: the row is a `<details class="chat-message__tool-usage">`
+  with a `<summary>` carrying the "Tools" caption; the `<details>`'s
+  native open / close semantics provide the arrow affordance. The
+  inner body is a stack of `.chat-tool-bubble` rows built by
+  `appendToolBubble` (one per tool call).
+- **Visibility during tool runs**: while a tool call is in flight, the
+  assistant prose body is hidden via the `chat-message--tool-pending`
+  class on the bubble. The CSS for that class explicitly preserves
+  the tool trace (`details.chat-message__tool-usage`) and any
+  widget card (`chat-weather-card`) so progress is never invisible.
+  Both the `finally` block in `streamReply` and `resolveToolBubble`
+  drop the class on success **and** on tool error so the prose
+  becomes visible regardless of which tool ran.
+
+#### 4.6.3 Widget inset
+
+- **Position**: the widget slot is the *next sibling* of the
+  `.chat-tool-bubble` *inside* the same
+  `<details class="chat-message__tool-usage">`. It is not a separate
+  bubble-level slot — the weather card sits inside the tool trace
+  `<details>` so the visual stack reads: tool trace (open) →
+  weather card → prose body.
+- **Presence**: the slot is shown only when the tool that resolved
+  advertises a widget renderer (see §4.7). For tools without a
+  renderer the slot is empty and the prose body sits directly below
+  the tools row.
+- **Idempotency**: `renderWeatherWidget` (chat.js:1126-1129) removes
+  any prior `.chat-weather-card` next to its `.chat-tool-bubble`
+  before inserting the new one, so a session re-hydration racing the
+  live stream never produces two cards for the same tool call.
+- **Weather replace**: on `get_weather` success with non-trivial
+  prose, `finalizeAssistantForToolResult` adds the
+  `chat-message--weather-replaced` class to the assistant bubble.
+  This class is the canonical CSS hook for the "card-as-answer"
+  layout — the prose is reduced to the italic hint "🌤️ Détails
+  ci-dessous." while the tool trace and the weather card stay
+  visible. Short replies (≤ 120 chars, single line) are kept
+  verbatim and the class is not applied.
+
+#### 4.6.4 Prose body
+
+- The LLM reply is processed by a Markdown pipeline
   (`renderMarkdown` in `chat.js`):
+  0. `normalizeMathDelimiters(text)` rewrites the model-friendly
+     `[\n … \n]` and `[\frac{…}]` shorthand into the `\[…\]`
+     delimiters KaTeX actually recognises (chat.js:193-222). Without
+     this pre-pass the model cannot reliably emit display math
+     without escaping every backslash.
   1. `marked` parses the accumulated LLM stream into HTML.
   2. `DOMPurify` sanitises the result so a prompt-injection reply
      cannot smuggle `<script>` tags or `onerror=` handlers.
@@ -247,35 +364,71 @@ Folded into the main `<details>` rather than its own nested one:
      `\frac{5000W}{500W}` becomes a stacked fraction.
   5. `decorateSafeLinks` post-processes `<a>` tags so external links
      get `rel="noopener noreferrer"` and `target="_blank"`.
-- A `chat-loader` (three bouncing dots, `role="status"`,
-  `aria-label="Loading response"`) is inserted into the assistant
-  bubble while waiting for the first token; it is removed (without
-  destroying the bubble's `innerHTML`) on the first delta.
-- A per-bubble **replay button** (`🔊`) is attached to every assistant
-  bubble but stays hidden (`chat-message--streaming`,
-  `chat-message--tool-pending`, etc.) until the reply is fully
-  rendered and the bubble transitions to a historical state.
+- During the stream the markdown is re-rendered on each accumulated
+  delta so links and math stay current; the final render happens
+  once on the full reply.
 
-### 4.7 Tool bubbles and widgets
+#### 4.6.5 Finalised state — TTS replay button
 
-When the LLM emits an SSE `tool_call` / `tool_result`, `chat.js`
-appends a separate tool bubble (`#chat-message--tool-*`) and routes
-the result through `resolveToolBubble`. Concrete examples:
+- **Visibility gate (two-tier)**:
+  - **CSS** (style.css:1682-1684): while the assistant bubble is
+    mid-stream, `chat-message--streaming` hides its
+    `.chat-message-replay` button via `display: none`. The class is
+    added at `streamReply` start and removed in its `finally`.
+  - **JS** (chat.js:2331-2336, `refreshReplayButtonVisibility`):
+    on every state change the function walks every assistant
+    bubble and toggles `btn.hidden` purely from
+    `window.__ttsAvailable` — it does **not** look at streaming,
+    tool-pending, or weather-replaced state. Tool-pending bubbles
+    hide the button structurally (no `.chat-message-replay` is
+    attached to the placeholder), not via class.
+  - Net effect: the button is hidden only when Piper is unavailable
+    on the server (`__ttsAvailable === false`) or while the current
+    bubble is actively streaming.
+- **Click semantics** (chat.js:2354-2399, `replayMessage`):
+  - Idle → speak the full sanitised bubble text in one HTTP
+    round-trip (no per-sentence streaming).
+  - Clicking the *same* playing button → stop playback.
+  - Clicking a *different* bubble's button while another is playing
+    → stop the previous one, start the new one.
+  - The button auto-enables the master `#chat-tts-check` if it was
+    off, so a first-time user does not need to open the Advanced
+    panel first.
+- Clicking the button re-synthesises the bubble's prose through the
+  same Piper-backed audio queue as live replies (see §4.9). The
+  button is hidden again if the user starts a new turn while the
+  replay is playing (`stopOnSend` semantics).
 
-- **Weather widget** (`renderWeatherWidget`): custom card rendered next
-  to the tool bubble. Supports three modes — `current`, `daily`,
-  `hourly` — chosen by `detectWeatherMode(data)`. The current-mode
-  hero block shows an emoji condition icon, temperature, "feels
-  like", wind, humidity, and UV; the daily/hourly strips show
-  forecast rows with day labels (`formatDayShort`) and timezone-aware
-  timestamps (`formatLocalTimestamp`). Idempotent: re-rendering a card
-  replaces an existing one in place rather than stacking duplicates.
-- **Web-fetch** tool bubble: title + summary link.
-- The assistant bubble stays marked `chat-message--tool-pending`
-  (with `display:none` on its content) until the tool resolves; the
-  `finally` block in `streamReply` and `resolveToolBubble` drop the
-  class on both success and error so prose becomes visible regardless
-  of which tool ran.
+### 4.7 Available widget renderers
+
+The widget inset described in §4.6.3 is filled in by a per-tool
+renderer keyed on the tool name. Today the only renderable tool is
+`get_weather` (§4.7.1); every other tool result — including
+`calculate`, `web_fetch`, `wikipedia`, … — is surfaced through the
+generic tool trace only, with no dedicated widget. Adding a new
+widget means writing a renderer that appends a card under its
+`.chat-tool-bubble` (mirroring the weather card below); the bubble
+layout itself does not need to change.
+
+#### 4.7.1 Weather
+
+- **Renderer**: `renderWeatherWidget(parentEl, data, mode)` in `chat.js`.
+- **Triggered by**: the `get_weather` tool result. The mode
+  (`current`, `daily`, or `hourly`) is auto-detected by
+  `detectWeatherMode(data)` from the payload shape.
+- **Layout**:
+  - Header line: city · as-of timestamp · requested date (for
+    forecast modes). Always present so the card is scannable even
+    when the upstream forecast array is empty.
+  - Hero block (`current` mode only): emoji condition icon,
+    temperature, "feels like", wind (direction + cardinal + speed),
+    humidity, UV index.
+  - Forecast strip (`daily` / `hourly`): day / hour cells with
+    labels (`formatDayShort`), mini icon, hi temperature, and
+    precipitation probability chip.
+- **Timezone handling**: every timestamp in the card uses
+  `formatLocalTimestamp` against the location's IANA timezone, not
+  the user's local clock.
 
 ### 4.8 Streaming reply
 
@@ -318,6 +471,39 @@ controls in `chat.js`:
 - `refreshReplayButtonVisibility`: hides / shows the per-bubble
   replay button as bubbles transition between streaming, pending,
   and finalised states.
+
+### 4.10 Inline voice waveform widget (Discussion)
+
+In Discussion mode the voice oscilloscope (§1.3) is not mounted at the
+top of the page — it is rendered **inline as a voice bubble inside
+`#chat-messages`**, so the live waveform sits in the same scroll
+context as the user / assistant turns.
+
+- **DOM anchor**: a dedicated voice-bubble element appended to
+  `#chat-messages`. The DOM tree for the widget itself is built by
+  the same `createScope` factory used by Transcript mode — only the
+  mount point differs.
+- **Lifecycle**:
+  - Hidden by default (`class="voice-graph is-hidden"`-equivalent on
+    the inline wrapper).
+  - Inserted / revealed on Record (`AudioCapture._setGraphVisible` or
+    the chat-mode equivalent) and removed / re-hidden on stop.
+  - During recording it scrolls with the conversation so the user
+    can keep typing in `#chat-input` while watching the waveform.
+- **Per-mode placement contract**: this is the Discussion-mode
+  instance of the shared voice oscilloscope widget. Transcript mode
+  still mounts its instance at the top of the transcript view
+  (§1.3, §3). The shared-code contract means a future mode can mount
+  a third instance without touching `createScope` or `AudioCapture`.
+- **Why inline**: anchoring the widget in the conversation makes the
+  recording session feel like a chat-native action (the user's voice
+  is part of the transcript) rather than a toolbar overlay. It also
+  keeps the visible scope close to the user's gaze point — typically
+  the chat input — when the chat view has scrolled down.
+- **Cross-mode exclusivity is preserved**: clicking Record in either
+  mode tears down the other mode's `AudioCapture` first (§2), so the
+  inline voice widget in Discussion and the top-mounted widget in
+  Transcript never animate at the same time.
 
 ## 5. Geolocation (Discussion)
 
