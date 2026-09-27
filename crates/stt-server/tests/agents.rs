@@ -27,7 +27,10 @@
     feature = "web-agent",
     feature = "datetime-agent",
     feature = "weather-agent",
-    feature = "stock-agent"
+    feature = "stock-agent",
+    feature = "calculate-agent",
+    feature = "unit-convert-agent",
+    feature = "wikipedia-agent"
 ))]
 
 use std::sync::Arc;
@@ -37,18 +40,26 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use stt_core::{MockBackend, WhisperBackend};
+#[cfg(feature = "calculate-agent")]
+use stt_server::agents::calculate_agent::CalculateAgent;
 #[cfg(feature = "datetime-agent")]
 use stt_server::agents::datetime_agent::DateTimeAgent;
 #[cfg(feature = "stock-agent")]
 use stt_server::agents::stock_agent::StockAgent;
+#[cfg(feature = "unit-convert-agent")]
+use stt_server::agents::unit_convert_agent::UnitConvertAgent;
 #[cfg(feature = "weather-agent")]
 use stt_server::agents::weather_agent::WeatherAgent;
 #[cfg(feature = "web-agent")]
 use stt_server::agents::web_fetch::WebFetchAgent;
+#[cfg(feature = "wikipedia-agent")]
+use stt_server::agents::wikipedia_agent::WikipediaAgent;
 use stt_server::{
     agents::{Agent, AgentRegistry},
     build_router,
-    config::{AgentConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig},
+    config::{
+        AgentConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig, WikipediaConfig,
+    },
     llm::LlmClient,
     rate_limit::{RateLimitPolicy, RateLimiter},
     session::SessionMap,
@@ -249,6 +260,21 @@ async fn agents_list_returns_web_fetch_when_feature_enabled() {
     assert!(
         names.contains(&"get_stock_quote"),
         "expected `get_stock_quote` in {names:?}"
+    );
+    #[cfg(feature = "calculate-agent")]
+    assert!(
+        names.contains(&"calculate"),
+        "expected `calculate` in {names:?}"
+    );
+    #[cfg(feature = "unit-convert-agent")]
+    assert!(
+        names.contains(&"unit_convert"),
+        "expected `unit_convert` in {names:?}"
+    );
+    #[cfg(feature = "wikipedia-agent")]
+    assert!(
+        names.contains(&"wikipedia"),
+        "expected `wikipedia` in {names:?}"
     );
 }
 
@@ -881,7 +907,234 @@ async fn stock_agent_invoke_endpoint_returns_400_for_bad_ticker() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-// ---- 7. tools-schema injection across all registered agents ----
+// ---- 7. calculate_agent end-to-end ----
+
+#[cfg(feature = "calculate-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn calculate_agent_evaluates_arithmetic() {
+    let agent = CalculateAgent::new();
+    let result = agent
+        .invoke(serde_json::json!({"expression": "15*87.5/100"}))
+        .await
+        .expect("invoke");
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["source"], "local");
+    let v = parsed["data"]["value"].as_f64().unwrap();
+    assert!((v - 13.125).abs() < 1e-9);
+}
+
+#[cfg(feature = "calculate-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn calculate_agent_invoke_endpoint_returns_400_for_invalid_chars() {
+    // End-to-end: a bad expression hits the deny-list at the parser
+    // gate, the agent returns `InvalidArguments`, and the proxy
+    // surfaces it as 400.
+    let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
+    let agents = AgentRegistry::from_config(&cfg.agents);
+    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
+    let state = make_app_state(cfg, None, Some(agents), sessions);
+    let url = start_test_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/agents/calculate/invoke"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"arguments":{"expression":"1; rm -rf /"}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---- 8. unit_convert_agent end-to-end ----
+
+#[cfg(feature = "unit-convert-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unit_convert_agent_converts_miles_to_km() {
+    // The canonical chat-user case. 12 mi × 1.609344 = 19.312128 km.
+    let agent = UnitConvertAgent::new(stt_server::config::UnitConvertConfig::default());
+    let result = agent
+        .invoke(serde_json::json!({"value": 12, "from": "mile", "to": "km"}))
+        .await
+        .expect("invoke");
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["source"], "local");
+    let v = parsed["data"]["value"].as_f64().unwrap();
+    assert!((v - 19.312128).abs() < 1e-6);
+    assert_eq!(parsed["data"]["category"], "length");
+}
+
+#[cfg(feature = "unit-convert-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unit_convert_agent_rejects_cross_category() {
+    // The endpoint must surface `InvalidArguments` as 400, not as a
+    // 500. The proxy relies on this distinction to tell the LLM
+    // "your args are wrong" vs "the upstream broke".
+    let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
+    let agents = AgentRegistry::from_config(&cfg.agents);
+    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
+    let state = make_app_state(cfg, None, Some(agents), sessions);
+    let url = start_test_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/agents/unit_convert/invoke"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"arguments":{"value":1,"from":"km","to":"kg"}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---- 9. wikipedia_agent end-to-end ----
+
+/// Spawn a loopback fixture that serves a canned summary response
+/// for every `/page/summary/{title}` URL. The agent's
+/// `WikipediaConfig::base_url` is pointed at this server.
+#[cfg(feature = "wikipedia-agent")]
+async fn spawn_wikipedia_summary_fixture(body: serde_json::Value) -> String {
+    let app = Router::new().route(
+        "/api/rest_v1/page/summary/:title",
+        get(move || {
+            let canned = body.clone();
+            async move {
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    canned.to_string(),
+                )
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+#[cfg(feature = "wikipedia-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wikipedia_agent_parses_summary_fixture() {
+    let canned = serde_json::json!({
+        "type": "standard",
+        "title": "Lyon",
+        "displaytitle": "Lyon",
+        "extract": "Lyon is a city in France.",
+        "description": "city in France",
+        "content_urls": {
+            "desktop": {"page": "https://en.wikipedia.org/wiki/Lyon"},
+            "mobile": {"page": "https://en.wikipedia.org/wiki/Lyon"}
+        }
+    });
+    let base_url = spawn_wikipedia_summary_fixture(canned).await;
+    let agent = WikipediaAgent::new(WikipediaConfig {
+        base_url: format!("{base_url}/api/rest_v1"),
+        timeout_ms: 2_000,
+        user_agent: "nagent-test/0.1".into(),
+    });
+    let result = agent
+        .invoke(serde_json::json!({"title": "Lyon"}))
+        .await
+        .expect("invoke");
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["source"], "wikipedia.org");
+    assert_eq!(parsed["data"]["title"], "Lyon");
+    assert_eq!(parsed["data"]["extract"], "Lyon is a city in France.");
+    assert_eq!(parsed["data"]["description"], "city in France");
+    assert_eq!(parsed["data"]["url"], "https://en.wikipedia.org/wiki/Lyon");
+}
+
+#[cfg(feature = "wikipedia-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wikipedia_agent_sends_descriptive_user_agent() {
+    // Wikimedia rejects unidentified clients. We capture the inbound
+    // `User-Agent` header on the fixture and assert it matches the
+    // configured value verbatim — a regression that drops the
+    // header would otherwise be invisible until production.
+    use axum::extract::Request;
+
+    let captured: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured_clone = captured.clone();
+    let app = Router::new().route(
+        "/api/rest_v1/page/summary/:title",
+        get(move |req: Request| {
+            let captured = captured_clone.clone();
+            async move {
+                let ua = req
+                    .headers()
+                    .get(header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                *captured.lock().unwrap() = ua;
+                let body = serde_json::json!({
+                    "title": "Lyon",
+                    "extract": "stub",
+                    "description": "stub",
+                    "content_urls": {"desktop": {"page": "https://example/wiki/Lyon"}}
+                });
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    body.to_string(),
+                )
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let base_url = format!("http://{addr}/api/rest_v1");
+
+    let agent = WikipediaAgent::new(WikipediaConfig {
+        base_url,
+        timeout_ms: 2_000,
+        user_agent: "nagent-test-wikipedia/42 (+https://example.test)".into(),
+    });
+    let _ = agent
+        .invoke(serde_json::json!({"title": "Lyon"}))
+        .await
+        .unwrap();
+    let sent = captured.lock().unwrap().clone();
+    assert_eq!(
+        sent.as_deref(),
+        Some("nagent-test-wikipedia/42 (+https://example.test)"),
+        "User-Agent header must be sent verbatim from the config"
+    );
+}
+
+#[cfg(feature = "wikipedia-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wikipedia_agent_invoke_endpoint_returns_400_for_missing_title() {
+    let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
+    let agents = AgentRegistry::from_config(&cfg.agents);
+    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
+    let state = make_app_state(cfg, None, Some(agents), sessions);
+    let url = start_test_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/agents/wikipedia/invoke"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"arguments":{}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---- 10. tools-schema injection across all registered agents ----
 
 /// Regression guard: every registered agent must contribute a
 /// `tools` entry to the upstream chat-completion request. The
@@ -893,7 +1146,10 @@ async fn stock_agent_invoke_endpoint_returns_400_for_bad_ticker() {
     feature = "web-agent",
     feature = "datetime-agent",
     feature = "weather-agent",
-    feature = "stock-agent"
+    feature = "stock-agent",
+    feature = "calculate-agent",
+    feature = "unit-convert-agent",
+    feature = "wikipedia-agent"
 ))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tools_schema_includes_every_registered_agent() {
@@ -915,6 +1171,12 @@ async fn tools_schema_includes_every_registered_agent() {
     assert!(names.contains(&"get_weather"));
     #[cfg(feature = "stock-agent")]
     assert!(names.contains(&"get_stock_quote"));
+    #[cfg(feature = "calculate-agent")]
+    assert!(names.contains(&"calculate"));
+    #[cfg(feature = "unit-convert-agent")]
+    assert!(names.contains(&"unit_convert"));
+    #[cfg(feature = "wikipedia-agent")]
+    assert!(names.contains(&"wikipedia"));
     for s in &schemas {
         let name = s["function"]["name"].as_str().unwrap();
         assert!(names.contains(&name));

@@ -83,6 +83,19 @@
 # timeout_ms = 8_000
 # base_url = "https://api.weatherapi.com"
 
+# `unit_convert` agent — pure-local unit conversions (length, mass,
+# volume, time, data, speed, area, temperature). No API key.
+# [agents.unit_convert]
+# timeout_ms = 5_000
+
+# `wikipedia` agent — anonymous REST access to Wikipedia summaries.
+# No API key; Wikimedia only requires a descriptive `User-Agent`.
+# Customise the contact string if you operate a high-volume deployment.
+# [agents.wikipedia]
+# timeout_ms = 5_000
+# base_url = "https://en.wikipedia.org/api/rest_v1"
+# user_agent = "nagent-wikipedia-agent/0.1 (contact: ops@example.com)"
+
 # ---------------------------------------------------------------------------
 # Local text-to-speech (Piper ONNX)
 # ---------------------------------------------------------------------------

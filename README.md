@@ -70,18 +70,21 @@ through the `make` targets and the Dockerfile `BACKEND` arg.
 | `stt-server/real-backend`       | Use the `whisper-rs` backend. Without it the server falls back to the in-process mock.   |
 | `stt-server/web-agent`          | Register the server-side `web_fetch` chat agent.                                         |
 | `stt-server/datetime-agent`     | Register the `get_datetime` chat agent (pulls `chrono` + `chrono-tz`).                   |
-| `stt-server/weather-agent`      | Register the `get_weather` chat agent (Open-Meteo, no API key).                          |
+| `stt-server/weather-agent`      | Register the `get_weather` chat agent (WeatherAPI.com, free API key required).            |
 | `stt-server/stock-agent`        | Register the `get_stock_quote` chat agent (Stooq CSV, no API key).                       |
+| `stt-server/calculate-agent`    | Register the `calculate` chat agent (local `meval`-backed expression evaluator).         |
+| `stt-server/unit-convert-agent` | Register the `unit_convert` chat agent (pure-local conversion tables).                  |
+| `stt-server/wikipedia-agent`    | Register the `wikipedia` chat agent (REST `wikipedia.org`, no API key, `User-Agent` set).|
 | `stt-core/whisper-rs-backend`   | Pulls in `whisper-rs` (CPU). Always required, even when a GPU backend is also selected.  |
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
 | `stt-core/whisper-rs-hipblas`   | Enable the ROCm/HIP GPU backend (needs ROCm toolchain at build time).                   |
 
 The three GPU features are mutually exclusive — enabling more than one
-wastes build time and can fight over system libraries. The four
+wastes build time and can fight over system libraries. The seven
 `*-agent` features are independent: each adds exactly one tool to the
 LLM's `tools` array. All six `make run*` targets enable `web-agent`
-plus the three daily agents so a fresh build has the full set
+plus the six daily agents so a fresh build has the full set
 available; disable any of them by editing the target's `--features`
 list.
 
@@ -122,7 +125,7 @@ without a default and is required.
 | `LLM_CORS_ALLOW_ORIGINS`     | _(empty)_                                     | LLM proxy      | Comma-separated list of origins allowed to call `/v1/*` cross-origin. Empty = same-origin only (preflight blocked for others). |
 | `LLM_SYSTEM_PROMPT`          | _(unset)_                                     | LLM proxy      | Optional default system prompt prepended to every `/v1/chat/completions` request as `messages[0]`. The browser's "Additional instructions" textarea is appended after it. Empty / whitespace-only values are treated as unset (no injection). Sent on every round of the tool loop — very long custom prompts may exhaust the model's context window. |
 | `LLM_ALLOW_USER_LOCATION`    | `true`                                        | LLM proxy      | Defence-in-depth kill-switch for the browser-injected geolocation block. When `false`, the server strips any `{role:"system"}` message whose content starts with `User's approximate location:` before forwarding to the upstream model, regardless of what the browser sends. The browser still requires explicit user consent for the geolocation prompt; this flag is for operators handling sensitive deployments. |
-| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (`web_fetch`, `get_datetime`, `get_weather`, `get_stock_quote`). When `false` the registry is empty. |
+| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (`web_fetch`, `get_datetime`, `get_weather`, `get_stock_quote`, `calculate`, `unit_convert`, `wikipedia`). When `false` the registry is empty. |
 | `LLM_MAX_TOOL_ROUNDS`        | `4`                                           | Chat agents    | Maximum tool-call rounds per user turn before the proxy aborts.                                               |
 | `WEB_FETCH_ALLOW_PUBLIC`     | `false`                                       | `web_fetch`    | When `true`, the agent may reach public IP ranges (SSRF defence still blocks loopback/RFC1918).               |
 | `WEB_FETCH_ALLOWLIST`        | _(empty)_                                     | `web_fetch`    | Comma-separated hostname allow-list (suffix match; `*.foo` wildcards). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
@@ -131,6 +134,10 @@ without a default and is required.
 | `WEATHER_API_KEY`            | _(required for `get_weather`)_                | `get_weather`  | WeatherAPI.com key. Register for a free key at <https://www.weatherapi.com/>. Without it the agent refuses to run with a clear error. |
 | `WEATHER_TIMEOUT_MS`         | `8000`                                        | `get_weather`  | Per-request timeout in milliseconds.                                                                          |
 | `WEATHER_BASE_URL`           | `https://api.weatherapi.com`                  | `get_weather`  | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
+| `UNIT_CONVERT_TIMEOUT_MS`    | `5000`                                        | `unit_convert` | Per-call timeout in milliseconds. The agent is local (no I/O); the knob exists for future-proofing and tests. |
+| `WIKIPEDIA_TIMEOUT_MS`       | `5000`                                        | `wikipedia`    | Per-request timeout in milliseconds.                                                                          |
+| `WIKIPEDIA_BASE_URL`         | `https://en.wikipedia.org/api/rest_v1`        | `wikipedia`    | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
+| `WIKIPEDIA_USER_AGENT`       | `nagent-wikipedia-agent/<version>`            | `wikipedia`    | Override the `User-Agent` header. Wikimedia rejects unidentified clients — keep this descriptive and add a contact URL. |
 | `RUST_LOG`                   | `info,stt_server=debug,stt_core=debug` (local); `info,stt_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
 
 Per-source-IP rate limiting applies at both layers: HTTP for the LLM proxy
@@ -212,9 +219,9 @@ base_url = "https://api.weatherapi.com"
 ```
 
 Unknown sub-tables under `[agents]` (e.g. `[agents.web_fetxh]`) are
-rejected at load time. Currently only `web_fetch` and `get_weather`
-have configuration; `get_datetime` and `get_stock_quote` take no
-parameters today.
+rejected at load time. The five daily tools take small overrides
+(`unit_convert`, `wikipedia`); `get_datetime`, `get_stock_quote`, and
+`calculate` need no configuration today.
 
 ### Kubernetes overlays
 
@@ -333,13 +340,14 @@ keeps the fetched content in the LLM's context without re-fetching.
 | `WEB_FETCH_MAX_BYTES`     | `2097152` | Maximum response size the agent will read (2 MiB). The agent iteratively doubles the budget on overflow, capped here. |
 | `WEB_FETCH_TIMEOUT_MS`    | `30000` | Per-request timeout in milliseconds.                                                |
 
-### Daily agents (datetime, weather, stock quote)
+### Daily agents (datetime, weather, stock quote, calculate, unit convert, wikipedia)
 
-Three small, read-only, no-API-key agents complement `web_fetch` for
-everyday chat queries. They are wired by default on every `make run*`
-target through the `datetime-agent`, `weather-agent`, and
-`stock-agent` cargo features; set `AGENTS_ENABLED=false` to disable
-all agents at runtime without recompiling.
+Six small, read-only agents complement `web_fetch` for everyday chat
+queries. They are wired by default on every `make run*` target
+through the `datetime-agent`, `weather-agent`, `stock-agent`,
+`calculate-agent`, `unit-convert-agent`, and `wikipedia-agent`
+cargo features; set `AGENTS_ENABLED=false` to disable all agents at
+runtime without recompiling.
 
 **`get_datetime`** — current local time, optionally localised to an
 IANA timezone. No network.
@@ -413,6 +421,71 @@ curl -s -X POST localhost:8080/v1/agents/get_stock_quote/invoke \
   -d '{"arguments":{"ticker":"Atos"}}'
 ```
 
+**`calculate`** — evaluates an arithmetic expression locally with
+[`meval`](https://crates.io/crates/meval). Supports `+ - * / ^ %`,
+parentheses, common math functions (`sin`, `cos`, `sqrt`, `log`,
+`abs`, …), and constants (`pi`, `e`). A character-class allow-list
+plus a 256-character cap is applied before evaluation; anything
+outside `[0-9a-zA-Z_+\-*/()., \t\n]` is rejected with a clear error
+so a typo never reaches the parser. No network, no I/O, no user
+variables.
+
+- FR: "combien font 15 % de 87,50 ?", "sqrt(2) + 1", "2^10"
+- EN: "what is 17% of 230?", "log(1000) in base 10"
+- Params: `expression` (required, ≤256 chars)
+
+```
+curl -s -X POST localhost:8080/v1/agents/calculate/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"expression":"15*87.5/100"}}'
+```
+
+**`unit_convert`** — pure-local unit conversions across eight
+categories: length, mass, volume, time, data (binary + decimal),
+speed, area, and temperature (special-cased since °F / °C / K are
+not linear). Each unit entry knows its category; cross-category
+conversions (`km` → `kg`) are rejected. Symbols that map to
+multiple categories (e.g. `pt` = pint / typographic point) are
+intentionally absent from the table — the agent asks the LLM to
+pick a less ambiguous name rather than guessing.
+
+- FR: "12 miles en km", "100 GB en MB", "100 °C en °F", "1 h en secondes"
+- EN: "convert 12 miles to km", "100 GB to MB", "100°C to °F"
+- Params: `value` (number, required), `from` (string, required),
+  `to` (string, required). Accepts full names (`kilometre`,
+  `celsius`) or symbols (`km`, `°C`, `K`, `GB`, `MiB`).
+
+```
+curl -s -X POST localhost:8080/v1/agents/unit_convert/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"value":12,"from":"mile","to":"km"}}'
+
+curl -s -X POST localhost:8080/v1/agents/unit_convert/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"value":100,"from":"°C","to":"°F"}}'
+```
+
+**`wikipedia`** — short summary of a Wikipedia article via the
+public REST endpoint
+`https://en.wikipedia.org/api/rest_v1/page/summary/{title}`. No API
+key required; Wikimedia's policy is to reject unidentified clients,
+so the agent unconditionally sets a descriptive `User-Agent`
+header (override via `WIKIPEDIA_USER_AGENT`).
+
+- FR: "qui est Marie Curie ?", "parle-moi de la Renaissance", "résumé wikipédia de la photosynthèse"
+- EN: "who is Marie Curie?", "tell me about the Renaissance", "Wikipedia summary of photosynthesis"
+- Params: `title` (required, ≤200 chars)
+- NOT for cities-as-places (use `get_weather` for weather forecasts or
+  a geo tool for "où suis-je"); this tool returns the encyclopedia
+  article ABOUT a subject (people, events, concepts, works, historical
+  places).
+
+```
+curl -s -X POST localhost:8080/v1/agents/wikipedia/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"title":"Lyon"}}'
+```
+
 **Caching.** v1 ships without a cache. Both providers tolerate
 ~10 req/s from a single IP, which is comfortable for a personal
 chat deployment; revisit if rate limits bite.
@@ -431,8 +504,9 @@ Smaller quantisations (e.g. Qwen 2.5 3B) sometimes ignore the
 injected `tools` schema and answer from memory. If a model
 consistently skips the tool call, add a one-line nudge to the system
 prompt: *"You may use the provided `web_fetch`, `get_datetime`,
-`get_weather`, and `get_stock_quote` tools when the user asks for
-live data."* No code change required.
+`get_weather`, `get_stock_quote`, `calculate`, `unit_convert`, and
+`wikipedia` tools when the user asks for live data."* No code
+change required.
 
 ### Security
 

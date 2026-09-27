@@ -771,6 +771,12 @@ pub struct AgentConfig {
     /// agent refuses to run when `api_key` is empty — register at
     /// <https://www.weatherapi.com/> for a free key.
     pub weather: WeatherConfig,
+    /// Knobs for the `unit_convert` agent. Empty by default (the agent
+    /// has no API key and a sensible default timeout/base URL).
+    pub unit_convert: UnitConvertConfig,
+    /// Knobs for the `wikipedia` agent. Empty by default (no API key,
+    /// only a `User-Agent` header is required by Wikimedia).
+    pub wikipedia: WikipediaConfig,
 }
 
 impl Default for AgentConfig {
@@ -780,6 +786,8 @@ impl Default for AgentConfig {
             llm_max_tool_rounds: 4,
             web_fetch: WebFetchConfig::default(),
             weather: WeatherConfig::default(),
+            unit_convert: UnitConvertConfig::default(),
+            wikipedia: WikipediaConfig::default(),
         }
     }
 }
@@ -804,6 +812,8 @@ impl AgentConfig {
             .clamp(1, 32),
             web_fetch: WebFetchConfig::from_env_with_toml(toml.web_fetch.as_ref())?,
             weather: WeatherConfig::from_env_with_toml(toml.get_weather.as_ref())?,
+            unit_convert: UnitConvertConfig::from_env_with_toml(toml.unit_convert.as_ref())?,
+            wikipedia: WikipediaConfig::from_env_with_toml(toml.wikipedia.as_ref())?,
         })
     }
 }
@@ -926,6 +936,97 @@ impl WeatherConfig {
                 toml.base_url.as_deref(),
             )
             .unwrap_or_else(|| defaults.base_url.clone()),
+        })
+    }
+}
+
+/// Knobs for the `unit_convert` agent (pure local — no API key).
+#[derive(Debug, Clone)]
+pub struct UnitConvertConfig {
+    /// Per-request timeout in milliseconds. Defaults to 5 s, which is
+    /// generous for a local table lookup; the knob exists primarily so
+    /// integration tests can drop it when calling the agent
+    /// synchronously from the LLM proxy loop.
+    pub timeout_ms: u64,
+}
+
+impl Default for UnitConvertConfig {
+    fn default() -> Self {
+        Self { timeout_ms: 5_000 }
+    }
+}
+
+impl UnitConvertConfig {
+    fn from_env_with_toml(
+        toml: Option<&crate::config_file::TomlUnitConvertConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("UNIT_CONVERT_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "UNIT_CONVERT_TIMEOUT_MS",
+            )?,
+        })
+    }
+}
+
+/// Knobs for the `wikipedia` agent.
+///
+/// Wikipedia's REST API is anonymous (no API key) and unlimited for
+/// reasonable use, but Wikimedia's policy requires a `User-Agent`
+/// header identifying the client. The agent sets one unconditionally;
+/// `user_agent` is exposed here so operators can customise the
+/// contact string (e.g. add their own contact URL).
+#[derive(Debug, Clone)]
+pub struct WikipediaConfig {
+    /// Per-request timeout in milliseconds. Defaults to 5 s.
+    pub timeout_ms: u64,
+    /// Override the upstream base URL. Defaults to the canonical
+    /// `https://en.wikipedia.org/api/rest_v1`. Useful for tests
+    /// pointing at a loopback fixture.
+    pub base_url: String,
+    /// `User-Agent` sent on every request. Wikimedia rejects clients
+    /// without a `User-Agent`, and de-prioritises generic ones — keep
+    /// this descriptive and add a contact URL.
+    pub user_agent: String,
+}
+
+impl Default for WikipediaConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 5_000,
+            base_url: "https://en.wikipedia.org/api/rest_v1".to_string(),
+            user_agent: format!("nagent-wikipedia-agent/{}", env!("CARGO_PKG_VERSION")),
+        }
+    }
+}
+
+impl WikipediaConfig {
+    fn from_env_with_toml(
+        toml: Option<&crate::config_file::TomlWikipediaConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("WIKIPEDIA_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "WIKIPEDIA_TIMEOUT_MS",
+            )?,
+            base_url: resolve_opt_string(
+                env_opt("WIKIPEDIA_BASE_URL").as_deref(),
+                toml.base_url.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.base_url.clone()),
+            user_agent: resolve_opt_string(
+                env_opt("WIKIPEDIA_USER_AGENT").as_deref(),
+                toml.user_agent.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.user_agent.clone()),
         })
     }
 }

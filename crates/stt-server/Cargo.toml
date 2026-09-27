@@ -26,6 +26,18 @@ web-agent = []
 datetime-agent = ["dep:chrono", "dep:chrono-tz"]
 weather-agent = ["dep:chrono"]
 stock-agent = ["dep:chrono"]
+# `calculate-agent` registers the `calculate` tool (a thin wrapper over
+# `meval` with a strict deny-list on the expression grammar). Pulls
+# `meval` for the AST evaluator.
+calculate-agent = ["dep:meval"]
+# `unit-convert-agent` registers the `unit_convert` tool (length, mass,
+# volume, time, data, speed, area, plus a special-cased temperature
+# conversion). Pure local, no extra deps.
+unit-convert-agent = []
+# `wikipedia-agent` registers the `wikipedia` tool (REST `wikipedia.org`
+# summary endpoint). No API key — Wikimedia only requires a
+# `User-Agent` header, which the agent sets unconditionally.
+wikipedia-agent = []
 # `tts` pulls in `piper-rs` (and transitively `ort` + the espeak-ng
 # FFI crate). With this feature off the binary compiles without
 # espeak-ng / libclang / libssl-dev headers, so GPU build targets
@@ -92,6 +104,14 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"], op
 # via `--features stt-server/tts` because the discussion view is the
 # primary TTS consumer.
 piper-rs = { version = "0.2", optional = true }
+# `meval` powers the `calculate-agent`. It is a small (~50 KB) safe
+# expression evaluator with a documented grammar (`+ - * / ^ %`,
+# parentheses, functions like `sin/cos/sqrt/log`, constants `pi`/`e`)
+# and refuses unknown identifiers — exactly the safety boundary we
+# need. The agent still applies its own deny-list (charset + 256-char
+# cap) on top of meval's grammar so user-supplied expressions can
+# never reach `eval`-style code paths.
+meval = { version = "0.2", optional = true }
 # `hound` writes the WAV bytes served by `POST /v1/audio/speech`.
 # We emit PCM 16-bit mono at the model's declared rate (typically
 # 22 050 Hz) and let the browser resample on playback. Lightweight,

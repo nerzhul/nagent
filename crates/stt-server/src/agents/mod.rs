@@ -165,11 +165,30 @@ impl AgentRegistry {
         {
             agents.push(Arc::new(stock_agent::StockAgent::new()));
         }
+        #[cfg(feature = "calculate-agent")]
+        {
+            agents.push(Arc::new(calculate_agent::CalculateAgent::new()));
+        }
+        #[cfg(feature = "unit-convert-agent")]
+        {
+            agents.push(Arc::new(unit_convert_agent::UnitConvertAgent::new(
+                cfg.unit_convert.clone(),
+            )));
+        }
+        #[cfg(feature = "wikipedia-agent")]
+        {
+            agents.push(Arc::new(wikipedia_agent::WikipediaAgent::new(
+                cfg.wikipedia.clone(),
+            )));
+        }
         #[cfg(not(any(
             feature = "web-agent",
             feature = "datetime-agent",
             feature = "weather-agent",
-            feature = "stock-agent"
+            feature = "stock-agent",
+            feature = "calculate-agent",
+            feature = "unit-convert-agent",
+            feature = "wikipedia-agent"
         )))]
         {
             let _ = cfg; // suppress unused warning when no agent features are on
@@ -244,11 +263,17 @@ pub struct AgentSummary {
     pub description: String,
 }
 
+#[cfg(feature = "calculate-agent")]
+pub mod calculate_agent;
 #[cfg(feature = "datetime-agent")]
 pub mod datetime_agent;
 #[cfg(feature = "stock-agent")]
 pub mod stock_agent;
+#[cfg(feature = "unit-convert-agent")]
+pub mod unit_convert_agent;
 #[cfg(feature = "weather-agent")]
 pub mod weather_agent;
 #[cfg(feature = "web-agent")]
 pub mod web_fetch;
+#[cfg(feature = "wikipedia-agent")]
+pub mod wikipedia_agent;

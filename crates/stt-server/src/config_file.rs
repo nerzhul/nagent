@@ -165,6 +165,10 @@ pub struct TomlAgentConfig {
     pub web_fetch: Option<TomlWebFetchConfig>,
     #[serde(default)]
     pub get_weather: Option<TomlWeatherConfig>,
+    #[serde(default)]
+    pub unit_convert: Option<TomlUnitConvertConfig>,
+    #[serde(default)]
+    pub wikipedia: Option<TomlWikipediaConfig>,
 }
 
 /// Sandbox and transfer knobs for the built-in `web_fetch` tool.
@@ -184,6 +188,24 @@ pub struct TomlWeatherConfig {
     pub api_key: Option<String>,
     pub timeout_ms: Option<u64>,
     pub base_url: Option<String>,
+}
+
+/// Knobs for the `unit_convert` tool (no API key). Mirrors
+/// [`crate::config::UnitConvertConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlUnitConvertConfig {
+    pub timeout_ms: Option<u64>,
+}
+
+/// Knobs for the `wikipedia` tool (no API key, only `User-Agent`).
+/// Mirrors [`crate::config::WikipediaConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlWikipediaConfig {
+    pub timeout_ms: Option<u64>,
+    pub base_url: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 /// WebSocket frame-limit knobs. Mirrors [`crate::config::LimitsConfig`].
@@ -359,6 +381,8 @@ fn merge_toml_agents(
             llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
             web_fetch: merge_toml_web_fetch(e.web_fetch.as_ref(), l.web_fetch.as_ref()),
             get_weather: merge_toml_weather(e.get_weather.as_ref(), l.get_weather.as_ref()),
+            unit_convert: merge_toml_unit_convert(e.unit_convert.as_ref(), l.unit_convert.as_ref()),
+            wikipedia: merge_toml_wikipedia(e.wikipedia.as_ref(), l.wikipedia.as_ref()),
         }),
     }
 }
@@ -392,6 +416,36 @@ fn merge_toml_weather(
             api_key: l.api_key.clone().or_else(|| e.api_key.clone()),
             timeout_ms: l.timeout_ms.or(e.timeout_ms),
             base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
+        }),
+    }
+}
+
+fn merge_toml_unit_convert(
+    earlier: Option<&TomlUnitConvertConfig>,
+    later: Option<&TomlUnitConvertConfig>,
+) -> Option<TomlUnitConvertConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlUnitConvertConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+        }),
+    }
+}
+
+fn merge_toml_wikipedia(
+    earlier: Option<&TomlWikipediaConfig>,
+    later: Option<&TomlWikipediaConfig>,
+) -> Option<TomlWikipediaConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlWikipediaConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
+            user_agent: l.user_agent.clone().or_else(|| e.user_agent.clone()),
         }),
     }
 }
