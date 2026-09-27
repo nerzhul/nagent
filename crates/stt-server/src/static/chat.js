@@ -1828,6 +1828,17 @@ async function streamReply(sessionId, userText) {
       if (tts) tts.stopAll();
     }
   } finally {
+    // Always clear the tool-pending state at stream end so the
+    // LLM's prose (preamble or final answer after seeing the tool
+    // result) is visible. The CSS rule
+    // `.chat-message--tool-pending > :not(.chat-message__tool-loading)`
+    // hides every child except the "Préparation…" placeholder; that
+    // placeholder only made sense while the tool was still running.
+    // For weather, the weather-specific finalizer below also runs
+    // and may collapse long prose down to a one-liner under the card.
+    if (assistantEl?.classList?.contains("chat-message--tool-pending")) {
+      setAssistantToolPending(assistantEl, false);
+    }
     // If a `get_weather` tool result came back successfully during
     // this reply, run the assistant finalizer (unhide what the tool
     // run was hiding; collapse long prose down to a one-liner, keep
