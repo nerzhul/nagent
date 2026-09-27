@@ -227,6 +227,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
         },
         agents: AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
+        auth: stt_server::config::AuthConfig::default(),
     }
 }
 

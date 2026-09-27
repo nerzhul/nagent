@@ -1,0 +1,50 @@
+# SQLite auth store config — drop-in for `stt-server --config
+# examples/auth.sqlite.toml`. Mirrors the [auth] block in
+# `config.toml.example` but with a fully-populated sqlite backend
+# so a fresh install can run the server out of the box once the
+# admin user has been bootstrapped via `stt-server auth create-admin`.
+
+# Server knob — same shape as the main example. Tune to taste.
+[server]
+bind_addr = "127.0.0.1:8080"
+whisper_model_path = "/models/ggml-base.bin"
+
+# ---- Authentication (PR1) ----
+[auth]
+enabled = true
+backends = ["local"]
+public_url = "http://127.0.0.1:8080"   # http://localhost auto-disables Secure cookie flag
+session_ttl_days = 7                    # absolute, NOT sliding; range 1..=90
+csrf_header = "x-csrf-token"
+
+[auth.db]
+backend = "sqlite"
+url = "sqlite://./data/auth.db?mode=rwc"
+max_connections = 16
+
+[auth.password]
+argon2_memory_kib = 19456               # OWASP 2025 minimum; clamped to this value
+argon2_iterations = 2
+argon2_parallelism = 1
+min_password_length = 8
+allow_registration = true               # logged-in users can create accounts
+
+# Leave [auth.oidc] / [auth.passkey] commented — a fresh install
+# only needs the local backend to validate the bootstrap. Uncomment
+# to enable OIDC / passkey; the server refuses to boot when the
+# respective `[auth].backends` entry has missing config.
+#
+# [auth.oidc]
+# auto_provision = true
+# issuer = "https://keycloak.example.com/realms/nagent"
+# client_id = "nagent"
+# client_secret = ""                    # prefer env: NAGENT_AUTH_OIDC_CLIENT_SECRET
+# scopes = ["openid", "email", "profile"]
+# required_groups = []
+# role_claim = "groups"
+#
+# [auth.passkey]
+# self_registration = true
+# rp_id = "nagent.example.com"           # MUST match the browser's effective domain
+# rp_name = "nagent"
+# origins = ["https://nagent.example.com"]  # scheme + port; first entry must match public_url's origin

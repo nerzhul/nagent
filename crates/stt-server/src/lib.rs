@@ -17,6 +17,8 @@
 #![warn(missing_debug_implementations)]
 
 pub mod agents;
+#[cfg(feature = "auth")]
+pub mod auth;
 pub mod config;
 pub mod config_file;
 pub mod llm;

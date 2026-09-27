@@ -613,16 +613,84 @@ from `chat.js` on boot.
 - No light-theme toggle in the current UI; the colour scheme is
   fixed.
 
-## 8. Out of scope (today)
+## 8. Authentication (PR1 — backend only)
+
+The auth backend ships in PR1 but the UI integration is staged
+across the next PRs. This section documents what exists today so
+reviewers can see the seam.
+
+### 8.1 Backend surface
+
+- `GET  /api/me` — returns the [`AuthUser`] resolved by the
+  `RequireAuth` middleware (`json` payload, `401` when anonymous).
+  This is the canonical probe the SPA uses on boot to decide
+  whether to render the chat view or a login panel.
+- `POST /api/auth/logout` — deletes the current session row + clears
+  the `nagent_session` cookie. Requires both the session cookie
+  AND the matching `x-csrf-token` header (constant-time compared).
+- `POST /api/auth/login/password` — `local` backend. Body is
+  `{ "email": ..., "password": ... }`; sets the cookie + echoes the
+  session id so API clients can store it.
+- `POST /api/auth/login/passkey/start` + `/finish` — `passkey`
+  backend. The start response carries an opaque `state_token` the
+  browser echoes back to the finish handler.
+- `POST /api/auth/login/passkey/register/start` + `/finish` —
+  passkey enrollment; gated by `RequireAuth` and
+  `auth.passkey.self_registration`.
+- `GET  /api/auth/login/oidc/start` + `/callback` — OIDC
+  authorisation-code redirect with PKCE + per-flow `state`
+  persisted in the `pending_oidc_states` table.
+- `POST /api/auth/password/register` — bootstraps a new local
+  account. Requires an existing session AND
+  `auth.password.allow_registration`.
+
+### 8.2 Cookie + CSRF model
+
+Authenticated browser clients carry a `nagent_session` cookie
+holding a UUID v4. API clients can pass the same id via
+`Authorization: Bearer <session-id>`. State-changing browser
+requests (POST/PUT/PATCH/DELETE) must also send an
+`x-csrf-token` header (configurable via `auth.csrf_header`) whose
+value matches the per-session `csrf_token` (32 bytes of OS RNG,
+hex-encoded). Bearer requests skip the CSRF check.
+
+The cookie `Secure` flag is **auto-disabled on
+`http://localhost`/`http://127.0.0.1`** so the dev experience works
+out of the box; for every other origin the flag mirrors the URL
+scheme. Sessions are absolute (NIST SP 800-63B): `expires_at =
+now() + auth.session_ttl_days` and never extends on activity.
+
+### 8.3 What's not in the UI yet (PR2+)
+
+The HTTP routes above work but the JS hooks that call them are
+landed in a follow-up PR. Specifically:
+
+- The `Logged in as` pill in the header (currently empty) does not
+  yet fetch `/api/me` on boot; the SPA still treats every request
+  as anonymous.
+- The login panel (modal containing one button per enabled backend
+  + a password form for the local backend) is not yet rendered.
+- The `x-csrf-token` header is not yet injected into the
+  `$fetch` wrapper; PR2 adds it.
+- The `Authorization: Bearer <session-id>` path is only used by
+  `curl`/API clients in PR1; the SPA relies entirely on the
+  cookie jar.
+
+This is intentional — splitting the backend wiring from the
+frontend wiring keeps each PR reviewable.
+
+## 9. Out of scope (today)
 
 For clarity, these are **not** features of the current UI even if a
 reasonable reader might assume they are:
 
 - No light theme switcher.
 - No account / login flow — every setting is stored per-browser in
-  `localStorage`; there is no server-side user state.
+  `localStorage`; there is no server-side user state. (The backend
+  has landed in PR1 but the UI integration is staged — see §8.)
 - No multi-user chat: sessions are keyed by `localStorage` and do not
-  sync across devices.
+  sync across devices. (Same as above; the auth DB is ready, the
+  client-side login panel is staged for PR2.)
 - No streaming partial transcripts in the UI for the Transcript view:
   only `FinalTranscript` messages append a line; `PartialTranscript`
   tags are received but not surfaced.

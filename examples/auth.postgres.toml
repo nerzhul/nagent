@@ -1,0 +1,48 @@
+# Postgres auth store config — drop-in for
+# `stt-server --config examples/auth.postgres.toml`. Mirrors the
+# sqlite example but switches `[auth.db].backend = "postgres"`.
+# Use this when you have an existing Postgres server (e.g. shared
+# with the LLM proxy's metadata DB) and want all durable state on
+# one engine.
+
+# Server knob — same shape as the main example.
+[server]
+bind_addr = "0.0.0.0:8080"
+whisper_model_path = "/models/ggml-base.bin"
+
+# ---- Authentication (PR1) ----
+[auth]
+enabled = true
+backends = ["local", "oidc"]
+public_url = "https://nagent.example.com"  # public origin drives OIDC redirect + cookie Secure
+session_ttl_days = 14
+csrf_header = "x-csrf-token"
+
+[auth.db]
+backend = "postgres"
+url = "postgres://nagent:CHANGE_ME@db.internal/nagent?sslmode=require"
+# `url` is intentionally the production example; the actual
+# credentials should come from `NAGENT_AUTH_DB_URL` at runtime so
+# they do not land in version control.
+max_connections = 32
+
+[auth.password]
+argon2_memory_kib = 19456               # OWASP 2025 minimum
+argon2_iterations = 2
+argon2_parallelism = 1
+min_password_length = 12                # bump up for a production deployment
+allow_registration = false              # admin provisions accounts via the CLI
+
+[auth.oidc]
+auto_provision = true
+issuer = "https://keycloak.example.com/realms/nagent"
+client_id = "nagent"
+client_secret = ""                       # env: NAGENT_AUTH_OIDC_CLIENT_SECRET
+scopes = ["openid", "email", "profile"]
+required_groups = ["nagent-users"]       # empty = no restriction
+role_claim = "groups"
+
+# Passkey deliberately omitted — the deployment relies on OIDC
+# + the local password backend only. Add `[auth.passkey]` here +
+# to `[auth].backends` above when the operators want to enrol a
+# hardware key.

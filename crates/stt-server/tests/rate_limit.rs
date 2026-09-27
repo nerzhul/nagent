@@ -71,6 +71,7 @@ async fn start_test_server_with(
         },
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
+        auth: stt_server::config::AuthConfig::default(),
     });
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let (job_tx_inner, job_rx) = mpsc::channel::<InferenceJob>(16);

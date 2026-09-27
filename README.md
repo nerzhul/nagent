@@ -80,6 +80,7 @@ through the `make` targets and the Dockerfile `BACKEND` arg.
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
 | `stt-core/whisper-rs-hipblas`   | Enable the ROCm/HIP GPU backend (needs ROCm toolchain at build time).                   |
+| `stt-server/auth`                | Multi-user authentication (PR1). Pulls `sqlx` (sqlite + postgres), `argon2`, `openidconnect`, `webauthn-rs`. When off, the server keeps the pre-PR1 single-user trust boundary: no login routes, no `/api/me`, no `RequireAuth` layer. |
 
 The three GPU features are mutually exclusive — enabling more than one
 wastes build time and can fight over system libraries. The seven
@@ -142,6 +143,30 @@ without a default and is required.
 | `WIKIPEDIA_USER_AGENT`       | `nagent-wikipedia-agent/<version>`            | `wikipedia`    | Override the `User-Agent` header. Wikimedia rejects unidentified clients — keep this descriptive and add a contact URL. |
 | `DICTIONARY_TIMEOUT_MS`      | `5000`                                        | `dictionary`   | Per-request timeout in milliseconds.                                                                          |
 | `DICTIONARY_BASE_URL`        | `https://api.dictionaryapi.dev/api/v2`        | `dictionary`   | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
+| `NAGENT_AUTH_ENABLED`        | `false`                                       | Auth           | Master switch. When `false`, the server keeps the pre-PR1 single-user trust boundary (no `/api/me`, no `RequireAuth`, no login routes). |
+| `NAGENT_AUTH_BACKENDS`       | _(empty)_                                     | Auth           | Comma-separated subset of `local`, `oidc`, `passkey`. Each enabled backend exposes its own login route.       |
+| `NAGENT_AUTH_DB_BACKEND`     | _(empty)_                                     | Auth           | `"sqlite"` or `"postgres"`. Required when `auth.enabled = true`. The choice is runtime — both engines compile into the same binary. |
+| `NAGENT_AUTH_DB_URL`         | _(empty)_                                     | Auth           | Connection URL — e.g. `sqlite://./data/auth.db?mode=rwc` or `postgres://user:pwd@host/nagent`. Required when `auth.enabled = true`. |
+| `NAGENT_AUTH_DB_MAX_CONNECTIONS` | `16`                                      | Auth           | Maximum simultaneous DB connections. Clamped to ≥ 1.                                                          |
+| `NAGENT_AUTH_PUBLIC_URL`     | _(empty)_                                     | Auth           | Public origin used for OIDC/Passkey callback URLs + cookie `Secure` flag. E.g. `https://nagent.example.com`.   |
+| `NAGENT_AUTH_SESSION_TTL_DAYS` | `7`                                         | Auth           | Absolute session TTL (NIST SP 800-63B). Range `1..=90`. The session is created with `expires_at = now() + ttl` and is **never** extended by activity. |
+| `NAGENT_AUTH_CSRF_HEADER`    | `x-csrf-token`                               | Auth           | CSRF token header name. State-changing requests (POST/PUT/PATCH/DELETE) must echo the per-session token.     |
+| `NAGENT_AUTH_PASSWORD_ALLOW_REGISTRATION` | `true`                          | Auth / local   | When `true`, any logged-in user can POST to `/api/auth/password/register` to create a new local account.       |
+| `NAGENT_AUTH_PASSWORD_ARGON2_MEMORY_KIB` | `19456`                          | Auth / local   | Argon2id memory cost in KiB. Clamped to ≥ 19456 (OWASP 2025 minimum) so a careless operator cannot weaken the hash. |
+| `NAGENT_AUTH_PASSWORD_ARGON2_ITERATIONS` | `2`                             | Auth / local   | Argon2id time cost. Clamped to ≥ 1.                                                                          |
+| `NAGENT_AUTH_PASSWORD_ARGON2_PARALLELISM` | `1`                            | Auth / local   | Argon2id parallelism (lanes). Clamped to ≥ 1.                                                                |
+| `NAGENT_AUTH_PASSWORD_MIN_LENGTH` | `8`                                     | Auth / local   | Minimum password length accepted by `/api/auth/password/register`.                                            |
+| `NAGENT_AUTH_OIDC_AUTO_PROVISION` | `true`                                  | Auth / OIDC    | When `true`, an OIDC user logging in for the first time has a `users` row created automatically.               |
+| `NAGENT_AUTH_OIDC_ISSUER`     | _(empty)_                                     | Auth / OIDC    | OIDC issuer URL (e.g. `https://keycloak.example.com/realms/nagent`). Required when `oidc` is in `backends`.   |
+| `NAGENT_AUTH_OIDC_CLIENT_ID` | _(empty)_                                     | Auth / OIDC    | OIDC client id registered with the IdP.                                                                       |
+| `NAGENT_AUTH_OIDC_CLIENT_SECRET` | _(empty)_                                 | Auth / OIDC    | OIDC client secret. Prefer env-var injection over TOML to avoid leaking the secret in version control.       |
+| `NAGENT_AUTH_OIDC_SCOPES`    | `openid,email,profile`                       | Auth / OIDC    | Comma-separated OIDC scopes.                                                                                 |
+| `NAGENT_AUTH_OIDC_REQUIRED_GROUPS` | _(empty)_                              | Auth / OIDC    | Comma-separated IdP group allow-list; empty = no restriction.                                                 |
+| `NAGENT_AUTH_OIDC_ROLE_CLAIM` | `groups`                                    | Auth / OIDC    | IdP claim name to map onto the local `roles` list (forward-compat with PR2 RBAC).                            |
+| `NAGENT_AUTH_PASSKEY_SELF_REGISTRATION` | `true`                             | Auth / passkey | When `true`, any logged-in user can enrol a new passkey without an admin.                                      |
+| `NAGENT_AUTH_PASSKEY_RP_ID`  | _(empty)_                                     | Auth / passkey | WebAuthn relying party id (no scheme, no port — e.g. `nagent.example.com`). MUST match the browser's effective domain. |
+| `NAGENT_AUTH_PASSKEY_RP_NAME` | `nagent`                                    | Auth / passkey | Human-readable RP name shown by the authenticator.                                                            |
+| `NAGENT_AUTH_PASSKEY_ORIGINS` | _(empty)_                                   | Auth / passkey | Comma-separated allowed origins — each entry MUST include scheme + port (e.g. `https://nagent.example.com`). |
 | `RUST_LOG`                   | `info,stt_server=debug,stt_core=debug` (local); `info,stt_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
 
 Per-source-IP rate limiting applies at both layers: HTTP for the LLM proxy
@@ -188,6 +213,7 @@ for per-source-IP rate limits:
 | `[server.limits].*`               | `MAX_*`, `REQUIRED_*`       | WebSocket frame knobs.                         |
 | `[server.rate_limits].*`          | `STT_RATE_PER_MIN`, `LLM_*` | Per-IP buckets.                                |
 | `[llm].*`                         | `LLM_*`, `OLLAMA_*`         | OpenAI-compatible proxy.                       |
+| `[auth].*`                        | `NAGENT_AUTH_*`             | Multi-user authentication (see "Authentication" below). `[auth.db]` selects sqlite vs postgres at runtime. |
 
 The `[agents]` section is a general block for chat-agent settings: it
 carries the master switches (`enabled`, `llm_max_tool_rounds`) plus
@@ -227,6 +253,124 @@ Unknown sub-tables under `[agents]` (e.g. `[agents.web_fetxh]`) are
 rejected at load time. The five daily tools take small overrides
 (`unit_convert`, `wikipedia`, `dictionary`); `get_datetime`,
 `get_stock_quote`, and `calculate` need no configuration today.
+
+## Authentication
+
+PR1 introduces multi-user identity. The auth subsystem is gated
+behind the `stt-server/auth` cargo feature — when the feature is off
+the server keeps the pre-PR1 single-user trust boundary (no login
+routes, no `/api/me`, no `RequireAuth` layer). The build targets
+in `Makefile` do not enable it by default; opt in by passing
+`--features stt-server/auth` to `cargo build` or by adding
+`stt-server/auth` to the feature list of your custom build.
+
+### Backends
+
+Three independent backends can coexist on the same server. Each one
+exposes its own login route; the operator enables a subset via
+`[auth].backends`:
+
+| Backend   | Login route(s)                                      | Storage                  | Notes |
+| --------- | --------------------------------------------------- | ------------------------ | ----- |
+| `local`   | `POST /api/auth/login/password`                     | argon2id in `users.password_hash` | Argon2id with OWASP 2025 default parameters (m = 19 MiB, t = 2, p = 1). Passwords are never logged, never echoed back to the client. |
+| `oidc`    | `GET /api/auth/login/oidc/start` + `/callback`       | none (IdP is the source of truth) | PKCE + state persisted in the `pending_oidc_states` table (PR1 ref [ARB-A] decision: DB row, not signed cookie). Auto-provisioning is on by default — first login creates a `users` row keyed on the IdP's email claim. Set `auth.oidc.auto_provision = false` to reject unknown emails with `403`. |
+| `passkey` | `POST /api/auth/login/passkey/{start,finish}`       | WebAuthn credentials in `passkeys` | Discoverable credentials (no `userHandle` round-trip). `webauthn-rs` 0.6 pre-release with `conditional-ui` + `resident-key-support` features. The registration ceremony is gated by `RequireAuth` and `auth.passkey.self_registration` (default `true`). |
+
+The backends share one DB-backed session table (`sessions`) and one
+user table (`users`). A user created via the local backend can log
+in with a passkey later (and vice versa) — the `provider` column on
+`users` is a label, not a unique constraint.
+
+### Storage engine
+
+`auth.db.backend` chooses the storage engine **at runtime** — the
+same binary compiles both, the operator picks at boot. The
+`sqlx::migrate!` macro applies the embedded `migrations/0001_init.sql`
+on first start (idempotent; sqlx tracks applied versions in its
+own `_sqlx_migrations` table).
+
+| Backend    | Connection URL example                                            | Notes |
+| ---------- | ----------------------------------------------------------------- | ----- |
+| `sqlite`   | `sqlite://./data/auth.db?mode=rwc`                                | Single binary, no external service. PR1 enables `WAL` journal mode + `foreign_keys = ON` + a 5 s busy timeout. The data directory (`./data/`) must exist and be writable by the server process. |
+| `postgres` | `postgres://nagent:pwd@db.internal/nagent`                        | Standard Postgres 14+. The schema uses `TEXT PRIMARY KEY` for UUIDs (not the native `uuid` type) so the migrations stay portable across engines. |
+
+`PRAGMA foreign_keys = ON` is set on every sqlite connection so the
+`ON DELETE CASCADE` clauses on `passkeys` / `sessions` actually
+fire (sqlite ships with FK enforcement off by default).
+
+### Cookie + CSRF model
+
+Authenticated browser clients carry a `nagent_session` cookie
+holding the session id (a UUID v4). API clients can pass the same id
+via `Authorization: Bearer <session-id>`. State-changing browser
+requests (POST / PUT / PATCH / DELETE) must also send a per-session
+CSRF token via the `x-csrf-token` header (configurable via
+`auth.csrf_header`); bearer requests skip the CSRF check because
+they cannot be tricked into cross-site submissions. CSRF tokens are
+32 random bytes hex-encoded, generated server-side at session
+creation, and never leave the server otherwise.
+
+The cookie `Secure` flag is **auto-disabled on `http://localhost`**
+(`127.0.0.1` too) so a local dev setup does not silently drop
+cookies. For every other URL the `Secure` flag mirrors the scheme
+(an `https://` public URL gets `Secure = true`; `http://`
+anywhere gets `Secure = false`).
+
+Sessions are **absolute** (NIST SP 800-63B pattern): `expires_at` is
+set to `now() + auth.session_ttl_days` at login and is never
+extended by activity. The default TTL is 7 days, clamped to the
+documented range `1..=90`. The `last_seen_at` column is debug-only
+and does not feed back into the expiry calculation.
+
+### Login rate-limit
+
+The local backend counts login attempts per `(email, ip)` pair with
+a 5-attempts / 15-min budget (progressive, in-process via `DashMap`).
+Loopback IPs bypass. On exhaustion the server returns `429 Too Many
+Requests` with a `Retry-After` header.
+
+### Bootstrap walkthrough
+
+A fresh install starts, finds an empty `users` table, and serves
+the login panel — but every login attempt fails because no user
+exists yet. The first user must be created **out-of-band** via the
+`stt-server auth create-admin` CLI subcommand:
+
+```bash
+# SQLite, default location. The CLI opens the pool, runs the
+# migration, and inserts the row — the server does NOT need to be
+# running. It refuses (without --force) when data/server.pid
+# points at a live process.
+stt-server auth create-admin \
+  --email admin@example.com \
+  --from-stdin           # password read from stdin to avoid argv / shell history
+```
+
+The CLI returns the new `user_id` on stdout and exits 0. The
+operator then logs in via the browser, registers a passkey, and
+(optionally) wires up OIDC so the rest of the team can log in via
+their IdP. Three additional CLI subcommands round out the operator
+surface:
+
+```bash
+stt-server auth list-users [--provider local|oidc|passkey]   # tab-separated
+stt-server auth delete-user --email <email> [--yes]          # refuses to remove the last local user when auth is enabled
+```
+
+The CLI reads the same `[auth.db]` configuration + env vars the
+server uses, so there is no second source of truth. Boot the server
+once to apply the schema; the CLI can run before or after.
+
+### Migration status
+
+PR1 keeps cryptographic signature verification of the OIDC
+`id_token` out of scope (the JWT is parsed and the standard claims
+`iss` / `aud` / `exp` / `nonce` are checked, but the `RS256` /
+`PS256` signature is not yet verified against the IdP's JWKS). This
+is acceptable for HTTPS deployments where the transport handles
+peer authentication; deployments behind a hostile network should
+hold off on OIDC until PR2 adds the JWKS fetch. The implementation
+note lives in `crates/stt-server/src/auth/oidc.rs`.
 
 ### Kubernetes overlays
 

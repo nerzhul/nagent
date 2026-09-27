@@ -55,6 +55,7 @@ fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
         },
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
+        auth: stt_server::config::AuthConfig::default(),
     });
     Arc::new(AppState {
         backend,

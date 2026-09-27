@@ -103,7 +103,7 @@
 # base_url = "https://api.dictionaryapi.dev/api/v2"
 
 # ---------------------------------------------------------------------------
-# Local text-to-speech (Piper ONNX)
+# Text-to-speech (Piper ONNX, local)
 # ---------------------------------------------------------------------------
 # All voices are CC-BY-NC-SA — see README "Text-to-Speech (Piper)" section
 # for attribution. Download voices with scripts/download-piper-voices.sh.
@@ -122,3 +122,49 @@
 # noise_scale = 0.667                          # Piper upstream default; controls variability
 # noise_w = 0.8                                # Piper upstream default; controls phoneme variability
 # max_input_chars = 2000                       # hard cap per /v1/audio/speech request body
+
+# ---------------------------------------------------------------------------
+# Authentication & user identity (PR1)
+# ---------------------------------------------------------------------------
+# When `enabled = false` (the default) the server keeps the pre-PR1 single
+# user trust boundary: no login routes, no /api/me, no RequireAuth layer.
+# Turning this on REQUIRES [auth.db] to point at a reachable SQL store
+# (sqlite or postgres); the server refuses to boot otherwise. See README
+# "Authentication" for the bootstrap walkthrough.
+#
+# Note: this section requires the `stt-server/auth` cargo feature —
+# a build without `--features stt-server/auth` ignores it entirely.
+#
+# [auth]
+# enabled = false
+# backends = ["local"]                       # subset of: local, oidc, passkey (multiple allowed)
+# public_url = "https://nagent.example.com"  # scheme + host (no trailing slash); drives cookie Secure flag
+# session_ttl_days = 7                       # absolute TTL, NOT sliding; range 1..=90
+# csrf_header = "x-csrf-token"
+#
+# [auth.db]
+# backend = "sqlite"                         # "sqlite" | "postgres"
+# url = "sqlite://./data/auth.db?mode=rwc"   # sqlite path or postgres:// URL
+# max_connections = 16
+#
+# [auth.password]
+# argon2_memory_kib = 19456                  # OWASP 2025 minimum; clamped to this value
+# argon2_iterations = 2
+# argon2_parallelism = 1
+# min_password_length = 8
+# allow_registration = true                  # logged-in users can create accounts
+#
+# [auth.oidc]
+# auto_provision = true                       # create users row on first OIDC login
+# issuer = "https://keycloak.example.com/realms/nagent"
+# client_id = "nagent"
+# client_secret = ""                         # env: NAGENT_AUTH_OIDC_CLIENT_SECRET (avoid TOML for secrets)
+# scopes = ["openid", "email", "profile"]
+# required_groups = []                        # IdP group allow-list; empty = no restriction
+# role_claim = "groups"
+#
+# [auth.passkey]
+# self_registration = true                    # any logged-in user can enrol a passkey
+# rp_id = "nagent.example.com"                # MUST match the browser's effective domain (no scheme, no port)
+# rp_name = "nagent"
+# origins = ["https://nagent.example.com"]    # scheme + port; first entry must match public_url's origin

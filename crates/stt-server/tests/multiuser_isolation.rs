@@ -68,6 +68,7 @@ async fn start_test_server() -> (String, SessionMap) {
         },
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
+        auth: stt_server::config::AuthConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());

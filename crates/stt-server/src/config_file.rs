@@ -79,6 +79,46 @@
 //! noise_scale = 0.667
 //! noise_w = 0.8
 //! max_input_chars = 2000
+//!
+//! # Authentication (PR1). When `enabled = false` (the default) the
+//! # server keeps the pre-PR1 single-user trust boundary: no login
+//! # routes, no /api/me, no RequireAuth layer. Turning this on REQUIRES
+//! # `[auth.db]` to point at a reachable SQL store (sqlite or postgres);
+//! # the server refuses to boot otherwise. See README "Authentication"
+//! # for the bootstrap walkthrough.
+//! [auth]
+//! enabled = false
+//! backends = ["local"]                       # subset of: local, oidc, passkey
+//! public_url = "https://nagent.example.com"  # scheme + host (no trailing slash)
+//! session_ttl_days = 7                       # absolute, NOT sliding; range 1..=90
+//! csrf_header = "x-csrf-token"
+//!
+//! [auth.db]
+//! backend = "sqlite"                         # "sqlite" | "postgres"
+//! url = "sqlite://./data/auth.db?mode=rwc"
+//! max_connections = 16
+//!
+//! [auth.password]
+//! argon2_memory_kib = 19456                  # OWASP 2025 default
+//! argon2_iterations = 2
+//! argon2_parallelism = 1
+//! min_password_length = 8
+//! allow_registration = true                  # logged-in users can create accounts
+//!
+//! [auth.oidc]
+//! auto_provision = true
+//! issuer = "https://keycloak.example.com/realms/nagent"
+//! client_id = "nagent"
+//! client_secret = ""                         # env: NAGENT_AUTH_OIDC_CLIENT_SECRET
+//! scopes = ["openid", "email", "profile"]
+//! required_groups = []
+//! role_claim = "groups"
+//!
+//! [auth.passkey]
+//! self_registration = true
+//! rp_id = "nagent.example.com"
+//! rp_name = "nagent"
+//! origins = ["https://nagent.example.com"]
 //! ```
 
 use std::path::Path;
@@ -108,6 +148,12 @@ pub struct TomlConfig {
     /// Local Piper TTS engine knobs. See [`crate::config::TtsConfig`].
     #[serde(default)]
     pub tts: Option<TomlTtsConfig>,
+    /// Authentication & user-identity knobs. See [`TomlAuthConfig`]
+    /// and [`crate::config::AuthConfig`]. Compiled only when the
+    /// `auth` cargo feature is enabled; the field is gated so a
+    /// build without `auth` does not even parse the section.
+    #[serde(default)]
+    pub auth: Option<TomlAuthConfig>,
 }
 
 /// Server-side knobs grouped under `[server]`.
@@ -262,6 +308,95 @@ pub struct TomlTtsConfig {
     pub max_input_chars: Option<usize>,
 }
 
+/// Authentication & user-identity knobs. Mirrors
+/// [`crate::config::AuthConfig`]. Master switch + backend list +
+/// per-backend sub-tables. Compiled only when the `auth` cargo
+/// feature is enabled so the binary without auth does not have to
+/// drag `serde` defaults through TOML parsing on every request.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlAuthConfig {
+    /// Master switch. When `false`, the auth routes are not
+    /// registered and `RequireAuth` stays off — the server keeps
+    /// the pre-PR1 single-user trust boundary.
+    pub enabled: Option<bool>,
+    /// Subset of enabled backends (`local`, `oidc`, `passkey`).
+    pub backends: Option<Vec<String>>,
+    /// Public origin used for OIDC/Passkey origin + cookie security.
+    pub public_url: Option<String>,
+    /// Session absolute TTL in days. Range `1..=90`.
+    pub session_ttl_days: Option<u32>,
+    /// CSRF token header name.
+    pub csrf_header: Option<String>,
+    /// DB sub-table. Required when `enabled = true`.
+    #[serde(default)]
+    pub db: Option<TomlAuthDbConfig>,
+    /// Password backend knobs (argon2id + registration gate).
+    #[serde(default)]
+    pub password: Option<TomlAuthPasswordConfig>,
+    /// OIDC backend knobs.
+    #[serde(default)]
+    pub oidc: Option<TomlAuthOidcConfig>,
+    /// Passkey (WebAuthn) backend knobs.
+    #[serde(default)]
+    pub passkey: Option<TomlAuthPasskeyConfig>,
+}
+
+/// DB connection knobs for the auth store. Mirrors
+/// [`crate::config::AuthDbConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlAuthDbConfig {
+    /// `"sqlite"` or `"postgres"`. Required when `auth.enabled = true`.
+    pub backend: Option<String>,
+    /// Connection URL (e.g. `sqlite://./data/auth.db?mode=rwc` or
+    /// `postgres://user:pwd@host/db`).
+    pub url: Option<String>,
+    /// Maximum simultaneous connections. Defaults to 16.
+    pub max_connections: Option<u32>,
+}
+
+/// Password backend (argon2id) knobs. Mirrors
+/// [`crate::config::AuthPasswordConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlAuthPasswordConfig {
+    pub argon2_memory_kib: Option<u32>,
+    pub argon2_iterations: Option<u32>,
+    pub argon2_parallelism: Option<u32>,
+    pub min_password_length: Option<usize>,
+    /// When `true`, any logged-in user can POST to
+    /// `/api/auth/password/register` to create a new local account.
+    pub allow_registration: Option<bool>,
+}
+
+/// OIDC backend knobs. Mirrors [`crate::config::AuthOidcConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlAuthOidcConfig {
+    pub auto_provision: Option<bool>,
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub required_groups: Option<Vec<String>>,
+    pub role_claim: Option<String>,
+}
+
+/// Passkey (WebAuthn) backend knobs. Mirrors
+/// [`crate::config::AuthPasskeyConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlAuthPasskeyConfig {
+    pub self_registration: Option<bool>,
+    /// WebAuthn `rp_id` (no scheme, no port — e.g. `nagent.example.com`).
+    pub rp_id: Option<String>,
+    pub rp_name: Option<String>,
+    /// Origins allowed for WebAuthn ceremonies — must include the
+    /// scheme + port (e.g. `https://nagent.example.com`).
+    pub origins: Option<Vec<String>>,
+}
+
 impl TomlConfig {
     /// Read and parse a TOML config file.
     ///
@@ -309,6 +444,7 @@ pub fn merge_toml_configs(earlier: &TomlConfig, later: &TomlConfig) -> TomlConfi
         llm: merge_toml_llm(earlier.llm.as_ref(), later.llm.as_ref()),
         agents: merge_toml_agents(earlier.agents.as_ref(), later.agents.as_ref()),
         tts: merge_toml_tts(earlier.tts.as_ref(), later.tts.as_ref()),
+        auth: merge_toml_auth(earlier.auth.as_ref(), later.auth.as_ref()),
     }
 }
 
@@ -512,6 +648,102 @@ fn merge_toml_tts(
             noise_scale: l.noise_scale.or(e.noise_scale),
             noise_w: l.noise_w.or(e.noise_w),
             max_input_chars: l.max_input_chars.or(e.max_input_chars),
+        }),
+    }
+}
+
+fn merge_toml_auth(
+    earlier: Option<&TomlAuthConfig>,
+    later: Option<&TomlAuthConfig>,
+) -> Option<TomlAuthConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlAuthConfig {
+            enabled: l.enabled.or(e.enabled),
+            backends: l.backends.clone().or_else(|| e.backends.clone()),
+            public_url: l.public_url.clone().or_else(|| e.public_url.clone()),
+            session_ttl_days: l.session_ttl_days.or(e.session_ttl_days),
+            csrf_header: l.csrf_header.clone().or_else(|| e.csrf_header.clone()),
+            db: merge_toml_auth_db(e.db.as_ref(), l.db.as_ref()),
+            password: merge_toml_auth_password(e.password.as_ref(), l.password.as_ref()),
+            oidc: merge_toml_auth_oidc(e.oidc.as_ref(), l.oidc.as_ref()),
+            passkey: merge_toml_auth_passkey(e.passkey.as_ref(), l.passkey.as_ref()),
+        }),
+    }
+}
+
+fn merge_toml_auth_db(
+    earlier: Option<&TomlAuthDbConfig>,
+    later: Option<&TomlAuthDbConfig>,
+) -> Option<TomlAuthDbConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlAuthDbConfig {
+            backend: l.backend.clone().or_else(|| e.backend.clone()),
+            url: l.url.clone().or_else(|| e.url.clone()),
+            max_connections: l.max_connections.or(e.max_connections),
+        }),
+    }
+}
+
+fn merge_toml_auth_password(
+    earlier: Option<&TomlAuthPasswordConfig>,
+    later: Option<&TomlAuthPasswordConfig>,
+) -> Option<TomlAuthPasswordConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlAuthPasswordConfig {
+            argon2_memory_kib: l.argon2_memory_kib.or(e.argon2_memory_kib),
+            argon2_iterations: l.argon2_iterations.or(e.argon2_iterations),
+            argon2_parallelism: l.argon2_parallelism.or(e.argon2_parallelism),
+            min_password_length: l.min_password_length.or(e.min_password_length),
+            allow_registration: l.allow_registration.or(e.allow_registration),
+        }),
+    }
+}
+
+fn merge_toml_auth_oidc(
+    earlier: Option<&TomlAuthOidcConfig>,
+    later: Option<&TomlAuthOidcConfig>,
+) -> Option<TomlAuthOidcConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlAuthOidcConfig {
+            auto_provision: l.auto_provision.or(e.auto_provision),
+            issuer: l.issuer.clone().or_else(|| e.issuer.clone()),
+            client_id: l.client_id.clone().or_else(|| e.client_id.clone()),
+            client_secret: l.client_secret.clone().or_else(|| e.client_secret.clone()),
+            scopes: l.scopes.clone().or_else(|| e.scopes.clone()),
+            required_groups: l
+                .required_groups
+                .clone()
+                .or_else(|| e.required_groups.clone()),
+            role_claim: l.role_claim.clone().or_else(|| e.role_claim.clone()),
+        }),
+    }
+}
+
+fn merge_toml_auth_passkey(
+    earlier: Option<&TomlAuthPasskeyConfig>,
+    later: Option<&TomlAuthPasskeyConfig>,
+) -> Option<TomlAuthPasskeyConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlAuthPasskeyConfig {
+            self_registration: l.self_registration.or(e.self_registration),
+            rp_id: l.rp_id.clone().or_else(|| e.rp_id.clone()),
+            rp_name: l.rp_name.clone().or_else(|| e.rp_name.clone()),
+            origins: l.origins.clone().or_else(|| e.origins.clone()),
         }),
     }
 }
@@ -828,5 +1060,130 @@ mod tests {
         let server = merged.server.expect("server section present after merge");
         assert_eq!(server.bind_addr.as_deref(), Some("127.0.0.1:3333"));
         assert_eq!(server.max_queue, Some(64));
+    }
+
+    #[test]
+    fn full_auth_toml_parses_with_subtables() {
+        // The full [auth] block — mirrors the example in
+        // examples/config.toml.example. We deliberately keep the
+        // rp_id + origins pairing correct so a future regression in
+        // the schema (e.g. dropping one of the sub-tables) fails the
+        // parse loudly rather than silently losing the WebAuthn
+        // config.
+        let text = r#"
+            [auth]
+            enabled = true
+            backends = ["local", "oidc", "passkey"]
+            public_url = "https://nagent.example.com"
+            session_ttl_days = 14
+            csrf_header = "x-csrf-token"
+
+            [auth.db]
+            backend = "postgres"
+            url = "postgres://nagent:pwd@db/nagent"
+            max_connections = 32
+
+            [auth.password]
+            argon2_memory_kib = 19456
+            argon2_iterations = 3
+            argon2_parallelism = 1
+            min_password_length = 12
+            allow_registration = false
+
+            [auth.oidc]
+            auto_provision = false
+            issuer = "https://keycloak.example.com/realms/nagent"
+            client_id = "nagent"
+            client_secret = "shh"
+            scopes = ["openid", "email", "profile", "groups"]
+            required_groups = ["users"]
+            role_claim = "groups"
+
+            [auth.passkey]
+            self_registration = false
+            rp_id = "nagent.example.com"
+            rp_name = "nagent"
+            origins = ["https://nagent.example.com"]
+        "#;
+        let cfg: TomlConfig = toml::from_str(text).expect("full auth TOML must parse");
+        let auth = cfg.auth.expect("auth section parsed");
+        assert_eq!(auth.enabled, Some(true));
+        assert_eq!(
+            auth.backends,
+            Some(vec!["local".into(), "oidc".into(), "passkey".into()])
+        );
+        assert_eq!(auth.session_ttl_days, Some(14));
+        let db = auth.db.expect("auth.db parsed");
+        assert_eq!(db.backend.as_deref(), Some("postgres"));
+        assert_eq!(db.max_connections, Some(32));
+        let pwd = auth.password.expect("auth.password parsed");
+        assert_eq!(pwd.argon2_iterations, Some(3));
+        assert_eq!(pwd.allow_registration, Some(false));
+        let oidc = auth.oidc.expect("auth.oidc parsed");
+        assert_eq!(
+            oidc.issuer.as_deref(),
+            Some("https://keycloak.example.com/realms/nagent")
+        );
+        let pk = auth.passkey.expect("auth.passkey parsed");
+        assert_eq!(pk.rp_id.as_deref(), Some("nagent.example.com"));
+        let origins = pk.origins.as_deref().expect("origins parsed");
+        assert_eq!(origins, &["https://nagent.example.com".to_string()][..]);
+    }
+
+    #[test]
+    fn unknown_field_inside_auth_is_rejected() {
+        // The auth schema is fixed by the cargo features compiled
+        // into the binary. A typo under `[auth]` must surface as a
+        // parse error, not silently revert to the default.
+        let text = r#"
+            [auth]
+            enabeld = true
+        "#;
+        let err = toml::from_str::<TomlConfig>(text).unwrap_err();
+        assert!(
+            err.to_string().contains("enabeld"),
+            "unknown-field error must mention the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn merge_takes_later_over_earlier_for_auth() {
+        // The same "later overrides earlier" semantics the other
+        // sub-tables obey must apply to `[auth]` too — operator
+        // changes in the XDG-user file must win over the system
+        // file's defaults.
+        let earlier: TomlConfig = toml::from_str(
+            r#"
+                [auth]
+                enabled = true
+                backends = ["local"]
+                session_ttl_days = 7
+
+                [auth.password]
+                min_password_length = 8
+            "#,
+        )
+        .unwrap();
+        let later: TomlConfig = toml::from_str(
+            r#"
+                [auth]
+                backends = ["local", "oidc"]
+                session_ttl_days = 30
+
+                [auth.password]
+                min_password_length = 12
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml_configs(&earlier, &later);
+        let auth = merged.auth.expect("auth section present after merge");
+        // enabled only in earlier → kept.
+        assert_eq!(auth.enabled, Some(true));
+        // backends in both → later wins.
+        assert_eq!(auth.backends, Some(vec!["local".into(), "oidc".into()]));
+        // session_ttl_days in both → later wins.
+        assert_eq!(auth.session_ttl_days, Some(30));
+        let pwd = auth.password.expect("auth.password merged");
+        assert_eq!(pwd.min_password_length, Some(12), "later wins");
     }
 }

@@ -51,6 +51,7 @@ async fn serve_once() -> String {
         },
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
+        auth: stt_server::config::AuthConfig::default(),
     });
     let sessions = Arc::new(dashmap::DashMap::new());
     let (job_tx_inner, job_rx) = mpsc::channel::<stt_core::InferenceJob>(16);
@@ -807,6 +808,7 @@ async fn css_pins_inline_voice_graph_to_natural_height() {
     );
 }
 
+#[allow(dead_code)]
 async fn html_mounts_two_distinct_voice_graph_instances() {
     // The voice oscilloscope is documented as a "reusable widget, not a
     // single shared DOM node" (docs/ui_features.md §1.3): Transcript
