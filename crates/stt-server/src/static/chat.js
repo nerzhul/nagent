@@ -1060,9 +1060,17 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
     // result, so collapse the wrapper now rather than waiting for
     // stream end: the `<details>` open state would otherwise show
     // the error body until the assistant turn finalises, which can
-    // be much later for multi-tool replies.
+    // be much later for multi-tool replies. We also unhide the
+    // assistant's prose at this point — if the LLM had already
+    // streamed a preamble before the tool call, the user wants to
+    // see it now (the LLM may also stream an error-acknowledging
+    // reply that the prose placeholder is hiding otherwise).
     if (!ok && details) {
       details.open = false;
+      const assistantEl = findAssistantBubble(details);
+      if (assistantEl?.classList?.contains("chat-message--tool-pending")) {
+        setAssistantToolPending(assistantEl, false);
+      }
     }
     // `get_weather` carries a structured JSON payload already — build
     // the compact card out of it. Wrapped in try/catch so a malformed
@@ -1949,6 +1957,18 @@ async function streamReply(sessionId, userText) {
       if (tts) tts.stopAll();
     }
   } finally {
+    // Always clear the `chat-message--tool-pending` class and its
+    // placeholder at stream end so the assistant's prose is visible.
+    // The class was added by `appendToolBubble` to hide the prose
+    // while a tool runs (so the placeholder + <details> trace
+    // dominated); without this clearing, the prose stays hidden
+    // forever — the LLM might stream a perfect answer (audible via
+    // TTS) but the user never sees it. The <details> wrapper is
+    // now the visible tool indicator; we don't need to also hide
+    // the prose.
+    if (assistantEl?.classList?.contains("chat-message--tool-pending")) {
+      setAssistantToolPending(assistantEl, false);
+    }
     // Drop the streaming class so the per-bubble replay button
     // (hidden via CSS while the class is present) becomes visible
     // now that the reply is fully rendered. The user only sees the
