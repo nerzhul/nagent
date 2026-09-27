@@ -308,7 +308,9 @@ LLM-specific knobs are:
 | `LLM_ENABLED`                | `false`                  | Master switch; when `false` the `/v1/*` routes are not registered |
 | `OLLAMA_BASE_URL`            | `http://localhost:11434` | Base URL of the OpenAI-compatible upstream (Ollama by default)    |
 | `OLLAMA_MODEL`               | `llama3.1`               | Default model for `/v1/chat/completions` when the client omits it |
-| `OLLAMA_API_KEY`             | _(unset)_                | Optional bearer token forwarded as `Authorization: Bearer …`      |
+| `OLLAMA_API_KEY`             | _(unset)_                | Optional bearer token forwarded as `Authorization: Bearer …` on outbound upstream requests. Unrelated to `LLM_API_KEY` below. |
+| `LLM_API_KEY`                | _(unset)_                | Optional bearer token required on inbound `/v1/*` requests when `LLM_AUTH_MODE=bearer`. Has no effect in `forward` / `disabled` modes. |
+| `LLM_AUTH_MODE`              | `forward`                | Inbound auth gate for `/v1/*` requests. `bearer` requires `Authorization: Bearer <LLM_API_KEY>` (returns `401` otherwise). `forward` keeps the historical behaviour (no inbound inspection). `disabled` is the explicit opt-out — `main` logs a startup warning when the server binds a non-loopback address. |
 | `LLM_REQUEST_TIMEOUT_SECS`   | `120`                    | Per-chunk idle timeout on the upstream stream                     |
 | `LLM_CORS_ALLOW_ORIGINS`     | _(empty)_                | Comma-separated list of origins allowed to call `/v1/*` cross-origin (empty = same-origin only) |
 | `LLM_SYSTEM_PROMPT`          | _(unset)_                | Optional default system prompt prepended to every `/v1/chat/completions` request as `messages[0]` (the browser's "Additional instructions" textarea is appended after it). Empty / whitespace-only values are treated as unset. |
@@ -536,18 +538,25 @@ No code change required.
 
 ### Security
 
-The proxy relies on `stt-server` binding to localhost and Ollama being
-on the same host; there is no auth on the chat endpoint. Do not expose
-the server to the network without adding a reverse proxy with
-authentication in front of it. The `web_fetch` agent defaults to
-**blocking all public internet access** — only loopback and RFC1918
-ranges are reachable out of the box — so even a malicious prompt cannot
-trick the LLM into exfiltrating data to an attacker-controlled host
-unless an operator has explicitly opted in via
-`WEB_FETCH_ALLOW_PUBLIC=true` or `WEB_FETCH_ALLOWLIST`. The daily
-agents (`get_datetime`, `get_weather`, `get_stock_quote`) reach their
-fixed public endpoints (WeatherAPI.com, Stooq, and `chrono-tz`'s
-bundled IANA data); they expose no SSRF surface.
+The proxy binds to localhost by default and Ollama is expected to be
+on the same host. Out of the box, `LLM_AUTH_MODE=forward` keeps the
+historical behaviour (no inbound inspection) so an existing
+deployment behind a reverse proxy with authentication keeps working
+unmodified. To make the proxy itself the auth gate, switch to
+`LLM_AUTH_MODE=bearer` and set `LLM_API_KEY=<token>`; every `/v1/*`
+request then needs to carry `Authorization: Bearer <token>` and a
+missing / wrong key gets a `401` with a `WWW-Authenticate` hint. A
+boot-time warning is logged when `LLM_AUTH_MODE=disabled` is paired
+with a non-loopback bind, or when `LLM_AUTH_MODE=bearer` is enabled
+without `LLM_API_KEY`. The `web_fetch` agent defaults to **blocking
+all public internet access** — only loopback and RFC1918 ranges are
+reachable out of the box — so even a malicious prompt cannot trick
+the LLM into exfiltrating data to an attacker-controlled host unless
+an operator has explicitly opted in via `WEB_FETCH_ALLOW_PUBLIC=true`
+or `WEB_FETCH_ALLOWLIST`. The daily agents (`get_datetime`,
+`get_weather`, `get_stock_quote`) reach their fixed public endpoints
+(WeatherAPI.com, Stooq, and `chrono-tz`'s bundled IANA data); they
+expose no SSRF surface.
 
 ### Smoke test
 

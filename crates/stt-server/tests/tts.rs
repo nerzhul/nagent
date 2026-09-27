@@ -20,7 +20,7 @@ use dashmap::DashMap;
 use stt_core::{InferenceJob, MockBackend, PoolDispatch, WhisperBackend};
 use stt_server::{
     build_router,
-    config::{LlmConfig, RateLimitConfig},
+    config::{LlmAuthMode, LlmConfig, RateLimitConfig},
     rate_limit::{RateLimitPolicy, RateLimiter},
     session::SessionMap,
     tts, AppState, Config as ServerConfig,
@@ -46,6 +46,8 @@ fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
             base_url: "http://localhost:11434".into(),
             default_model: "llama3.1".into(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: LlmAuthMode::default(),
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,

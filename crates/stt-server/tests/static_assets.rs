@@ -16,7 +16,7 @@ use std::time::Duration;
 use stt_core::{MockBackend, PoolDispatch};
 use stt_server::{
     build_router,
-    config::RateLimitConfig,
+    config::{LlmAuthMode, RateLimitConfig},
     rate_limit::{RateLimitPolicy, RateLimiter},
     AppState, Config as ServerConfig,
 };
@@ -42,6 +42,8 @@ async fn serve_once() -> String {
             base_url: "http://localhost:11434".into(),
             default_model: "llama3.1".into(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: LlmAuthMode::default(),
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,
@@ -994,5 +996,186 @@ async fn chat_js_preserves_inline_voice_graph_across_history_rehydrate() {
     assert!(
         chat.contains("ensureInlineVoiceGraphAtEnd()"),
         "chat.js does not call `ensureInlineVoiceGraphAtEnd()` anywhere. Without this, every new bubble pushes the inline voice-graph above the bottom of the conversation and sticky positioning stops matching the viewport bottom."
+    );
+}
+
+// ---- Transcript export (P0 — Export SRT / VTT / JSON) -----------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn app_js_exposes_srt_vtt_json_builders() {
+    // The export dropdown is wired to four pure functions inside
+    // `app.js`: `buildSrt`, `buildVtt`, `buildJson`, `buildTxt`. A
+    // future refactor that drops one of them would silently break
+    // the matching menu item (the user clicks and nothing happens).
+    // Substring-level guard against that.
+    let base = serve_once().await;
+    let app = reqwest::get(format!("{base}/static/app.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        app.contains("function buildSrt("),
+        "app.js is missing `buildSrt()`. The SubRip export will produce an empty file."
+    );
+    assert!(
+        app.contains("function buildVtt("),
+        "app.js is missing `buildVtt()`. The WebVTT export will produce an empty file."
+    );
+    assert!(
+        app.contains("function buildJson("),
+        "app.js is missing `buildJson()`. The structured export will produce an empty file."
+    );
+    assert!(
+        app.contains("function buildTxt("),
+        "app.js is missing `buildTxt()`. The legacy plain-text export stops working."
+    );
+    // SRT/VTT must format timestamps with the millisecond separator
+    // the spec requires. Both functions delegate to a single
+    // `formatSrtTimestamp` helper that swaps the comma for a dot in
+    // VTT; pin both halves of that contract so a future copy/paste
+    // refactor does not regress them.
+    assert!(
+        app.contains("WEBVTT"),
+        "buildVtt() no longer emits the `WEBVTT` magic header required by the WebVTT spec."
+    );
+    assert!(
+        app.contains(".replace(\",\", \".\")"),
+        "formatVttTimestamp is missing the comma→dot swap that differentiates SRT from WebVTT timestamps."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_html_wires_download_dropdown_to_exporters() {
+    // The four export formats are listed in the `<details>` dropdown
+    // by `data-format` attribute; `app.js` reads them back via
+    // `[data-format]`. A refactor that uses a different selector
+    // (e.g. `<button>` + JSON) would break the click handler. The
+    // index must mention all four formats so every menu entry maps
+    // to a real builder.
+    let base = serve_once().await;
+    let html = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    for fmt in ["txt", "srt", "vtt", "json"] {
+        assert!(
+            html.contains(&format!("data-format=\"{fmt}\"")),
+            "index.html is missing a `data-format=\"{fmt}\"` menu entry. The download dropdown will not offer this format."
+        );
+    }
+    assert!(
+        html.contains("id=\"download-menu\""),
+        "index.html is missing `id=\"download-menu\"`. The dropdown wrapper cannot be enabled/disabled by app.js."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audio_js_passes_segments_to_on_final_transcript() {
+    // `app.js` derives SRT/VTT timing from the per-chunk `segments[]`
+    // carried in each `FinalTranscript`. If `audio.js` ever stops
+    // surfacing that array to the callback (e.g. someone "cleans up"
+    // the unused 4th argument), every caption export becomes empty.
+    // Substring-level guard against that.
+    let base = serve_once().await;
+    let audio = reqwest::get(format!("{base}/static/audio.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        audio.contains("onFinalTranscript?.(p.text, p.lang, latencyMs, p.segments)"),
+        "audio.js no longer forwards `p.segments` to `onFinalTranscript`. The SRT/VTT/JSON exporters will produce empty files."
+    );
+}
+
+// ---- Keyboard shortcuts surface (P1) ----------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_html_mounts_shortcuts_modal() {
+    // The `?` help modal lives at the bottom of `index.html`. It must
+    // be present, hidden by default (`hidden` attribute), and expose
+    // `role="dialog"` so screen readers announce it. The static
+    // markup is the only place we keep the user-facing list — it has
+    // to mirror the wiring in `shortcuts.js`, hence the paired
+    // substring assertions.
+    let base = serve_once().await;
+    let html = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        html.contains("id=\"shortcuts-modal\""),
+        "index.html is missing the `#shortcuts-modal` dialog wrapper. The `?` shortcut has no surface to open."
+    );
+    assert!(
+        html.contains("role=\"dialog\""),
+        "index.html help modal is missing `role=\"dialog\"`. Screen readers will not announce it as a dialog."
+    );
+    // Every shortcut documented in `shortcuts.js` must appear as a
+    // legend entry so the modal stays in sync with the actual
+    // bindings. Pinning the marker strings rather than the wording
+    // keeps the test stable through copy tweaks.
+    for marker in [
+        "Toggle recording",
+        "Toggle voice recording",
+        "Stop an in-flight",
+        "Export the current transcript",
+    ] {
+        assert!(
+            html.contains(marker),
+            "index.html help modal is missing the `{marker}` entry. The legend has drifted from the keyboard wiring in shortcuts.js."
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shortcuts_js_loads_and_lists_every_binding() {
+    // Pairs with `index_html_mounts_shortcuts_modal`: the JS side
+    // must keep every binding it advertises in the help. We check
+    // for the actual `keydown` guards so a refactor that drops one
+    // (e.g. `Ctrl+S`) fails CI instead of silently breaking the
+    // shortcut.
+    let base = serve_once().await;
+    let js = reqwest::get(format!("{base}/static/shortcuts.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    for needle in [
+        "e.key === \"?\"",
+        "e.key === \"Escape\"",
+        "(e.key === \"s\" || e.key === \"S\")",
+        "(e.key === \"R\" || e.key === \"r\")",
+        "__nagentExportTranscript",
+        "isTypingTarget(e.target)",
+    ] {
+        assert!(
+            js.contains(needle),
+            "shortcuts.js is missing the binding guarded by `{needle}`. Update the help modal legend at the same time."
+        );
+    }
+    assert!(
+        js.contains("shortcuts-modal"),
+        "shortcuts.js no longer references the `#shortcuts-modal` element. The `?` key handler has nothing to open."
+    );
+    // Regression guard for the bug where typing `?` inside the chat
+    // textarea popped the help modal over the half-typed message.
+    // Pin the helper definition so a future "simplification" that
+    // drops it surfaces in CI rather than as a user-visible glitch.
+    assert!(
+        js.contains("function isTypingTarget("),
+        "shortcuts.js is missing the `isTypingTarget` helper. The `?`, `Ctrl+S`, and `Ctrl+Shift+R` shortcuts will pop over focused editable fields (chat textarea, system-prompt textarea, etc.)."
     );
 }

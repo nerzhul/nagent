@@ -117,7 +117,23 @@
         <input type="checkbox" id="inactivity-check" checked>
         Auto-stop after 5s of silence
       </label>
-      <button id="download-btn" type="button" disabled>Download .txt</button>
+      <button id="download-btn" type="button" disabled hidden>Download .txt</button>
+      <!--
+        Export dropdown. A `<details>` element acts as a lightweight
+        popover: clicking the summary opens the menu, picking an item
+        triggers the matching exporter and collapses the menu. Hidden
+        until the first transcript line lands (same `disabled`
+        contract as the legacy `Download .txt` button).
+      -->
+      <details id="download-menu" class="download-menu" disabled>
+        <summary class="download-menu-summary">Download ▾</summary>
+        <ul class="download-menu-list" role="menu">
+          <li role="menuitem"><a href="#" data-format="txt">Plain text (.txt)</a></li>
+          <li role="menuitem"><a href="#" data-format="srt">SubRip (.srt)</a></li>
+          <li role="menuitem"><a href="#" data-format="vtt">WebVTT (.vtt)</a></li>
+          <li role="menuitem"><a href="#" data-format="json">JSON (.json)</a></li>
+        </ul>
+      </details>
       <button id="clear-btn" type="button" class="ghost" disabled>Clear</button>
       <span id="status" class="status idle">idle</span>
       <span id="backend-info" class="backend-info"></span>
@@ -364,5 +380,60 @@
   <script src="/static/mode.js" defer></script>
   <script type="module" src="/static/chat.js"></script>
   <script type="module" src="/static/app.js"></script>
+
+  <!--
+    Keyboard shortcuts help modal. Hidden until the user presses
+    `?` (or clicks a future header help button). The list mirrors
+    `crates/stt-server/src/static/shortcuts.js`; both must move
+    together when a new shortcut lands.
+
+    The `<kbd class="shortcuts-modal-mod">Ctrl</kbd>` markers are
+    rewritten on macOS-like platforms by `rewriteMacModifiers()`
+    into the ⌘ glyph, so the rest of the markup stays static.
+  -->
+  <div id="shortcuts-modal" class="shortcuts-modal" role="dialog"
+       aria-modal="true" aria-labelledby="shortcuts-modal-title"
+       aria-hidden="true" hidden>
+    <div class="shortcuts-modal-card" role="document">
+      <header class="shortcuts-modal-header">
+        <h2 id="shortcuts-modal-title">Keyboard shortcuts</h2>
+        <button id="shortcuts-modal-close" type="button"
+                class="shortcuts-modal-close"
+                aria-label="Close shortcuts help">×</button>
+      </header>
+      <div class="shortcuts-modal-body">
+        <p class="shortcuts-modal-intro">
+          Press <kbd>?</kbd> any time to open this list.
+          <kbd>Esc</kbd> closes it.
+        </p>
+        <h3>Global</h3>
+        <dl class="shortcuts-modal-list">
+          <dt><kbd>?</kbd></dt>
+          <dd>Open this help</dd>
+          <dt><kbd>Esc</kbd></dt>
+          <dd>Close this help, or stop an in-flight chat reply</dd>
+          <dt><kbd class="shortcuts-modal-mod">Ctrl</kbd>+<kbd>S</kbd></dt>
+          <dd>Export the current transcript as <code>.txt</code></dd>
+        </dl>
+        <h3>Transcript mode</h3>
+        <dl class="shortcuts-modal-list">
+          <dt><kbd class="shortcuts-modal-mod">Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></dt>
+          <dd>Toggle recording</dd>
+        </dl>
+        <h3>Discussion mode</h3>
+        <dl class="shortcuts-modal-list">
+          <dt><kbd>Enter</kbd></dt>
+          <dd>Send the current message</dd>
+          <dt><kbd class="shortcuts-modal-mod">Ctrl</kbd>+<kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd></dt>
+          <dd>Insert a newline in the message</dd>
+          <dt><kbd class="shortcuts-modal-mod">Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd></dt>
+          <dd>Toggle voice recording</dd>
+          <dt><kbd>Esc</kbd></dt>
+          <dd>Stop an in-flight reply</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/static/shortcuts.js"></script>
 </body>
 </html>

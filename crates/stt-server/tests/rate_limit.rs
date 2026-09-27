@@ -28,8 +28,11 @@ use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, Whisper
 use stt_proto::{decode_frame, Tag};
 use stt_server::config::RateLimitConfig;
 use stt_server::{
-    build_router, config::LlmConfig, rate_limit::RateLimiter, session::SessionMap, AppState,
-    Config as ServerConfig,
+    build_router,
+    config::{LlmAuthMode, LlmConfig},
+    rate_limit::RateLimiter,
+    session::SessionMap,
+    AppState, Config as ServerConfig,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -59,6 +62,8 @@ async fn start_test_server_with(
             base_url: "http://127.0.0.1:1".into(),
             default_model: "llama3.1".into(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: LlmAuthMode::default(),
             request_timeout: Duration::from_secs(1),
             cors_allow_origins: vec![],
             system_prompt: None,

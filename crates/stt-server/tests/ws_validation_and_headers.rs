@@ -22,7 +22,7 @@ use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, Whisper
 use stt_proto::{decode_frame, encode, error_code, AudioFrame, Config, Payload, StartSession, Tag};
 use stt_server::{
     build_router,
-    config::{LimitsConfig, LlmConfig, RateLimitConfig},
+    config::{LimitsConfig, LlmAuthMode, LlmConfig, RateLimitConfig},
     llm::LlmClient,
     rate_limit::{RateLimitPolicy, RateLimiter},
     router::ResultRouter,
@@ -72,6 +72,8 @@ async fn start_test_server_with_rate_limit(
             base_url: "http://localhost:11434".into(),
             default_model: "llama3.1".into(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: LlmAuthMode::default(),
             request_timeout: Duration::from_secs(120),
             cors_allow_origins,
             system_prompt: None,

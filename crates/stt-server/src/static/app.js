@@ -4,8 +4,13 @@
 // wire-protocol codec) lives in `audio.js` and is shared with
 // Discussion mode. This file is only responsible for wiring the
 // Transcript-mode DOM (`#record-btn`, `#lang-select`, `#translate-check`,
-// `#download-btn`, `#status`, `#backend-info`, `#transcript-list`)
-// on top of an `AudioCapture` instance.
+// `#download-btn`, `#download-menu`, `#status`, `#backend-info`,
+// `#transcript-list`) on top of an `AudioCapture` instance.
+//
+// Export (SRT / VTT / JSON / TXT) is owned by this file because the
+// per-line `segments[]` carrying `t0_ms` / `t1_ms` is captured here
+// when `appendLine` runs; downstream modules never see the raw wire
+// payload.
 //
 // The voice oscilloscope is a shared widget (createScope +
 // AudioCapture), but each mode mounts its own DOM instance — clicking
@@ -26,6 +31,7 @@ const langSelect  = $("lang-select");
 const translateCk = $("translate-check");
 const inactivityCk = $("inactivity-check");
 const downloadBtn = $("download-btn");
+const downloadMenu = $("download-menu");
 const clearBtn    = $("clear-btn");
 const statusEl    = $("status");
 const backendEl   = $("backend-info");
@@ -38,14 +44,22 @@ const updateBanner        = $("update-banner");
 const updateBannerReload  = $("update-banner-reload");
 const updateBannerDismiss = $("update-banner-dismiss");
 
-const transcript = []; // { text, lang, ts, latencyMs? }
+const transcript = []; // { text, lang, ts, latencyMs?, segments: [{ text, t0_ms, t1_ms }] }
+//
+// Cumulative audio-offset tracker for SRT/VTT export. Each FinalTranscript
+// carries `segments[]` whose `t0_ms`/`t1_ms` are relative to the *start
+// of the audio chunk that produced them*, not the start of the whole
+// recording session. SRT/VTT captions need a global offset, so we bump
+// this counter by the longest segment in the previous chunk on every
+// arrival. Reset to 0 on `clearTranscript` (a fresh recording session).
+let cumulativeOffsetMs = 0;
 
 function setStatus(text, cls) {
   statusEl.textContent = text;
   statusEl.className = "status " + cls;
 }
 
-function appendLine(text, lang, latencyMs) {
+function appendLine(text, lang, latencyMs, segments) {
   const empty = listEl.querySelector(".empty-state");
   if (empty) empty.remove();
   const li = document.createElement("li");
@@ -71,8 +85,40 @@ function appendLine(text, lang, latencyMs) {
   listEl.appendChild(li);
   listEl.scrollTop = listEl.scrollHeight;
   downloadBtn.disabled = false;
+  downloadBtn.hidden = false;
+  if (downloadMenu) downloadMenu.removeAttribute("disabled");
   clearBtn.disabled = false;
-  transcript.push({ text, lang, ts, latencyMs });
+
+  // Promote segments to absolute timestamps by adding the running
+  // offset. We keep the original relative timings on `rel_*` so the
+  // JSON export can show both views if it ever needs to.
+  const segs = Array.isArray(segments) ? segments : [];
+  const absoluteSegments = segs.map((s) => ({
+    text: s.text,
+    t0_ms: s.t0_ms + cumulativeOffsetMs,
+    t1_ms: s.t1_ms + cumulativeOffsetMs,
+    rel_t0_ms: s.t0_ms,
+    rel_t1_ms: s.t1_ms,
+  }));
+  transcript.push({
+    text,
+    lang,
+    ts,
+    latencyMs,
+    segments: absoluteSegments,
+  });
+
+  // Bump the cumulative offset by the chunk's last segment end so the
+  // next chunk's captions start where this one finished. Empty chunks
+  // (transcript from a tool error or no_speech frame) keep the
+  // counter untouched.
+  if (segs.length > 0) {
+    const chunkEndMs = segs.reduce(
+      (acc, s) => (typeof s.t1_ms === "number" && s.t1_ms > acc ? s.t1_ms : acc),
+      0,
+    );
+    cumulativeOffsetMs += chunkEndMs;
+  }
 }
 
 function clearTranscript() {
@@ -80,8 +126,11 @@ function clearTranscript() {
   // destructive and the transcript is not persisted to disk.
   if (!confirm("Clear the transcript?")) return;
   transcript.length = 0;
+  cumulativeOffsetMs = 0;
   listEl.innerHTML = "";
   downloadBtn.disabled = true;
+  downloadBtn.hidden = true;
+  if (downloadMenu) downloadMenu.setAttribute("disabled", "");
   clearBtn.disabled = true;
   emptyState();
 }
@@ -140,8 +189,8 @@ new AudioCapture({
   translateCheckEl: translateCk,
   inactivityCheckEl: inactivityCk,
   backendInfoEl: backendEl,
-  onFinalTranscript: (text, lang, latencyMs) => {
-    if (text) appendLine(text, lang, latencyMs);
+  onFinalTranscript: (text, lang, latencyMs, segments) => {
+    if (text) appendLine(text, lang, latencyMs, segments);
   },
   onError: (code, message) => {
     appendLine(`[error ${code}] ${message}`, "err");
@@ -206,24 +255,163 @@ if (updateBannerDismiss) {
   }
 })();
 
-// ---- Download button --------------------------------------------------------
+// ---- Export (SRT / VTT / JSON / TXT) ----------------------------------------
+//
+// Caption exports reuse the per-chunk `segments[]` carrying absolute
+// `t0_ms`/`t1_ms` (see `cumulativeOffsetMs` above) so a player can
+// jump directly to any line. `.txt` is the historical flat log used
+// by `Download .txt` and stays untouched for backwards compatibility.
+//
+// The button is a `<details>`-based dropdown so we don't ship a
+// popover library; clicking outside the menu closes it via the
+// `toggle` event the browser fires when the `<summary>` is re-
+// activated.
 
-downloadBtn.addEventListener("click", () => {
-  const blob = new Blob(
-    [
-      transcript
-        .map((l) => {
-          const lat = typeof l.latencyMs === "number" ? ` (${formatLatency(l.latencyMs)})` : "";
-          return `${l.ts} [${l.lang || "-"}]${lat} ${l.text}`;
-        })
-        .join("\n"),
-    ],
-    { type: "text/plain" },
+function pad2(n) {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/// Format `ms` as a SRT/VTT-friendly `HH:MM:SS,mmm` (SRT) or
+/// `HH:MM:SS.mmm` (VTT) timestamp. Hours are always two digits
+/// because all three formats require it.
+function formatSrtTimestamp(ms) {
+  const totalMs = Math.max(0, Math.round(ms));
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const seconds = Math.floor((totalMs % 60_000) / 1000);
+  const millis = totalMs % 1000;
+  return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)},${pad2(millis)}`;
+}
+
+function formatVttTimestamp(ms) {
+  // VTT uses a dot instead of a comma for the millisecond separator
+  // (WebVTT spec). Everything else is identical to SRT.
+  return formatSrtTimestamp(ms).replace(",", ".");
+}
+
+/// Build the SRT body. Iterates over every segment in every line so
+/// captions line up with the actual audio timestamps — collapsing
+/// to a single cue per `FinalTranscript` would lose intra-chunk
+/// structure (rare but legal: whisper can emit multiple segments
+/// from one chunk).
+function buildSrt() {
+  const cues = [];
+  let index = 1;
+  for (const line of transcript) {
+    if (!line.segments || line.segments.length === 0) continue;
+    for (const seg of line.segments) {
+      cues.push(
+        `${index}\n${formatSrtTimestamp(seg.t0_ms)} --> ${formatSrtTimestamp(seg.t1_ms)}\n${seg.text}\n`,
+      );
+      index += 1;
+    }
+  }
+  // SRT spec mandates a trailing newline; players misbehave on
+  // truncated files.
+  return cues.join("\n") + (cues.length > 0 ? "\n" : "");
+}
+
+function buildVtt() {
+  const cues = [];
+  for (const line of transcript) {
+    if (!line.segments || line.segments.length === 0) continue;
+    for (const seg of line.segments) {
+      cues.push(
+        `${formatVttTimestamp(seg.t0_ms)} --> ${formatVttTimestamp(seg.t1_ms)}\n${seg.text}\n`,
+      );
+    }
+  }
+  // WebVTT requires the `WEBVTT` magic on the first line. A blank
+  // line separates the header from the cues.
+  const body = cues.join("\n");
+  return body.length > 0 ? `WEBVTT\n\n${body}\n` : "WEBVTT\n\n";
+}
+
+function buildJson() {
+  // Plain JSON serialization of the in-memory transcript. The shape
+  // mirrors what `app.js` keeps internally so a future CLI importer
+  // can round-trip the file without surprises.
+  const payload = {
+    version: 1,
+    segments: transcript.flatMap((line) =>
+      (line.segments || []).map((seg) => ({
+        text: seg.text,
+        t0_ms: seg.t0_ms,
+        t1_ms: seg.t1_ms,
+        lang: line.lang || null,
+        wall_clock_ts: line.ts,
+        latency_ms: typeof line.latencyMs === "number" ? line.latencyMs : null,
+      })),
+    ),
+    lines: transcript.map((line) => ({
+      text: line.text,
+      lang: line.lang || null,
+      wall_clock_ts: line.ts,
+      latency_ms: typeof line.latencyMs === "number" ? line.latencyMs : null,
+      segments: line.segments || [],
+    })),
+  };
+  return JSON.stringify(payload, null, 2) + "\n";
+}
+
+function buildTxt() {
+  // Historical flat format kept byte-for-byte compatible with the
+  // pre-SRT/VTT download button: `<wall-clock> [<lang>] (<latency>)
+  // <text>`, one line per `FinalTranscript`.
+  return (
+    transcript
+      .map((l) => {
+        const lat = typeof l.latencyMs === "number" ? ` (${formatLatency(l.latencyMs)})` : "";
+        return `${l.ts} [${l.lang || "-"}]${lat} ${l.text}`;
+      })
+      .join("\n") + "\n"
   );
+}
+
+const exporters = {
+  txt: { build: buildTxt, mime: "text/plain", ext: "txt", label: "Plain text (.txt)" },
+  srt: { build: buildSrt, mime: "application/x-subrip", ext: "srt", label: "SubRip (.srt)" },
+  vtt: { build: buildVtt, mime: "text/vtt", ext: "vtt", label: "WebVTT (.vtt)" },
+  json: { build: buildJson, mime: "application/json", ext: "json", label: "JSON (.json)" },
+};
+
+function exportAs(format) {
+  const exp = exporters[format];
+  if (!exp) return;
+  const blob = new Blob([exp.build()], { type: exp.mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "transcript.txt";
+  a.download = `transcript.${exp.ext}`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-});
+}
+
+const downloadMenu = document.getElementById("download-menu");
+if (downloadMenu) {
+  downloadMenu.addEventListener("click", (e) => {
+    const target = e.target.closest("[data-format]");
+    if (!target) return;
+    e.preventDefault();
+    exportAs(target.dataset.format);
+    // Collapse the <details> after the click so the menu behaves
+    // like a normal dropdown (one-shot pick → close).
+    downloadMenu.removeAttribute("open");
+  });
+}
+
+// Keep the historical `Download .txt` button (now hidden in the UI but
+// still bound for back-compat with any third-party clicker that
+// remembers the old id). Calls into the dropdown exporter.
+downloadBtn.addEventListener("click", () => exportAs("txt"));
+
+/// Programmatically trigger the `.txt` export. Used by the
+/// `Ctrl+S` keyboard shortcut and any future export affordance.
+function exportCurrentTranscript() {
+  if (transcript.length === 0) return;
+  exportAs("txt");
+}
+
+// Expose for other modules (e.g. keyboard-shortcut wiring in the
+// future, or integration tests that simulate the shortcut).
+globalThis.__nagentExportTranscript = exportCurrentTranscript;

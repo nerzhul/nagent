@@ -32,6 +32,7 @@ pub mod version;
 pub mod watchdog;
 pub mod ws_handler;
 
+use config::LlmConfig;
 pub use config::{CliArgs, Config};
 use rate_limit::{RateLimitPolicy, RateLimiter};
 use session::SessionMap;
@@ -142,9 +143,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .unwrap_or_default();
         let cors = middleware::cors_layer(&cors_origins);
         let llm_limiter = state.llm_rate_limiter.clone();
+        // Auth always reads from the global `LlmConfig` so operators
+        // can gate `/v1/agents*` without enabling the LLM proxy —
+        // the two subsystems share the `[llm]` table on purpose so
+        // there is one source of truth for "is this server public?".
+        let llm_cfg = Arc::new(state.config.llm.clone());
         let agents_app = Router::new()
             .route("/v1/agents", get(llm::agents_list))
             .route("/v1/agents/:name/invoke", post(llm::agent_invoke))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let cfg = llm_cfg.clone();
+                async move { llm_auth_middleware(Some(cfg), req, next).await }
+            }))
             .layer(axum::middleware::from_fn(move |req, next| {
                 let limiter = llm_limiter.clone();
                 async move { llm_rate_limit_middleware(limiter, req, next).await }
@@ -156,13 +166,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     if let Some(llm) = &state.llm {
         // The LLM proxy gets its own CORS layer driven by
-        // `LLM_CORS_ALLOW_ORIGINS`, a per-IP rate limiter, and the
-        // same security headers.
+        // `LLM_CORS_ALLOW_ORIGINS`, a per-IP rate limiter, the
+        // bearer-auth gate driven by `LLM_AUTH_MODE` / `LLM_API_KEY`,
+        // and the same security headers.
         let cors = middleware::cors_layer(&llm.cfg().cors_allow_origins);
         let llm_limiter = state.llm_rate_limiter.clone();
+        let llm_cfg = Arc::new(llm.cfg().clone());
         let llm_app = Router::new()
             .route("/v1/chat/completions", post(llm::chat_completions))
             .route("/v1/models", get(llm::models_list))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let cfg = llm_cfg.clone();
+                async move { llm_auth_middleware(Some(cfg), req, next).await }
+            }))
             .layer(axum::middleware::from_fn(move |req, next| {
                 let limiter = llm_limiter.clone();
                 async move { llm_rate_limit_middleware(limiter, req, next).await }
@@ -184,9 +200,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .unwrap_or_default();
         let cors = middleware::cors_layer(&cors_origins);
         let llm_limiter = state.llm_rate_limiter.clone();
+        let llm_cfg = Arc::new(state.config.llm.clone());
         let tts_app = Router::new()
             .route("/v1/audio/speech", post(tts::audio_speech))
             .route("/v1/audio/voices", get(tts::audio_voices))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let cfg = llm_cfg.clone();
+                async move { llm_auth_middleware(Some(cfg), req, next).await }
+            }))
             .layer(axum::middleware::from_fn(move |req, next| {
                 let limiter = llm_limiter.clone();
                 async move { llm_rate_limit_middleware(limiter, req, next).await }
@@ -247,4 +268,75 @@ pub fn build_rate_limiters(cfg: &Config) -> (RateLimiter, RateLimiter) {
         RateLimiter::new(RateLimitPolicy::stt(cfg.rate_limit.stt_per_min)),
         RateLimiter::new(RateLimitPolicy::llm(cfg.rate_limit.llm_per_min)),
     )
+}
+
+/// axum middleware that gates `/v1/*` requests behind the
+/// `LLM_AUTH_MODE` policy.
+///
+/// Behaviour per [`config::LlmAuthMode`]:
+/// - [`LlmAuthMode::Bearer`] (with `inbound_auth_key` set): reject
+///   requests missing `Authorization: Bearer <key>` or carrying a
+///   different key with `401 Unauthorized` and a `WWW-Authenticate`
+///   hint so curl and SDKs surface a useful error.
+/// - [`LlmAuthMode::Bearer`] (no key set): the auth gate is a no-op
+///   and a warning is logged at boot — the operator enabled the
+///   `bearer` mode without providing a key, so the proxy is effectively
+///   public until they fix the config.
+/// - [`LlmAuthMode::Forward`] / [`LlmAuthMode::Disabled`]: no inbound
+///   inspection. `Disabled` is a deliberate opt-out and only affects
+///   the startup warning emitted by `main`.
+async fn llm_auth_middleware(
+    cfg: Option<Arc<LlmConfig>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let Some(cfg) = cfg else {
+        return next.run(req).await;
+    };
+    if !matches!(cfg.auth_mode, config::LlmAuthMode::Bearer) {
+        return next.run(req).await;
+    }
+    let Some(expected) = cfg.inbound_auth_key.as_deref() else {
+        // `bearer` mode without a key — log once at startup via
+        // `main`, and let the request through here so a misconfigured
+        // server still functions.
+        return next.run(req).await;
+    };
+    let header_value = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let presented = header_value.and_then(|h| {
+        h.strip_prefix("Bearer ")
+            .or_else(|| h.strip_prefix("bearer "))
+    });
+    match presented {
+        Some(key) if constant_time_eq(key.as_bytes(), expected.as_bytes()) => next.run(req).await,
+        _ => {
+            let mut resp = (
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid Authorization header",
+            )
+                .into_response();
+            resp.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer realm=\"nagent-llm-proxy\""),
+            );
+            resp
+        }
+    }
+}
+
+/// Constant-time byte slice comparison. Avoids leaking the key length
+/// via the early-exit path of `==`. Safe for ASCII bearer tokens which
+/// never contain non-ASCII bytes.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
 }

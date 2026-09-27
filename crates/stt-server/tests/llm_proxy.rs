@@ -123,6 +123,8 @@ async fn start_test_server_with_llm_and_system_prompt(
             base_url: upstream_url,
             default_model: "llama3.1".into(),
             api_key,
+            inbound_auth_key: None,
+            auth_mode: stt_server::config::LlmAuthMode::Forward,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt,
@@ -197,6 +199,8 @@ async fn start_test_server_disabled() -> String {
             base_url: "http://localhost:11434".into(),
             default_model: "llama3.1".into(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: stt_server::config::LlmAuthMode::Forward,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,
@@ -552,4 +556,301 @@ async fn proxy_is_passthrough_when_system_prompt_unset() {
     );
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[0]["content"], "hi");
+}
+
+// ---- Inbound auth gate (P0 — Auth on the LLM proxy) ------------------------
+//
+// Mirrors the structure of `start_test_server_with_llm_and_system_prompt`
+// but lets the caller pick `auth_mode` + `inbound_auth_key` directly so
+// we can exercise the bearer path end-to-end without an upstream that
+// cares about auth.
+
+/// Same as [`start_test_server_with_llm_and_system_prompt`] but lets
+/// the caller pick `auth_mode` + `inbound_auth_key` so the bearer
+/// path can be exercised end-to-end. The function takes the LLM config
+/// fields by value (rather than rebuilding the whole `ServerConfig`)
+/// to keep the helper close to the existing one.
+async fn start_test_server_with_llm_auth(
+    upstream_url: String,
+    auth_mode: stt_server::config::LlmAuthMode,
+    inbound_auth_key: Option<String>,
+) -> (
+    String,
+    Arc<tokio::sync::Mutex<Option<axum::http::HeaderMap>>>,
+) {
+    let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
+    let server_cfg = Arc::new(ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
+        max_queue: 32,
+        inference_workers: None,
+        session_idle_timeout: Duration::from_secs(30),
+        infer_timeout: Duration::from_secs(30),
+        limits: stt_server::config::LimitsConfig::default(),
+        rate_limit: RateLimitConfig::default(),
+        llm: LlmConfig {
+            enabled: true,
+            base_url: upstream_url,
+            default_model: "llama3.1".into(),
+            api_key: None,
+            inbound_auth_key,
+            auth_mode,
+            request_timeout: Duration::from_secs(120),
+            cors_allow_origins: vec![],
+            system_prompt: None,
+            allow_user_location: true,
+        },
+        agents: stt_server::config::AgentConfig::default(),
+        tts: stt_server::config::TtsConfig::default(),
+    });
+    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
+    let llm_cfg = Arc::new(server_cfg.llm.clone());
+    let llm_client =
+        LlmClient::new(llm_cfg).expect("LlmClient::new should succeed for test config");
+    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
+    let on_request = Arc::new(tokio::sync::Mutex::new(None));
+    let state = Arc::new(AppState {
+        backend,
+        sessions: Arc::clone(&sessions),
+        job_tx,
+        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        config: server_cfg,
+        llm: Some(llm_client),
+        agents: None,
+        tts: None,
+        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
+            RateLimitConfig::default().stt_per_min,
+        )),
+        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
+            RateLimitConfig::default().llm_per_min,
+        )),
+    });
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+    (url, on_request)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_mode_rejects_request_without_auth_header() {
+    // `LLM_AUTH_MODE=bearer` + `LLM_API_KEY=…` → every `/v1/*` request
+    // without the matching `Authorization: Bearer …` header is rejected
+    // with `401 Unauthorized`. The upstream must never see the
+    // request, which is what we're guarding against (P0 of the
+    // security plan: LAN attacker driving the local LLM).
+    let captured = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
+    let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
+    let (url, _) = start_test_server_with_llm_auth(
+        upstream_url,
+        stt_server::config::LlmAuthMode::Bearer,
+        Some("swordfish".into()),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[],"stream":true}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "missing Authorization header must produce 401"
+    );
+    // The standard `WWW-Authenticate: Bearer` hint must accompany
+    // the 401 so SDKs and curl surface a useful error.
+    assert_eq!(
+        resp.headers()
+            .get(header::WWW_AUTHENTICATE)
+            .map(|v| v.to_str().unwrap().to_string()),
+        Some("Bearer realm=\"nagent-llm-proxy\"".to_string()),
+        "401 must include a WWW-Authenticate hint"
+    );
+
+    // The upstream must not have been contacted at all. The captured
+    // header map stays `None` after a successful handler hit because
+    // the spawn_mock_upstream helper only writes it from the inner
+    // closure that runs when the upstream is hit. Asserting on that
+    // gives us a stronger guarantee than a `is_success` check on the
+    // upstream (we don't have one).
+    assert!(
+        captured.lock().await.is_none(),
+        "upstream must never be contacted when auth fails"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_mode_rejects_wrong_key() {
+    // Defence against a typo: a valid `Authorization: Bearer`
+    // header with the wrong key must also be rejected. The check is
+    // done in constant time so the comparison itself does not leak
+    // the expected key length; this test guards the surface, the
+    // constant-time property is exercised by the unit test in
+    // `lib.rs`.
+    let captured = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
+    let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
+    let (url, _) = start_test_server_with_llm_auth(
+        upstream_url,
+        stt_server::config::LlmAuthMode::Bearer,
+        Some("swordfish".into()),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::AUTHORIZATION, "Bearer wrong-key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[],"stream":true}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "wrong bearer key must produce 401"
+    );
+    assert!(captured.lock().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_mode_accepts_matching_key() {
+    // Happy path: the right key reaches the upstream. We assert on
+    // the upstream captured header map to confirm the request
+    // actually went through (and that no `Authorization` was added
+    // by the proxy — `inbound_auth_key` is for inbound gating, the
+    // outbound `api_key` stays unset for this test).
+    let captured = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
+    let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
+    let (url, _) = start_test_server_with_llm_auth(
+        upstream_url,
+        stt_server::config::LlmAuthMode::Bearer,
+        Some("swordfish".into()),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::AUTHORIZATION, "Bearer swordfish")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[],"stream":true}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+
+    let captured_headers = captured.lock().await.take().expect("upstream was hit");
+    assert!(
+        captured_headers.get(header::AUTHORIZATION).is_none(),
+        "the server-side outbound api_key is unset, so no Authorization \
+         must reach the upstream. The inbound auth gate and the \
+         outbound api_key are independent knobs."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_mode_ignores_inbound_auth_header() {
+    // The default mode (`forward`) keeps the historical behaviour:
+    // the proxy never inspects the inbound `Authorization` header and
+    // forwards any value the client sent untouched (we don't add one
+    // either, since `api_key` is unset).
+    let captured = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
+    let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
+    let (url, _) = start_test_server_with_llm_auth(
+        upstream_url,
+        stt_server::config::LlmAuthMode::Forward,
+        // Set the key too so we know the gate is the mode, not the
+        // absence of the key.
+        Some("swordfish".into()),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[],"stream":true}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "forward mode must let unauthenticated requests through"
+    );
+    let _ = resp.bytes().await;
+    let captured_headers = captured.lock().await.take().expect("upstream was hit");
+    assert!(captured_headers.get(header::AUTHORIZATION).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_mode_is_noop_without_key() {
+    // Misconfiguration guard: if the operator enabled `bearer` mode
+    // but forgot to set the key, the server logs a warning at boot
+    // (see `main.rs`) and lets every request through here so a
+    // misconfigured deployment still functions. The alternative
+    // (refuse all traffic) would brick the server until the config
+    // is fixed.
+    let captured = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
+    let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
+    let (url, _) = start_test_server_with_llm_auth(
+        upstream_url,
+        stt_server::config::LlmAuthMode::Bearer,
+        None,
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[],"stream":true}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "bearer mode without a key must fall open (warning logged separately)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_mode_accepts_lowercase_scheme() {
+    // RFC 7235 says the auth scheme is case-insensitive. Both
+    // `Bearer …` and `bearer …` must work so a curl user can hand-
+    // type either form.
+    let captured = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
+    let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
+    let (url, _) = start_test_server_with_llm_auth(
+        upstream_url,
+        stt_server::config::LlmAuthMode::Bearer,
+        Some("swordfish".into()),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::AUTHORIZATION, "bearer swordfish")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[],"stream":true}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "lowercase 'bearer' scheme must be accepted"
+    );
 }

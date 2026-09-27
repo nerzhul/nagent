@@ -642,6 +642,64 @@ impl TtsConfig {
     }
 }
 
+/// Authentication mode applied to inbound `/v1/*` requests.
+///
+/// `Disabled` is a deliberate convenience for trusted local deployments
+/// where the bind address is loopback and the operator accepts that
+/// anyone on the same host can drive the LLM. `Bearer` requires an
+/// `Authorization: Bearer <key>` header on every `/v1/*` request and
+/// returns `401 Unauthorized` when the header is missing or the key
+/// does not match `api_key`. `Forward` is the historical behaviour:
+/// the server only attaches an `Authorization` header on outbound
+/// upstream requests (when `api_key` is set) and never inspects the
+/// inbound header — equivalent to `Disabled` for the local trust
+/// model but documented as a separate value so the operator has to
+/// make the choice explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LlmAuthMode {
+    /// Require `Authorization: Bearer <key>` on every `/v1/*` request.
+    Bearer,
+    /// Do not inspect the inbound header. Kept for backwards
+    /// compatibility with deployments that already gate the proxy via
+    /// a reverse proxy.
+    #[default]
+    Forward,
+    /// Explicit "no auth". Same runtime behaviour as `Forward` but
+    /// distinguishes deployments that have deliberately opted out so
+    /// `main` can emit a startup warning when the server binds a
+    /// non-loopback address.
+    Disabled,
+}
+
+impl LlmAuthMode {
+    /// Parse the human-friendly form (`disabled`, `bearer`, `forward`).
+    /// Case-insensitive; unknown values surface as `InvalidEnv` so a
+    /// typo in the config never silently reverts to the default.
+    fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "bearer" => Ok(Self::Bearer),
+            "forward" => Ok(Self::Forward),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(format!(
+                "expected one of `bearer`, `forward`, `disabled`, got `{other}`"
+            )),
+        }
+    }
+}
+
+impl From<String> for LlmAuthMode {
+    /// Conversion used by the TOML path: the TOML file holds the
+    /// human-friendly form (`"bearer"`, `"forward"`, `"disabled"`).
+    /// Unknown values fall back to [`LlmAuthMode::default`] so a typo
+    /// in a config file never prevents the server from booting — the
+    /// env-var path is the strict one because the operator is more
+    /// likely to spot a startup error than a silently-ignored file
+    /// value.
+    fn from(s: String) -> Self {
+        Self::parse(&s).unwrap_or_default()
+    }
+}
+
 /// Configuration for the optional server-side Ollama proxy.
 ///
 /// When `enabled` is `false` the `/v1/chat/completions` and `/v1/models`
@@ -657,8 +715,21 @@ pub struct LlmConfig {
     /// Default model id for `/v1/chat/completions` when the browser
     /// does not specify one.
     pub default_model: String,
-    /// Optional bearer token to forward as `Authorization: Bearer …`.
+    /// Optional bearer token to forward as `Authorization: Bearer …`
+    /// on outbound upstream requests. Unrelated to `inbound_auth_key`
+    /// below: setting this lets the proxy talk to an authenticated
+    /// upstream without making the inbound `/v1/*` surface private.
     pub api_key: Option<String>,
+    /// Bearer key required on inbound `/v1/*` requests when
+    /// `auth_mode = Bearer`. Has no effect when `auth_mode` is
+    /// `Forward` or `Disabled` — the proxy never inspects the
+    /// inbound `Authorization` header in those modes.
+    pub inbound_auth_key: Option<String>,
+    /// How the proxy authenticates inbound `/v1/*` requests. Defaults
+    /// to [`LlmAuthMode::Forward`] (historical behaviour: outbound
+    /// header forwarding only). See [`LlmAuthMode`] for the full
+    /// semantics.
+    pub auth_mode: LlmAuthMode,
     /// Per-chunk idle timeout (no bytes for this long → drop the stream).
     pub request_timeout: Duration,
     /// Comma-separated list of origins allowed to call `/v1/*` via
@@ -716,6 +787,15 @@ impl LlmConfig {
             env_opt("OLLAMA_API_KEY").as_deref(),
             toml.api_key.as_deref(),
         );
+        let inbound_auth_key = resolve_opt_string(
+            env_opt("LLM_API_KEY").as_deref(),
+            toml.inbound_auth_key.as_deref(),
+        );
+        let auth_mode = match env_opt("LLM_AUTH_MODE").as_deref() {
+            Some(v) => LlmAuthMode::parse(v)
+                .map_err(|e| ConfigError::InvalidEnv("LLM_AUTH_MODE".into(), e))?,
+            None => toml.auth_mode.map(LlmAuthMode::from).unwrap_or_default(),
+        };
         let request_timeout = Duration::from_secs(resolve_primitive(
             env_opt("LLM_REQUEST_TIMEOUT_SECS").as_deref(),
             toml.request_timeout_secs,
@@ -743,6 +823,8 @@ impl LlmConfig {
             base_url,
             default_model,
             api_key,
+            inbound_auth_key,
+            auth_mode,
             request_timeout,
             cors_allow_origins,
             system_prompt,
@@ -758,6 +840,8 @@ impl Default for LlmConfig {
             base_url: "http://localhost:11434".to_string(),
             default_model: "llama3.1".to_string(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: LlmAuthMode::default(),
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: Vec::new(),
             system_prompt: None,
@@ -1560,5 +1644,56 @@ mod tests {
             });
         }
         Ok(merged)
+    }
+
+    #[test]
+    fn llm_auth_mode_parse_accepts_known_values() {
+        // Lowercase + trimmed variants all map to the same variant so
+        // an operator can hand-type either case.
+        assert!(matches!(
+            LlmAuthMode::parse("bearer").unwrap(),
+            LlmAuthMode::Bearer
+        ));
+        assert!(matches!(
+            LlmAuthMode::parse("FORWARD").unwrap(),
+            LlmAuthMode::Forward
+        ));
+        assert!(matches!(
+            LlmAuthMode::parse(" Disabled ").unwrap(),
+            LlmAuthMode::Disabled
+        ));
+    }
+
+    #[test]
+    fn llm_auth_mode_parse_rejects_unknown_values() {
+        // A typo in the env var must surface as an error so the
+        // operator sees it at boot rather than silently reverting to
+        // the default and wondering why their `Authorization` header
+        // is being ignored.
+        let err = LlmAuthMode::parse("barer").unwrap_err();
+        assert!(
+            err.contains("bearer") && err.contains("barer"),
+            "error must list valid options and echo the offending value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn llm_auth_mode_default_is_forward() {
+        // Documented default: `forward` preserves the pre-auth
+        // behaviour so an upgrade does not break deployments that
+        // already gate the proxy via a reverse proxy.
+        assert!(matches!(LlmAuthMode::default(), LlmAuthMode::Forward));
+    }
+
+    #[test]
+    fn llm_config_default_keeps_inbound_auth_key_unset() {
+        // Default-on path: `LLM_API_KEY` and `LLM_AUTH_MODE` are unset,
+        // so the auth gate is a no-op. The `main` warning only fires
+        // when the operator binds a non-loopback address AND sets
+        // `LLM_AUTH_MODE=disabled` explicitly — leaving both at their
+        // defaults must stay silent.
+        let cfg = LlmConfig::default();
+        assert!(cfg.inbound_auth_key.is_none());
+        assert!(matches!(cfg.auth_mode, LlmAuthMode::Forward));
     }
 }

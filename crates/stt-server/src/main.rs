@@ -175,6 +175,28 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- HTTP router -----------------------------------------------------
     let ready = Arc::new(AtomicBool::new(true));
+    // Surface a startup warning when the operator is exposing the
+    // proxy on a non-loopback bind with auth explicitly disabled —
+    // the worst-case deployment we are trying to prevent (P0 of the
+    // security plan).
+    if cfg.llm.auth_mode == stt_server::config::LlmAuthMode::Disabled
+        && !cfg.bind_addr.ip().is_loopback()
+    {
+        tracing::warn!(
+            bind_addr = %cfg.bind_addr,
+            "LLM_AUTH_MODE=disabled while binding a non-loopback address; \
+             /v1/* is fully public. Set LLM_AUTH_MODE=bearer and LLM_API_KEY \
+             to require an Authorization header."
+        );
+    }
+    if cfg.llm.auth_mode == stt_server::config::LlmAuthMode::Bearer
+        && cfg.llm.inbound_auth_key.is_none()
+    {
+        tracing::warn!(
+            "LLM_AUTH_MODE=bearer but LLM_API_KEY is unset; the /v1/* \
+             auth gate is effectively disabled. Set LLM_API_KEY to enforce it."
+        );
+    }
     let llm = if cfg.llm.enabled {
         info!(
             base_url = %cfg.llm.base_url,
@@ -230,8 +252,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,stt_server=debug,stt_core=debug"));
+    // Default filter demotes the ONNX Runtime allocator chatter
+    // (`ort::logging` emits BFC-arena allocation lines at `info` on
+    // every model load — see the
+    // "Allocated memory at 0x…", "Extending BFCArena", "Extended
+    // allocation by … bytes" lines) down to `debug` so the runtime
+    // log stays usable. Operators who want to see the allocator
+    // accounting can opt back in with `RUST_LOG=ort=debug`. The
+    // `whisper_rs::*` target is treated the same way for symmetry:
+    // whisper-rs emits a per-chunk "mel" trace at info that drowns
+    // out everything else during a long session.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "info,stt_server=debug,stt_core=debug,ort=debug,ort::logging=debug,whisper_rs=debug",
+        )
+    });
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 

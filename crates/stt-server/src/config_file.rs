@@ -140,6 +140,14 @@ pub struct TomlLlmConfig {
     pub base_url: Option<String>,
     pub default_model: Option<String>,
     pub api_key: Option<String>,
+    /// Bearer key required on inbound `/v1/*` requests when
+    /// `auth_mode = "bearer"`. Mirrors the `LLM_API_KEY` env var; env
+    /// wins when both are set. Has no effect when `auth_mode` is
+    /// `forward` or `disabled`.
+    pub inbound_auth_key: Option<String>,
+    /// Inbound auth mode (`bearer`, `forward`, `disabled`). Mirrors
+    /// the `LLM_AUTH_MODE` env var; env wins when both are set.
+    pub auth_mode: Option<String>,
     pub request_timeout_secs: Option<u64>,
     pub cors_allow_origins: Option<Vec<String>>,
     /// Server-default system prompt prepended to every
@@ -372,6 +380,11 @@ fn merge_toml_llm(
             base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
             default_model: l.default_model.clone().or_else(|| e.default_model.clone()),
             api_key: l.api_key.clone().or_else(|| e.api_key.clone()),
+            inbound_auth_key: l
+                .inbound_auth_key
+                .clone()
+                .or_else(|| e.inbound_auth_key.clone()),
+            auth_mode: l.auth_mode.clone().or_else(|| e.auth_mode.clone()),
             request_timeout_secs: l.request_timeout_secs.or(e.request_timeout_secs),
             cors_allow_origins: l
                 .cors_allow_origins

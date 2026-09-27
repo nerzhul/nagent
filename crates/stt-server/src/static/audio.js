@@ -481,7 +481,7 @@ export class AudioCapture {
    *                                                     the watchdog is always on.
    * @param {HTMLElement} [cfg.backendInfoEl]  Optional element to render
    *                                           `model=… backend=…` into.
-   * @param {(text:string, lang:string, latencyMs:number|undefined) => void} cfg.onFinalTranscript
+   * @param {(text:string, lang:string, latencyMs:number|undefined, segments?:Array<{text:string,t0_ms:number,t1_ms:number}>) => void} cfg.onFinalTranscript
    * @param {(text:string, lang:string) => void} [cfg.onPartialTranscript]
    * @param {(modelId:string, gpuBackend:string) => void} [cfg.onBackendInfo]
    * @param {(code:number, message:string) => void} [cfg.onError]
@@ -904,7 +904,7 @@ export class AudioCapture {
     } else if (p.kind === "final") {
       const sentAt = this.pendingAudioTs.shift();
       const latencyMs = typeof sentAt === "number" ? performance.now() - sentAt : undefined;
-      this.cfg.onFinalTranscript?.(p.text, p.lang, latencyMs);
+      this.cfg.onFinalTranscript?.(p.text, p.lang, latencyMs, p.segments);
     } else if (p.kind === "partial") {
       this.cfg.onPartialTranscript?.(p.text, p.lang);
     } else if (p.kind === "error") {

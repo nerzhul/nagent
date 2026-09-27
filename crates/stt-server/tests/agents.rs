@@ -218,6 +218,8 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             base_url: upstream_url,
             default_model: "llama3.1".into(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: stt_server::config::LlmAuthMode::Forward,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,

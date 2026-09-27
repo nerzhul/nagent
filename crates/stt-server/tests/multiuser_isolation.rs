@@ -25,7 +25,7 @@ use stt_proto::{
 };
 use stt_server::{
     build_router,
-    config::RateLimitConfig,
+    config::{LlmAuthMode, RateLimitConfig},
     rate_limit::{RateLimitPolicy, RateLimiter},
     router::ResultRouter,
     session::SessionMap,
@@ -59,6 +59,8 @@ async fn start_test_server() -> (String, SessionMap) {
             base_url: "http://localhost:11434".into(),
             default_model: "llama3.1".into(),
             api_key: None,
+            inbound_auth_key: None,
+            auth_mode: LlmAuthMode::default(),
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,

@@ -1786,3 +1786,181 @@ select, input[type="checkbox"] {
   position: relative;
   padding-right: 2.4rem;
 }
+
+/* ---- Transcript-mode export dropdown ---------------------------------------
+ *
+ * Native `<details>` element used as a lightweight popover so we can
+ * ship a four-item menu without a custom widget layer. The wrapper
+ * sits inline with the other toolbar buttons (Download ▾) and opens
+ * a small absolutely-positioned list below it. The `[disabled]`
+ * attribute on the `<details>` blocks the summary click and removes
+ * the cursor affordance — matching the legacy single-button contract
+ * (the menu was hidden until the first transcript line arrived).
+ */
+.download-menu {
+  position: relative;
+  display: inline-block;
+}
+.download-menu[disabled] > .download-menu-summary {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.download-menu > .download-menu-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 0.9rem;
+  font-family: inherit;
+  display: inline-block;
+}
+/* Hide the default disclosure triangle on every browser. We render
+ * our own ▾ glyph in the summary text. */
+.download-menu > .download-menu-summary::-webkit-details-marker {
+  display: none;
+}
+.download-menu > .download-menu-list {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  z-index: 20;
+  margin: 0;
+  padding: 0.25rem 0;
+  min-width: 12rem;
+  list-style: none;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+.download-menu > .download-menu-list li {
+  margin: 0;
+  padding: 0;
+}
+.download-menu > .download-menu-list a {
+  display: block;
+  padding: 0.45rem 0.8rem;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+.download-menu > .download-menu-list a:hover,
+.download-menu > .download-menu-list a:focus {
+  background: var(--bg);
+  color: var(--accent);
+}
+
+/* ---- Keyboard-shortcuts help modal ----------------------------------------
+ *
+ * Full-viewport dim backdrop + centred card. Built on top of the
+ * native `hidden` attribute + `role="dialog"` so screen readers
+ * announce it correctly. Click on the dim backdrop (or the close
+ * button, or `Esc`) dismisses the modal.
+ *
+ * The shortcut keys themselves reuse the `<kbd>` element styled
+ * below so the legend reads as a real key cap instead of inline text.
+ */
+.shortcuts-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.shortcuts-modal[hidden] {
+  display: none;
+}
+.shortcuts-modal-card {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-width: 32rem;
+  width: min(32rem, calc(100% - 2rem));
+  max-height: calc(100vh - 4rem);
+  overflow: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  font-size: 0.95rem;
+}
+.shortcuts-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.shortcuts-modal-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.shortcuts-modal-close {
+  background: transparent;
+  border: 0;
+  color: var(--fg-mute);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+}
+.shortcuts-modal-close:hover,
+.shortcuts-modal-close:focus {
+  color: var(--fg);
+  background: var(--bg);
+}
+.shortcuts-modal-body {
+  padding: 1rem 1.25rem 1.25rem;
+}
+.shortcuts-modal-body h3 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-mute);
+}
+.shortcuts-modal-body h3:first-of-type {
+  margin-top: 0;
+}
+.shortcuts-modal-intro {
+  margin: 0 0 0.6rem;
+  color: var(--fg-mute);
+  font-size: 0.9rem;
+}
+.shortcuts-modal-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0 0 0.5rem;
+  align-items: center;
+}
+.shortcuts-modal-list dt {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex-wrap: wrap;
+}
+.shortcuts-modal-list dd {
+  margin: 0;
+  color: var(--fg);
+}
+kbd {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  line-height: 1.3;
+  min-width: 1.4rem;
+  text-align: center;
+}
