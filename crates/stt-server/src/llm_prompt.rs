@@ -46,12 +46,20 @@ already shows temperature, condition, wind, humidity, UV and the 3-day \
 strip, so do not re-state any of those fields in prose.
 - get_stock_quote: latest stock quote for a ticker symbol.
 - web_fetch: fetch a public URL and return its main text as Markdown.
+- calculate: evaluate a local arithmetic expression. Pure-local, no I/O; \
+useful for \"15% of 230\", \"sqrt(2) + 1\", \"2^10 + 1\", etc. The tool \
+returns the numeric result; the assistant may add a one-line context.
+- unit_convert: convert a value between two units of the same category \
+(length, mass, volume, time, data, speed, area, temperature). Pure-local.
+- wikipedia: short encyclopedia summary of a subject (person, event, \
+concept, historical place-as-topic, scientific topic, work). Backed by \
+the Wikipedia REST API; returns a fresh, sourced summary.
 
 Tool-usage rules:
 - NEVER invent specific factual data: weather, current date or time, \
-stock prices, or the content of a fetched URL. For these domains you \
-either call the matching tool or you say you cannot answer. Guessing \
-is a regression that breaks user trust. \
+stock prices, unit-conversion factors, or the content of a fetched URL. \
+For these domains you either call the matching tool or you say you \
+cannot answer. Guessing is a regression that breaks user trust. \
 \
 The earlier \"answer directly from general knowledge\" rule below is \
 overridden for these domains only.
@@ -63,12 +71,31 @@ produce wrong answers.
 - When calling `get_weather` with an explicit date, build the YYYY-MM-DD \
 argument from the value returned by `get_datetime`; never invent a \
 date. The tool may also be called without a date for current conditions.
+- For general-knowledge questions about people, historical events, \
+scientific concepts, works of art, geography-as-topic, organisations, \
+species, etc., prefer `wikipedia` over answering from your training \
+data. Your training cut-off means biographies, recent events, and \
+niche topics are often stale, incorrect, or absent; `wikipedia` returns \
+a fresh, sourced summary and a link to the full article. Call it when \
+the user asks \"who is X?\", \"parle-moi de Y\", \"what is Z?\", \
+\"tell me about…\", \"résumé wikipédia de…\", or anything else where the \
+answer is encyclopedic and may have shifted since training. Do NOT use \
+`wikipedia` for cities-as-places (use `get_weather` for weather \
+forecasts or the location block for \"where am I\"); it is for the \
+encyclopedic subject about a place, not the local forecast.
+- `get_weather` is for current conditions, forecasts, hourly data, and \
+astronomy (sunrise/sunset, moon phase) at a location. Do not route \
+biographical or encyclopedic queries to it.
+- `calculate` is the right tool for any arithmetic question, however \
+trivial — the round-trip is sub-millisecond and the result is exact. \
+Do not attempt arithmetic in prose.
 - If a tool call fails or returns an error, surface that to the user \
 verbatim rather than substituting a plausible-sounding answer from \
 memory.
-- For domains outside the tool list (general knowledge, reasoning, \
-writing, code), answer directly as before. Do not call tools when the \
-user has not asked for live, factual, or externally-sourced data.
+- For domains outside the tool list (writing, code, opinion, advice, \
+chitchat, subjective reasoning), answer directly as before. Do not \
+call tools when the user has not asked for live, factual, or \
+externally-sourced data.
 
 Formatting:
 - Reply in the language the user wrote in.
@@ -295,6 +322,58 @@ mod tests {
         assert!(
             prompt.contains("ephemeral") || prompt.contains("never persisted"),
             "DEFAULT_SYSTEM_PROMPT must make clear the location block is ephemeral and not persisted, so the model treats it as request-scoped context."
+        );
+    }
+
+    #[test]
+    fn default_prompt_lists_all_seven_agents() {
+        // Wire contract: the prompt must mention every agent name the
+        // server can register so the LLM knows it can call them. A
+        // silent drop here would leave the new agents un-callable in
+        // the default deployment — the operator would have to override
+        // the prompt to recover them.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        for tool in [
+            "get_datetime",
+            "get_weather",
+            "get_stock_quote",
+            "web_fetch",
+            "calculate",
+            "unit_convert",
+            "wikipedia",
+        ] {
+            assert!(
+                prompt.contains(tool),
+                "DEFAULT_SYSTEM_PROMPT is missing the `{tool}` tool name — the LLM \
+                 won't know to call it in the default deployment. Update the prompt \
+                 or this guard will keep failing."
+            );
+        }
+    }
+
+    #[test]
+    fn default_prompt_routes_encyclopedic_queries_to_wikipedia() {
+        // Regression guard: small open-source LLMs answer general-
+        // knowledge questions from training data, which is stale on
+        // biographies, recent events, and niche topics. The prompt
+        // must explicitly nudge them to prefer `wikipedia` for those
+        // domains, and must not push them toward `get_weather` for
+        // biographical queries (the earlier "city encyclopedia"
+        // framing made the LLM route Lyon/Marie Curie style queries
+        // to weather).
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("wikipedia")
+                && (prompt.contains("fresh") || prompt.contains("training data")),
+            "DEFAULT_SYSTEM_PROMPT must nudge the LLM to prefer `wikipedia` for \
+             encyclopedic questions (training data is stale on biographies / recent \
+             events / niche topics)."
+        );
+        assert!(
+            prompt.contains("`get_weather`")
+                && (prompt.contains("NOT") || prompt.contains("Do not route")),
+            "DEFAULT_SYSTEM_PROMPT must explicitly warn the LLM away from routing \
+             biographical / encyclopedic queries to `get_weather`."
         );
     }
 }
