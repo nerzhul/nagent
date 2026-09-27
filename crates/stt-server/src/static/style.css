@@ -1054,6 +1054,71 @@ select, input[type="checkbox"] {
   color: var(--error);
 }
 
+/* ---- Collapsible tool usage (`<details>` wrapper) ------------------------
+ * The tool trace is inlined inside the assistant bubble as a native
+ * `<details>` element so the user can collapse it by default once the
+ * reply settles (see `appendToolBubble` in chat.js). The `<summary>`
+ * is a compact pill — icon + tool name + status — and the body is the
+ * full `.chat-tool-bubble` rendered above. */
+.chat-message__tool-usage {
+  margin: 0.4rem 0 0.1rem 0;
+  display: block;
+}
+.chat-message__tool-usage > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg-mute);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  user-select: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-message__tool-usage > summary::-webkit-details-marker {
+  display: none;
+}
+.chat-message__tool-usage > summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  color: var(--fg-mute);
+  transition: transform 120ms ease;
+}
+.chat-message__tool-usage[open] > summary::before {
+  transform: rotate(90deg);
+}
+.chat-message__tool-usage > summary:hover {
+  border-color: var(--fg-mute);
+}
+.chat-message__tool-summary-icon {
+  flex: 0 0 auto;
+}
+.chat-message__tool-summary-name {
+  flex: 0 0 auto;
+  color: var(--fg);
+  font-weight: 600;
+}
+.chat-message__tool-summary-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* When expanded, drop the top border on the inner tool bubble so the
+ * two pieces (summary pill + detail row) read as one connected block. */
+.chat-message__tool-usage[open] > .chat-tool-bubble {
+  margin-top: 0.25rem;
+}
+
 /* ---- Weather widget ------------------------------------------------------
  * Rendered under the `get_weather` tool bubble as a compact structured
  * card so the user gets the answer at a glance instead of scanning
@@ -1285,7 +1350,7 @@ select, input[type="checkbox"] {
  * stay in the DOM — only the `.chat-message__tool-loading` placeholder
  * is visible — so the prose can stream back into view cleanly when
  * the tool resolves. */
-.chat-message--tool-pending > :not(.chat-message__tool-loading) {
+.chat-message--tool-pending > :not(.chat-message__tool-loading):not(details.chat-message__tool-usage) {
   display: none;
 }
 .chat-message__tool-loading {
@@ -1598,6 +1663,14 @@ select, input[type="checkbox"] {
  * streaming, so playback is gap-free and the audio duration is
  * predictable. */
 .chat-message-replay[hidden] {
+  display: none;
+}
+/* Per-bubble replay button stays hidden while the assistant bubble
+ * is still being rendered (`chat-message--streaming` is set on the
+ * bubble at the start of `streamReply` and removed in its `finally`
+ * block). Historical bubbles are rehydrated without the class, so
+ * the button shows immediately on reload. */
+.chat-message--streaming > .chat-message-replay {
   display: none;
 }
 .chat-message-replay {

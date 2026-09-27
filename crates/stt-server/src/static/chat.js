@@ -445,12 +445,23 @@ function applyMarkdown(bubbleEl, text) {
   bubbleEl.innerHTML = renderMarkdown(text);
   decorateSafeLinks(bubbleEl);
   renderMath(bubbleEl);
-  // `innerHTML = ...` above wiped the per-bubble replay button that
-  // `appendBubble` (or the loader-removal point) attached. Re-attach
-  // it now so the button survives every streaming markdown re-render.
+  // `innerHTML = ...` above wiped every child including the per-bubble
+  // replay button (added by `appendBubble`) and any inlined tool
+  // traces (added by `appendToolBubble`). Re-attach both so they
+  // survive every streaming markdown re-render.
   if (bubbleEl._replayBtn || bubbleEl.classList.contains("chat-message--markdown")) {
     ensureReplayButton(bubbleEl);
     refreshReplayButtonVisibility();
+  }
+  if (bubbleEl._toolUsageEls && bubbleEl._toolUsageEls.length > 0) {
+    // `_toolUsageEls` is in source order (the order each tool_call
+    // landed). Insert them as the last children of the bubble —
+    // just before the replay button — so the visible flow stays
+    // (prose, then tool traces, then 🔊 button).
+    const replayBtn = bubbleEl._replayBtn;
+    for (const details of bubbleEl._toolUsageEls) {
+      bubbleEl.insertBefore(details, replayBtn);
+    }
   }
 }
 
@@ -721,6 +732,17 @@ function renderHistory(sessionId) {
     });
     lastUserOrFinalAssistantEl = bubble;
     toolAnchorEl = null;
+    continue;
+  }
+  // Historical assistant bubbles: collapse the inlined tool traces
+  // by default so the rehydrated view matches the "retracted after
+  // the reply settles" rule. Live streams drop the same traces in
+  // `streamReply`'s `finally` block.
+  for (const bubble of messagesEl.querySelectorAll(".chat-assistant")) {
+    const traces = bubble.querySelectorAll(
+      "details.chat-message__tool-usage[open]",
+    );
+    traces.forEach((d) => { d.open = false; });
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -891,12 +913,67 @@ function appendToolBubble(
   statusEl.textContent = "running…";
   div.appendChild(statusEl);
 
-  // Insert directly after the assistant bubble so the live tool
-  // appears under the message that requested it, in source order.
+  // Wrap the tool bubble in a collapsible `<details>` element so the
+  // user can hide the tool trace by default once the reply settles.
+  // The `<summary>` carries a compact "🔧 wikipedia …" line; the body
+  // is the full tool bubble. During the tool run the `<details>` is
+  // open so the user sees progress; once the reply completes we
+  // remove the `open` attribute (see `finalizeAssistantBubble`).
+  //
+  // The wrapper is inserted INSIDE the assistant bubble (before the
+  // replay button), so the tool trace visually hangs off the message
+  // that produced it. Rehydration on history reload reproduces the
+  // same DOM via the `renderHistory` path, which calls
+  // `appendToolBubble` with `sessionId = null` and the assistant
+  // bubble as anchor.
+  const details = document.createElement("details");
+  details.className = "chat-message__tool-usage";
+  details.dataset.toolId = id;
+  details.dataset.toolName = name;
+  details.open = true;
+  const summary = document.createElement("summary");
+  // `summary` must contain the same label so the user sees a stable
+  // caption in both states (collapsed: this line; expanded: this line
+  // + the full body). The icon + name are duplicated into the body
+  // by the existing `.chat-tool-bubble` markup below.
+  const summaryIcon = document.createElement("span");
+  summaryIcon.className = "chat-message__tool-summary-icon";
+  summaryIcon.textContent = toolIcon(name);
+  const summaryName = document.createElement("span");
+  summaryName.className = "chat-message__tool-summary-name";
+  summaryName.textContent = name;
+  const summaryStatus = document.createElement("span");
+  summaryStatus.className = "chat-message__tool-summary-status";
+  summaryStatus.textContent = "running…";
+  summary.appendChild(summaryIcon);
+  summary.appendChild(summaryName);
+  summary.appendChild(summaryStatus);
+  details.appendChild(summary);
+  details.appendChild(div);
+
   if (assistantEl && assistantEl.parentNode === messagesEl) {
-    assistantEl.insertAdjacentElement("afterend", div);
+    // Insert before the replay button if it's already attached
+    // (`appendBubble` adds it before any tool_call lands). Falls
+    // back to plain appendChild for callers that pass a detached
+    // assistant bubble (tests).
+    const replayBtn = assistantEl.querySelector(".chat-message-replay");
+    if (replayBtn) {
+      assistantEl.insertBefore(details, replayBtn);
+    } else {
+      assistantEl.appendChild(details);
+    }
   } else {
-    messagesEl.appendChild(div);
+    messagesEl.appendChild(details);
+  }
+  // Track the wrapper on the bubble so `applyMarkdown` (which wipes
+  // the bubble's `innerHTML` on every streaming tick) can re-insert
+  // it after the wipe. Without this the tool trace would vanish
+  // mid-stream.
+  if (assistantEl && !assistantEl._toolUsageEls) {
+    assistantEl._toolUsageEls = [];
+  }
+  if (assistantEl) {
+    assistantEl._toolUsageEls.push(details);
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 
@@ -955,7 +1032,13 @@ function appendToolBubble(
  * LLM turns.
  */
 function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
-  const div = messagesEl.querySelector(`.chat-tool-bubble[data-tool-id="${CSS.escape(id)}"]`);
+  // The tool trace is now wrapped in a `<details>` collapsible
+  // (`appendToolBubble`); the inner `.chat-tool-bubble` div is the
+  // historical node whose status / class flips on result.
+  const details = messagesEl.querySelector(
+    `details.chat-message__tool-usage[data-tool-id="${CSS.escape(id)}"]`,
+  );
+  const div = details?.querySelector(".chat-tool-bubble");
   if (div) {
     div.classList.remove("chat-tool-bubble--running");
     div.classList.add(ok ? "chat-tool-bubble--ok" : "chat-tool-bubble--error");
@@ -963,14 +1046,23 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
     if (statusEl) {
       statusEl.textContent = ok ? `✓ ${truncateSummary(summary)}` : `⚠ ${truncateSummary(summary)}`;
     }
+    // Mirror the result on the `<summary>` so the user sees the
+    // status line even when the tool trace is collapsed (which is
+    // the default once the reply settles).
+    const summaryStatus = details.querySelector(".chat-message__tool-summary-status");
+    if (summaryStatus) {
+      summaryStatus.textContent = ok
+        ? `✓ ${truncateSummary(summary)}`
+        : `⚠ ${truncateSummary(summary)}`;
+    }
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    // On tool error, undo the visual hide `appendToolBubble` applied:
-    // the assistant prose is the only signal we have for a failed
-    // tool, so it must stay readable. The success path runs the
-    // hide/show logic via the deferral below.
-    if (!ok) {
-      const assistantEl = findAssistantAbove(div);
-      setAssistantToolPending(assistantEl, false);
+    // On tool error, no prose is going to stream after the tool
+    // result, so collapse the wrapper now rather than waiting for
+    // stream end: the `<details>` open state would otherwise show
+    // the error body until the assistant turn finalises, which can
+    // be much later for multi-tool replies.
+    if (!ok && details) {
+      details.open = false;
     }
     // `get_weather` carries a structured JSON payload already — build
     // the compact card out of it. Wrapped in try/catch so a malformed
@@ -982,15 +1074,16 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
         if (data) {
           const mode = detectWeatherMode(data);
           renderWeatherWidget(div, data, mode);
-          // Suppress the assistant bubble that emitted the tool call so
-          // the widget is the visible answer. Defer to stream end via
-          // `inflight.weatherSuppressEl`: suppressing mid-stream would
-          // clobber tokens the LLM is still writing. On renderHistory
-          // `inflight` is null, so we suppress immediately.
+          // Mark the weather bubble so the stream-end finalizer
+          // collapses the assistant's prose down to a one-liner
+          // (the widget is the visible answer). Defer to stream end
+          // via `inflight.weatherFinalizeEl`; on rehydration
+          // (`inflight` is null) we suppress immediately.
           if (inflight && inflight.sessionId === sessionId) {
             inflight.weatherFinalizeEl = div;
-          } else if (div.parentNode === messagesEl) {
-            finalizeAssistantForToolResult(div);
+          } else if (details?.parentElement) {
+            const assistantEl = details.parentElement.closest(".chat-assistant");
+            if (assistantEl) finalizeAssistantForToolResult(details, assistantEl);
           }
         }
       } catch (e) {
@@ -1216,7 +1309,7 @@ function setAssistantToolPending(assistantEl, loading) {
     assistantEl.classList.add("chat-message--tool-pending");
     const el = document.createElement("div");
     el.className = "chat-message__tool-loading";
-    el.textContent = "\u{1F324} Préparation de la carte météo\u2026";
+    el.textContent = "Préparation de la réponse\u2026";
     assistantEl.appendChild(el);
     return;
   }
@@ -1224,13 +1317,14 @@ function setAssistantToolPending(assistantEl, loading) {
   if (placeholder) placeholder.remove();
 }
 
-// Walk back through `previousElementSibling` until we find the
-// assistant bubble that emitted this tool call. Multiple chained
-// tool bubbles mean we may have to skip a few.
-function findAssistantAbove(toolBubble) {
-  let cur = toolBubble?.previousElementSibling;
-  while (cur && !cur.classList.contains("chat-assistant")) {
-    cur = cur.previousElementSibling;
+// Walk up the DOM tree to find the assistant bubble that owns a
+// tool bubble. With the tool trace now inlined inside the assistant
+// bubble (see `appendToolBubble`), the assistant is the closest
+// `.chat-assistant` ancestor.
+function findAssistantBubble(el) {
+  let cur = el?.parentElement;
+  while (cur && !cur.classList?.contains("chat-assistant")) {
+    cur = cur.parentElement;
   }
   return cur || null;
 }
@@ -1251,8 +1345,15 @@ function findAssistantAbove(toolBubble) {
 // Called from `resolveToolBubble` (rehydration / immediate) and from
 // `streamReply`'s finally block (live stream — deferred to avoid
 // clobbering tokens still in flight when the tool result lands).
-function finalizeAssistantForToolResult(toolBubble) {
-  const assistantEl = findAssistantAbove(toolBubble);
+function finalizeAssistantForToolResult(toolBubble, assistantEl) {
+  // When called from `resolveToolBubble`, the tool trace is a
+  // `<details>` wrapper; `assistantEl` is its closest `.chat-assistant`
+  // ancestor. When called from `streamReply`'s finally block with the
+  // raw `.chat-tool-bubble` div from a previous layout, fall back to
+  // the upward walk.
+  if (!assistantEl) {
+    assistantEl = findAssistantBubble(toolBubble);
+  }
   if (!assistantEl) return;
   setAssistantToolPending(assistantEl, false);
   const text = (assistantEl.textContent || "").trim();
@@ -1265,7 +1366,22 @@ function finalizeAssistantForToolResult(toolBubble) {
     return;
   }
   assistantEl.classList.add("chat-message--weather-replaced");
-  while (assistantEl.firstChild) assistantEl.removeChild(assistantEl.firstChild);
+  // The weather card IS the answer, so the assistant's prose
+  // (preamble + ack) has to go. We can't blindly wipe every child
+  // any more — the bubble now hosts the inlined tool trace
+  // `<details>`, the weather card itself, and the replay button.
+  // Collect the children to keep, then drop the rest.
+  const keep = new Set();
+  for (const child of Array.from(assistantEl.children)) {
+    if (child.classList?.contains("chat-message__tool-usage")
+        || child.classList?.contains("chat-weather-card")
+        || child.classList?.contains("chat-message-replay")) {
+      keep.add(child);
+    }
+  }
+  for (const child of Array.from(assistantEl.children)) {
+    if (!keep.has(child)) assistantEl.removeChild(child);
+  }
   const hint = document.createElement("span");
   hint.className = "chat-message__weather-hint";
   hint.textContent = "\u{1F324} Détails ci-dessous.";
@@ -1583,6 +1699,11 @@ async function streamReply(sessionId, userText) {
   const assistantEl = appendBubble("assistant", "", {
     persist: false, model, markdown: true, sessionId,
   });
+  // Mark the bubble as actively streaming so the per-bubble replay
+  // button (and any other "finished reply" affordance) stays hidden
+  // until the reply is fully rendered. The flag is dropped in the
+  // `finally` block of `streamReply` once the SSE stream ends.
+  assistantEl.classList.add("chat-message--streaming");
   // Render an inline bouncing-dots loader inside the assistant bubble
   // while we wait for the LLM's first token. Without this, the bubble
   // sits empty during the Ollama cold start (sometimes 30s+ on a
@@ -1828,26 +1949,32 @@ async function streamReply(sessionId, userText) {
       if (tts) tts.stopAll();
     }
   } finally {
-    // Always clear the tool-pending state at stream end so the
-    // LLM's prose (preamble or final answer after seeing the tool
-    // result) is visible. The CSS rule
-    // `.chat-message--tool-pending > :not(.chat-message__tool-loading)`
-    // hides every child except the "Préparation…" placeholder; that
-    // placeholder only made sense while the tool was still running.
-    // For weather, the weather-specific finalizer below also runs
-    // and may collapse long prose down to a one-liner under the card.
-    if (assistantEl?.classList?.contains("chat-message--tool-pending")) {
-      setAssistantToolPending(assistantEl, false);
+    // Drop the streaming class so the per-bubble replay button
+    // (hidden via CSS while the class is present) becomes visible
+    // now that the reply is fully rendered. The user only sees the
+    // 🔊 icon once the assistant turn is complete, never mid-stream.
+    if (assistantEl) {
+      assistantEl.classList.remove("chat-message--streaming");
+      // Collapse every tool trace inside the bubble so the default
+      // state matches the "retracted after the reply settles" rule.
+      // The user can still expand a trace by clicking the `<summary>`.
+      const traces = assistantEl.querySelectorAll(
+        "details.chat-message__tool-usage[open]",
+      );
+      traces.forEach((d) => { d.open = false; });
     }
     // If a `get_weather` tool result came back successfully during
-    // this reply, run the assistant finalizer (unhide what the tool
-    // run was hiding; collapse long prose down to a one-liner, keep
-    // short acknowledgments visible). Done here, not in
+    // this reply, run the assistant finalizer (collapse long prose
+    // down to a one-liner under the card; keep short
+    // acknowledgments visible). Done here, not in
     // resolveToolBubble, so we never judge the assistant's prose while
     // the LLM is still streaming tokens after the tool result.
-    if (inflight?.weatherFinalizeEl) {
+    if (inflight?.weatherFinalizeEl && assistantEl) {
       try {
-        finalizeAssistantForToolResult(inflight.weatherFinalizeEl);
+        finalizeAssistantForToolResult(
+          inflight.weatherFinalizeEl,
+          assistantEl,
+        );
       } catch (e) {
         console.warn("weather finalizer failed:", e);
       }
