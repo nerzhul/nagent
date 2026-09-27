@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use futures_util::StreamExt;
-use stt_core::{InferenceJob, InferenceWorker, MockBackend, WhisperBackend};
+use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, WhisperBackend};
 use stt_proto::{decode_frame, Tag};
 use stt_server::config::RateLimitConfig;
 use stt_server::{
@@ -47,6 +47,7 @@ async fn start_test_server_with(
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
+        inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
@@ -67,7 +68,8 @@ async fn start_test_server_with(
         tts: stt_server::config::TtsConfig::default(),
     });
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let (job_tx, job_rx) = mpsc::channel::<InferenceJob>(16);
+    let (job_tx_inner, job_rx) = mpsc::channel::<InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(16);
     let _worker = InferenceWorker::spawn(Arc::clone(&backend), job_rx);
     let _shutdown = stt_server::router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);

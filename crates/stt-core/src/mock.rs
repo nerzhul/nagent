@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::backend::{BackendError, WhisperBackend};
+use crate::backend::{BackendError, BackendInfo, WhisperBackend};
 use crate::job::{InferRequest, InferResponse};
 
 /// Always-available mock backend used by default.
@@ -53,6 +53,13 @@ impl WhisperBackend for MockBackend {
 
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    fn info(&self) -> BackendInfo {
+        // The mock backend is free of all hardware constraints, so the
+        // worker pool may grow as wide as the OS lets it. The server's
+        // own sizing logic still caps this at the CPU count.
+        BackendInfo::new("mock", self.model_id.clone(), 0, usize::MAX)
     }
 }
 

@@ -30,6 +30,10 @@ pub struct Config {
     pub whisper_model_path: PathBuf,
     /// Capacity of the global inference queue.
     pub max_queue: usize,
+    /// Operator override for the inference worker pool size. `None`
+    /// means "let the server pick a default from the backend's
+    /// [`stt_core::BackendInfo`]" (P0 + P2 of the perf plan).
+    pub inference_workers: Option<usize>,
     /// Watchdog threshold: a session with no activity for this long is
     /// dropped.
     pub session_idle_timeout: Duration,
@@ -240,6 +244,21 @@ impl Config {
             30_000,
             "INFER_TIMEOUT_MS",
         )?);
+        // `INFERENCE_WORKERS` is an optional override: when the env var
+        // and the TOML key are both unset we keep `None` and let
+        // `main` pick a default from the loaded backend's
+        // `BackendInfo` (P0/P2 of the perf plan). The value is clamped
+        // to at least 1 — `WorkerPool::spawn` panics on 0.
+        let inference_workers = match (
+            env_opt("INFERENCE_WORKERS").as_deref(),
+            server.and_then(|s| s.inference_workers),
+        ) {
+            (Some(v), _) => {
+                Some(resolve_primitive::<usize>(Some(v), None, 1, "INFERENCE_WORKERS")?.max(1))
+            }
+            (None, Some(v)) => Some(v.max(1)),
+            (None, None) => None,
+        };
 
         let limits = LimitsConfig::from_env_with_toml(server.and_then(|s| s.limits.as_ref()))?;
         let llm = LlmConfig::from_env_with_toml(toml.and_then(|t| t.llm.as_ref()))?;
@@ -252,6 +271,7 @@ impl Config {
             bind_addr,
             whisper_model_path,
             max_queue,
+            inference_workers,
             session_idle_timeout,
             infer_timeout,
             limits,
@@ -777,6 +797,9 @@ pub struct AgentConfig {
     /// Knobs for the `wikipedia` agent. Empty by default (no API key,
     /// only a `User-Agent` header is required by Wikimedia).
     pub wikipedia: WikipediaConfig,
+    /// Knobs for the `dictionary` agent (no API key — anonymous
+    /// Free Dictionary API).
+    pub dictionary: DictionaryConfig,
 }
 
 impl Default for AgentConfig {
@@ -788,6 +811,7 @@ impl Default for AgentConfig {
             weather: WeatherConfig::default(),
             unit_convert: UnitConvertConfig::default(),
             wikipedia: WikipediaConfig::default(),
+            dictionary: DictionaryConfig::default(),
         }
     }
 }
@@ -814,6 +838,7 @@ impl AgentConfig {
             weather: WeatherConfig::from_env_with_toml(toml.get_weather.as_ref())?,
             unit_convert: UnitConvertConfig::from_env_with_toml(toml.unit_convert.as_ref())?,
             wikipedia: WikipediaConfig::from_env_with_toml(toml.wikipedia.as_ref())?,
+            dictionary: DictionaryConfig::from_env_with_toml(toml.dictionary.as_ref())?,
         })
     }
 }
@@ -1031,6 +1056,54 @@ impl WikipediaConfig {
     }
 }
 
+/// Knobs for the `dictionary` agent.
+///
+/// The Free Dictionary API (<https://api.dictionaryapi.dev/>) is
+/// anonymous (no API key required) and returns definitions,
+/// phonetics, examples, and synonyms for English words. The agent
+/// calls it over plain HTTPS; no `User-Agent` policy to honour, no
+/// rate-limit beyond the published fair-use cap.
+#[derive(Debug, Clone)]
+pub struct DictionaryConfig {
+    /// Per-request timeout in milliseconds. Defaults to 5 s.
+    pub timeout_ms: u64,
+    /// Override the upstream base URL. Defaults to the canonical
+    /// `https://api.dictionaryapi.dev/api/v2`. Useful for tests
+    /// pointing at a loopback fixture.
+    pub base_url: String,
+}
+
+impl Default for DictionaryConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 5_000,
+            base_url: "https://api.dictionaryapi.dev/api/v2".to_string(),
+        }
+    }
+}
+
+impl DictionaryConfig {
+    fn from_env_with_toml(
+        toml: Option<&crate::config_file::TomlDictionaryConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("DICTIONARY_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "DICTIONARY_TIMEOUT_MS",
+            )?,
+            base_url: resolve_opt_string(
+                env_opt("DICTIONARY_BASE_URL").as_deref(),
+                toml.base_url.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.base_url.clone()),
+        })
+    }
+}
+
 /// Errors produced by [`Config::from_env`], [`Config::from_env_with_toml`]
 /// and [`Config::load`].
 #[derive(Debug, thiserror::Error)]
@@ -1119,6 +1192,35 @@ mod tests {
         assert_eq!(cfg.agents.weather.api_key, "weather-toml-key");
     }
 
+    /// `inference_workers` defaults to `None` so the server falls back
+    /// to the backend-derived recommendation at startup. Operators
+    /// that need a different count can pin it via `[server].inference_workers`
+    /// in the TOML overlay; the resolution helper mirrors the
+    /// `env > TOML > default` precedence.
+    #[test]
+    fn inference_workers_resolution_precedence() {
+        // TOML-only value is picked up.
+        let toml = toml_from(
+            r#"
+                [server]
+                whisper_model_path = "/tmp/m.bin"
+                inference_workers = 4
+            "#,
+        );
+        let cfg = Config::from_env_with_toml(Some(&toml)).expect("config must load");
+        assert_eq!(cfg.inference_workers, Some(4), "TOML value must apply");
+
+        // Invalid TOML value (zero) must be clamped to 1, never panic.
+        let toml = toml_from(
+            r#"
+                [server]
+                whisper_model_path = "/tmp/m.bin"
+                inference_workers = 0
+            "#,
+        );
+        let cfg = Config::from_env_with_toml(Some(&toml)).expect("config must load");
+        assert_eq!(cfg.inference_workers, Some(1), "zero must clamp to 1");
+    }
     /// Env var must beat TOML when both are present. Exercised through
     /// the pure `resolve_primitive` helper so the test stays free of
     /// process-global env mutations (see the comment on

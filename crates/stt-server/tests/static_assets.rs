@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use stt_core::MockBackend;
+use stt_core::{MockBackend, PoolDispatch};
 use stt_server::{
     build_router,
     config::RateLimitConfig,
@@ -32,6 +32,7 @@ async fn serve_once() -> String {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
+        inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
@@ -50,7 +51,8 @@ async fn serve_once() -> String {
         tts: stt_server::config::TtsConfig::default(),
     });
     let sessions = Arc::new(dashmap::DashMap::new());
-    let (job_tx, job_rx) = mpsc::channel::<stt_core::InferenceJob>(16);
+    let (job_tx_inner, job_rx) = mpsc::channel::<stt_core::InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(16);
     let _worker = stt_core::InferenceWorker::spawn(Arc::clone(&backend), job_rx);
     let _shutdown = stt_server::router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
@@ -787,9 +789,7 @@ async fn css_pins_inline_voice_graph_to_natural_height() {
             rule.push(ch);
             depth -= 1;
             if depth == 0 {
-                if rule.contains("voice-graph--inline")
-                    && rule.contains("flex-shrink: 0")
-                {
+                if rule.contains("voice-graph--inline") && rule.contains("flex-shrink: 0") {
                     inline_rule_has_flex_shrink_zero = true;
                     break;
                 }
@@ -842,7 +842,8 @@ async fn html_mounts_two_distinct_voice_graph_instances() {
     );
 
     // The Transcript instance must live inside the Transcript view.
-    let transcript_view_start = html.find(r#"id="view-transcript""#)
+    let transcript_view_start = html
+        .find(r#"id="view-transcript""#)
         .expect("index.html is missing #view-transcript");
     let transcript_view_end = html[transcript_view_start..]
         .find("</main>")
@@ -867,7 +868,8 @@ async fn html_mounts_two_distinct_voice_graph_instances() {
     // The Discussion instance must live inside #chat-messages so it
     // scrolls with the conversation and sits "in the same scroll
     // context as the user / assistant turns" (spec §4.10).
-    let chat_messages_start = html.find(r#"id="chat-messages""#)
+    let chat_messages_start = html
+        .find(r#"id="chat-messages""#)
         .expect("index.html is missing #chat-messages");
     let chat_messages_end = html[chat_messages_start..]
         .find("</div>")

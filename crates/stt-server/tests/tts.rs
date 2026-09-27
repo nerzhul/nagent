@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use dashmap::DashMap;
-use stt_core::{InferenceJob, MockBackend, WhisperBackend};
+use stt_core::{InferenceJob, MockBackend, PoolDispatch, WhisperBackend};
 use stt_server::{
     build_router,
     config::{LlmConfig, RateLimitConfig},
@@ -30,11 +30,13 @@ use tokio::net::TcpListener;
 fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
     let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
     let sessions: SessionMap = Arc::new(DashMap::new());
-    let (job_tx, _job_rx) = tokio::sync::mpsc::channel::<InferenceJob>(16);
+    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     let server_cfg = Arc::new(ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
+        inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),

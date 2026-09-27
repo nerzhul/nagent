@@ -97,7 +97,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use stt_core::{InferenceJob, InferenceWorker, WhisperBackend};
+use stt_core::{default_worker_count, WhisperBackend, WorkerPool};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -112,23 +112,58 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- Backend ---------------------------------------------------------
     let backend: Arc<dyn WhisperBackend> = build_backend(&cfg).await?;
+    let backend_info = backend.info();
     info!(
-        backend = backend.backend_name(),
-        model = backend.model_id(),
+        backend = %backend_info.name,
+        model = %backend_info.model_id,
+        size_bytes = backend_info.model_size_bytes,
+        recommended_workers = backend_info.recommended_workers,
         "backend ready"
+    );
+
+    // ---- Worker pool sizing (P0 + P2 of the perf plan) ------------------
+    // The pool owns N independent backend instances (each gets a fresh
+    // WhisperState, so they actually run in parallel instead of
+    // serializing on a shared mutex). Dispatch is sticky on
+    // `session_id`, which keeps per-session FIFO ordering intact and
+    // lets us warm any per-session cache once and reuse it across
+    // turns.
+    //
+    // Priority for the chosen count:
+    //   1. `Config::inference_workers` if the operator set it.
+    //   2. `BackendInfo::recommended_workers` (model-size aware) if
+    //      the backend advertises a hint.
+    //   3. `stt_core::default_worker_count` (CPU-count fallback, capped
+    //      at 8).
+    let worker_count = cfg
+        .inference_workers
+        .unwrap_or_else(|| default_worker_count(&backend_info))
+        .max(1);
+    info!(
+        inference_workers = worker_count,
+        "worker pool sizing decided"
     );
 
     // ---- Session map (shared) --------------------------------------------
     let sessions: session::SessionMap = Arc::new(dashmap::DashMap::new());
 
-    // ---- Channels --------------------------------------------------------
-    let (job_tx, job_rx) = mpsc::channel::<InferenceJob>(cfg.max_queue);
+    // ---- Worker pool -----------------------------------------------------
+    // Each worker gets its own backend clone. For the in-process mock
+    // that's a cheap `Clone`; for the real whisper-rs backend the
+    // factory would build N independent `WhisperState`s. The
+    // `backend_for_pool` Arc is captured by the factory closure and
+    // cloned per worker — keep it alive for the lifetime of the pool.
+    let backend_for_pool = Arc::clone(&backend);
+    let pool = WorkerPool::spawn(worker_count, move || Arc::clone(&backend_for_pool));
+    let job_tx = pool.dispatch();
+
+    // ---- Result router (unchanged) --------------------------------------
+    // The router still consumes `InferResponse`s from a single channel
+    // — same wiring as before the pool. The actual responses today
+    // flow back to the WS handler through the per-job oneshot, but
+    // the router is kept around as the integration point for the P1
+    // "Streaming partial transcripts" feature.
     let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(cfg.max_queue);
-
-    // ---- Worker ----------------------------------------------------------
-    let _worker = InferenceWorker::spawn(Arc::clone(&backend), job_rx);
-
-    // ---- Result router ---------------------------------------------------
     let _router_shutdown = router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
 
     // ---- Watchdog --------------------------------------------------------

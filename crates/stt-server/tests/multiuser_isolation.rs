@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
-use stt_core::{InferenceJob, InferenceWorker, MockBackend, WhisperBackend};
+use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, WhisperBackend};
 use stt_proto::{
     decode_frame, encode, AudioFrame, Config, FinalTranscript, Payload, StartSession, Tag,
 };
@@ -46,6 +46,7 @@ async fn start_test_server() -> (String, SessionMap) {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
+        inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
@@ -69,7 +70,8 @@ async fn start_test_server() -> (String, SessionMap) {
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
 
-    let (job_tx, job_rx) = mpsc::channel::<InferenceJob>(16);
+    let (job_tx_inner, job_rx) = mpsc::channel::<InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(16);
 
     // Worker + result router.

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use stt_proto::Segment;
 
-use crate::backend::{BackendError, WhisperBackend};
+use crate::backend::{BackendError, BackendInfo, WhisperBackend};
 use crate::job::{InferRequest, InferResponse};
 
 /// Production backend wrapping a single `WhisperContext` + `WhisperState`.
@@ -33,6 +33,7 @@ pub struct WhisperRsBackend {
     state: Arc<Mutex<whisper_rs::WhisperState>>,
     model_id: String,
     backend_name: &'static str,
+    model_size_bytes: u64,
 }
 
 impl WhisperRsBackend {
@@ -45,6 +46,15 @@ impl WhisperRsBackend {
             .unwrap_or("model")
             .to_string();
 
+        // Peek at the model size before loading the context. This lets
+        // us advertise a sensible default worker count (P2 of the perf
+        // plan): a `ggml-tiny.bin` (~75 MiB) can comfortably run a few
+        // contexts in parallel on consumer VRAM, while `ggml-large-v3`
+        // (~3 GiB) usually fits only one.
+        let model_size_bytes = std::fs::metadata(model_path)
+            .map(|m| m.len())
+            .map_err(|e| BackendError::NotReady(format!("stat model: {e}")))?;
+
         let params = whisper_rs::WhisperContextParameters::default();
         let ctx = whisper_rs::WhisperContext::new_with_params(model_path, params)
             .map_err(|e| BackendError::NotReady(format!("load model: {e}")))?;
@@ -53,12 +63,19 @@ impl WhisperRsBackend {
             .create_state()
             .map_err(|e| BackendError::NotReady(format!("create state: {e}")))?;
 
-        info!(model = %model_id, "whisper model loaded");
+        let backend_name = detect_backend_name();
+        info!(
+            model = %model_id,
+            backend = backend_name,
+            size_bytes = model_size_bytes,
+            "whisper model loaded"
+        );
 
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
             model_id,
-            backend_name: detect_backend_name(),
+            backend_name,
+            model_size_bytes,
         })
     }
 
@@ -179,6 +196,68 @@ impl WhisperBackend for WhisperRsBackend {
     fn model_id(&self) -> &str {
         &self.model_id
     }
+
+    fn info(&self) -> BackendInfo {
+        // The recommendation is based purely on model size: on CPU the
+        // context RAM is the only binding constraint, on GPU VRAM is.
+        // The hard cutoff between "small/medium" and "large" is set at
+        // 1.5 GiB because ggml-large-v3.bin is ~3.1 GiB and even the
+        // 6 GB consumer cards struggle to keep two of those warm.
+        let recommended_workers =
+            default_recommended_workers(self.backend_name, self.model_size_bytes);
+        BackendInfo::new(
+            self.backend_name,
+            self.model_id.clone(),
+            self.model_size_bytes,
+            recommended_workers,
+        )
+    }
+}
+
+/// Pick a default number of parallel inference contexts based on the
+/// backend flavour and the loaded model's on-disk size.
+///
+/// The thresholds are deliberately conservative: whisper's working set
+/// grows past the model file size at runtime, so `ggml-medium` already
+/// makes most consumer GPU boxes swap. CPU-only deployments are even
+/// more constrained (no parallelism at all by default, because
+/// `whisper.cpp`'s encoder is already multi-threaded inside a single
+/// context).
+pub fn default_recommended_workers(backend_name: &str, model_size_bytes: u64) -> usize {
+    const SMALL_MODEL_BYTES: u64 = 500 * 1024 * 1024; // <= ~500 MiB
+    const LARGE_MODEL_BYTES: u64 = 1500 * 1024 * 1024; // > ~1.5 GiB
+    match backend_name {
+        // CPU: whisper.cpp already saturates every core inside a single
+        // context. Running two in parallel usually makes the server
+        // *slower* than just queueing them serially, so default to 1.
+        "cpu" | "mock" => 1,
+        // No GPU features compiled in: treat as CPU.
+        name if name.starts_with("cpu") => 1,
+        // GPUs: scale with model size. The brackets below are
+        // intentionally simple — operators on a 24 GB card should set
+        // `INFERENCE_WORKERS` explicitly. We just need a sane default
+        // so a fresh `make run` doesn't blow VRAM.
+        "vulkan" | "cuda" | "hipblas" => {
+            if model_size_bytes == 0 {
+                // Unknown model size (shouldn't happen for the real
+                // backend, but a defensive default keeps the pool from
+                // going wild if the stat failed). 1 is always safe.
+                1
+            } else if model_size_bytes <= SMALL_MODEL_BYTES {
+                // tiny / base fits many times.
+                4
+            } else if model_size_bytes >= LARGE_MODEL_BYTES {
+                // large-v3 / large-v2: only one context fits.
+                1
+            } else {
+                // small / medium: two contexts usually fit.
+                2
+            }
+        }
+        // Unknown backend name (e.g. a future custom backend). Stay
+        // safe — one context.
+        _ => 1,
+    }
 }
 
 /// Pick a backend label from compile-time features, in priority order:
@@ -207,5 +286,85 @@ fn detect_backend_name() -> &'static str {
     {
         warn!("no GPU backend feature enabled; whisper will run on CPU");
         "cpu"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_recommended_workers;
+
+    /// `default_recommended_workers` is the heart of P2 of the perf
+    /// plan (adaptive worker concurrency from model size). These tests
+    /// pin the threshold table so a careless refactor that flips a
+    /// bracket or drops a backend name shows up at unit-test time
+    /// rather than in production.
+    #[test]
+    fn cpu_is_always_single_threaded() {
+        // whisper.cpp's encoder already saturates every core inside a
+        // single context; running two CPU contexts in parallel is
+        // almost always a regression.
+        for size in [
+            0,
+            100 * 1024 * 1024,
+            1_000 * 1024 * 1024,
+            5_000 * 1024 * 1024,
+        ] {
+            assert_eq!(
+                default_recommended_workers("cpu", size),
+                1,
+                "cpu with {size} bytes must recommend 1 worker"
+            );
+        }
+        // The CPU fall-back (unknown backend name) must also default to
+        // one worker so a fresh backend implementation starts safe.
+        assert_eq!(default_recommended_workers("custom-future-backend", 0), 1);
+    }
+
+    #[test]
+    fn gpu_brackets_scale_with_model_size() {
+        // Small models (tiny / base) get the highest recommendation.
+        assert_eq!(default_recommended_workers("vulkan", 75 * 1024 * 1024), 4);
+        assert_eq!(default_recommended_workers("cuda", 200 * 1024 * 1024), 4);
+        assert_eq!(default_recommended_workers("hipblas", 400 * 1024 * 1024), 4);
+
+        // Medium models (small / medium) get two contexts.
+        assert_eq!(default_recommended_workers("vulkan", 600 * 1024 * 1024), 2);
+        assert_eq!(default_recommended_workers("cuda", 1_200 * 1024 * 1024), 2);
+
+        // Large models (large-v2 / large-v3) only fit one context.
+        assert_eq!(
+            default_recommended_workers("vulkan", 1_500 * 1024 * 1024),
+            1
+        );
+        assert_eq!(
+            default_recommended_workers("cuda", 3 * 1024 * 1024 * 1024),
+            1
+        );
+        assert_eq!(
+            default_recommended_workers("hipblas", 5 * 1024 * 1024 * 1024),
+            1
+        );
+
+        // GPU backends must never recommend zero — if `stat` failed the
+        // default of 1 keeps the server responsive and conservative.
+        assert_eq!(default_recommended_workers("vulkan", 0), 1);
+        assert_eq!(default_recommended_workers("cuda", 0), 1);
+    }
+
+    #[test]
+    fn boundary_at_small_threshold_is_inclusive() {
+        // The boundary between "small" and "medium" is inclusive on
+        // the small side: a model of exactly 500 MiB should get 4.
+        assert_eq!(
+            default_recommended_workers("vulkan", 500 * 1024 * 1024),
+            4,
+            "500 MiB exactly must still be treated as 'small'"
+        );
+        // 500 MiB + 1 byte must drop to 2.
+        assert_eq!(
+            default_recommended_workers("vulkan", 500 * 1024 * 1024 + 1),
+            2,
+            "500 MiB + 1 byte must already be 'medium'"
+        );
     }
 }

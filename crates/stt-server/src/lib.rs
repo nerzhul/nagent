@@ -47,16 +47,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use std::net::SocketAddr;
-use tokio::sync::mpsc;
 
-use stt_core::{InferenceJob, WhisperBackend};
+use stt_core::{PoolDispatch, WhisperBackend};
 
 /// Shared application state injected into every axum handler.
 #[derive(Clone)]
 pub struct AppState {
     pub backend: Arc<dyn WhisperBackend>,
     pub sessions: SessionMap,
-    pub job_tx: mpsc::Sender<InferenceJob>,
+    /// Sticky-dispatch handle into the inference worker pool. Each WS
+    /// handler clones it (cheap) and sends its jobs through it; jobs
+    /// from the same session always land on the same worker so
+    /// per-session FIFO order is preserved.
+    pub job_tx: PoolDispatch,
     pub ready: Arc<AtomicBool>,
     pub config: Arc<Config>,
     /// Optional LLM proxy. `None` when `LLM_ENABLED=false`; in that

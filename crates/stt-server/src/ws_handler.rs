@@ -273,7 +273,9 @@ async fn handle_inbound(
                 },
                 response_tx: resp_tx,
             };
-            // If the queue is full, the send fails — surface an error to the client.
+            // If the targeted worker's queue is full (or the pool has
+            // been shut down) the send fails — surface an error to the
+            // client so it knows the request did not reach a worker.
             app.job_tx
                 .send(job)
                 .await

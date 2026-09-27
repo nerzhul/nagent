@@ -18,7 +18,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
-use stt_core::{MockBackend, WhisperBackend};
+use stt_core::{MockBackend, PoolDispatch, WhisperBackend};
 use stt_server::{
     build_router,
     config::{LlmConfig, RateLimitConfig},
@@ -113,6 +113,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
+        inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
@@ -136,7 +137,8 @@ async fn start_test_server_with_llm_and_system_prompt(
     let llm_client =
         LlmClient::new(llm_cfg).expect("LlmClient::new should succeed for test config");
 
-    let (job_tx, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
+    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
 
     let on_request = Arc::new(tokio::sync::Mutex::new(None));
 
@@ -185,6 +187,7 @@ async fn start_test_server_disabled() -> String {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
+        inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
@@ -204,7 +207,8 @@ async fn start_test_server_disabled() -> String {
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let (job_tx, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
+    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),

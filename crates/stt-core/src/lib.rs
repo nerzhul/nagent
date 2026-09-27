@@ -21,7 +21,10 @@ pub mod worker;
 #[cfg(feature = "whisper-rs-backend")]
 pub mod whisper_backend;
 
-pub use backend::WhisperBackend;
+pub use backend::{BackendInfo, WhisperBackend};
 pub use job::{InferRequest, InferResponse, InferenceJob};
 pub use mock::MockBackend;
-pub use worker::{InferenceWorker, WorkerHandle};
+pub use worker::{
+    default_worker_count, shard_for, InferenceWorker, PoolDispatch, PoolHandle, PoolSendError,
+    WorkerHandle, WorkerPool,
+};

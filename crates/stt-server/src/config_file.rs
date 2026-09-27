@@ -123,6 +123,9 @@ pub struct TomlServerConfig {
     pub max_queue: Option<usize>,
     pub session_idle_timeout_ms: Option<u64>,
     pub infer_timeout_ms: Option<u64>,
+    /// Operator override for the inference worker pool size. When unset,
+    /// the server picks a default from the backend's [`stt_core::BackendInfo`].
+    pub inference_workers: Option<usize>,
     #[serde(default)]
     pub limits: Option<TomlLimitsConfig>,
     #[serde(default)]
@@ -169,6 +172,8 @@ pub struct TomlAgentConfig {
     pub unit_convert: Option<TomlUnitConvertConfig>,
     #[serde(default)]
     pub wikipedia: Option<TomlWikipediaConfig>,
+    #[serde(default)]
+    pub dictionary: Option<TomlDictionaryConfig>,
 }
 
 /// Sandbox and transfer knobs for the built-in `web_fetch` tool.
@@ -206,6 +211,15 @@ pub struct TomlWikipediaConfig {
     pub timeout_ms: Option<u64>,
     pub base_url: Option<String>,
     pub user_agent: Option<String>,
+}
+
+/// Knobs for the `dictionary` tool (no API key). Mirrors
+/// [`crate::config::DictionaryConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlDictionaryConfig {
+    pub timeout_ms: Option<u64>,
+    pub base_url: Option<String>,
 }
 
 /// WebSocket frame-limit knobs. Mirrors [`crate::config::LimitsConfig`].
@@ -305,6 +319,7 @@ fn merge_toml_server(
                 .clone()
                 .or_else(|| e.whisper_model_path.clone()),
             max_queue: l.max_queue.or(e.max_queue),
+            inference_workers: l.inference_workers.or(e.inference_workers),
             session_idle_timeout_ms: l.session_idle_timeout_ms.or(e.session_idle_timeout_ms),
             infer_timeout_ms: l.infer_timeout_ms.or(e.infer_timeout_ms),
             limits: merge_toml_limits(e.limits.as_ref(), l.limits.as_ref()),
@@ -383,6 +398,7 @@ fn merge_toml_agents(
             get_weather: merge_toml_weather(e.get_weather.as_ref(), l.get_weather.as_ref()),
             unit_convert: merge_toml_unit_convert(e.unit_convert.as_ref(), l.unit_convert.as_ref()),
             wikipedia: merge_toml_wikipedia(e.wikipedia.as_ref(), l.wikipedia.as_ref()),
+            dictionary: merge_toml_dictionary(e.dictionary.as_ref(), l.dictionary.as_ref()),
         }),
     }
 }
@@ -446,6 +462,21 @@ fn merge_toml_wikipedia(
             timeout_ms: l.timeout_ms.or(e.timeout_ms),
             base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
             user_agent: l.user_agent.clone().or_else(|| e.user_agent.clone()),
+        }),
+    }
+}
+
+fn merge_toml_dictionary(
+    earlier: Option<&TomlDictionaryConfig>,
+    later: Option<&TomlDictionaryConfig>,
+) -> Option<TomlDictionaryConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlDictionaryConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
         }),
     }
 }
