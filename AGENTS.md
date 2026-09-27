@@ -16,6 +16,12 @@ Do not mix languages. When a feature originates from a non-English request or di
 
 ## 2. Commit Convention
 
+Before committing any change:
+
+- Ensure code is properly tested
+- run `cargo fmt`
+- run `cargo clippy` (if applicable)
+
 Commits must follow a strict format so the history stays readable and usable.
 
 - **Title (first line)**:
