@@ -96,6 +96,12 @@
 # base_url = "https://en.wikipedia.org/api/rest_v1"
 # user_agent = "nagent-wikipedia-agent/0.1 (contact: ops@example.com)"
 
+# `dictionary` agent — Free Dictionary API (no API key). Returns
+# definitions, phonetics, examples, and synonyms for an English word.
+# [agents.dictionary]
+# timeout_ms = 5_000
+# base_url = "https://api.dictionaryapi.dev/api/v2"
+
 # ---------------------------------------------------------------------------
 # Local text-to-speech (Piper ONNX)
 # ---------------------------------------------------------------------------

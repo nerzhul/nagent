@@ -30,7 +30,8 @@
     feature = "stock-agent",
     feature = "calculate-agent",
     feature = "unit-convert-agent",
-    feature = "wikipedia-agent"
+    feature = "wikipedia-agent",
+    feature = "dictionary-agent"
 ))]
 
 use std::sync::Arc;
@@ -39,11 +40,13 @@ use std::time::Duration;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
-use stt_core::{MockBackend, WhisperBackend};
+use stt_core::{MockBackend, PoolDispatch, WhisperBackend};
 #[cfg(feature = "calculate-agent")]
 use stt_server::agents::calculate_agent::CalculateAgent;
 #[cfg(feature = "datetime-agent")]
 use stt_server::agents::datetime_agent::DateTimeAgent;
+#[cfg(feature = "dictionary-agent")]
+use stt_server::agents::dictionary_agent::DictionaryAgent;
 #[cfg(feature = "stock-agent")]
 use stt_server::agents::stock_agent::StockAgent;
 #[cfg(feature = "unit-convert-agent")]
@@ -58,7 +61,8 @@ use stt_server::{
     agents::{Agent, AgentRegistry},
     build_router,
     config::{
-        AgentConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig, WikipediaConfig,
+        AgentConfig, DictionaryConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig,
+        WikipediaConfig,
     },
     llm::LlmClient,
     rate_limit::{RateLimitPolicy, RateLimiter},
@@ -163,7 +167,8 @@ fn make_app_state(
     sessions: SessionMap,
 ) -> Arc<AppState> {
     let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
-    let (job_tx, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
+    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
+    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     Arc::new(AppState {
         backend,
         sessions,
@@ -203,6 +208,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
+        inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
@@ -275,6 +281,11 @@ async fn agents_list_returns_web_fetch_when_feature_enabled() {
     assert!(
         names.contains(&"wikipedia"),
         "expected `wikipedia` in {names:?}"
+    );
+    #[cfg(feature = "dictionary-agent")]
+    assert!(
+        names.contains(&"dictionary"),
+        "expected `dictionary` in {names:?}"
     );
 }
 
@@ -1134,6 +1145,106 @@ async fn wikipedia_agent_invoke_endpoint_returns_400_for_missing_title() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ---- 10. dictionary_agent end-to-end ----
+
+/// Spawn a loopback fixture that serves a canned dictionary entry
+/// for every `/entries/en/{word}` URL. The agent's
+/// `DictionaryConfig::base_url` is pointed at this server.
+#[cfg(feature = "dictionary-agent")]
+async fn spawn_dictionary_entries_fixture(body: serde_json::Value) -> String {
+    let app = Router::new().route(
+        "/api/v2/entries/en/:word",
+        get(move || {
+            let canned = body.clone();
+            async move {
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    canned.to_string(),
+                )
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+#[cfg(feature = "dictionary-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dictionary_agent_parses_entries_fixture() {
+    // Mirrors the upstream payload for "hello".
+    let canned = serde_json::json!([{
+        "word": "hello",
+        "phonetics": [
+            {"text": "/həˈləʊ/", "audio": ""},
+            {"text": "", "audio": ""}
+        ],
+        "meanings": [{
+            "partOfSpeech": "interjection",
+            "definitions": [
+                {
+                    "definition": "A greeting said when meeting someone.",
+                    "example": "Hello, everyone.",
+                    "synonyms": [],
+                    "antonyms": []
+                }
+            ],
+            "synonyms": ["greeting"],
+            "antonyms": []
+        }],
+        "license": {"name": "CC BY-SA 3.0"}
+    }]);
+    let base_url = spawn_dictionary_entries_fixture(canned).await;
+    let agent = DictionaryAgent::new(DictionaryConfig {
+        base_url: format!("{base_url}/api/v2"),
+        timeout_ms: 2_000,
+    });
+    let result = agent
+        .invoke(serde_json::json!({"word": "hello"}))
+        .await
+        .expect("invoke");
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["source"], "dictionaryapi.dev");
+    assert_eq!(parsed["data"]["word"], "hello");
+    assert_eq!(parsed["data"]["phonetic"], "/həˈləʊ/");
+    assert_eq!(
+        parsed["data"]["meanings"][0]["definitions"][0]["definition"],
+        "A greeting said when meeting someone."
+    );
+    assert_eq!(
+        parsed["data"]["meanings"][0]["definitions"][0]["example"],
+        "Hello, everyone."
+    );
+    assert_eq!(parsed["data"]["synonyms"][0], "greeting");
+}
+
+#[cfg(feature = "dictionary-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dictionary_agent_invoke_endpoint_returns_400_for_missing_word() {
+    let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
+    let agents = AgentRegistry::from_config(&cfg.agents);
+    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
+    let state = make_app_state(cfg, None, Some(agents), sessions);
+    let url = start_test_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/agents/dictionary/invoke"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"arguments":{}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ---- 10. tools-schema injection across all registered agents ----
 
 /// Regression guard: every registered agent must contribute a
@@ -1149,7 +1260,8 @@ async fn wikipedia_agent_invoke_endpoint_returns_400_for_missing_title() {
     feature = "stock-agent",
     feature = "calculate-agent",
     feature = "unit-convert-agent",
-    feature = "wikipedia-agent"
+    feature = "wikipedia-agent",
+    feature = "dictionary-agent"
 ))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tools_schema_includes_every_registered_agent() {
@@ -1177,6 +1289,8 @@ async fn tools_schema_includes_every_registered_agent() {
     assert!(names.contains(&"unit_convert"));
     #[cfg(feature = "wikipedia-agent")]
     assert!(names.contains(&"wikipedia"));
+    #[cfg(feature = "dictionary-agent")]
+    assert!(names.contains(&"dictionary"));
     for s in &schemas {
         let name = s["function"]["name"].as_str().unwrap();
         assert!(names.contains(&name));

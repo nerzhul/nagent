@@ -54,6 +54,12 @@ returns the numeric result; the assistant may add a one-line context.
 - wikipedia: short encyclopedia summary of a subject (person, event, \
 concept, historical place-as-topic, scientific topic, work). Backed by \
 the Wikipedia REST API; returns a fresh, sourced summary.
+- dictionary: look up definitions, phonetics, examples, and synonyms for \
+an English word via the Free Dictionary API (no API key). Use for \
+\"define serendipity\", \"what does 'ephemeral' mean?\", \"synonym of \
+'fast'\", \"pronunciation of 'quinoa'\". Do NOT use for encyclopedic / \
+biographical / historical questions — answer those from your own \
+knowledge; this tool is scoped to English vocabulary lookups.
 
 Tool-usage rules:
 - NEVER invent specific factual data: weather, current date or time, \
@@ -346,6 +352,7 @@ mod tests {
             "calculate",
             "unit_convert",
             "wikipedia",
+            "dictionary",
         ] {
             assert!(
                 prompt.contains(tool),

@@ -75,6 +75,7 @@ through the `make` targets and the Dockerfile `BACKEND` arg.
 | `stt-server/calculate-agent`    | Register the `calculate` chat agent (local `meval`-backed expression evaluator).         |
 | `stt-server/unit-convert-agent` | Register the `unit_convert` chat agent (pure-local conversion tables).                  |
 | `stt-server/wikipedia-agent`    | Register the `wikipedia` chat agent (REST `wikipedia.org`, no API key, `User-Agent` set).|
+| `stt-server/dictionary-agent`   | Register the `dictionary` chat agent (Free Dictionary REST API, no API key).             |
 | `stt-core/whisper-rs-backend`   | Pulls in `whisper-rs` (CPU). Always required, even when a GPU backend is also selected.  |
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
@@ -110,6 +111,7 @@ without a default and is required.
 | `BIND_ADDR`                  | `0.0.0.0:8080`                                | Core           | Socket address the HTTP server binds to.                                                                      |
 | `WHISPER_MODEL_PATH`         | _(required)_                                  | Core           | Path to the ggml-format Whisper model.                                                                        |
 | `MAX_QUEUE`                  | `32`                                          | Core           | Capacity of the global inference queue (one per session).                                                     |
+| `INFERENCE_WORKERS`          | _(backend-derived)_                           | Core           | Number of parallel inference workers (sticky per-session dispatch). Default is taken from the loaded model's size on GPU builds, or 1 on CPU. |
 | `SESSION_IDLE_TIMEOUT_MS`    | `30000`                                       | Core           | Watchdog threshold — sessions idle for this long are dropped.                                                |
 | `INFER_TIMEOUT_MS`           | `30000`                                       | Core           | Per-inference timeout for a single Whisper call.                                                              |
 | `MAX_AUDIO_FRAME_SAMPLES`    | `480000` (30 s × 16 kHz)                      | WS frame limits| Maximum PCM Float32 samples accepted in one `AudioFrame`.                                                     |
@@ -125,7 +127,7 @@ without a default and is required.
 | `LLM_CORS_ALLOW_ORIGINS`     | _(empty)_                                     | LLM proxy      | Comma-separated list of origins allowed to call `/v1/*` cross-origin. Empty = same-origin only (preflight blocked for others). |
 | `LLM_SYSTEM_PROMPT`          | _(unset)_                                     | LLM proxy      | Optional default system prompt prepended to every `/v1/chat/completions` request as `messages[0]`. The browser's "Additional instructions" textarea is appended after it. Empty / whitespace-only values are treated as unset (no injection). Sent on every round of the tool loop — very long custom prompts may exhaust the model's context window. |
 | `LLM_ALLOW_USER_LOCATION`    | `true`                                        | LLM proxy      | Defence-in-depth kill-switch for the browser-injected geolocation block. When `false`, the server strips any `{role:"system"}` message whose content starts with `User's approximate location:` before forwarding to the upstream model, regardless of what the browser sends. The browser still requires explicit user consent for the geolocation prompt; this flag is for operators handling sensitive deployments. |
-| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (`web_fetch`, `get_datetime`, `get_weather`, `get_stock_quote`, `calculate`, `unit_convert`, `wikipedia`). When `false` the registry is empty. |
+| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (`web_fetch`, `get_datetime`, `get_weather`, `get_stock_quote`, `calculate`, `unit_convert`, `wikipedia`, `dictionary`). When `false` the registry is empty. |
 | `LLM_MAX_TOOL_ROUNDS`        | `4`                                           | Chat agents    | Maximum tool-call rounds per user turn before the proxy aborts.                                               |
 | `WEB_FETCH_ALLOW_PUBLIC`     | `false`                                       | `web_fetch`    | When `true`, the agent may reach public IP ranges (SSRF defence still blocks loopback/RFC1918).               |
 | `WEB_FETCH_ALLOWLIST`        | _(empty)_                                     | `web_fetch`    | Comma-separated hostname allow-list (suffix match; `*.foo` wildcards). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
@@ -138,6 +140,8 @@ without a default and is required.
 | `WIKIPEDIA_TIMEOUT_MS`       | `5000`                                        | `wikipedia`    | Per-request timeout in milliseconds.                                                                          |
 | `WIKIPEDIA_BASE_URL`         | `https://en.wikipedia.org/api/rest_v1`        | `wikipedia`    | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
 | `WIKIPEDIA_USER_AGENT`       | `nagent-wikipedia-agent/<version>`            | `wikipedia`    | Override the `User-Agent` header. Wikimedia rejects unidentified clients — keep this descriptive and add a contact URL. |
+| `DICTIONARY_TIMEOUT_MS`      | `5000`                                        | `dictionary`   | Per-request timeout in milliseconds.                                                                          |
+| `DICTIONARY_BASE_URL`        | `https://api.dictionaryapi.dev/api/v2`        | `dictionary`   | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
 | `RUST_LOG`                   | `info,stt_server=debug,stt_core=debug` (local); `info,stt_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
 
 Per-source-IP rate limiting applies at both layers: HTTP for the LLM proxy
@@ -178,6 +182,7 @@ for per-source-IP rate limits:
 | `[server].bind_addr`              | `BIND_ADDR`                 |                                                |
 | `[server].whisper_model_path`     | `WHISPER_MODEL_PATH`        | Required (env or TOML).                        |
 | `[server].max_queue`              | `MAX_QUEUE`                 |                                                |
+| `[server].inference_workers`      | `INFERENCE_WORKERS`         | Stick to backend-derived default unless overridden. |
 | `[server].session_idle_timeout_ms`| `SESSION_IDLE_TIMEOUT_MS`   |                                                |
 | `[server].infer_timeout_ms`       | `INFER_TIMEOUT_MS`          |                                                |
 | `[server.limits].*`               | `MAX_*`, `REQUIRED_*`       | WebSocket frame knobs.                         |
@@ -220,8 +225,8 @@ base_url = "https://api.weatherapi.com"
 
 Unknown sub-tables under `[agents]` (e.g. `[agents.web_fetxh]`) are
 rejected at load time. The five daily tools take small overrides
-(`unit_convert`, `wikipedia`); `get_datetime`, `get_stock_quote`, and
-`calculate` need no configuration today.
+(`unit_convert`, `wikipedia`, `dictionary`); `get_datetime`,
+`get_stock_quote`, and `calculate` need no configuration today.
 
 ### Kubernetes overlays
 
@@ -340,14 +345,14 @@ keeps the fetched content in the LLM's context without re-fetching.
 | `WEB_FETCH_MAX_BYTES`     | `2097152` | Maximum response size the agent will read (2 MiB). The agent iteratively doubles the budget on overflow, capped here. |
 | `WEB_FETCH_TIMEOUT_MS`    | `30000` | Per-request timeout in milliseconds.                                                |
 
-### Daily agents (datetime, weather, stock quote, calculate, unit convert, wikipedia)
+### Daily agents (datetime, weather, stock quote, calculate, unit convert, wikipedia, dictionary)
 
-Six small, read-only agents complement `web_fetch` for everyday chat
+Seven small, read-only agents complement `web_fetch` for everyday chat
 queries. They are wired by default on every `make run*` target
 through the `datetime-agent`, `weather-agent`, `stock-agent`,
-`calculate-agent`, `unit-convert-agent`, and `wikipedia-agent`
-cargo features; set `AGENTS_ENABLED=false` to disable all agents at
-runtime without recompiling.
+`calculate-agent`, `unit-convert-agent`, `wikipedia-agent`, and
+`dictionary-agent` cargo features; set `AGENTS_ENABLED=false` to
+disable all agents at runtime without recompiling.
 
 **`get_datetime`** — current local time, optionally localised to an
 IANA timezone. No network.
@@ -486,7 +491,28 @@ curl -s -X POST localhost:8080/v1/agents/wikipedia/invoke \
   -d '{"arguments":{"title":"Lyon"}}'
 ```
 
-**Caching.** v1 ships without a cache. Both providers tolerate
+**`dictionary`** — definitions, phonetics, examples, and synonyms
+for an English word via the anonymous Free Dictionary REST API
+(<https://api.dictionaryapi.dev/api/v2/entries/en/{word}>). No API
+key required; the agent trims the upstream payload to the fields
+the LLM actually needs and surfaces a 404 as a clear
+"no definitions found" so the LLM does not silently fabricate a
+definition.
+
+- FR: "définition de 'sérendipité'", "synonyme de 'rapide'", "comment prononcer 'quinoa'"
+- EN: "define serendipity", "what does 'ephemeral' mean?", "synonym of 'fast'", "how do you pronounce 'quinoa'?"
+- Params: `word` (required, ≤100 chars, ASCII letters / hyphens / apostrophes / spaces).
+- NOT for encyclopedic / biographical / historical questions
+  (answer those from your own knowledge); the tool is scoped to
+  English vocabulary lookups.
+
+```
+curl -s -X POST localhost:8080/v1/agents/dictionary/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments":{"word":"serendipity"}}'
+```
+
+**Caching.** v1 ships without a cache. All three providers tolerate
 ~10 req/s from a single IP, which is comfortable for a personal
 chat deployment; revisit if rate limits bite.
 
@@ -504,9 +530,9 @@ Smaller quantisations (e.g. Qwen 2.5 3B) sometimes ignore the
 injected `tools` schema and answer from memory. If a model
 consistently skips the tool call, add a one-line nudge to the system
 prompt: *"You may use the provided `web_fetch`, `get_datetime`,
-`get_weather`, `get_stock_quote`, `calculate`, `unit_convert`, and
-`wikipedia` tools when the user asks for live data."* No code
-change required.
+`get_weather`, `get_stock_quote`, `calculate`, `unit_convert`,
+`wikipedia`, and `dictionary` tools when the user asks for live data."*
+No code change required.
 
 ### Security
 

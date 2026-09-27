@@ -181,6 +181,12 @@ impl AgentRegistry {
                 cfg.wikipedia.clone(),
             )));
         }
+        #[cfg(feature = "dictionary-agent")]
+        {
+            agents.push(Arc::new(dictionary_agent::DictionaryAgent::new(
+                cfg.dictionary.clone(),
+            )));
+        }
         #[cfg(not(any(
             feature = "web-agent",
             feature = "datetime-agent",
@@ -188,7 +194,8 @@ impl AgentRegistry {
             feature = "stock-agent",
             feature = "calculate-agent",
             feature = "unit-convert-agent",
-            feature = "wikipedia-agent"
+            feature = "wikipedia-agent",
+            feature = "dictionary-agent"
         )))]
         {
             let _ = cfg; // suppress unused warning when no agent features are on
@@ -267,6 +274,8 @@ pub struct AgentSummary {
 pub mod calculate_agent;
 #[cfg(feature = "datetime-agent")]
 pub mod datetime_agent;
+#[cfg(feature = "dictionary-agent")]
+pub mod dictionary_agent;
 #[cfg(feature = "stock-agent")]
 pub mod stock_agent;
 #[cfg(feature = "unit-convert-agent")]

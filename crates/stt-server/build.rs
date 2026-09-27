@@ -55,10 +55,8 @@ fn main() {
         // Default to dynamic linking against the system libs.
         // Operators who need static links (rare; usually for embedded
         // deployments) can override with `*_LINK_KIND=static`.
-        let sonic_kind =
-            std::env::var("SONIC_LINK_KIND").unwrap_or_else(|_| "dylib".into());
-        let pcaudio_kind =
-            std::env::var("PCAUDIO_LINK_KIND").unwrap_or_else(|_| "dylib".into());
+        let sonic_kind = std::env::var("SONIC_LINK_KIND").unwrap_or_else(|_| "dylib".into());
+        let pcaudio_kind = std::env::var("PCAUDIO_LINK_KIND").unwrap_or_else(|_| "dylib".into());
         println!("cargo:rustc-link-lib={sonic_kind}=sonic");
         println!("cargo:rustc-link-lib={pcaudio_kind}=pcaudio");
     }

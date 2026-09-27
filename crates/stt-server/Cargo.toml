@@ -38,6 +38,11 @@ unit-convert-agent = []
 # summary endpoint). No API key — Wikimedia only requires a
 # `User-Agent` header, which the agent sets unconditionally.
 wikipedia-agent = []
+# `dictionary-agent` registers the `dictionary` tool (Free Dictionary
+# REST API at `api.dictionaryapi.dev`, no API key, anonymous).
+# Returns definitions, phonetics, examples, and synonyms for an
+# English word.
+dictionary-agent = []
 # `tts` pulls in `piper-rs` (and transitively `ort` + the espeak-ng
 # FFI crate). With this feature off the binary compiles without
 # espeak-ng / libclang / libssl-dev headers, so GPU build targets
