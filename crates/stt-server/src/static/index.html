@@ -53,25 +53,6 @@
   <script src="/static/vendor/katex/contrib/auto-render.min.js" defer></script>
 </head>
 <body>
-  <!-- Shared oscilloscope: a single DOM element reused by both modes
-       so clicking Record in either Transcript or Discussion drives
-       the same visual. Hidden by default; AudioCapture._setGraphVisible
-       toggles `.is-hidden` when recording starts/stops. Placed at the
-       top of the body so it sits above the mode toggle and the active
-       view, giving the waveform maximum horizontal room regardless of
-       which sidebar / layout the active view has. -->
-  <section class="voice-graph is-hidden" id="voice-graph-shared"
-           aria-label="Live microphone waveform">
-    <div class="voice-graph-header">
-      <span class="voice-graph-label">Live input</span>
-      <span id="voice-graph-shared-level" class="voice-graph-level"
-            title="Speech probability">
-        <span class="bar"></span>
-      </span>
-    </div>
-    <canvas id="voice-graph-shared-canvas"></canvas>
-  </section>
-
   <header>
     <h1>nagent</h1>
     <p class="subtitle">Local Whisper transcription and local-model chat.</p>
@@ -88,6 +69,23 @@
   </header>
 
   <main id="view-transcript" class="view" data-active="true">
+    <!-- Transcript-mode voice oscilloscope. Mounted at the top of the
+         Transcript view per docs/ui_features.md §1.3. Each mode owns
+         its own instance of the widget; only the DOM anchor differs.
+         Hidden by default; AudioCapture._setGraphVisible toggles
+         `.is-hidden` when recording starts/stops. -->
+    <section class="voice-graph is-hidden" id="voice-graph-transcript"
+             aria-label="Live microphone waveform">
+      <div class="voice-graph-header">
+        <span class="voice-graph-label">Live input</span>
+        <span id="voice-graph-transcript-level" class="voice-graph-level"
+              title="Speech probability">
+          <span class="bar"></span>
+        </span>
+      </div>
+      <canvas id="voice-graph-transcript-canvas"></canvas>
+    </section>
+
     <div id="update-banner" class="update-banner" role="status" aria-live="polite" hidden>
       <span class="update-banner-text">
         A new version of the UI is available.
@@ -192,7 +190,36 @@
       <span id="chat-backend-info" class="backend-info"></span>
     </section>
 
-    <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+    <div id="chat-messages" class="chat-messages" aria-live="polite">
+      <!-- Discussion-mode voice oscilloscope, mounted inline as a
+           voice bubble at the *end* of `#chat-messages` per
+           docs/ui_features.md §4.10 ("DOM anchor: a dedicated
+           voice-bubble element appended to `#chat-messages`").
+           Same shared widget code as the Transcript-mode instance
+           (createScope + AudioCapture); only the DOM anchor and
+           CSS placement differ. Hidden by default;
+           `AudioCapture._setGraphVisible` toggles `.is-hidden`.
+           The `.voice-graph--inline` modifier opts out of the
+           flex layout's gap so a hidden bubble does not leave a
+           phantom 0.75rem below the last visible message, and
+           gives the bubble a darker background + accent-coloured
+           left border so it stands out from the chat-messages
+           container (whose `--bg-elev` background is identical
+           to the base voice-graph background; without the
+           override the bubble blended into its parent). -->
+      <section class="voice-graph voice-graph--inline is-hidden"
+               id="voice-graph-discussion"
+               aria-label="Live microphone waveform">
+        <div class="voice-graph-header">
+          <span class="voice-graph-label">Live input</span>
+          <span id="voice-graph-discussion-level" class="voice-graph-level"
+                title="Speech probability">
+            <span class="bar"></span>
+          </span>
+        </div>
+        <canvas id="voice-graph-discussion-canvas"></canvas>
+      </section>
+    </div>
     <details class="chat-advanced">
       <summary>Advanced</summary>
       <!--

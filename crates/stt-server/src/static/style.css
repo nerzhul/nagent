@@ -277,6 +277,19 @@ select, input[type="checkbox"] {
   pointer-events: none;
 }
 
+/* Inline (Discussion-mode) variant. The voice bubble is mounted
+ * inside `#chat-messages`, a flex column with `gap: 0.75rem`. The
+ * `max-height: 0` collapse on the base `.is-hidden` rule still leaves
+ * the element in the flex flow, which the parent gap applies to —
+ * leaving a phantom 0.75rem below the last visible message even when
+ * the widget is fully hidden. Switch the inline variant to
+ * `display: none` so it drops out of the flex flow entirely. We lose
+ * the smooth max-height transition on this instance; the show/hide
+ * is instant, which is fine for a transient recording affordance. */
+.voice-graph.voice-graph--inline.is-hidden {
+  display: none;
+}
+
 .voice-graph-header {
   display: flex;
   align-items: center;
@@ -314,7 +327,15 @@ select, input[type="checkbox"] {
   background: var(--ok);
 }
 
-#voice-graph-shared-canvas {
+/* Both voice-graph instances share the same widget markup. Apply the
+ * common sizing rules (canvas height, max-width container) to the
+ * shared `voice-graph` class so the rules do not have to be
+ * duplicated per mode. The Transcript-mode instance sits at the top
+ * of the transcript view and uses the wider max-width; the inline
+ * (Discussion-mode) variant — appended inside `#chat-messages` —
+ * uses a narrower max-width so it visually fits the conversation
+ * width. */
+.voice-graph canvas {
   display: block;
   width: 100%;
   height: 80px;
@@ -323,19 +344,58 @@ select, input[type="checkbox"] {
   border-radius: 4px;
 }
 
-/* The shared oscilloscope sits at the top of the page, above the
- * header. `max-width` keeps the canvas from stretching across
- * ultra-wide monitors, while `margin: 0 auto` centres it. The
- * `.is-hidden` toggle (opacity + max-height + padding + margin)
- * drives the slide-down reveal via the existing transition. */
-#voice-graph-shared {
+.voice-graph:not(.voice-graph--inline) {
   max-width: 920px;
   margin: 0.75rem auto 0;
   border-radius: 10px;
 }
 
-#voice-graph-shared .voice-graph-level {
+.voice-graph:not(.voice-graph--inline) .voice-graph-level {
   width: 8rem;
+}
+
+/* Inline voice bubble: a visually distinct card that lives at the
+ * end of `#chat-messages`. The base `.voice-graph` background is
+ * `--bg-elev` — the same colour as `#chat-messages`'s background —
+ * so without an override the inline bubble blends into its parent
+ * and looks invisible. We override to the darker `--bg` (matching
+ * the assistant-bubble style) and add an accent-coloured left
+ * border so the user reads it as part of the chat family. The
+ * bubble centres horizontally inside the conversation column via
+ * `align-self: center`. Sticky positioning keeps it pinned to the
+ * bottom of the chat-messages scroll container so the user can
+ * keep typing in `#chat-input` while watching the waveform
+ * (§4.10). */
+.voice-graph.voice-graph--inline {
+  max-width: 460px;
+  margin: 0.5rem auto 0;
+  background: var(--bg);
+  border-color: var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 10px;
+  align-self: center;
+  font-size: 0.85rem;
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  /* Flex children are shrinkable by default (`flex-shrink: 1`) and
+   * `#chat-messages` is a flex column whose total content regularly
+   * exceeds the `max-height: 65vh` cap. Without this guard, the
+   * flex algorithm compresses the widget down to the height of its
+   * tallest unbreakable child (the voice-graph-header pill) and
+   * clips the canvas — exactly the regression the user reported:
+   * "le widget… il n'est plus assez haut et on perd une partie du
+   * contenu à l'affichage". `flex-shrink: 0` keeps the widget at
+   * its natural ~122px so the canvas is fully visible. The cost —
+   * the widget always reserves its full height inside the scroll
+   * container — is intentional: sticky bottom then keeps it pinned
+   * to the visible bottom edge and the conversation scrolls behind
+   * it (see docs/ui_features.md §4.10). */
+  flex-shrink: 0;
+}
+
+.voice-graph.voice-graph--inline .voice-graph-level {
+  width: 6rem;
 }
 
 .transcript {

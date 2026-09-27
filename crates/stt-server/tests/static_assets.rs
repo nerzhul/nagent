@@ -590,6 +590,63 @@ async fn chat_js_renders_weather_widget_for_get_weather() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_places_weather_card_outside_the_tool_trace() {
+    // docs/ui_features.md §4.6.3 requires the weather card to live
+    // OUTSIDE the tool trace `<details class="chat-message__tool-usage">`.
+    // An earlier revision tucked the card inside the `<details>`, so
+    // collapsing the tool summary silently hid the answer — exactly
+    // the UX regression this guard exists to prevent. The card is
+    // tracked on `assistantEl._weatherCards` so `applyMarkdown` can
+    // re-insert it after the per-tick `innerHTML = ""` reset (the
+    // card is a direct child of the bubble, not inside any container
+    // that `applyMarkdown` re-mounts).
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The renderWeatherWidget function must find the enclosing tool
+    // trace <details> via .closest() and insert the card as a sibling
+    // of it — not as a child via `parentEl.insertAdjacentElement`.
+    assert!(
+        body.contains("parentEl.closest(\"details.chat-message__tool-usage\")"),
+        "chat.js `renderWeatherWidget` no longer looks up the enclosing tool trace <details> via .closest(). Per docs/ui_features.md §4.6.3 the weather card must live as a sibling of the <details> so collapsing the tool summary doesn't hide the answer."
+    );
+
+    // The card must NOT be inserted via `parentEl.insertAdjacentElement`,
+    // which would put it inside the <details> (parentEl is the
+    // `.chat-tool-bubble` div whose direct parent is the <details>).
+    // The test counts occurrences of the bare call as a substring
+    // outside a comment; a real regression would re-introduce it.
+    // We accept it ONLY inside the trailing "previous layout" comment.
+    let adjacent_after = body.matches("parentEl.insertAdjacentElement").count();
+    assert!(
+        adjacent_after <= 1,
+        "chat.js calls `parentEl.insertAdjacentElement` {adjacent_after} times — once would still put the weather card inside the <details>, which collapses it with the tool summary."
+    );
+
+    // The `_weatherCards` tracking array is the contract that lets
+    // `applyMarkdown` re-insert the card after every `innerHTML = ""`.
+    // Both the render path and the re-mount path must reference it.
+    assert!(
+        body.contains("_weatherCards"),
+        "chat.js no longer tracks weather cards in `assistantEl._weatherCards`. Without it, `applyMarkdown`'s per-tick `innerHTML = \"\"` reset silently drops the card between streaming ticks."
+    );
+
+    // `applyMarkdown` must re-insert the tracked cards alongside
+    // `_toolUsageEls`. The streaming tick path runs many times per
+    // reply; losing the re-mount would make the card flicker in/out
+    // on every delta.
+    assert!(
+        body.contains("bubbleEl._weatherCards"),
+        "chat.js `applyMarkdown` does not re-insert tracked weather cards after its `innerHTML = \"\"` reset. Without this, the card disappears between streaming ticks and only reappears once streaming stops."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn css_carries_weather_card_rules() {
     // The weather widget relies on `.chat-weather-card` and the
     // responsive collapse to a single-column day strip below 520px.
@@ -684,5 +741,256 @@ async fn css_carries_weather_card_rules() {
     assert!(
         tool_pending_rule_has_weather_exemption,
         "style.css hides every non-`<details>` child of `.chat-message--tool-pending`; the weather widget card is not in the `:not(...)` exemption list and gets `display:none` while the tool trace and the prose stay visible."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn css_pins_inline_voice_graph_to_natural_height() {
+    // The Discussion-mode voice oscilloscope (docs/ui_features.md
+    // §4.10) lives inside `#chat-messages`, a flex column container
+    // whose total content regularly exceeds the `max-height: 65vh`
+    // cap. With `flex-shrink: 1` (the default for flex items), the
+    // flex algorithm compresses the widget to the height of its
+    // tallest unbreakable child (~17px for the voice-graph-header
+    // pill) and clips the canvas. That's exactly the regression
+    // the user reported: "le widget… il n'est plus assez haut et on
+    // perd une partie du contenu à l'affichage".
+    //
+    // `flex-shrink: 0` on the inline variant keeps the widget at
+    // its natural ~124px height so the canvas is fully visible.
+    // The cost — the widget always reserves its full height inside
+    // the scroll container — is intentional: sticky bottom then
+    // keeps it pinned to the visible bottom edge.
+    let base = serve_once().await;
+    let css = reqwest::get(format!("{base}/static/style.css"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // Look at the rule body for `.voice-graph--inline` and require
+    // `flex-shrink: 0` to be present in the same rule body. We walk
+    // top-level rules so a future refactor that splits the inline
+    // variant across multiple selectors can't silently drop the
+    // guard.
+    let mut inline_rule_has_flex_shrink_zero = false;
+    let mut depth = 0;
+    let mut rule = String::new();
+    for ch in css.chars() {
+        if ch == '{' {
+            depth += 1;
+            rule.push(ch);
+            continue;
+        }
+        if ch == '}' {
+            rule.push(ch);
+            depth -= 1;
+            if depth == 0 {
+                if rule.contains("voice-graph--inline")
+                    && rule.contains("flex-shrink: 0")
+                {
+                    inline_rule_has_flex_shrink_zero = true;
+                    break;
+                }
+                rule.clear();
+            }
+            continue;
+        }
+        rule.push(ch);
+    }
+    assert!(
+        inline_rule_has_flex_shrink_zero,
+        "style.css is missing `flex-shrink: 0` on the `.voice-graph--inline` rule. Without it, the flex algorithm compresses the widget down to the height of its voice-graph-header pill and clips the canvas — the user reports the oscilloscope losing part of its content as soon as the conversation is long enough to scroll."
+    );
+}
+
+async fn html_mounts_two_distinct_voice_graph_instances() {
+    // The voice oscilloscope is documented as a "reusable widget, not a
+    // single shared DOM node" (docs/ui_features.md §1.3): Transcript
+    // mode mounts its instance at the top of the transcript view and
+    // Discussion mode mounts its own instance inline inside
+    // `#chat-messages` as a voice bubble (§4.10). A regression that
+    // collapses the two back into a single shared element would break
+    // the per-mode placement contract.
+    //
+    // We assert against the served HTML: both `id`s must exist, the
+    // Transcript instance must sit inside `#view-transcript`, and the
+    // Discussion instance must sit inside `#chat-messages`. We also
+    // assert that no legacy `#voice-graph-shared` id remains — a
+    // rename that left the old id dangling would mean the JS still
+    // points at a now-stale element and the widget is invisible.
+    let base = serve_once().await;
+    let html = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        html.contains(r#"id="voice-graph-transcript""#),
+        "index.html no longer carries the Transcript-mode voice-graph instance. docs/ui_features.md §1.3 requires the widget to be mounted at the top of the transcript view; removing it would leave Transcript mode with no oscilloscope."
+    );
+    assert!(
+        html.contains(r#"id="voice-graph-discussion""#),
+        "index.html no longer carries the Discussion-mode voice-graph instance. docs/ui_features.md §4.10 requires the widget to be mounted inline as a voice bubble inside `#chat-messages`; removing it would leave Discussion mode with no oscilloscope."
+    );
+    assert!(
+        !html.contains("voice-graph-shared"),
+        "index.html still references the legacy `voice-graph-shared` id. Per docs/ui_features.md §1.3 the oscilloscope is a reusable widget, not a single shared DOM node — both modes must own their own instance."
+    );
+
+    // The Transcript instance must live inside the Transcript view.
+    let transcript_view_start = html.find(r#"id="view-transcript""#)
+        .expect("index.html is missing #view-transcript");
+    let transcript_view_end = html[transcript_view_start..]
+        .find("</main>")
+        .map(|i| transcript_view_start + i)
+        .expect("index.html is missing the closing </main> for #view-transcript");
+    let transcript_graph_pos = html[transcript_view_start..transcript_view_end]
+        .find(r#"id="voice-graph-transcript""#)
+        .unwrap_or_else(|| panic!(
+            "#voice-graph-transcript must be mounted inside #view-transcript per docs/ui_features.md §1.3, but it was placed outside the Transcript view."
+        ));
+    // The Transcript voice-graph must appear above the toolbar so it
+    // sits "above the controls" (spec §1.3) — guard against a future
+    // refactor that moves it to the bottom of the view.
+    let controls_pos = html[transcript_view_start..transcript_view_end]
+        .find(r#"class="controls""#)
+        .expect("index.html is missing the Transcript-mode `.controls` section");
+    assert!(
+        transcript_graph_pos < controls_pos,
+        "#voice-graph-transcript must be mounted above the Transcript-mode `.controls` per docs/ui_features.md §1.3; it was placed below them."
+    );
+
+    // The Discussion instance must live inside #chat-messages so it
+    // scrolls with the conversation and sits "in the same scroll
+    // context as the user / assistant turns" (spec §4.10).
+    let chat_messages_start = html.find(r#"id="chat-messages""#)
+        .expect("index.html is missing #chat-messages");
+    let chat_messages_end = html[chat_messages_start..]
+        .find("</div>")
+        .map(|i| chat_messages_start + i)
+        .expect("index.html is missing the closing </div> for #chat-messages");
+    assert!(
+        html[chat_messages_start..chat_messages_end].contains(r#"id="voice-graph-discussion""#),
+        "#voice-graph-discussion must be mounted inside #chat-messages per docs/ui_features.md §4.10. Mounting it elsewhere (e.g. above or below the conversation) breaks the per-mode placement contract."
+    );
+    // The inline instance must carry the `voice-graph--inline` modifier
+    // so the CSS can opt the bubble out of `#chat-messages`'s flex
+    // `gap` (otherwise a hidden bubble leaves a phantom 0.75rem
+    // below the last visible message).
+    assert!(
+        html.contains(r#"class="voice-graph voice-graph--inline"#),
+        "Discussion-mode voice-graph must carry the `voice-graph--inline` modifier so the CSS removes it from the `#chat-messages` flex flow when hidden."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn app_and_chat_point_at_per_mode_voice_graph_ids() {
+    // Both frontends must point their `AudioCapture` at the
+    // per-mode voice-graph id, not the old shared id. A regression
+    // that left a JS reference on `voice-graph-shared*` would mean
+    // `$("voice-graph-shared-canvas")` returns null and the canvas
+    // never draws — a silent UI regression that is hard to spot
+    // without booting the browser.
+    let base = serve_once().await;
+
+    let app = reqwest::get(format!("{base}/static/app.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        app.contains("voice-graph-transcript-canvas")
+            && app.contains("voice-graph-transcript-level")
+            && app.contains(r#"$("voice-graph-transcript")"#),
+        "app.js does not wire the Transcript-mode AudioCapture to its per-mode voice-graph ids. The canvas/level/graph references must all point at #voice-graph-transcript-* so the waveform renders in the transcript view."
+    );
+    assert!(
+        !app.contains("voice-graph-shared"),
+        "app.js still references the legacy `voice-graph-shared` id. The Transcript instance must use its own per-mode id."
+    );
+
+    let chat = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        chat.contains("voice-graph-discussion-canvas")
+            && chat.contains("voice-graph-discussion-level")
+            && chat.contains(r#"$("voice-graph-discussion")"#),
+        "chat.js does not wire the Discussion-mode AudioCapture to its per-mode voice-graph ids. Per docs/ui_features.md §4.10 the Discussion instance must use its own canvas/level/graph ids so the inline voice bubble in #chat-messages renders independently of the Transcript view."
+    );
+    assert!(
+        !chat.contains("voice-graph-shared"),
+        "chat.js still references the legacy `voice-graph-shared` id. The Discussion instance must use its own per-mode id, not the shared one."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_preserves_inline_voice_graph_across_history_rehydrate() {
+    // The Discussion-mode voice oscilloscope (docs/ui_features.md
+    // §4.10) lives as a direct child of `#chat-messages`. The
+    // `renderHistory` function wipes the conversation with
+    // `messagesEl.innerHTML = ""` before re-rendering each history
+    // message — without a preservation step, that reset orphans the
+    // voice-graph element and the `AudioCapture`'s `graphEl`
+    // reference silently dangles. Clicking Record then toggles
+    // `is-hidden` on a detached node and the recording UI never
+    // appears.
+    //
+    // The fix is a two-part contract in chat.js:
+    //   1. `renderHistory` saves the inline voice-graph element
+    //      *before* the wipe and re-appends it *after* the bubbles.
+    //   2. `appendBubble` (and `appendError`) call
+    //      `ensureInlineVoiceGraphAtEnd` after `messagesEl.appendChild`
+    //      so the voice-graph stays the last child of the
+    //      conversation across subsequent turns — the CSS uses
+    //      `position: sticky; bottom: 0` to pin it to the bottom of
+    //      the scroll container, and sticky only matches the bottom
+    //      of the viewport when the element really is the last DOM
+    //      child.
+    //
+    // A regression in either half makes the voice-graph disappear
+    // the moment the page loads, and a stale-browser-cache issue
+    // would look identical from the user's side.
+    let base = serve_once().await;
+    let chat = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The fix in `renderHistory`: save the inline voice-graph before
+    // `messagesEl.innerHTML = ""` and re-append it after.
+    assert!(
+        chat.contains("messagesEl.querySelector(\".voice-graph--inline\")"),
+        "chat.js `renderHistory` does not look up the inline voice-graph before its `messagesEl.innerHTML = \"\"` reset, so the wipe orphans the AudioCapture's `graphEl` reference. Per docs/ui_features.md §4.10 the discussion voice-graph must survive history rehydration; without this guard, clicking Record in Discussion mode shows no waveform."
+    );
+    // The re-append step: the saved reference is moved back into
+    // `#chat-messages` after the bubbles are rendered.
+    assert!(
+        chat.contains("messagesEl.appendChild(inlineVoiceGraph)"),
+        "chat.js `renderHistory` does not re-append the saved inline voice-graph after rehydrating bubbles. Without this, `#chat-messages` ends up without the voice-graph on every session switch / boot, and the recording UI never appears."
+    );
+
+    // The fix in `appendBubble` (and `appendError`): a helper
+    // re-pins the inline voice-graph to the end of the conversation
+    // every time a new bubble is appended, so `position: sticky;
+    // bottom: 0` keeps matching the bottom of the viewport across
+    // turns.
+    assert!(
+        chat.contains("function ensureInlineVoiceGraphAtEnd("),
+        "chat.js is missing `ensureInlineVoiceGraphAtEnd()`. The inline voice-graph must be re-pinned to the last child of `#chat-messages` after every `messagesEl.appendChild` so the CSS `position: sticky; bottom: 0` continues to match the bottom of the chat-messages scroll container."
+    );
+    assert!(
+        chat.contains("ensureInlineVoiceGraphAtEnd()"),
+        "chat.js does not call `ensureInlineVoiceGraphAtEnd()` anywhere. Without this, every new bubble pushes the inline voice-graph above the bottom of the conversation and sticky positioning stops matching the viewport bottom."
     );
 }

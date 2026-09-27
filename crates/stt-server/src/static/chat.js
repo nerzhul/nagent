@@ -463,6 +463,18 @@ function applyMarkdown(bubbleEl, text) {
       bubbleEl.insertBefore(details, replayBtn);
     }
   }
+  if (bubbleEl._weatherCards && bubbleEl._weatherCards.length > 0) {
+    // Weather cards live as direct children of the bubble (NOT
+    // inside any tool-trace `<details>` — the user closes the tool
+    // summary but the answer must stay readable). Re-insert each
+    // tracked card before the replay button so it stays the last
+    // visible element. Order matches insertion order (one card per
+    // `get_weather` call).
+    const replayBtn = bubbleEl._replayBtn;
+    for (const card of bubbleEl._weatherCards) {
+      bubbleEl.insertBefore(card, replayBtn);
+    }
+  }
 }
 
 /**
@@ -652,6 +664,15 @@ function setStreamingUi(streaming) {
 // a render after a reload reproduces the same view as before.
 
 function renderHistory(sessionId) {
+  // Preserve the inline voice-graph element (Discussion-mode voice
+  // oscilloscope, see docs/ui_features.md §4.10) across the wipe
+  // below. The element lives as a direct child of `#chat-messages`,
+  // so `messagesEl.innerHTML = ""` would otherwise orphan it and
+  // silently dangle the `AudioCapture`'s `graphEl` reference — the
+  // recording UI would never appear and any later `_setGraphVisible`
+  // toggle would hit a detached element. Save the reference, wipe,
+  // re-append after the rehydrated bubbles are in place.
+  const inlineVoiceGraph = messagesEl.querySelector(".voice-graph--inline");
   messagesEl.innerHTML = "";
   const history = loadHistory(sessionId);
   // Track the assistant bubble the *current* tool-bubble cluster
@@ -744,6 +765,15 @@ function renderHistory(sessionId) {
     );
     traces.forEach((d) => { d.open = false; });
   }
+  // Re-append the inline voice-graph at the very end so it stays
+  // the last child of `#chat-messages` per §4.10 ("appended to
+  // `#chat-messages`"). The wipe above removed it; the AudioCapture
+  // still holds a JS reference to the element so the canvas and
+  // level bindings survive the round-trip — only the DOM placement
+  // needs restoring.
+  if (inlineVoiceGraph) {
+    messagesEl.appendChild(inlineVoiceGraph);
+  }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -797,6 +827,12 @@ function appendBubble(role, text, {
     ensureReplayButton(div);
   }
   messagesEl.appendChild(div);
+  // Re-pin the inline voice-graph to the end so the
+  // `position: sticky; bottom: 0` CSS keeps it at the bottom of the
+  // chat-messages scroll container (see
+  // docs/ui_features.md §4.10). Without this the new bubble would
+  // push the voice-graph above the visible bottom edge.
+  ensureInlineVoiceGraphAtEnd();
   messagesEl.scrollTop = messagesEl.scrollHeight;
   // Refresh replay-button visibility AFTER the bubble is in the DOM
   // tree. `document.querySelectorAll(".chat-message-replay")` skips
@@ -833,7 +869,28 @@ function appendError(text) {
   div.className = "chat-message chat-error";
   div.textContent = `[error] ${text}`;
   messagesEl.appendChild(div);
+  // Re-pin the inline voice-graph to the end (see `appendBubble`).
+  ensureInlineVoiceGraphAtEnd();
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// The Discussion-mode voice oscilloscope (§4.10) lives as a direct
+// child of `#chat-messages` and uses `position: sticky; bottom: 0` to
+// stay pinned to the bottom of the conversation column. Every
+// `messagesEl.appendChild` above pushes the bubble to the end and
+// therefore pushes the voice-graph above it; without re-appending the
+// graph, sticky bottom-of-the-DOM no longer matches sticky
+// bottom-of-the-viewport and the widget can scroll out of view. This
+// helper moves the inline voice-graph back to the last-child position
+// in O(N) over `#chat-messages`'s direct children (typically < 50
+// bubbles in a normal session). Safe to call when the graph is absent.
+function ensureInlineVoiceGraphAtEnd() {
+  for (const child of messagesEl.children) {
+    if (child.classList?.contains("voice-graph--inline")) {
+      messagesEl.appendChild(child);
+      return;
+    }
+  }
 }
 
 // ---- Tool bubbles -------------------------------------------------------
@@ -1111,22 +1168,36 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
   }
 }
 
-// Build the structured weather card and inject it immediately after
-// `parentEl` (the corresponding `.chat-tool-bubble`). Built with
-// `createElement` + `textContent` only — no `innerHTML` / DOMPurify
-// pass, mirroring the existing tool-bubble detail line at chat.js:634-642.
-// The card is purely additive: it never replaces the existing tool
-// bubble, which already shows the city + tick so the card visually
-// hangs off a familiar header.
+// Build the structured weather card and inject it as a sibling of
+// the tool trace `<details>`, NOT as a child of it. The card is the
+// visible answer for `get_weather`, so it must stay readable even
+// when the user collapses the tool summary; tucking it inside the
+// `<details>` made it disappear with the summary (caught in a UX
+// review — the user was losing the structured card whenever they
+// closed the tool trace). Built with `createElement` + `textContent`
+// only — no `innerHTML` / DOMPurify pass, mirroring the existing
+// tool-bubble detail line at chat.js:634-642.
+//
+// The card is tracked on `assistantEl._weatherCards` so
+// `applyMarkdown` can re-insert it after the per-tick `innerHTML = ""`
+// reset (the card lives as a direct child of the bubble, not inside
+// any container that `applyMarkdown` re-mounts).
 function renderWeatherWidget(parentEl, data, mode) {
   if (!parentEl || !messagesEl.contains(parentEl)) return null;
-  // Idempotency: if a previous render already attached a card under
-  // this tool bubble (e.g. a session rehydration racing the live
-  // stream), replace it in place rather than stacking duplicates.
-  const existing = parentEl.nextElementSibling;
-  if (existing && existing.classList?.contains("chat-weather-card")) {
-    existing.remove();
+  const details = parentEl.closest("details.chat-message__tool-usage");
+  const assistantEl = details?.parentElement?.closest(".chat-assistant");
+  if (!assistantEl) {
+    // No enclosing assistant bubble — bail. Shouldn't happen for a
+    // live tool bubble, but a test fixture could pass a detached one.
+    return null;
   }
+  // Idempotency: if a previous render already attached a card to
+  // this assistant bubble (e.g. a session rehydration racing the
+  // live stream), replace it in place rather than stacking
+  // duplicates. The card is no longer the next sibling of the
+  // tool-bubble div, so we look it up by tracked reference instead.
+  const tracked = (assistantEl._weatherCards || []).find((c) => c && c.isConnected);
+  if (tracked) tracked.remove();
   const location = data?.location || {};
   const current = data?.current || null;
   const days = pickWeatherDays(data, mode);
@@ -1261,7 +1332,26 @@ function renderWeatherWidget(parentEl, data, mode) {
     card.appendChild(strip);
   }
 
-  parentEl.insertAdjacentElement("afterend", card);
+  // Insert as a sibling of the tool trace <details>, before the
+  // replay button so the visual flow reads: [prose/hint] → [tool
+  // trace] → [weather card] → [🔊]. The card stays visible when the
+  // tool trace is collapsed because it sits OUTSIDE the `<details>`.
+  // Fall back to a plain appendChild if the replay button isn't
+  // mounted yet (e.g. when called from a renderHistory pass before
+  // `ensureReplayButton` has run on a freshly-rehydrated bubble).
+  const replayBtn = assistantEl.querySelector(".chat-message-replay");
+  if (replayBtn) {
+    assistantEl.insertBefore(card, replayBtn);
+  } else {
+    assistantEl.appendChild(card);
+  }
+  // Track the card so `applyMarkdown`'s `innerHTML = ""` reset can
+  // re-mount it after every streaming tick. The array grows with
+  // each new tool call that has a widget; multiple cards in a
+  // single assistant bubble (e.g. weather + calculate) stay in the
+  // order they were rendered.
+  if (!assistantEl._weatherCards) assistantEl._weatherCards = [];
+  assistantEl._weatherCards.push(card);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return card;
 }
@@ -1393,7 +1483,18 @@ function finalizeAssistantForToolResult(toolBubble, assistantEl) {
   const hint = document.createElement("span");
   hint.className = "chat-message__weather-hint";
   hint.textContent = "\u{1F324} Détails ci-dessous.";
-  assistantEl.appendChild(hint);
+  // Insert the hint directly before the weather card so the visible
+  // flow reads: [tool trace] → ["Détails ci-dessous."] → [weather
+  // card] → [🔊]. The user explicitly asked for the card to come
+  // after the hint — appending at the end would push the card above
+  // the hint, which inverts the contract. Falls back to appendChild
+  // when no card is present (the hint then sits just above the 🔊).
+  const card = assistantEl.querySelector(".chat-weather-card");
+  if (card) {
+    assistantEl.insertBefore(hint, card);
+  } else {
+    assistantEl.appendChild(hint);
+  }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -2143,12 +2244,15 @@ document.addEventListener("keydown", (e) => {
 const audioCapture = new AudioCapture({
   buttonEl: $("chat-record-btn"),
   statusEl: null, // merged into #chat-status via the onStatusChange callback
-  // Shared oscilloscope: same DOM element as Transcript mode, so a
-  // single waveform shows up regardless of which view the user is
-  // in when they click Record.
-  canvasEl: $("voice-graph-shared-canvas"),
-  levelEl:  $("voice-graph-shared-level"),
-  graphEl:  $("voice-graph-shared"),
+  // Discussion-mode instance of the shared voice oscilloscope widget.
+  // The DOM element lives inline as a voice bubble inside
+  // #chat-messages (see §4.10 of docs/ui_features.md), distinct from
+  // the Transcript-mode instance mounted at the top of the transcript
+  // view. Each `AudioCapture` owns its own canvas/level; the only
+  // shared resource is the underlying MicVAD singleton.
+  canvasEl: $("voice-graph-discussion-canvas"),
+  levelEl:  $("voice-graph-discussion-level"),
+  graphEl:  $("voice-graph-discussion"),
   containerEl: document.getElementById("view-discussion"),
   langSelectEl: $("chat-lang-select"),
   translateCheckEl: $("chat-translate-check"),

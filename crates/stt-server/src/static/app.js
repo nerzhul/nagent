@@ -7,9 +7,13 @@
 // `#download-btn`, `#status`, `#backend-info`, `#transcript-list`)
 // on top of an `AudioCapture` instance.
 //
-// The voice graph (`#voice-graph-shared`) is a single DOM element
-// reused by both modes — clicking Record in either view drives the
-// same oscilloscope, so we never end up with two parallel waveforms.
+// The voice oscilloscope is a shared widget (createScope +
+// AudioCapture), but each mode mounts its own DOM instance — clicking
+// Record in either view drives its own oscilloscope, scoped to the
+// active view's layout. The Transcript-mode instance lives at the top
+// of the transcript view (`#voice-graph-transcript`); the
+// Discussion-mode instance is appended inline as a voice bubble
+// inside `#chat-messages` (see `chat.js`).
 
 import { AudioCapture } from "/static/audio.js";
 import { preselectFromBrowser } from "/static/lang-preselect.js";
@@ -26,8 +30,8 @@ const clearBtn    = $("clear-btn");
 const statusEl    = $("status");
 const backendEl   = $("backend-info");
 const listEl      = $("transcript-list");
-const scopeCanvas = $("voice-graph-shared-canvas");
-const scopeLevel  = $("voice-graph-shared-level");
+const scopeCanvas = $("voice-graph-transcript-canvas");
+const scopeLevel  = $("voice-graph-transcript-level");
 const backendVersionEl    = $("backend-version");
 const frontendVersionSelf = $("frontend-version-self");
 const updateBanner        = $("update-banner");
@@ -130,7 +134,7 @@ new AudioCapture({
   statusEl,
   canvasEl: scopeCanvas,
   levelEl: scopeLevel,
-  graphEl: $("voice-graph-shared"),
+  graphEl: $("voice-graph-transcript"),
   containerEl: document.getElementById("view-transcript"),
   langSelectEl: langSelect,
   translateCheckEl: translateCk,

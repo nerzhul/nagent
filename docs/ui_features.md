@@ -322,28 +322,43 @@ with a tool that has no widget renderer has no widget inset, and so on.
 
 #### 4.6.3 Widget inset
 
-- **Position**: the widget slot is the *next sibling* of the
-  `.chat-tool-bubble` *inside* the same
-  `<details class="chat-message__tool-usage">`. It is not a separate
-  bubble-level slot — the weather card sits inside the tool trace
-  `<details>` so the visual stack reads: tool trace (open) →
-  weather card → prose body.
+- **Position**: the widget slot is a *sibling* of the tool trace
+  `<details class="chat-message__tool-usage">`, NOT a child of it.
+  Putting the card inside the `<details>` made it disappear the
+  moment the user collapsed the tool summary (the card was the
+  visible answer — losing it with the trace defeated the point of
+  the widget). The card now sits as a direct child of the assistant
+  bubble, immediately after the `<details>`, so the visual stack
+  reads: tool trace → weather card → prose body. The hint inserted
+  by `finalizeAssistantForToolResult` ("🌤️ Détails ci-dessous.")
+  is positioned directly before the card so the contracted view
+  reads: tool trace → hint → card → 🔊.
 - **Presence**: the slot is shown only when the tool that resolved
   advertises a widget renderer (see §4.7). For tools without a
   renderer the slot is empty and the prose body sits directly below
   the tools row.
-- **Idempotency**: `renderWeatherWidget` (chat.js:1126-1129) removes
-  any prior `.chat-weather-card` next to its `.chat-tool-bubble`
-  before inserting the new one, so a session re-hydration racing the
-  live stream never produces two cards for the same tool call.
+- **Idempotency**: `renderWeatherWidget` (chat.js) walks the
+  bubble's tracked `_weatherCards` array and removes the
+  previously-rendered card before inserting the new one, so a
+  session re-hydration racing the live stream never produces two
+  cards for the same tool call.
+- **Re-mount across markdown re-renders**: the card is a direct
+  child of the assistant bubble, so `applyMarkdown`'s per-tick
+  `innerHTML = ""` reset wipes it along with the prose. The bubble
+  carries a parallel `_weatherCards` array (mirroring
+  `_toolUsageEls`) that `applyMarkdown` re-mounts after every
+  render — order matches the order the cards were inserted, with
+  each card placed immediately before the replay button so it
+  stays the last visible element.
 - **Weather replace**: on `get_weather` success with non-trivial
   prose, `finalizeAssistantForToolResult` adds the
   `chat-message--weather-replaced` class to the assistant bubble.
   This class is the canonical CSS hook for the "card-as-answer"
   layout — the prose is reduced to the italic hint "🌤️ Détails
-  ci-dessous." while the tool trace and the weather card stay
-  visible. Short replies (≤ 120 chars, single line) are kept
-  verbatim and the class is not applied.
+  ci-dessous." (inserted directly before the card) while the tool
+  trace and the weather card stay visible. Short replies
+  (≤ 120 chars, single line) are kept verbatim and the class is not
+  applied.
 
 #### 4.6.4 Prose body
 
