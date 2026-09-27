@@ -1349,8 +1349,17 @@ select, input[type="checkbox"] {
  * stealing focus from the eventual widget. The original children
  * stay in the DOM — only the `.chat-message__tool-loading` placeholder
  * is visible — so the prose can stream back into view cleanly when
- * the tool resolves. */
-.chat-message--tool-pending > :not(.chat-message__tool-loading):not(details.chat-message__tool-usage) {
+ * the tool resolves.
+ *
+ * `.chat-weather-card` is also kept visible: once the `get_weather`
+ * tool result lands, `resolveToolBubble` injects the card right next
+ * to the `<details>` tool trace. The `chat-message--tool-pending`
+ * class itself is only cleared in `streamReply`'s `finally` block
+ * (so the LLM can stream post-tool preamble without clobbering it),
+ * which means without this exemption the weather widget would stay
+ * hidden for the rest of the reply. The prose around it is still
+ * hidden — only the widget itself is visible alongside the tool trace. */
+.chat-message--tool-pending > :not(.chat-message__tool-loading):not(details.chat-message__tool-usage):not(.chat-weather-card) {
   display: none;
 }
 .chat-message__tool-loading {

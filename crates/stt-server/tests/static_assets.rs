@@ -629,4 +629,60 @@ async fn css_carries_weather_card_rules() {
             && css.contains("chat-message__tool-loading"),
         "style.css is missing the `.chat-message--tool-pending` rule that hides the LLM's accumulating prose while a tool runs. The 'let me check…' preamble bleeds through."
     );
+    // Regression guard: the weather widget is injected as a child of the
+    // assistant bubble right after the `<details>` tool trace, but the
+    // `chat-message--tool-pending` class stays on the bubble until the
+    // SSE stream ends. The hide-everything-while-pending rule has to
+    // exempt `.chat-weather-card` so the widget stays visible to the
+    // user while the LLM still streams the post-tool preamble (or while
+    // the stream is just slow to close). Without this exemption the
+    // weather card renders as `display: none` and the user sees an
+    // empty bubble where the widget should be.
+    //
+    // The check looks for the actual selector fragment, not just the
+    // presence of both class names: a future CSS split that defines
+    // `.chat-message--tool-pending { display: none }` on one line and
+    // `.chat-weather-card { ... }` on another would satisfy a naive
+    // `contains` check but still leave the bug in place.
+    //
+    // We walk every top-level rule and require that the same rule
+    // (selector + body) carries BOTH the `.chat-message--tool-pending`
+    // class on the selector side AND the `:not(.chat-weather-card)`
+    // exemption on the same selector. The `display: none` body is
+    // implied by the existing earlier assertion that this rule exists.
+    //
+    // Implementation note: we reset `rule` on the *closing* `}` of
+    // each top-level rule, not on the opening `{`, so the selector
+    // chars (which arrive before the `{`) survive into the captured
+    // rule. Clearing on `{` would discard them and the check would
+    // miss the actual selector.
+    let mut tool_pending_rule_has_weather_exemption = false;
+    let mut depth = 0;
+    let mut rule = String::new();
+    for ch in css.chars() {
+        if ch == '{' {
+            depth += 1;
+            rule.push(ch);
+            continue;
+        }
+        if ch == '}' {
+            rule.push(ch);
+            depth -= 1;
+            if depth == 0 {
+                if rule.contains("chat-message--tool-pending")
+                    && rule.contains(":not(.chat-weather-card)")
+                {
+                    tool_pending_rule_has_weather_exemption = true;
+                    break;
+                }
+                rule.clear();
+            }
+            continue;
+        }
+        rule.push(ch);
+    }
+    assert!(
+        tool_pending_rule_has_weather_exemption,
+        "style.css hides every non-`<details>` child of `.chat-message--tool-pending`; the weather widget card is not in the `:not(...)` exemption list and gets `display:none` while the tool trace and the prose stay visible."
+    );
 }
