@@ -44,6 +44,7 @@ import { NagentTts } from "/static/tts.js";
 import { preselectFromBrowser } from "/static/lang-preselect.js";
 import {
   DEFAULT_TITLE,
+  TIMEZONE_ENABLED_KEY,
   createSessionObj,
   deleteSession as storeDeleteSession,
   deriveTitle,
@@ -556,6 +557,13 @@ const locationToggleEl  = $("chat-location-toggle");
 const locationRefresh   = $("chat-location-refresh");
 const locationForget    = $("chat-location-forget");
 const locationStatusEl  = $("chat-location-status");
+
+// Browser-timezone UI handles. Always visible (no permission, no
+// cache); the toggle mirrors the LOCATION_ENABLED_KEY pattern so a
+// fresh page reload picks up the user's choice. `null` checks protect
+// against an older `index.html` that lacks the elements.
+const timezoneToggleEl  = $("chat-timezone-toggle");
+const timezoneStatusEl  = $("chat-timezone-status");
 
 // The active session id is read at every operation rather than
 // cached, so a same-tab mutation (delete, new chat, switch from the
@@ -1642,6 +1650,143 @@ function maybeBuildLocationBlock() {
   };
 }
 
+// ---- Browser timezone ------------------------------------------------------
+//
+// The user can opt in to forwarding their IANA timezone to the LLM
+// from the Advanced drawer. The block is ephemeral (sent on each
+// request, never persisted into the session history) so a flight
+// across timezones picks up the new zone on the very next turn
+// without any bookkeeping on our side.
+//
+// The IANA name is recomputed at message-build time from
+// `Intl.DateTimeFormat().resolvedOptions().timeZone` rather than
+// cached, because that value reflects the *system* timezone — which
+// the user can change (travel, daylight saving, manual override)
+// between page loads. We do cache the "current local time" snapshot
+// in the message body so the LLM has a usable timestamp without
+// having to call `get_datetime` first; the marker prefix matches
+// `USER_TIMEZONE_MARKER` on the Rust side so the admin kill-switch
+// (`LLM_ALLOW_USER_TIMEZONE=false`) can drop the block before it
+// reaches the upstream model.
+
+/// Detect the browser's IANA timezone, or `null` when unavailable.
+///
+/// `Intl.DateTimeFormat` is available in every modern browser; on
+/// exotic runtimes (very old Safari, some embedded WebViews) the
+/// resolved timezone can come back as `undefined` or an empty string.
+/// We treat both as "no timezone" so the toggle quietly does nothing
+/// rather than sending `"UTC"` to a user who actually has a real
+/// zone but whose browser refused to disclose it.
+function detectBrowserTimezone() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (typeof tz !== "string" || !tz) return null;
+    return tz;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function loadTimezoneEnabled() {
+  // Same boolean string convention as `loadLocationEnabled` — "true"
+  // means on, anything else (including absence) means off.
+  try { return lsGet(TIMEZONE_ENABLED_KEY) === "true"; }
+  catch (_) { return false; }
+}
+
+function setTimezoneEnabled(enabled) {
+  if (enabled) lsSet(TIMEZONE_ENABLED_KEY, "true");
+  else lsSet(TIMEZONE_ENABLED_KEY, "false");
+}
+
+/// Render the cached IANA name into the body of an ephemeral system
+/// message. The marker prefix MUST stay at the start so the server's
+/// defensive strip can match it. The `now` parameter is overridable
+/// for unit tests.
+function formatTimezoneMessage(tz, now = new Date()) {
+  // `Intl.DateTimeFormat` with `timeZoneName: "shortOffset"` yields
+  // strings like "GMT+1" or "GMT-05:00"; we want the colon-bearing
+  // form so the LLM has a deterministic shape to parse. Falling back
+  // to the long name (e.g. "Central European Summer Time") keeps the
+  // message informative even on browsers that do not implement
+  // `shortOffset`.
+  let offsetLabel;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      timeZoneName: "shortOffset",
+    }).formatToParts(now);
+    offsetLabel = parts.find((p) => p.type === "timeZoneName")?.value
+      || tz;
+  } catch (_e) {
+    offsetLabel = tz;
+  }
+  // Snapshot the local time in the user's zone so the LLM has an
+  // instant to anchor on without calling `get_datetime`. The marker
+  // paragraph below tells it to prefer the tool when it needs an
+  // authoritative answer.
+  let localTime;
+  try {
+    localTime = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: tz,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      weekday: "long",
+    }).format(now);
+  } catch (_e) {
+    localTime = now.toISOString();
+  }
+  return (
+    `The user's local timezone is "${tz}" (${offsetLabel}, current local `
+    + `time on the user's device: ${localTime}). Always answer time-related `
+    + `questions ("what time is it", "today", "this week", "tonight", ...) in `
+    + `this timezone unless the user explicitly names another one. When you `
+    + `need an authoritative current time, call get_datetime with `
+    + `timezone="${tz}" so the tool's answer matches what the user sees on `
+    + `their device. The snapshot above is captured at message-build time `
+    + `and may be a few seconds stale by the time you see it.`
+  );
+}
+
+/// Build the ephemeral timezone system message for this turn, or
+/// `null` when sharing is disabled or the browser refused to disclose
+/// a zone. Mirrors `maybeBuildLocationBlock` so the two opt-ins are
+/// symmetric.
+function maybeBuildTimezoneBlock() {
+  if (!loadTimezoneEnabled()) return null;
+  const tz = detectBrowserTimezone();
+  if (!tz) return null;
+  return {
+    role: "system",
+    content: formatTimezoneMessage(tz),
+  };
+}
+
+/// Update the Advanced-panel timezone control from the current
+/// toggle + detected zone. Defensive about missing elements so an
+/// older `index.html` does not crash the rest of the chat boot path.
+function renderTimezoneUi() {
+  if (timezoneToggleEl) {
+    timezoneToggleEl.checked = loadTimezoneEnabled();
+  }
+  if (timezoneStatusEl) {
+    const tz = detectBrowserTimezone();
+    if (tz) {
+      timezoneStatusEl.textContent = `Detected: ${tz}`;
+    } else {
+      timezoneStatusEl.textContent =
+        "Browser did not disclose a timezone — toggle has no effect.";
+    }
+  }
+}
+
+/// Click handler for `#chat-timezone-toggle`. The persisted flag is
+/// read at message-build time so a reload picks up the latest choice
+/// without any further bookkeeping.
+function handleTimezoneToggleChange() {
+  setTimezoneEnabled(!!timezoneToggleEl?.checked);
+}
+
 /// Update every geolocation control from the current cache + toggle.
 /// Called on boot, after every successful fetch, and on toggle /
 /// refresh / forget clicks. Kept defensive about missing elements so
@@ -1875,6 +2020,14 @@ async function streamReply(sessionId, userText) {
   // unless the user re-consented.
   const locBlock = maybeBuildLocationBlock();
   if (locBlock) messages.unshift(locBlock);
+  // Same ephemerality rule as the location block: the timezone is
+  // recomputed on every turn (system clock may have changed since
+  // the last request) and never persisted into the session history.
+  // Inserted AFTER the location block so the admin system prompt and
+  // the location block both stay ahead of it; `unshift` in the same
+  // order keeps the most-recently-added block at index 0.
+  const tzBlock = maybeBuildTimezoneBlock();
+  if (tzBlock) messages.unshift(tzBlock);
   const body = { messages, stream: true };
   const temperature = parseFloat(tempEl.value);
   if (Number.isFinite(temperature)) body.temperature = temperature;
@@ -2833,6 +2986,11 @@ locationToggleEl?.addEventListener("change", handleLocationToggleChange);
 locationRefresh?.addEventListener("click", handleLocationRefreshClick);
 locationForget?.addEventListener("click", handleLocationForgetClick);
 
+// Browser timezone is cheaper than geolocation — there is no
+// permission gate, no async fetch, no cache to refresh — so the only
+// runtime wiring is the toggle change handler.
+timezoneToggleEl?.addEventListener("change", handleTimezoneToggleChange);
+
 // ---- Boot ------------------------------------------------------------------
 
 // One-time upgrade from the old single-history layout, then resolve
@@ -2848,6 +3006,11 @@ renderHistory(currentSessionId);
 // the history render so the layout is settled before scrollIntoView
 // is ever called from a click handler.
 renderLocationUi();
+// Same deal for the timezone toggle: paint the cached state and the
+// detected IANA name into the Advanced panel on boot so the user can
+// spot a wrong value (e.g. a VPN tunneling into a different region)
+// before they trust the LLM's clock to be theirs.
+renderTimezoneUi();
 // Re-fetch the position once on boot so the user does not inherit
 // yesterday's fix. `loadLocationEnabled` early-returns when the
 // toggle was off, so this is a no-op for users who have never opted

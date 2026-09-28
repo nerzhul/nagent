@@ -1534,6 +1534,45 @@ select, input[type="checkbox"] {
   word-break: break-word;
 }
 
+/* Browser-timezone controls inside the Advanced panel. Mirrors the
+ * location block styling so the two opt-ins read as siblings; the
+ * wrapper is not gated by `[hidden]` because timezone is always
+ * available (no permission / no cache to acquire). */
+.chat-timezone-advanced {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--fg-mute);
+}
+
+.chat-timezone-toggle-label {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0 !important;
+  font-size: 0.85rem;
+  color: var(--fg);
+  cursor: pointer;
+}
+.chat-timezone-toggle-label input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.chat-timezone-status {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
 #chat-form {
   display: flex;
   gap: 0.5rem;

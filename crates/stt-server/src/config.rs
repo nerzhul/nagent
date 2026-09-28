@@ -768,6 +768,19 @@ pub struct LlmConfig {
     /// `[llm].allow_user_location`. Defaults to `true` — the user's
     /// consent in the UI is the primary gate.
     pub allow_user_location: bool,
+    /// Whether the browser is allowed to forward the user's IANA
+    /// timezone to the LLM as part of the request. The browser still
+    /// asks for explicit consent in the Advanced drawer; this flag is
+    /// a defence-in-depth kill-switch so operators handling sensitive
+    /// deployments can strip the ephemeral `The user's local
+    /// timezone is` system message before it ever reaches the
+    /// upstream model, regardless of what the browser sends. Env var
+    /// `LLM_ALLOW_USER_TIMEZONE`, TOML key
+    /// `[llm].allow_user_timezone`. Defaults to `true` — the user's
+    /// consent in the UI is the primary gate. Independent from
+    /// `allow_user_location`: an operator may forbid one without
+    /// touching the other.
+    pub allow_user_timezone: bool,
 }
 
 impl LlmConfig {
@@ -826,6 +839,12 @@ impl LlmConfig {
             defaults.allow_user_location,
             "LLM_ALLOW_USER_LOCATION",
         )?;
+        let allow_user_timezone = resolve_primitive(
+            env_opt("LLM_ALLOW_USER_TIMEZONE").as_deref(),
+            toml.allow_user_timezone,
+            defaults.allow_user_timezone,
+            "LLM_ALLOW_USER_TIMEZONE",
+        )?;
 
         Ok(Self {
             enabled,
@@ -838,6 +857,7 @@ impl LlmConfig {
             cors_allow_origins,
             system_prompt,
             allow_user_location,
+            allow_user_timezone,
         })
     }
 }
@@ -855,6 +875,7 @@ impl Default for LlmConfig {
             cors_allow_origins: Vec::new(),
             system_prompt: None,
             allow_user_location: true,
+            allow_user_timezone: true,
         }
     }
 }
@@ -2006,6 +2027,32 @@ mod tests {
         assert!(!from_toml, "TOML value must apply when env is unset");
         let from_default =
             resolve_primitive::<bool>(None, None, default, "LLM_ALLOW_USER_LOCATION")
+                .expect("default must parse");
+        assert!(from_default, "default must win when neither is set");
+    }
+
+    #[test]
+    fn llm_allow_user_timezone_env_overrides_toml_and_default() {
+        // Same precedence contract as `allow_user_location`, exercised
+        // on the new timezone kill-switch. The two flags must
+        // resolve independently — a future refactor that shares the
+        // resolve call between them would silently couple the
+        // behaviour and this test would catch it.
+        let default = LlmConfig::default().allow_user_timezone;
+        assert!(default, "allow_user_timezone must default to true");
+        let from_env = resolve_primitive(
+            Some("false"),
+            Some(true),
+            default,
+            "LLM_ALLOW_USER_TIMEZONE",
+        )
+        .expect("env 'false' must parse");
+        assert!(!from_env, "env var must beat TOML when both are set");
+        let from_toml = resolve_primitive(None, Some(false), default, "LLM_ALLOW_USER_TIMEZONE")
+            .expect("toml bool must parse");
+        assert!(!from_toml, "TOML value must apply when env is unset");
+        let from_default =
+            resolve_primitive::<bool>(None, None, default, "LLM_ALLOW_USER_TIMEZONE")
                 .expect("default must parse");
         assert!(from_default, "default must win when neither is set");
     }

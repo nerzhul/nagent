@@ -23,6 +23,17 @@ use serde_json::{json, Value};
 /// divergence here would silently disable the filter (and vice versa).
 pub const USER_LOCATION_MARKER: &str = "User's approximate location:";
 
+/// Prefix that the browser-prepended timezone block always carries.
+///
+/// `chat.js::formatTimezoneMessage` writes this exact prefix; the
+/// server-side defensive filter in
+/// `llm.rs::strip_user_timezone_if_disabled` matches on it so the
+/// admin kill-switch (`LLM_ALLOW_USER_TIMEZONE=false`) can drop the
+/// block before it reaches the upstream model. Keep the two strings
+/// in sync — a divergence here would silently disable the filter (and
+/// vice versa).
+pub const USER_TIMEZONE_MARKER: &str = "The user's local timezone is";
+
 /// Built-in default system prompt. English by `AGENTS.md` rule #1;
 /// admins override it via `LLM_SYSTEM_PROMPT` or `[llm].system_prompt`
 /// in TOML. The agent names match `Agent::name()` in
@@ -129,7 +140,23 @@ answering as if the position were current.
 - When calling `get_weather` and the user did not name a specific \
 location, pass the coordinates as `location=\"lat,lon\"` directly. \
 The agent accepts the comma-separated form verbatim and returns a \
-weather card for that point.";
+weather card for that point.
+
+User timezone (opt-in, ephemeral):
+- When the user has shared their browser timezone, the request also \
+carries an ephemeral system message that starts with the marker \
+\"The user's local timezone is\". Treat that IANA zone as the \
+default for time-relative queries (\"what time is it\", \"today\", \
+\"this week\", \"tonight\", \"right now\", \"in an hour\", …) unless \
+the user explicitly names another zone in the same turn. The block \
+is never persisted in the browser session history, so it appears \
+only on the request that triggered it.
+- The block carries a snapshot of the local time captured at \
+message-build time. Treat the snapshot as a hint, not a guarantee — \
+when an authoritative answer matters (scheduling, countdown, exact \
+\"now\"), call `get_datetime` with `timezone=\"<IANA name>\"` so the \
+tool's answer is fresh and matches what the user sees on their \
+device.";
 
 /// Prepend the admin's system prompt as `messages[0]`.
 ///
@@ -333,6 +360,29 @@ mod tests {
         assert!(
             prompt.contains("ephemeral") || prompt.contains("never persisted"),
             "DEFAULT_SYSTEM_PROMPT must make clear the location block is ephemeral and not persisted, so the model treats it as request-scoped context."
+        );
+    }
+
+    #[test]
+    fn default_prompt_documents_user_timezone_block() {
+        // Mirror of `default_prompt_documents_user_location_block`
+        // for the browser-timezone opt-in. The prompt must mention
+        // the marker, must steer the LLM toward `get_datetime` with
+        // the user's IANA zone when an authoritative answer matters,
+        // and must make the block's ephemeral nature obvious so the
+        // model treats it as request-scoped context.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains(USER_TIMEZONE_MARKER),
+            "DEFAULT_SYSTEM_PROMPT must mention the '{USER_TIMEZONE_MARKER}' marker so the system knows it can rely on the block for time-relative queries."
+        );
+        assert!(
+            prompt.contains("get_datetime") && prompt.contains("timezone="),
+            "DEFAULT_SYSTEM_PROMPT must instruct the model to call get_datetime with timezone=\"<IANA>\" when an authoritative current time is needed."
+        );
+        assert!(
+            prompt.contains("ephemeral") || prompt.contains("never persisted"),
+            "DEFAULT_SYSTEM_PROMPT must make clear the timezone block is ephemeral and not persisted, so the model treats it as request-scoped context."
         );
     }
 

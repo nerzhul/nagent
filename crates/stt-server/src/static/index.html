@@ -373,6 +373,21 @@
         </div>
         <p id="chat-location-status" class="chat-location-status">…</p>
       </div>
+      <!--
+        Browser timezone opt-in. Always available (unlike location,
+        which requires HTTPS + a cached fix), so it lives at the top
+        level of Advanced rather than being gated behind a cache check.
+        The status line surfaces the detected IANA name so the user can
+        spot a wrong value (e.g. a VPN tunneling into a different
+        region) before they trust the LLM's clock to be theirs.
+      -->
+      <div class="chat-timezone-advanced">
+        <label class="chat-timezone-toggle-label">
+          <input id="chat-timezone-toggle" type="checkbox">
+          Use browser timezone in LLM context
+        </label>
+        <p id="chat-timezone-status" class="chat-timezone-status">…</p>
+      </div>
     </details>
     <form id="chat-form">
       <textarea id="chat-input" rows="1"

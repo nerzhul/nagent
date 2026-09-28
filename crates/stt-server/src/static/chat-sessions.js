@@ -30,6 +30,13 @@ export const DEFAULT_TITLE = "New chat";
 export const LOCATION_KEY = "nagent.chat.location";
 export const LOCATION_ENABLED_KEY = "nagent.chat.locationEnabled";
 
+// User-timezone opt-in flag. The detected IANA name is *not* cached:
+// `Intl.DateTimeFormat().resolvedOptions().timeZone` is cheap, always
+// fresh, and reflects the system clock even when the user crosses
+// timezones between page loads. Storing it would freeze yesterday's
+// zone across an evening flight.
+export const TIMEZONE_ENABLED_KEY = "nagent.chat.timezoneEnabled";
+
 export function historyKey(id) {
   return HISTORY_PREFIX + id;
 }

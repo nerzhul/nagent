@@ -228,6 +228,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             cors_allow_origins: vec![],
             system_prompt: None,
             allow_user_location: true,
+            allow_user_timezone: true,
         },
         agents: AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),

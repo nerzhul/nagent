@@ -342,5 +342,6 @@ fn _suppress_unused_warnings() {
         cors_allow_origins: Vec::new(),
         system_prompt: None,
         allow_user_location: false,
+        allow_user_timezone: true,
     };
 }

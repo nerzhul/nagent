@@ -65,6 +65,7 @@ async fn start_test_server() -> (String, SessionMap) {
             cors_allow_origins: vec![],
             system_prompt: None,
             allow_user_location: true,
+            allow_user_timezone: true,
         },
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
