@@ -698,16 +698,38 @@ function renderHistory(sessionId) {
       // reloads reproduce the same DOM as the live stream.
       if (toolAnchorEl) {
         const id = msg.tool_call_id || "";
-        appendToolBubble(
-          null,
-          { id, name: msg.name || "tool", args: null, index: 0 },
-          toolAnchorEl,
-        );
+        const name = msg.name || "tool";
+        // The matching assistant `tool_calls[]` entry (processed just
+        // above) already created a running `<details>` for this id with
+        // the tool's args wired into the bubble body. Don't add a second
+        // one — only resolve the existing bubble. Without this guard
+        // each tool call ends up with two traces after a refresh: the
+        // first one flips to `ok` via `resolveToolBubble`, the second
+        // stays in `--running` and the user sees a stuck
+        // "tool running…" pill that never settles.
+        const existing = id
+          ? messagesEl.querySelector(
+              `details.chat-message__tool-usage[data-tool-id="${CSS.escape(id)}"]`,
+            )
+          : null;
+        if (!existing) {
+          appendToolBubble(
+            null,
+            { id, name, args: null, index: 0 },
+            toolAnchorEl,
+          );
+        }
+        // Prefer the server-curated `summary` (matches the live pill
+        // byte-for-byte, ≤ 80 chars on success / ≤ 160 on error). Fall
+        // back to a content-derived truncation for history written by
+        // older builds that did not persist `summary`.
+        const summary = msg.summary
+          || (msg.content ? truncateSummary(msg.content) : "");
         resolveToolBubble(null, {
           id,
-          name: msg.name || "tool",
+          name,
           ok: true,
-          summary: msg.content ? truncateSummary(msg.content) : "",
+          summary,
           content: msg.content,
         });
       }
@@ -1169,7 +1191,15 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
     h.push({
       role: "tool",
       tool_call_id: id,
+      // Persist `name` and `summary` so a page refresh reproduces the
+      // same pill text as the live stream byte-for-byte. Without
+      // `summary` the rehydration path had to recompute it from
+      // `content` (≤ 117 chars + "…") which is slightly longer than
+      // the server's live cap (≤ 80 chars on success) and visually
+      // diverges from what the user just saw.
+      name: name || "",
       content: content == null ? "" : String(content),
+      summary: summary || "",
       ts: Date.now(),
     });
     saveHistory(sessionId, h);

@@ -500,6 +500,43 @@ async fn chat_js_parses_tool_call_and_tool_result_sse_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_render_history_avoids_duplicate_tool_bubble_after_refresh() {
+    // Regression guard for the "tool running…" pill that used to stick
+    // around on past assistant turns after a page refresh. The
+    // rehydration loop in `renderHistory` walks an assistant message's
+    // `tool_calls[]` (creating one running `<details>` per id) and
+    // then the matching `role: "tool"` entry. Calling
+    // `appendToolBubble` again on the `role: "tool"` path produces a
+    // second `<details>` with the same `data-tool-id`; the subsequent
+    // `resolveToolBubble` only flips the FIRST match to `ok`, leaving
+    // the duplicate stuck in `--running`.
+    //
+    // The fix gates the second `appendToolBubble` call on a
+    // `querySelector` for an existing matching `<details>`. We assert
+    // the source still carries the guard so a future refactor that
+    // re-merges the two branches trips this test.
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("data-tool-id=\"${CSS.escape(id)}\""),
+        "chat.js `renderHistory` lost the existing-`<details>` lookup used to deduplicate tool bubbles on refresh. Without it each tool call renders twice and one of them stays stuck on the 'running…' indicator."
+    );
+    // The persisted `role: \"tool\"` entry must carry the
+    // server-curated `summary` so the rehydrated pill text matches
+    // the live stream byte-for-byte (≤ 80 chars on success vs.
+    // ≤ 117 chars + \"…\" recomputed from `content`).
+    assert!(
+        body.contains("summary: summary || \"\""),
+        "chat.js `resolveToolBubble` no longer persists the server-curated `summary` on the `role: \"tool\"` history entry. A page refresh now shows a longer (and visually divergent) tool pill than the user saw live."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn css_hides_inactive_view_with_higher_specificity() {
     // Both mode views are `<main>` elements. The Transcript tab sets
     // `hidden` on `#view-discussion` (and vice versa) to swap the
