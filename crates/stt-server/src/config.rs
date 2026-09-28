@@ -1222,8 +1222,8 @@ pub enum ConfigError {
 /// Authentication & user-identity subsystem (PR1).
 ///
 /// Always present in [`Config`] so the rest of the code does not need
-/// `#[cfg(feature = "auth")]` gates. When the `auth` cargo feature is
-/// off, `enabled` is forced to `false` and every other field is the
+/// feature gates. When the runtime config sets `auth.enabled = false`
+/// (the default), `enabled` is `false` and every other field is the
 /// "no auth" default — the server then behaves exactly as it did
 /// before PR1. When the feature is on, the operator enables the
 /// subsystem via `NAGENT_AUTH_ENABLED=true` (or `auth.enabled = true`
@@ -1290,7 +1290,6 @@ pub enum AuthBackendKind {
 }
 
 impl AuthBackendKind {
-    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
             "local" => Ok(Self::Local),
@@ -1302,7 +1301,6 @@ impl AuthBackendKind {
         }
     }
 
-    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
@@ -1433,166 +1431,152 @@ impl Default for AuthPasskeyConfig {
 
 impl AuthConfig {
     fn from_env_with_toml(toml: Option<&TomlAuthConfig>) -> Result<Self, ConfigError> {
-        // When the `auth` cargo feature is off, refuse to honour any
-        // `[auth]` section so an operator who copy-pastes the example
-        // into a server without the feature does not get a silently
-        // half-applied config.
-        #[cfg(not(feature = "auth"))]
-        {
-            let _ = toml;
-            Ok(Self::default())
-        }
-        #[cfg(feature = "auth")]
-        {
-            let defaults = Self::default();
-            let toml = toml.cloned().unwrap_or_default();
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
 
-            // `NAGENT_AUTH_ENABLED` wins. Missing → TOML → default.
-            // Forcing `false` when the env var is exactly "false" / "0"
-            // lets an operator disable auth via env even when the
-            // TOML file enables it (the canonical 12-factor contract).
-            let enabled_raw = env_opt("NAGENT_AUTH_ENABLED");
-            let enabled = match enabled_raw.as_deref() {
-                Some(v) => resolve_primitive(
-                    Some(v),
-                    toml.enabled,
-                    defaults.enabled,
-                    "NAGENT_AUTH_ENABLED",
-                )?,
-                None => toml.enabled.unwrap_or(defaults.enabled),
-            };
+        // `NAGENT_AUTH_ENABLED` wins. Missing → TOML → default.
+        // Forcing `false` when the env var is exactly "false" / "0"
+        // lets an operator disable auth via env even when the
+        // TOML file enables it (the canonical 12-factor contract).
+        let enabled_raw = env_opt("NAGENT_AUTH_ENABLED");
+        let enabled = match enabled_raw.as_deref() {
+            Some(v) => resolve_primitive(
+                Some(v),
+                toml.enabled,
+                defaults.enabled,
+                "NAGENT_AUTH_ENABLED",
+            )?,
+            None => toml.enabled.unwrap_or(defaults.enabled),
+        };
 
-            // Backend list — env (comma-separated) wins.
-            let backends_csv = env_opt("NAGENT_AUTH_BACKENDS");
-            let backends_raw: Vec<String> = match backends_csv.as_deref() {
-                Some(v) => v
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-                None => toml.backends.unwrap_or_default(),
-            };
-            if enabled && backends_raw.is_empty() {
-                return Err(ConfigError::InvalidAuth(
-                    "auth.enabled = true but auth.backends is empty; \
+        // Backend list — env (comma-separated) wins.
+        let backends_csv = env_opt("NAGENT_AUTH_BACKENDS");
+        let backends_raw: Vec<String> = match backends_csv.as_deref() {
+            Some(v) => v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => toml.backends.unwrap_or_default(),
+        };
+        if enabled && backends_raw.is_empty() {
+            return Err(ConfigError::InvalidAuth(
+                "auth.enabled = true but auth.backends is empty; \
                      set [auth].backends = [\"local\"] (or another subset)"
+                    .into(),
+            ));
+        }
+        let mut backends = Vec::with_capacity(backends_raw.len());
+        for raw in &backends_raw {
+            backends.push(AuthBackendKind::parse(raw).map_err(ConfigError::InvalidAuth)?);
+        }
+
+        let public_url = resolve_opt_string(
+            env_opt("NAGENT_AUTH_PUBLIC_URL").as_deref(),
+            toml.public_url.as_deref(),
+        )
+        .unwrap_or_default();
+
+        let session_ttl_days = resolve_primitive(
+            env_opt("NAGENT_AUTH_SESSION_TTL_DAYS").as_deref(),
+            toml.session_ttl_days,
+            defaults.session_ttl_days,
+            "NAGENT_AUTH_SESSION_TTL_DAYS",
+        )?
+        // Clamp to the documented range so a typo (`0` or `365`)
+        // surfaces as a boot error rather than silently weakening
+        // the session timeout. `1..=90` matches the NIST / GDPR
+        // guidance cited in plan D6a.
+        .clamp(1, 90);
+
+        let csrf_header = resolve_opt_string(
+            env_opt("NAGENT_AUTH_CSRF_HEADER").as_deref(),
+            toml.csrf_header.as_deref(),
+        )
+        .unwrap_or_else(|| defaults.csrf_header.clone());
+
+        let db = AuthDbConfig::from_toml(toml.db.as_ref())?;
+        if enabled {
+            if db.backend.is_empty() {
+                return Err(ConfigError::InvalidAuth(
+                    "auth.enabled = true but [auth.db].backend is unset; \
+                         set it to \"sqlite\" or \"postgres\""
                         .into(),
                 ));
             }
-            let mut backends = Vec::with_capacity(backends_raw.len());
-            for raw in &backends_raw {
-                backends.push(AuthBackendKind::parse(raw).map_err(ConfigError::InvalidAuth)?);
-            }
-
-            let public_url = resolve_opt_string(
-                env_opt("NAGENT_AUTH_PUBLIC_URL").as_deref(),
-                toml.public_url.as_deref(),
-            )
-            .unwrap_or_default();
-
-            let session_ttl_days = resolve_primitive(
-                env_opt("NAGENT_AUTH_SESSION_TTL_DAYS").as_deref(),
-                toml.session_ttl_days,
-                defaults.session_ttl_days,
-                "NAGENT_AUTH_SESSION_TTL_DAYS",
-            )?
-            // Clamp to the documented range so a typo (`0` or `365`)
-            // surfaces as a boot error rather than silently weakening
-            // the session timeout. `1..=90` matches the NIST / GDPR
-            // guidance cited in plan D6a.
-            .clamp(1, 90);
-
-            let csrf_header = resolve_opt_string(
-                env_opt("NAGENT_AUTH_CSRF_HEADER").as_deref(),
-                toml.csrf_header.as_deref(),
-            )
-            .unwrap_or_else(|| defaults.csrf_header.clone());
-
-            let db = AuthDbConfig::from_toml(toml.db.as_ref())?;
-            if enabled {
-                if db.backend.is_empty() {
-                    return Err(ConfigError::InvalidAuth(
-                        "auth.enabled = true but [auth.db].backend is unset; \
-                         set it to \"sqlite\" or \"postgres\""
-                            .into(),
-                    ));
-                }
-                if db.url.is_empty() {
-                    return Err(ConfigError::InvalidAuth(
-                        "auth.enabled = true but [auth.db].url is unset; \
+            if db.url.is_empty() {
+                return Err(ConfigError::InvalidAuth(
+                    "auth.enabled = true but [auth.db].url is unset; \
                          set it to a sqlite://… or postgres://… URL"
-                            .into(),
-                    ));
-                }
-                if db.backend != "sqlite" && db.backend != "postgres" {
-                    return Err(ConfigError::InvalidAuth(format!(
-                        "auth.db.backend must be \"sqlite\" or \"postgres\", got {:?}",
-                        db.backend
-                    )));
-                }
-                // Cross-check: each enabled backend must have its
-                // minimum config present so the operator cannot boot
-                // a server that just sits at "missing OIDC issuer"
-                // until the first login attempt.
-                for kind in &backends {
-                    match kind {
-                        AuthBackendKind::Local => { /* password config has sane defaults */ }
-                        AuthBackendKind::Oidc => {
-                            let oidc = AuthOidcConfig::from_toml(toml.oidc.as_ref())?;
-                            if oidc.issuer.is_empty() {
-                                return Err(ConfigError::InvalidAuth(
-                                    "auth.oidc is enabled but [auth.oidc].issuer is unset".into(),
-                                ));
-                            }
-                            if oidc.client_id.is_empty() {
-                                return Err(ConfigError::InvalidAuth(
-                                    "auth.oidc is enabled but [auth.oidc].client_id is unset"
-                                        .into(),
-                                ));
-                            }
+                        .into(),
+                ));
+            }
+            if db.backend != "sqlite" && db.backend != "postgres" {
+                return Err(ConfigError::InvalidAuth(format!(
+                    "auth.db.backend must be \"sqlite\" or \"postgres\", got {:?}",
+                    db.backend
+                )));
+            }
+            // Cross-check: each enabled backend must have its
+            // minimum config present so the operator cannot boot
+            // a server that just sits at "missing OIDC issuer"
+            // until the first login attempt.
+            for kind in &backends {
+                match kind {
+                    AuthBackendKind::Local => { /* password config has sane defaults */ }
+                    AuthBackendKind::Oidc => {
+                        let oidc = AuthOidcConfig::from_toml(toml.oidc.as_ref())?;
+                        if oidc.issuer.is_empty() {
+                            return Err(ConfigError::InvalidAuth(
+                                "auth.oidc is enabled but [auth.oidc].issuer is unset".into(),
+                            ));
                         }
-                        AuthBackendKind::Passkey => {
-                            let pk = AuthPasskeyConfig::from_toml(toml.passkey.as_ref())?;
-                            if pk.rp_id.is_empty() {
-                                return Err(ConfigError::InvalidAuth(
-                                    "auth.passkey is enabled but [auth.passkey].rp_id is unset"
-                                        .into(),
-                                ));
-                            }
-                            if pk.origins.is_empty() {
-                                return Err(ConfigError::InvalidAuth(
-                                    "auth.passkey is enabled but [auth.passkey].origins is empty"
-                                        .into(),
-                                ));
-                            }
+                        if oidc.client_id.is_empty() {
+                            return Err(ConfigError::InvalidAuth(
+                                "auth.oidc is enabled but [auth.oidc].client_id is unset".into(),
+                            ));
+                        }
+                    }
+                    AuthBackendKind::Passkey => {
+                        let pk = AuthPasskeyConfig::from_toml(toml.passkey.as_ref())?;
+                        if pk.rp_id.is_empty() {
+                            return Err(ConfigError::InvalidAuth(
+                                "auth.passkey is enabled but [auth.passkey].rp_id is unset".into(),
+                            ));
+                        }
+                        if pk.origins.is_empty() {
+                            return Err(ConfigError::InvalidAuth(
+                                "auth.passkey is enabled but [auth.passkey].origins is empty"
+                                    .into(),
+                            ));
                         }
                     }
                 }
             }
-
-            // Per-backend config is parsed unconditionally so the
-            // operator can supply `oidc` config even when only
-            // `local` is currently enabled (and flip on OIDC later
-            // without a server restart needing a config edit first).
-            let password = AuthPasswordConfig::from_toml(
-                toml.password.as_ref(),
-                env_opt("NAGENT_AUTH_PASSWORD_ALLOW_REGISTRATION").as_deref(),
-            )?;
-            let oidc = AuthOidcConfig::from_toml_with_env(toml.oidc.as_ref())?;
-            let passkey = AuthPasskeyConfig::from_toml(toml.passkey.as_ref())?;
-
-            Ok(Self {
-                enabled,
-                backends,
-                public_url,
-                session_ttl_days,
-                csrf_header,
-                db,
-                password,
-                oidc,
-                passkey,
-            })
         }
+
+        // Per-backend config is parsed unconditionally so the
+        // operator can supply `oidc` config even when only
+        // `local` is currently enabled (and flip on OIDC later
+        // without a server restart needing a config edit first).
+        let password = AuthPasswordConfig::from_toml(
+            toml.password.as_ref(),
+            env_opt("NAGENT_AUTH_PASSWORD_ALLOW_REGISTRATION").as_deref(),
+        )?;
+        let oidc = AuthOidcConfig::from_toml_with_env(toml.oidc.as_ref())?;
+        let passkey = AuthPasskeyConfig::from_toml(toml.passkey.as_ref())?;
+
+        Ok(Self {
+            enabled,
+            backends,
+            public_url,
+            session_ttl_days,
+            csrf_header,
+            db,
+            password,
+            oidc,
+            passkey,
+        })
     }
 
     /// Returns the cookie `Secure` flag for the configured public URL.
@@ -1630,7 +1614,6 @@ impl AuthConfig {
 }
 
 impl AuthDbConfig {
-    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     fn from_toml(toml: Option<&crate::config_file::TomlAuthDbConfig>) -> Result<Self, ConfigError> {
         let defaults = Self::default();
         let toml = toml.cloned().unwrap_or_default();
@@ -1657,7 +1640,6 @@ impl AuthDbConfig {
 }
 
 impl AuthPasswordConfig {
-    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     fn from_toml(
         toml: Option<&crate::config_file::TomlAuthPasswordConfig>,
         env_allow_registration: Option<&str>,
@@ -1717,7 +1699,6 @@ impl AuthPasswordConfig {
 }
 
 impl AuthOidcConfig {
-    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     fn from_toml_with_env(
         toml: Option<&crate::config_file::TomlAuthOidcConfig>,
     ) -> Result<Self, ConfigError> {
@@ -1769,7 +1750,6 @@ impl AuthOidcConfig {
         })
     }
 
-    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     fn from_toml(
         toml: Option<&crate::config_file::TomlAuthOidcConfig>,
     ) -> Result<Self, ConfigError> {
@@ -1778,7 +1758,6 @@ impl AuthOidcConfig {
 }
 
 impl AuthPasskeyConfig {
-    #[cfg_attr(not(feature = "auth"), allow(dead_code))]
     fn from_toml(
         toml: Option<&crate::config_file::TomlAuthPasskeyConfig>,
     ) -> Result<Self, ConfigError> {
@@ -2310,7 +2289,6 @@ mod tests {
 
     /// Helper: minimal TOML that satisfies `[auth].enabled = true` —
     /// the rest of the auth tests layer extra sections on top of this.
-    #[cfg(feature = "auth")]
     fn minimal_auth_toml() -> TomlConfig {
         toml::from_str(
             r#"
@@ -2330,7 +2308,6 @@ mod tests {
         .expect("minimal auth TOML must parse")
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn auth_defaults_disabled_when_no_toml() {
         // No [auth] section at all → enabled=false, no backends.
@@ -2352,7 +2329,6 @@ mod tests {
         assert_eq!(cfg.auth.csrf_header, "x-csrf-token");
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn auth_toml_overlay_enables_local_backend() {
         let toml = minimal_auth_toml();
@@ -2363,7 +2339,6 @@ mod tests {
         assert!(cfg.auth.db.url.contains("auth.db"));
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn auth_enabled_without_backends_is_rejected() {
         let toml: TomlConfig = toml::from_str(
@@ -2388,7 +2363,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn auth_enabled_without_db_backend_is_rejected() {
         let toml: TomlConfig = toml::from_str(
@@ -2415,7 +2389,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn auth_oidc_enabled_without_issuer_is_rejected() {
         let toml: TomlConfig = toml::from_str(
@@ -2449,7 +2422,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn auth_passkey_enabled_without_rp_id_is_rejected() {
         let toml: TomlConfig = toml::from_str(
@@ -2483,7 +2455,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn session_ttl_clamped_to_documented_range() {
         // 0 → clamped to 1, 91 → clamped to 90. We do not have to
@@ -2506,7 +2477,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn argon2_memory_clamped_to_owasp_minimum() {
         // The resolver clamps argon2_memory_kib to >= 19456 so a
@@ -2527,7 +2497,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn cookie_secure_auto_disables_on_http_localhost() {
         // Dev story: `http://localhost:8080` must NOT set the Secure
@@ -2569,7 +2538,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn auth_backend_kinds_parse_case_insensitive() {
         // Operators occasionally typo-case; we accept any case to keep
@@ -2590,7 +2558,6 @@ mod tests {
         assert!(AuthBackendKind::parse("magic-link").is_err());
     }
 
-    #[cfg(feature = "auth")]
     #[test]
     fn enabled_backend_names_returns_lowercase_slice() {
         let mut base = minimal_auth_toml();

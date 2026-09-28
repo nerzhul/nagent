@@ -160,6 +160,10 @@ async fn start_test_server_with_llm_and_system_prompt(
         llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
             RateLimitConfig::default().llm_per_min,
         )),
+        auth_store: None,
+        auth_oidc: None,
+        auth_passkey: None,
+        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
     });
 
     let app = build_router(state);
@@ -230,6 +234,10 @@ async fn start_test_server_disabled() -> String {
         llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
             RateLimitConfig::default().llm_per_min,
         )),
+        auth_store: None,
+        auth_oidc: None,
+        auth_passkey: None,
+        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
     });
 
     let app = build_router(state);
@@ -628,6 +636,10 @@ async fn start_test_server_with_llm_auth(
         llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
             RateLimitConfig::default().llm_per_min,
         )),
+        auth_store: None,
+        auth_oidc: None,
+        auth_passkey: None,
+        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

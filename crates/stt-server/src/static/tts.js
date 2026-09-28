@@ -266,7 +266,11 @@ function phraseForTts(phrase) {
     };
     fetch(this._settings.endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // `RequireAuth` rejects every state-changing request that
+      // does not carry the per-session CSRF token. `csrfHeaders()`
+      // returns `undefined` when the session is gone, which the
+      // spread below silently drops.
+      headers: { 'Content-Type': 'application/json', ...window.nagentAuth?.csrfHeaders() },
       body: JSON.stringify(body),
       signal: ctrl.signal,
     })
@@ -454,7 +458,11 @@ function phraseForTts(phrase) {
         };
         fetch(self._settings.endpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          // `RequireAuth` rejects every state-changing request that
+          // does not carry the per-session CSRF token. `csrfHeaders()`
+          // returns `undefined` when the session is gone, which the
+          // spread below silently drops.
+          headers: { "Content-Type": "application/json", ...window.nagentAuth?.csrfHeaders() },
           body: JSON.stringify(body),
           signal: ctrl.signal,
         })

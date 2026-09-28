@@ -1,6 +1,6 @@
 # Postgres auth store config — drop-in for
-# `stt-server --config examples/auth.postgres.toml`. Mirrors the
-# sqlite example but switches `[auth.db].backend = "postgres"`.
+# `stt-server --config docs/examples/auth.postgres.toml`. Mirrors
+# the sqlite example but switches `[auth.db].backend = "postgres"`.
 # Use this when you have an existing Postgres server (e.g. shared
 # with the LLM proxy's metadata DB) and want all durable state on
 # one engine.
@@ -10,7 +10,7 @@
 bind_addr = "0.0.0.0:8080"
 whisper_model_path = "/models/ggml-base.bin"
 
-# ---- Authentication (PR1) ----
+# ---- Authentication ----
 [auth]
 enabled = true
 backends = ["local", "oidc"]

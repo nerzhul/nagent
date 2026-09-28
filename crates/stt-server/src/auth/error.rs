@@ -4,12 +4,9 @@
 //! axum handlers translate the variants into the appropriate HTTP
 //! status code via the `IntoResponse` impl in [`crate::auth::routes`].
 
-#[cfg(feature = "auth")]
 use axum::http::StatusCode;
-#[cfg(feature = "auth")]
 use axum::response::{IntoResponse, Response};
 
-#[cfg(feature = "auth")]
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     /// The supplied credentials did not match (wrong password,
@@ -53,7 +50,49 @@ pub enum AuthError {
     Internal(String),
 }
 
-#[cfg(feature = "auth")]
+/// Helper for auth handlers: pull the auth store off an
+/// `Arc<AppState>`. Refuses with `AuthError::Internal` if the
+/// store is not configured — which would be a bug since the auth
+/// subtree is only mounted when `auth.enabled = true` (which
+/// `auto_bootstrap` enforces by populating `state.auth_store`).
+pub fn require_auth_store(
+    state: &std::sync::Arc<crate::AppState>,
+) -> Result<&crate::auth::AuthStore, AuthError> {
+    state.auth_store.as_ref().ok_or_else(|| {
+        AuthError::Internal(
+            "auth_store is not configured; the auth subtree should not be mounted when auth is disabled".into(),
+        )
+    })
+}
+
+/// Helper for auth handlers: pull the passkey sub-state off an
+/// `Arc<AppState>`. Returns `AuthError::Internal` when passkey is
+/// not enabled — the passkey routes are only mounted when
+/// `state.auth_passkey.is_some()`, so hitting this in a handler
+/// indicates a wiring bug.
+pub fn require_passkey_state(
+    state: &std::sync::Arc<crate::AppState>,
+) -> Result<&crate::auth::passkey::PasskeyState, AuthError> {
+    state.auth_passkey.as_ref().ok_or_else(|| {
+        AuthError::Internal(
+            "passkey backend is not configured; the passkey routes should not be mounted when passkey is disabled".into(),
+        )
+    })
+}
+
+/// Helper for auth handlers: pull the OIDC sub-state off an
+/// `Arc<AppState>`. Returns `AuthError::Internal` when OIDC is
+/// not enabled.
+pub fn require_oidc_state(
+    state: &std::sync::Arc<crate::AppState>,
+) -> Result<&crate::auth::oidc::OidcState, AuthError> {
+    state.auth_oidc.as_ref().ok_or_else(|| {
+        AuthError::Internal(
+            "OIDC backend is not configured; the OIDC routes should not be mounted when OIDC is disabled".into(),
+        )
+    })
+}
+
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         use axum::http::header::HeaderValue;

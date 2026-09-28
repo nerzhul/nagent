@@ -1896,7 +1896,12 @@ async function streamReply(sessionId, userText) {
   try {
     const resp = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // `RequireAuth` rejects every state-changing request that
+      // does not carry the per-session CSRF token. `csrfHeaders()`
+      // returns `undefined` when the session is gone, which the
+      // HeadersInit spread below silently drops (rather than
+      // setting the header to the string "undefined").
+      headers: { "Content-Type": "application/json", ...window.nagentAuth?.csrfHeaders() },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -2590,7 +2595,7 @@ function wireTtsControls() {
       const tts = getOrCreateTtsPlayer();
       const resp = await fetch("/v1/audio/speech", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...window.nagentAuth?.csrfHeaders() },
         body: JSON.stringify({
           input: "Hello, this is a voice test.",
           voice: resolveTtsVoice(),

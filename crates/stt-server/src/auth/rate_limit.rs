@@ -11,22 +11,16 @@
 //! parallel key-space otherwise. See the planning handover §"Per-IP
 //! rate limiting already exists in `rate_limit.rs`".
 
-#[cfg(feature = "auth")]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "auth")]
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "auth")]
 use dashmap::DashMap;
 
 /// Default cap: 5 attempts per 15-minute window.
-#[cfg(feature = "auth")]
 pub const DEFAULT_LOGIN_MAX_ATTEMPTS: u32 = 5;
-#[cfg(feature = "auth")]
 pub const DEFAULT_LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 
 /// Per-(email, ip) bucket.
-#[cfg(feature = "auth")]
 #[derive(Debug)]
 struct Bucket {
     count: u32,
@@ -34,7 +28,6 @@ struct Bucket {
 }
 
 /// Outcome of [`LoginRateLimiter::check`].
-#[cfg(feature = "auth")]
 #[derive(Debug, PartialEq, Eq)]
 pub enum LoginRateLimitDecision {
     /// The attempt is within budget.
@@ -45,13 +38,11 @@ pub enum LoginRateLimitDecision {
 }
 
 /// Cheap-to-clone wrapper around the per-(email, ip) map.
-#[cfg(feature = "auth")]
 #[derive(Clone)]
 pub struct LoginRateLimiter {
     inner: std::sync::Arc<LoginRateLimiterInner>,
 }
 
-#[cfg(feature = "auth")]
 struct LoginRateLimiterInner {
     buckets: DashMap<(String, std::net::IpAddr), Bucket>,
     max_attempts: u32,
@@ -62,7 +53,6 @@ struct LoginRateLimiterInner {
     sweep_every: u64,
 }
 
-#[cfg(feature = "auth")]
 impl LoginRateLimiter {
     pub fn new() -> Self {
         Self::with_limits(DEFAULT_LOGIN_MAX_ATTEMPTS, DEFAULT_LOGIN_WINDOW)
@@ -141,14 +131,12 @@ impl LoginRateLimiter {
     }
 }
 
-#[cfg(feature = "auth")]
 impl Default for LoginRateLimiter {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "auth")]
 impl std::fmt::Debug for LoginRateLimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoginRateLimiter")
@@ -161,12 +149,11 @@ impl std::fmt::Debug for LoginRateLimiter {
 
 /// Lower-case + trim an email so `Alice@Example.com` and
 /// `alice@example.com ` share a bucket.
-#[cfg(feature = "auth")]
 fn normalise_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
-#[cfg(all(test, feature = "auth"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};

@@ -16,19 +16,13 @@
 //! DEFAULT CURRENT_TIMESTAMP` so both engines pick a sensible
 //! default without a round-trip through the application.
 
-#[cfg(feature = "auth")]
 use chrono::{DateTime, Utc};
-#[cfg(feature = "auth")]
 use uuid::Uuid;
 
-#[cfg(feature = "auth")]
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
 use crate::auth::session::SessionRecord;
 
-#[cfg(feature = "auth")]
 pub use crate::auth::db_postgres::PgStore;
-#[cfg(feature = "auth")]
 pub use crate::auth::db_sqlite::SqliteStore;
 
 /// DB-pool handle returned by [`AuthStore::pool`].
@@ -36,14 +30,12 @@ pub use crate::auth::db_sqlite::SqliteStore;
 /// Lets subsystem code (OIDC state persistence, passkey ceremonies
 /// that need to issue additional queries outside the trait surface)
 /// run a one-off query without re-plumbing the generic pool type.
-#[cfg(feature = "auth")]
 #[derive(Debug)]
 pub enum AnyPool {
     Sqlite(sqlx::SqlitePool),
     Postgres(sqlx::PgPool),
 }
 
-#[cfg(feature = "auth")]
 impl AnyPool {
     pub fn sqlite(&self) -> Option<&sqlx::SqlitePool> {
         match self {
@@ -61,14 +53,12 @@ impl AnyPool {
 
 /// DB-agnostic auth store. Cheap to clone (each variant wraps a
 /// sqlx pool which itself is `Arc`-backed).
-#[cfg(feature = "auth")]
 #[derive(Clone, Debug)]
 pub enum AuthStore {
     Sqlite(SqliteStore),
     Postgres(PgStore),
 }
 
-#[cfg(feature = "auth")]
 impl AuthStore {
     /// Build the store from the runtime config. Returns an error if
     /// the URL fails to parse, the pool cannot connect, or the
@@ -321,7 +311,6 @@ impl AuthStore {
 
 /// Public-facing user record. Mirrors the row in the `users` table
 /// minus the password hash (which stays inside the store).
-#[cfg(feature = "auth")]
 #[derive(Debug, Clone)]
 pub struct AuthUserRecord {
     pub id: Uuid,
@@ -336,7 +325,6 @@ pub struct AuthUserRecord {
 }
 
 /// Parameters for [`AuthStore::insert_passkey`].
-#[cfg(feature = "auth")]
 #[derive(Debug, Clone)]
 pub struct NewPasskeyRecord {
     pub id: Uuid,
@@ -353,7 +341,6 @@ pub struct NewPasskeyRecord {
 /// as JSON — keeping the entire struct (not just the COSE bytes)
 /// lets `passkey.rs` reconstruct the `Passkey` without poking at
 /// the crate's private `cred` field.
-#[cfg(feature = "auth")]
 #[derive(Debug, Clone)]
 pub struct PasskeyRecord {
     pub id: Uuid,
@@ -365,7 +352,6 @@ pub struct PasskeyRecord {
 }
 
 /// Parameters for [`AuthStore::record_event`].
-#[cfg(feature = "auth")]
 #[derive(Debug, Clone)]
 pub struct NewAuthEvent {
     pub user_id: Option<Uuid>,

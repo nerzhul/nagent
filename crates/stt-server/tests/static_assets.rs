@@ -74,6 +74,10 @@ async fn serve_once() -> String {
         llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
             RateLimitConfig::default().llm_per_min,
         )),
+        auth_store: None,
+        auth_oidc: None,
+        auth_passkey: None,
+        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1141,6 +1145,121 @@ async fn index_html_mounts_shortcuts_modal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_html_wraps_app_shell_in_template() {
+    // The "global portal" contract: when the server has
+    // `auth.enabled = true` and the visitor is anonymous, the
+    // chat/voice UI must not appear in the document tree at all.
+    // The whole UI lives inside a `<template id="app-shell-template">`
+    // and `auth.js` clones it into `#app-root` only after a
+    // successful `/api/me` probe. The login modal stays outside
+    // the template so the auth flow can run before any UI is
+    // mounted.
+    let base = serve_once().await;
+    let html = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        html.contains("<template id=\"app-shell-template\""),
+        "index.html is missing <template id=\"app-shell-template\">. The app shell must live in an inert template so anonymous users do not see the UI in DevTools."
+    );
+    assert!(
+        html.contains("<div id=\"app-root\">"),
+        "index.html is missing the empty <div id=\"app-root\"> mount point where auth.js clones the template."
+    );
+    // The login modal is intentionally outside the template so it
+    // can be shown before the app shell is mounted.
+    assert!(
+        html.contains("<dialog id=\"login-modal\""),
+        "index.html is missing the <dialog id=\"login-modal\"> wrapper. The login modal must live in the body so auth.js can show it before the template is cloned."
+    );
+    // The Transcript and Discussion views + the shortcuts modal must
+    // sit INSIDE the template (not as direct children of <body>),
+    // otherwise they are visible to anonymous visitors.
+    let template_open = html
+        .find("<template id=\"app-shell-template\"")
+        .expect("app-shell-template must be present");
+    let template_close = html.rfind("</template>").expect("template must be closed");
+    assert!(
+        template_open < template_close,
+        "template open/close markers are out of order"
+    );
+    for must_be_inside in [
+        "<main id=\"view-transcript\"",
+        "<main id=\"view-discussion\"",
+        "id=\"shortcuts-modal\"",
+        "id=\"auth-pill\"",
+    ] {
+        let pos = html
+            .find(must_be_inside)
+            .unwrap_or_else(|| panic!("index.html is missing `{must_be_inside}`"));
+        assert!(
+            pos > template_open && pos < template_close,
+            "`{must_be_inside}` must live inside <template id=\"app-shell-template\"> so it is absent from the DOM for anonymous users. Found at position {pos}, template spans {template_open}..{template_close}."
+        );
+    }
+    // Conversely, the login modal must live OUTSIDE the template.
+    let modal_pos = html
+        .find("<dialog id=\"login-modal\"")
+        .expect("login modal must be present");
+    assert!(
+        modal_pos < template_open || modal_pos > template_close,
+        "<dialog id=\"login-modal\"> must live outside the app-shell template, but it is inside it."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_js_is_loaded_outside_template() {
+    // The auth probe, login form, and mount/unmount logic live in
+    // `auth.js`. It is the only script in `index.html` that is
+    // loaded directly in the body (outside the template) — every
+    // other script (mode.js, chat.js, app.js, shortcuts.js) is
+    // inside the template so they only execute after `auth.js`
+    // has cloned it.
+    let base = serve_once().await;
+    let html = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let auth_tag = "<script type=\"module\" src=\"/static/auth.js\">";
+    let pos = html
+        .find(auth_tag)
+        .unwrap_or_else(|| panic!("index.html is missing `{auth_tag}`"));
+    let template_open = html
+        .find("<template id=\"app-shell-template\"")
+        .expect("app-shell-template must be present");
+    let template_close = html.rfind("</template>").expect("template must be closed");
+    assert!(
+        pos < template_open || pos > template_close,
+        "`{auth_tag}` must live outside the app-shell template so it can run before the rest of the UI exists. Found at position {pos}, template spans {template_open}..{template_close}."
+    );
+    // Verify the auth.js source itself ships the portal pieces.
+    let auth_src = reqwest::get(format!("{base}/static/auth.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for marker in [
+        "/api/me",
+        "login-modal--forced",
+        "nagent:logout",
+        "window.nagentAuth",
+        "app-shell-template",
+    ] {
+        assert!(
+            auth_src.contains(marker),
+            "auth.js is missing `{marker}`. The portal contract is incomplete."
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shortcuts_js_loads_and_lists_every_binding() {
     // Pairs with `index_html_mounts_shortcuts_modal`: the JS side
     // must keep every binding it advertises in the help. We check
@@ -1179,5 +1298,63 @@ async fn shortcuts_js_loads_and_lists_every_binding() {
     assert!(
         js.contains("function isTypingTarget("),
         "shortcuts.js is missing the `isTypingTarget` helper. The `?`, `Ctrl+S`, and `Ctrl+Shift+R` shortcuts will pop over focused editable fields (chat textarea, system-prompt textarea, etc.)."
+    );
+}
+
+/// Regression guard for the "403 on /v1/chat/completions after
+/// login" bug.
+///
+/// The server's `RequireAuth` middleware rejects every state-changing
+/// request (POST/PUT/PATCH/DELETE) on a protected route that does
+/// not carry the per-session `x-csrf-token` header. The login
+/// response hands the token to the SPA via `authState.user.csrf_token`
+/// (and the cloned app.js / chat.js / tts.js read it back through
+/// `window.nagentAuth.csrfHeaders()`), but a `fetch()` call that
+/// builds its own `headers` object without spreading the helper
+/// will miss it and be rejected.
+///
+/// We pin the marker string in every JS module that issues a
+/// state-changing fetch to a protected route so a future refactor
+/// that drops the spread (or re-introduces a hardcoded `headers`
+/// object) is caught in CI instead of as a user-visible 403.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_changing_fetches_carry_csrf_header() {
+    let base = serve_once().await;
+    // chat.js: chat completions + TTS test voice.
+    let chat = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // tts.js: two distinct playback call sites.
+    let tts = reqwest::get(format!("{base}/static/tts.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for (name, body, needle) in [
+        ("chat.js (chat completions)", &chat, "csrfHeaders()"),
+        ("chat.js (TTS test voice)", &chat, "csrfHeaders()"),
+        ("tts.js (first playback site)", &tts, "csrfHeaders()"),
+        ("tts.js (second playback site)", &tts, "csrfHeaders()"),
+    ] {
+        assert!(
+            body.contains(needle),
+            "{name} is missing `{needle}`. The fetch() call to a protected route will be rejected by RequireAuth with 403 because no x-csrf-token header is sent. Spread the helper in the headers object: {{ 'Content-Type': 'application/json', ...window.nagentAuth?.csrfHeaders() }}."
+        );
+    }
+    // Pin the helper itself so a future "simplification" that drops
+    // it from auth.js surfaces here.
+    let auth = reqwest::get(format!("{base}/static/auth.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        auth.contains("csrfHeaders"),
+        "auth.js is missing the `csrfHeaders` helper. Protected POSTs have no way to read the per-session CSRF token."
     );
 }

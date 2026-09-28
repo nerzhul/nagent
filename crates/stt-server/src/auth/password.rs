@@ -7,40 +7,26 @@
 //! opaque here — we always go through the [`AuthStore`] enum so
 //! the same code path runs against both engines.
 
-#[cfg(feature = "auth")]
 use argon2::password_hash::rand_core::OsRng;
-#[cfg(feature = "auth")]
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-#[cfg(feature = "auth")]
 use argon2::Argon2;
-#[cfg(feature = "auth")]
 use axum::extract::{ConnectInfo, State};
-#[cfg(feature = "auth")]
 use axum::http::{HeaderMap, StatusCode};
-#[cfg(feature = "auth")]
 use axum::response::{IntoResponse, Response};
-#[cfg(feature = "auth")]
 use axum::Json;
-#[cfg(feature = "auth")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "auth")]
 use std::net::SocketAddr;
-#[cfg(feature = "auth")]
 use uuid::Uuid;
 
-#[cfg(feature = "auth")]
+use crate::auth::error::require_auth_store;
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
 use crate::auth::rate_limit::LoginRateLimitDecision;
-#[cfg(feature = "auth")]
 use crate::auth::session;
-#[cfg(feature = "auth")]
 use crate::auth::AuthUser;
 
 /// Hash a password with argon2id. Returns the encoded `phc-string`
 /// (includes the salt + parameters in a single string), which is
 /// what the store layer persists as a BLOB.
-#[cfg(feature = "auth")]
 pub fn hash_password(
     password: &str,
     memory_kib: u32,
@@ -70,7 +56,6 @@ pub fn hash_password(
 
 /// Verify a password against the stored encoded hash. Returns
 /// `Ok(true)` on match, `Ok(false)` on mismatch.
-#[cfg(feature = "auth")]
 pub fn verify_password(password: &str, encoded: &[u8]) -> Result<bool, AuthError> {
     let encoded_str = std::str::from_utf8(encoded)
         .map_err(|e| AuthError::Crypto(format!("stored hash is not utf-8: {e}")))?;
@@ -91,14 +76,12 @@ pub fn verify_password(password: &str, encoded: &[u8]) -> Result<bool, AuthError
 /// cookie value is also returned in the JSON body so a CLI script
 /// can store it and use `Authorization: Bearer <id>` for subsequent
 /// calls.
-#[cfg(feature = "auth")]
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
 }
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
     pub user: AuthUser,
@@ -106,23 +89,30 @@ pub struct LoginResponse {
     pub session_id: Uuid,
 }
 
-/// Shared state the password handlers need. The router exposes
-/// the application-wide `Arc<AppState>` to every auth handler so
-/// the merged router has a single state type.
-#[cfg(feature = "auth")]
-pub type PasswordState = crate::auth::middleware::AuthState;
+/// (Reserved) — the password handlers now take
+/// `State<Arc<AppState>>` directly (same state type as the
+/// LLM / agents / TTS handlers). This alias is kept for any
+/// downstream caller that still references the type by name.
+pub type PasswordState = std::sync::Arc<crate::AppState>;
 
-#[cfg(feature = "auth")]
 pub async fn login_handler(
-    State(state): State<crate::auth::middleware::AuthState>,
+    State(state): State<std::sync::Arc<crate::AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, AuthError> {
     let ip = addr.ip();
     if let LoginRateLimitDecision::Deny { retry_after_secs } =
-        state.rate_limiter.check(&body.email, ip)
+        state.auth_rate_limiter.check(&body.email, ip)
     {
-        state.store.record_event(crate::auth::store::NewAuthEvent {
+        tracing::warn!(
+            event = "auth.password.login",
+            outcome = "rate_limited",
+            email = %body.email,
+            ip = %ip,
+            retry_after_secs,
+            "password login rate-limited"
+        );
+        require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
             user_id: None,
             kind: "login_rate_limited".into(),
             provider: "local".into(),
@@ -132,7 +122,10 @@ pub async fn login_handler(
         return Err(AuthError::RateLimited { retry_after_secs });
     }
 
-    let user = match state.store.get_user_by_email(&body.email).await? {
+    let user = match require_auth_store(&state)?
+        .get_user_by_email(&body.email)
+        .await?
+    {
         Some(u) if u.password_hash.is_some() => u,
         _ => {
             // Always run argon2 even on a miss, so an attacker
@@ -140,7 +133,15 @@ pub async fn login_handler(
             // password" by timing. Constant-time-ish on the lookup
             // itself (DB lookup dominates either way).
             let _ = verify_password(&body.password, b"$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-            state.store.record_event(crate::auth::store::NewAuthEvent {
+            tracing::warn!(
+                event = "auth.password.login",
+                outcome = "fail",
+                reason = "invalid_credentials",
+                email = %body.email,
+                ip = %ip,
+                "password login failed (unknown email or no password hash)"
+            );
+            require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
                 user_id: None,
                 kind: "login_fail".into(),
                 provider: "local".into(),
@@ -153,7 +154,16 @@ pub async fn login_handler(
 
     let ok = verify_password(&body.password, user.password_hash.as_deref().unwrap_or(b""))?;
     if !ok {
-        state.store.record_event(crate::auth::store::NewAuthEvent {
+        tracing::warn!(
+            event = "auth.password.login",
+            outcome = "fail",
+            reason = "invalid_credentials",
+            email = %user.email,
+            user_id = %user.id,
+            ip = %ip,
+            "password login failed (wrong password)"
+        );
+        require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
             user_id: Some(user.id),
             kind: "login_fail".into(),
             provider: "local".into(),
@@ -164,15 +174,23 @@ pub async fn login_handler(
     }
 
     let ttl =
-        std::time::Duration::from_secs((state.cfg.auth.session_ttl_days as u64) * 24 * 60 * 60);
-    let session = state
-        .store
+        std::time::Duration::from_secs((state.config.auth.session_ttl_days as u64) * 24 * 60 * 60);
+    let session = require_auth_store(&state)?
         .create_session(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
 
-    state.rate_limiter.reset(&body.email, ip);
+    state.auth_rate_limiter.reset(&body.email, ip);
 
-    state.store.record_event(crate::auth::store::NewAuthEvent {
+    tracing::info!(
+        event = "auth.password.login",
+        outcome = "ok",
+        email = %user.email,
+        user_id = %user.id,
+        ip = %ip,
+        session_id = %session.id,
+        "password login ok"
+    );
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
         user_id: Some(user.id),
         kind: "login_ok".into(),
         provider: "local".into(),
@@ -195,9 +213,9 @@ pub async fn login_handler(
         session_id: session.id,
     };
     let cookie = session::build_set_cookie(
-        state.cfg.auth.cookie_name(),
+        state.config.auth.cookie_name(),
         session.id,
-        state.cfg.auth.cookie_secure(),
+        state.config.auth.cookie_secure(),
         ttl.as_secs() as i64,
     );
     let mut response = (StatusCode::OK, Json(resp)).into_response();
@@ -219,7 +237,6 @@ pub async fn login_handler(
 /// `auth.password.allow_registration = true` (PR2 will gate this
 /// further with a role check). The minimum password length comes
 /// from `auth.password.min_password_length`.
-#[cfg(feature = "auth")]
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub email: String,
@@ -227,49 +244,81 @@ pub struct RegisterRequest {
     pub password: String,
 }
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Serialize)]
 pub struct RegisterResponse {
     pub user: AuthUser,
 }
 
-#[cfg(feature = "auth")]
 pub async fn register_handler(
-    State(state): State<crate::auth::middleware::AuthState>,
+    State(state): State<std::sync::Arc<crate::AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Response, AuthError> {
-    let auth_state =
-        crate::auth::middleware::AuthState::new(state.store.clone(), state.cfg.clone());
+    let auth_state = crate::auth::middleware::AuthState::new(
+        require_auth_store(&state)?.clone(),
+        state.config.clone(),
+    );
     let _existing = crate::auth::middleware::extract_auth_user(&headers, &auth_state)
         .await?
         .ok_or(AuthError::Unauthenticated)?;
 
-    if !state.cfg.auth.password.allow_registration {
+    if !state.config.auth.password.allow_registration {
+        tracing::warn!(
+            event = "auth.password.register",
+            outcome = "denied",
+            reason = "registration_disabled",
+            email = %body.email,
+            "password register denied (allow_registration = false)"
+        );
         return Err(AuthError::Forbidden);
     }
-    if body.password.len() < state.cfg.auth.password.min_password_length {
+    if body.password.len() < state.config.auth.password.min_password_length {
+        tracing::warn!(
+            event = "auth.password.register",
+            outcome = "fail",
+            reason = "password_too_short",
+            email = %body.email,
+            "password register failed (password too short)"
+        );
         return Err(AuthError::BadRequest(format!(
             "password must be at least {} characters",
-            state.cfg.auth.password.min_password_length
+            state.config.auth.password.min_password_length
         )));
     }
 
     let hash = hash_password(
         &body.password,
-        state.cfg.auth.password.argon2_memory_kib,
-        state.cfg.auth.password.argon2_iterations,
-        state.cfg.auth.password.argon2_parallelism,
+        state.config.auth.password.argon2_memory_kib,
+        state.config.auth.password.argon2_iterations,
+        state.config.auth.password.argon2_parallelism,
     )?;
 
-    let user_id = state
-        .store
+    let user_id = require_auth_store(&state)?
         .create_user(&body.email, &body.display_name, "local", Some(&hash))
-        .await?;
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                event = "auth.password.register",
+                outcome = "fail",
+                reason = "create_user_failed",
+                email = %body.email,
+                error = %e,
+                "password register failed"
+            );
+            e
+        })?;
 
     let ip = addr.ip();
-    state.store.record_event(crate::auth::store::NewAuthEvent {
+    tracing::info!(
+        event = "auth.password.register",
+        outcome = "ok",
+        email = %body.email,
+        user_id = %user_id,
+        ip = %ip,
+        "password register ok"
+    );
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
         user_id: Some(user_id),
         kind: "register_local".into(),
         provider: "local".into(),
@@ -277,8 +326,7 @@ pub async fn register_handler(
         user_agent: None,
     });
 
-    let user = state
-        .store
+    let user = require_auth_store(&state)?
         .get_user_by_id(user_id)
         .await?
         .ok_or_else(|| AuthError::Internal("just-created user disappeared".into()))?;
@@ -298,7 +346,7 @@ pub async fn register_handler(
     Ok((StatusCode::CREATED, Json(resp)).into_response())
 }
 
-#[cfg(all(test, feature = "auth"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

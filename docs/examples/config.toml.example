@@ -126,14 +126,14 @@
 # ---------------------------------------------------------------------------
 # Authentication & user identity (PR1)
 # ---------------------------------------------------------------------------
-# When `enabled = false` (the default) the server keeps the pre-PR1 single
-# user trust boundary: no login routes, no /api/me, no RequireAuth layer.
-# Turning this on REQUIRES [auth.db] to point at a reachable SQL store
-# (sqlite or postgres); the server refuses to boot otherwise. See README
-# "Authentication" for the bootstrap walkthrough.
-#
-# Note: this section requires the `stt-server/auth` cargo feature —
-# a build without `--features stt-server/auth` ignores it entirely.
+# When `enabled = false` (the default) the server keeps the pre-PR1 single 
+# user trust boundary:
+# no login routes, no /api/me, no RequireAuth layer. Turning this on
+# REQUIRES [auth.db] to point at a reachable SQL store (sqlite or postgres);
+# the server refuses to boot otherwise. See README "Authentication" for
+# the bootstrap walkthrough — on a fresh sqlite install the server
+# auto-creates the first local admin and logs the random password at
+# WARN level.
 #
 # [auth]
 # enabled = false

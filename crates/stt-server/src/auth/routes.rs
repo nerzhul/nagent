@@ -11,35 +11,26 @@
 //! routes live in [`crate::auth::password`], [`crate::auth::oidc`]
 //! and [`crate::auth::passkey`]; the router wires them all up.
 
-#[cfg(feature = "auth")]
 use axum::extract::State;
-#[cfg(feature = "auth")]
 use axum::http::{header, StatusCode};
-#[cfg(feature = "auth")]
 use axum::response::{IntoResponse, Response};
-#[cfg(feature = "auth")]
 use axum::Json;
 
-#[cfg(feature = "auth")]
+use crate::auth::error::require_auth_store;
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
 use crate::auth::middleware::check_csrf;
-#[cfg(feature = "auth")]
 use crate::auth::session;
-#[cfg(feature = "auth")]
 use crate::auth::AuthUser;
 
 /// `GET /api/me` — returns the [`AuthUser`] resolved by the
 /// `RequireAuth` middleware.
-#[cfg(feature = "auth")]
 pub async fn me_handler(axum::Extension(user): axum::Extension<AuthUser>) -> Json<AuthUser> {
     Json(user)
 }
 
 /// `POST /api/auth/logout`
-#[cfg(feature = "auth")]
 pub async fn logout_handler(
-    State(state): State<crate::auth::middleware::AuthState>,
+    State(state): State<std::sync::Arc<crate::AppState>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AuthError> {
     // The middleware would normally have rejected anonymous
@@ -47,15 +38,28 @@ pub async fn logout_handler(
     // from the per-route test helpers — be defensive.
     let user = crate::auth::middleware::extract_auth_user(
         &headers,
-        &crate::auth::middleware::AuthState::new(state.store.clone(), state.cfg.clone()),
+        &crate::auth::middleware::AuthState::new(
+            require_auth_store(&state)?.clone(),
+            state.config.clone(),
+        ),
     )
     .await?
     .ok_or(AuthError::Unauthenticated)?;
     check_csrf(&headers, &user)?;
-    state.store.delete_session(user.id).await?;
-    let cookie =
-        session::build_clear_cookie(state.cfg.auth.cookie_name(), state.cfg.auth.cookie_secure());
-    state.store.record_event(crate::auth::store::NewAuthEvent {
+    require_auth_store(&state)?.delete_session(user.id).await?;
+    let cookie = session::build_clear_cookie(
+        state.config.auth.cookie_name(),
+        state.config.auth.cookie_secure(),
+    );
+    tracing::info!(
+        event = "auth.logout",
+        outcome = "ok",
+        email = %user.email,
+        user_id = %user.id,
+        provider = %user.provider,
+        "auth logout ok"
+    );
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
         user_id: Some(user.id),
         kind: "logout".into(),
         provider: user.provider.clone(),

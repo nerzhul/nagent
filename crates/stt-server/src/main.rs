@@ -3,10 +3,12 @@
 //! Wires together the configuration, the [`WhisperBackend`], the inference
 //! worker, the session map, the WebSocket router, and the watchdog.
 
+use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use stt_server::config::AuthBackendKind;
 use stt_server::{
-    agents, build_rate_limiters, build_router, llm, router, session, tts, watchdog, AppState,
+    agents, auth, build_rate_limiters, build_router, llm, router, session, tts, watchdog, AppState,
     CliArgs, Config,
 };
 
@@ -100,15 +102,78 @@ use tracing_subscriber::EnvFilter;
 use stt_core::{default_worker_count, WhisperBackend, WorkerPool};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
+    // `stt-server auth …` subcommand dispatch happens FIRST so the
+    // CLI subcommand arguments (`create-admin`, `--email`, etc.)
+    // do not get rejected by the strict `CliArgs::parse` loop below.
+    // The dispatch walks the full argv (skipping the binary name)
+    // so `--config FOO auth list-users` routes correctly even when
+    // the operator puts the global flag before the subcommand.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(idx) = argv.iter().position(|a| a == "auth") {
+        // Concatenate leading global flags (`--config FOO`) with
+        // the trailing subcommand args (`list-users`). The auth CLI
+        // re-parses `--config` from the combined vector and routes
+        // the rest to the subcommand parser. This handles both
+        // `stt-server auth …` and `stt-server --config FOO auth …`.
+        let mut argv = argv;
+        let trailing = argv.split_off(idx + 1);
+        let mut combined = argv;
+        combined.extend(trailing);
+        return auth::cli::run_auth_cli(combined).await;
+    }
+
     init_tracing();
 
     // CLI flags must be parsed before tracing emits its first
     // `info!` so a malformed `--config` exits cleanly without
     // producing a half-initialised log line.
     let cli = CliArgs::parse();
+
     let cfg = Config::load(&cli).map_err(|e| anyhow::anyhow!("{e}"))?;
     info!(addr = %cfg.bind_addr, model = ?cfg.whisper_model_path, "starting nagent stt-server");
+
+    // Auth bootstrap (migrations + sqlite first-admin). Runs only
+    // when `auth.enabled = true`; a `None` result here means the
+    // subsystem is disabled. Errors here are fatal — a half-broken
+    // auth DB on a server that expects it is the worst-case state
+    // (silent fallthrough to the pre-PR1 trust boundary would be a
+    // security regression).
+    let auth_store = match auth::boot::auto_bootstrap(&Arc::new(cfg.clone())).await {
+        Ok(store) => store,
+        Err(e) => {
+            return Err(anyhow::anyhow!("{}", auth::boot::format_bootstrap_err(&e)));
+        }
+    };
+
+    // Build the OIDC + passkey sub-states when their respective
+    // backends are enabled (i.e. listed in `cfg.auth.backends`).
+    // Both are best-effort: a missing configuration or a discovery
+    // failure only logs a warning so the server still boots (the
+    // auth routes for that backend simply 501 at request time).
+    let oidc_enabled = cfg.auth.backends.contains(&AuthBackendKind::Oidc);
+    let passkey_enabled = cfg.auth.backends.contains(&AuthBackendKind::Passkey);
+    let auth_oidc = if oidc_enabled {
+        auth::oidc::build_state(
+            auth_store.clone().unwrap_or_else(|| unreachable!()),
+            Arc::new(cfg.clone()),
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
+    let auth_passkey = if passkey_enabled && auth_store.is_some() {
+        auth::passkey::build_state(auth_store.clone().unwrap(), Arc::new(cfg.clone())).ok()
+    } else {
+        None
+    };
+    if let Some(ref s) = auth_oidc {
+        tracing::info!(issuer = %s.cfg.issuer, "OIDC backend ready");
+    }
+    if let Some(ref _p) = auth_passkey {
+        tracing::info!("passkey backend ready");
+    }
 
     // ---- Backend ---------------------------------------------------------
     let backend: Arc<dyn WhisperBackend> = build_backend(&cfg).await?;
@@ -241,14 +306,29 @@ async fn main() -> anyhow::Result<()> {
         tts,
         stt_rate_limiter,
         llm_rate_limiter,
+        // `auto_bootstrap` returns `Some(store)` when `auth.enabled
+        // = true` and the sqlite DB is reachable. We stash it on the
+        // `AppState` so the HTTP handlers can reach it without
+        // opening a second pool.
+        auth_store: auth_store.clone(),
+        auth_oidc: auth_oidc.clone(),
+        auth_passkey: auth_passkey.clone(),
+        auth_rate_limiter: auth::rate_limit::LoginRateLimiter::new(),
     });
 
     let app = build_router(state);
-
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     info!("listening on http://{}", cfg.bind_addr);
-    axum::serve(listener, app).await?;
-    Ok(())
+    // Use the `with_connect_info` variant so the auth login handler
+    // can read the peer IP via `ConnectInfo<SocketAddr>` (used for
+    // the per-(email, ip) login rate-limit + the audit row). The
+    // vanilla `into_make_service` would omit it.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 fn init_tracing() {

@@ -22,11 +22,8 @@
 //! by activity. Sliding / idle timeouts can be layered later if a
 //! threat model requires them.
 
-#[cfg(feature = "auth")]
 use chrono::{DateTime, Utc};
-#[cfg(feature = "auth")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "auth")]
 use uuid::Uuid;
 
 /// Public-facing identity attached to every authenticated request.
@@ -34,7 +31,6 @@ use uuid::Uuid;
 /// Lives in `req.extensions_mut()` after [`middleware::require_auth_middleware`].
 /// Handlers extract it via the [`AuthUser`] axum extractor (see
 /// [`crate::auth::routes::me_handler`]).
-#[cfg(feature = "auth")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
     pub id: Uuid,
@@ -58,7 +54,6 @@ pub struct AuthUser {
 
 /// A row from the `sessions` table. Internal — handlers never see
 /// the raw row, they get an [`AuthUser`].
-#[cfg(feature = "auth")]
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
     pub id: Uuid,
@@ -70,13 +65,11 @@ pub struct SessionRecord {
 }
 
 /// Generate a new opaque session id (UUID v4).
-#[cfg(feature = "auth")]
 pub fn new_session_id() -> Uuid {
     Uuid::new_v4()
 }
 
 /// Generate a CSRF token: 32 bytes of OS RNG, hex-encoded.
-#[cfg(feature = "auth")]
 pub fn new_csrf_token() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
@@ -88,7 +81,6 @@ pub fn new_csrf_token() -> String {
 /// (`Cookie: nagent_session=<id>`), then the `Authorization: Bearer
 /// <id>` header. Returns `None` if neither is present or if both are
 /// malformed.
-#[cfg(feature = "auth")]
 pub fn extract_session_id(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option<Uuid> {
     // 1. Cookie path. We use the `cookie` crate directly rather
     //    than `Cookie::parse` on the raw header because the request
@@ -133,7 +125,6 @@ pub fn extract_session_id(headers: &axum::http::HeaderMap, cookie_name: &str) ->
 /// browser drops `Secure` cookies set over plain HTTP and dev
 /// would silently break. `HttpOnly` is unconditional — the cookie
 /// is opaque to JS.
-#[cfg(feature = "auth")]
 pub fn build_set_cookie(
     cookie_name: &str,
     session_id: Uuid,
@@ -160,7 +151,6 @@ pub fn build_set_cookie(
 }
 
 /// Build the `Set-Cookie` value that clears the session cookie.
-#[cfg(feature = "auth")]
 pub fn build_clear_cookie(cookie_name: &str, secure: bool) -> String {
     let mut out = String::with_capacity(64);
     out.push_str(cookie_name);
@@ -174,7 +164,6 @@ pub fn build_clear_cookie(cookie_name: &str, secure: bool) -> String {
 /// HTTP methods that require a CSRF token when the request carries
 /// a session cookie (bearer requests skip CSRF because they cannot
 /// be tricked into cross-site submissions).
-#[cfg(feature = "auth")]
 pub fn requires_csrf_check(method: &axum::http::Method) -> bool {
     matches!(
         *method,
@@ -187,7 +176,6 @@ pub fn requires_csrf_check(method: &axum::http::Method) -> bool {
 
 /// Constant-time string comparison for CSRF tokens. Avoids leaking
 /// the token length / prefix via the early-exit path of `==`.
-#[cfg(feature = "auth")]
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -199,7 +187,7 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     acc == 0
 }
 
-#[cfg(all(test, feature = "auth"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::HeaderMap;

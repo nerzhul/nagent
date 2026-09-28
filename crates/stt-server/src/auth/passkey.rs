@@ -23,43 +23,27 @@
 //! logged-in user by default; the operator can disable it with
 //! `auth.passkey.self_registration = false`.
 
-#[cfg(feature = "auth")]
 use axum::extract::{ConnectInfo, State};
-#[cfg(feature = "auth")]
 use axum::http::{header, HeaderMap, StatusCode};
-#[cfg(feature = "auth")]
 use axum::response::{IntoResponse, Response};
-#[cfg(feature = "auth")]
 use axum::Json;
-#[cfg(feature = "auth")]
 use base64::Engine;
-#[cfg(feature = "auth")]
 use dashmap::DashMap;
-#[cfg(feature = "auth")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "auth")]
 use std::net::SocketAddr;
-#[cfg(feature = "auth")]
 use std::sync::Arc;
-#[cfg(feature = "auth")]
 use uuid::Uuid;
-#[cfg(feature = "auth")]
 use webauthn_rs::prelude::*;
 
-#[cfg(feature = "auth")]
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
+use crate::auth::error::{require_auth_store, require_passkey_state};
 use crate::auth::middleware::{check_csrf, extract_auth_user, AuthState};
-#[cfg(feature = "auth")]
 use crate::auth::session::{self, AuthUser};
-#[cfg(feature = "auth")]
 use crate::auth::store::{AuthStore, NewAuthEvent, NewPasskeyRecord};
 
-#[cfg(feature = "auth")]
 const CEREMONY_TTL_SECS: i64 = 5 * 60;
 
 /// Shared state for the passkey handlers.
-#[cfg(feature = "auth")]
 #[derive(Clone)]
 pub struct PasskeyState {
     pub store: AuthStore,
@@ -71,7 +55,6 @@ pub struct PasskeyState {
     pub ceremonies: Arc<DashMap<String, CeremonyEntry>>,
 }
 
-#[cfg(feature = "auth")]
 impl std::fmt::Debug for PasskeyState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PasskeyState")
@@ -83,7 +66,6 @@ impl std::fmt::Debug for PasskeyState {
     }
 }
 
-#[cfg(feature = "auth")]
 #[derive(Debug)]
 pub struct CeremonyEntry {
     pub kind: CeremonyKind,
@@ -100,7 +82,6 @@ pub struct CeremonyEntry {
     pub state_json: String,
 }
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Clone, Copy)]
 pub enum CeremonyKind {
     Register,
@@ -111,7 +92,6 @@ pub enum CeremonyKind {
 /// `AuthError::Internal` when the operator's `rp_id` / `origins`
 /// configuration is invalid (see plan §"WebAuthn `rp_id` must
 /// match the browser's effective domain").
-#[cfg(feature = "auth")]
 pub fn build_state(
     store: AuthStore,
     cfg: std::sync::Arc<crate::config::Config>,
@@ -156,7 +136,6 @@ pub fn build_state(
     })
 }
 
-#[cfg(feature = "auth")]
 #[allow(dead_code)]
 fn encode_base64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -164,26 +143,21 @@ fn encode_base64url(bytes: &[u8]) -> String {
 
 // ---- Registration ceremony -------------------------------------------------
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Serialize)]
 pub struct StartRegisterResponse {
     pub state_token: String,
     pub challenge_json: serde_json::Value,
 }
 
-#[cfg(feature = "auth")]
 pub async fn register_start_handler(
-    State(state): State<crate::auth::middleware::AuthState>,
+    State(state): State<std::sync::Arc<crate::AppState>>,
     headers: HeaderMap,
 ) -> Result<Response, AuthError> {
-    let inner = state
-        .passkey
-        .as_ref()
-        .ok_or_else(|| AuthError::Internal("passkey backend not initialised".into()))?;
-    if !state.cfg.auth.passkey.self_registration {
+    let inner = require_passkey_state(&state)?;
+    if !state.config.auth.passkey.self_registration {
         return Err(AuthError::Forbidden);
     }
-    let auth_state = AuthState::new(state.store.clone(), state.cfg.clone());
+    let auth_state = AuthState::new(require_auth_store(&state)?.clone(), state.config.clone());
     let user = extract_auth_user(&headers, &auth_state)
         .await?
         .ok_or(AuthError::Unauthenticated)?;
@@ -220,7 +194,6 @@ pub async fn register_start_handler(
         .into_response())
 }
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Deserialize)]
 pub struct FinishRegisterRequest {
     pub state_token: String,
@@ -230,15 +203,11 @@ pub struct FinishRegisterRequest {
     pub response: serde_json::Value,
 }
 
-#[cfg(feature = "auth")]
 pub async fn register_finish_handler(
-    State(state): State<crate::auth::middleware::AuthState>,
+    State(state): State<std::sync::Arc<crate::AppState>>,
     Json(req): Json<FinishRegisterRequest>,
 ) -> Result<Response, AuthError> {
-    let inner = state
-        .passkey
-        .as_ref()
-        .ok_or_else(|| AuthError::Internal("passkey backend not initialised".into()))?;
+    let inner = require_passkey_state(&state)?;
     let (_token, entry) = inner
         .ceremonies
         .remove(&req.state_token)
@@ -278,8 +247,7 @@ pub async fn register_finish_handler(
     let passkey_json = serde_json::to_vec(&passkey)
         .map_err(|e| AuthError::Internal(format!("serialise passkey: {e}")))?;
     let _ = passkey_json; // stored as separate column in a future PR
-    state
-        .store
+    require_auth_store(&state)?
         .insert_passkey(NewPasskeyRecord {
             id: pk_id,
             user_id,
@@ -291,7 +259,14 @@ pub async fn register_finish_handler(
             aaguid: None,
         })
         .await?;
-    state.store.record_event(crate::auth::store::NewAuthEvent {
+    tracing::info!(
+        event = "auth.passkey.register",
+        outcome = "ok",
+        user_id = %user_id,
+        passkey_id = %pk_id,
+        "passkey register ok"
+    );
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
         user_id: Some(user_id),
         kind: "passkey_register".into(),
         provider: "passkey".into(),
@@ -307,22 +282,17 @@ pub async fn register_finish_handler(
 
 // ---- Login ceremony --------------------------------------------------------
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Serialize)]
 pub struct StartAuthResponse {
     pub state_token: String,
     pub challenge_json: serde_json::Value,
 }
 
-#[cfg(feature = "auth")]
 pub async fn login_start_handler(
-    State(state): State<crate::auth::middleware::AuthState>,
+    State(state): State<std::sync::Arc<crate::AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Response, AuthError> {
-    let inner = state
-        .passkey
-        .as_ref()
-        .ok_or_else(|| AuthError::Internal("passkey backend not initialised".into()))?;
+    let inner = require_passkey_state(&state)?;
     let _ = addr; // available for the audit row + rate-limit hook
     let (car, skr) = inner
         .webauthn
@@ -354,33 +324,54 @@ pub async fn login_start_handler(
         .into_response())
 }
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Deserialize)]
 pub struct FinishAuthRequest {
     pub state_token: String,
     pub response: serde_json::Value,
 }
 
-#[cfg(feature = "auth")]
 pub async fn login_finish_handler(
-    State(state): State<crate::auth::middleware::AuthState>,
+    State(state): State<std::sync::Arc<crate::AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<FinishAuthRequest>,
 ) -> Result<Response, AuthError> {
-    let inner = state
-        .passkey
-        .as_ref()
-        .ok_or_else(|| AuthError::Internal("passkey backend not initialised".into()))?;
-    let (_token, entry) = inner
-        .ceremonies
-        .remove(&req.state_token)
-        .ok_or_else(|| AuthError::BadRequest("unknown or expired state_token".into()))?;
+    let ip = addr.ip();
+    let inner = require_passkey_state(&state)?;
+    let (_token, entry) = match inner.ceremonies.remove(&req.state_token) {
+        Some(e) => e,
+        None => {
+            tracing::warn!(
+                event = "auth.passkey.login",
+                outcome = "fail",
+                reason = "unknown_state_token",
+                ip = %ip,
+                "passkey login failed (unknown or expired state_token)"
+            );
+            return Err(AuthError::BadRequest(
+                "unknown or expired state_token".into(),
+            ));
+        }
+    };
     if !matches!(entry.kind, CeremonyKind::Authenticate) {
+        tracing::warn!(
+            event = "auth.passkey.login",
+            outcome = "fail",
+            reason = "wrong_ceremony_kind",
+            ip = %ip,
+            "passkey login failed (state_token belongs to a different ceremony)"
+        );
         return Err(AuthError::BadRequest(
             "state_token belongs to a different ceremony".into(),
         ));
     }
     if entry.created_at + chrono::Duration::seconds(CEREMONY_TTL_SECS) < chrono::Utc::now() {
+        tracing::warn!(
+            event = "auth.passkey.login",
+            outcome = "fail",
+            reason = "ceremony_expired",
+            ip = %ip,
+            "passkey login failed (ceremony state expired)"
+        );
         return Err(AuthError::BadRequest(
             "passkey ceremony state expired".into(),
         ));
@@ -389,11 +380,22 @@ pub async fn login_finish_handler(
     let assertion: PublicKeyCredential = serde_json::from_value(req.response)
         .map_err(|e| AuthError::BadRequest(format!("invalid assertion: {e}")))?;
     let cred_id_bytes = assertion.raw_id.clone();
-    let stored = state
-        .store
+    let stored = match require_auth_store(&state)?
         .get_passkey_by_credential_id(&cred_id_bytes)
         .await?
-        .ok_or(AuthError::InvalidCredentials)?;
+    {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                event = "auth.passkey.login",
+                outcome = "fail",
+                reason = "unknown_credential_id",
+                ip = %ip,
+                "passkey login failed (no passkey matches the credential_id)"
+            );
+            return Err(AuthError::InvalidCredentials);
+        }
+    };
     // `Passkey` and `DiscoverableKey` are both single-field
     // wrappers around the same private `Credential` struct. Both
     // derive `Serialize + Deserialize` so the JSON we stored at
@@ -410,29 +412,46 @@ pub async fn login_finish_handler(
     let auth_result = inner
         .webauthn
         .finish_discoverable_authentication(&assertion, sk_auth, &[dk])
-        .map_err(|e| AuthError::BadRequest(format!("finish_discoverable_authentication: {e}")))?;
-    state
-        .store
+        .map_err(|e| {
+            tracing::warn!(
+                event = "auth.passkey.login",
+                outcome = "fail",
+                reason = "webauthn_finish_failed",
+                user_id = %stored.user_id,
+                ip = %ip,
+                error = %e,
+                "passkey login failed (webauthn finish_discoverable_authentication)"
+            );
+            AuthError::BadRequest(format!("finish_discoverable_authentication: {e}"))
+        })?;
+    require_auth_store(&state)?
         .bump_passkey_counter(stored.id, passkey_counter_u32(&auth_result))
         .await?;
 
-    let user = state
-        .store
+    let user = require_auth_store(&state)?
         .get_user_by_id(stored.user_id)
         .await?
         .ok_or_else(|| AuthError::Internal("passkey user disappeared".into()))?;
 
     let ttl =
-        std::time::Duration::from_secs((state.cfg.auth.session_ttl_days as u64) * 24 * 60 * 60);
-    let session = state
-        .store
-        .create_session(user.id, ttl, Some(&addr.ip().to_string()), None)
+        std::time::Duration::from_secs((state.config.auth.session_ttl_days as u64) * 24 * 60 * 60);
+    let session = require_auth_store(&state)?
+        .create_session(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
-    state.store.record_event(NewAuthEvent {
+    tracing::info!(
+        event = "auth.passkey.login",
+        outcome = "ok",
+        email = %user.email,
+        user_id = %user.id,
+        ip = %ip,
+        session_id = %session.id,
+        "passkey login ok"
+    );
+    require_auth_store(&state)?.record_event(NewAuthEvent {
         user_id: Some(user.id),
         kind: "login_ok".into(),
         provider: "passkey".into(),
-        ip: Some(addr.ip().to_string()),
+        ip: Some(ip.to_string()),
         user_agent: None,
     });
 
@@ -447,9 +466,9 @@ pub async fn login_finish_handler(
         session_expires_at: session.expires_at,
     };
     let cookie = session::build_set_cookie(
-        state.cfg.auth.cookie_name(),
+        state.config.auth.cookie_name(),
         session.id,
-        state.cfg.auth.cookie_secure(),
+        state.config.auth.cookie_secure(),
         ttl.as_secs() as i64,
     );
     let mut response = (
@@ -475,7 +494,6 @@ pub async fn login_finish_handler(
 /// `AuthenticatorData` carries a 32-bit counter; webauthn-rs
 /// exposes it through `AuthenticationResult::counter()` which
 /// returns a plain `u32` (alias for `Counter`).
-#[cfg(feature = "auth")]
 fn passkey_counter_u32(r: &AuthenticationResult) -> u32 {
     r.counter()
 }

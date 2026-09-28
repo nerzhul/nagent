@@ -80,7 +80,6 @@ through the `make` targets and the Dockerfile `BACKEND` arg.
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
 | `stt-core/whisper-rs-hipblas`   | Enable the ROCm/HIP GPU backend (needs ROCm toolchain at build time).                   |
-| `stt-server/auth`                | Multi-user authentication (PR1). Pulls `sqlx` (sqlite + postgres), `argon2`, `openidconnect`, `webauthn-rs`. When off, the server keeps the pre-PR1 single-user trust boundary: no login routes, no `/api/me`, no `RequireAuth` layer. |
 
 The three GPU features are mutually exclusive — enabling more than one
 wastes build time and can fight over system libraries. The seven
@@ -143,7 +142,7 @@ without a default and is required.
 | `WIKIPEDIA_USER_AGENT`       | `nagent-wikipedia-agent/<version>`            | `wikipedia`    | Override the `User-Agent` header. Wikimedia rejects unidentified clients — keep this descriptive and add a contact URL. |
 | `DICTIONARY_TIMEOUT_MS`      | `5000`                                        | `dictionary`   | Per-request timeout in milliseconds.                                                                          |
 | `DICTIONARY_BASE_URL`        | `https://api.dictionaryapi.dev/api/v2`        | `dictionary`   | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
-| `NAGENT_AUTH_ENABLED`        | `false`                                       | Auth           | Master switch. When `false`, the server keeps the pre-PR1 single-user trust boundary (no `/api/me`, no `RequireAuth`, no login routes). |
+| `NAGENT_AUTH_ENABLED`        | `false`                                       | Auth           | Master switch. When `false`, the server keeps the single-user trust boundary (no `/api/me`, no `RequireAuth`, no login routes). |
 | `NAGENT_AUTH_BACKENDS`       | _(empty)_                                     | Auth           | Comma-separated subset of `local`, `oidc`, `passkey`. Each enabled backend exposes its own login route.       |
 | `NAGENT_AUTH_DB_BACKEND`     | _(empty)_                                     | Auth           | `"sqlite"` or `"postgres"`. Required when `auth.enabled = true`. The choice is runtime — both engines compile into the same binary. |
 | `NAGENT_AUTH_DB_URL`         | _(empty)_                                     | Auth           | Connection URL — e.g. `sqlite://./data/auth.db?mode=rwc` or `postgres://user:pwd@host/nagent`. Required when `auth.enabled = true`. |
@@ -162,7 +161,7 @@ without a default and is required.
 | `NAGENT_AUTH_OIDC_CLIENT_SECRET` | _(empty)_                                 | Auth / OIDC    | OIDC client secret. Prefer env-var injection over TOML to avoid leaking the secret in version control.       |
 | `NAGENT_AUTH_OIDC_SCOPES`    | `openid,email,profile`                       | Auth / OIDC    | Comma-separated OIDC scopes.                                                                                 |
 | `NAGENT_AUTH_OIDC_REQUIRED_GROUPS` | _(empty)_                              | Auth / OIDC    | Comma-separated IdP group allow-list; empty = no restriction.                                                 |
-| `NAGENT_AUTH_OIDC_ROLE_CLAIM` | `groups`                                    | Auth / OIDC    | IdP claim name to map onto the local `roles` list (forward-compat with PR2 RBAC).                            |
+| `NAGENT_AUTH_OIDC_ROLE_CLAIM` | `groups`                                    | Auth / OIDC    | IdP claim name to map onto the local `roles` list. Reserved for a future RBAC layer; ignored at the HTTP layer today. |
 | `NAGENT_AUTH_PASSKEY_SELF_REGISTRATION` | `true`                             | Auth / passkey | When `true`, any logged-in user can enrol a new passkey without an admin.                                      |
 | `NAGENT_AUTH_PASSKEY_RP_ID`  | _(empty)_                                     | Auth / passkey | WebAuthn relying party id (no scheme, no port — e.g. `nagent.example.com`). MUST match the browser's effective domain. |
 | `NAGENT_AUTH_PASSKEY_RP_NAME` | `nagent`                                    | Auth / passkey | Human-readable RP name shown by the authenticator.                                                            |
@@ -191,7 +190,7 @@ silently skipped, and env vars still trump both:
    per the XDG Base Directory spec). This is the per-user override.
 
 A commented-out starter file lives at
-[`examples/config.toml.example`](examples/config.toml.example). Copy it,
+[`docs/examples/config.toml.example`](docs/examples/config.toml.example). Copy it,
 edit the values you want, and point the binary at it:
 
 ```
@@ -256,13 +255,39 @@ rejected at load time. The five daily tools take small overrides
 
 ## Authentication
 
-PR1 introduces multi-user identity. The auth subsystem is gated
-behind the `stt-server/auth` cargo feature — when the feature is off
-the server keeps the pre-PR1 single-user trust boundary (no login
-routes, no `/api/me`, no `RequireAuth` layer). The build targets
-in `Makefile` do not enable it by default; opt in by passing
-`--features stt-server/auth` to `cargo build` or by adding
-`stt-server/auth` to the feature list of your custom build.
+The server ships a multi-user identity subsystem. When the runtime
+config sets `auth.enabled = false` (the default), the server
+keeps the single-user trust boundary: no login routes, no
+`/api/me`, no `RequireAuth` layer. Operators opt in by setting
+`[auth].enabled = true` (or `NAGENT_AUTH_ENABLED=true`) and
+configuring at least one backend in `[auth].backends`.
+
+### Routing contract
+
+When `auth.enabled = true`, the `RequireAuth` middleware is
+installed on every functional endpoint. The set of routes that
+stay reachable without a session cookie is intentionally small,
+so the browser can fetch the login page and submit credentials,
+and ops tooling keeps working:
+
+| Route                                                | Why it is public                                  |
+| ---------------------------------------------------- | ------------------------------------------------- |
+| `GET /`                                              | Serves the login page (index.html).               |
+| `GET /static/*`                                      | Frontend assets bundled into the binary.          |
+| `GET /healthz`                                       | Health probe for orchestrators / load balancers.  |
+| `GET /api/version`                                   | Version probe used by the frontend update banner. |
+| `POST /api/auth/login/password`                      | Password login.                                   |
+| `POST /api/auth/login/passkey/start` / `/finish`     | Passkey login ceremony.                           |
+| `GET /api/auth/login/oidc/start` / `/callback`       | OIDC redirect + callback.                         |
+| `POST /api/auth/password/register`                   | First-time account creation.                      |
+
+Everything else — the STT WebSocket upgrade (`/ws`),
+`/v1/chat/completions`, `/v1/models`, `/v1/agents*`,
+`/v1/audio/*`, `/api/me`, `POST /api/auth/logout`, the
+passkey register start/finish routes — requires a valid session
+cookie (or `Authorization: Bearer <session-id>`). Anonymous
+requests get `401 authentication required` with a
+`WWW-Authenticate: Cookie realm="nagent"` header.
 
 ### Backends
 
@@ -273,8 +298,16 @@ exposes its own login route; the operator enables a subset via
 | Backend   | Login route(s)                                      | Storage                  | Notes |
 | --------- | --------------------------------------------------- | ------------------------ | ----- |
 | `local`   | `POST /api/auth/login/password`                     | argon2id in `users.password_hash` | Argon2id with OWASP 2025 default parameters (m = 19 MiB, t = 2, p = 1). Passwords are never logged, never echoed back to the client. |
-| `oidc`    | `GET /api/auth/login/oidc/start` + `/callback`       | none (IdP is the source of truth) | PKCE + state persisted in the `pending_oidc_states` table (PR1 ref [ARB-A] decision: DB row, not signed cookie). Auto-provisioning is on by default — first login creates a `users` row keyed on the IdP's email claim. Set `auth.oidc.auto_provision = false` to reject unknown emails with `403`. |
+| `oidc`    | `GET /api/auth/login/oidc/start` + `/callback`       | none (IdP is the source of truth) | PKCE + state persisted in the `pending_oidc_states` table. Auto-provisioning is on by default — first login creates a `users` row keyed on the IdP's email claim. Set `auth.oidc.auto_provision = false` to reject unknown emails with `403`. |
 | `passkey` | `POST /api/auth/login/passkey/{start,finish}`       | WebAuthn credentials in `passkeys` | Discoverable credentials (no `userHandle` round-trip). `webauthn-rs` 0.6 pre-release with `conditional-ui` + `resident-key-support` features. The registration ceremony is gated by `RequireAuth` and `auth.passkey.self_registration` (default `true`). |
+
+The OIDC handlers accept the `state` and `nonce` standard claims and
+verify them, but the JWT signature is not checked against the IdP's
+JWKS yet — the verification path is logged as a TODO in
+`crates/stt-server/src/auth/oidc.rs`. HTTPS deployments where the
+transport already authenticates the IdP are unaffected; operators
+sensitive to network-level attacks should keep OIDC disabled until
+the JWKS check lands.
 
 The backends share one DB-backed session table (`sessions`) and one
 user table (`users`). A user created via the local backend can log
@@ -291,7 +324,7 @@ own `_sqlx_migrations` table).
 
 | Backend    | Connection URL example                                            | Notes |
 | ---------- | ----------------------------------------------------------------- | ----- |
-| `sqlite`   | `sqlite://./data/auth.db?mode=rwc`                                | Single binary, no external service. PR1 enables `WAL` journal mode + `foreign_keys = ON` + a 5 s busy timeout. The data directory (`./data/`) must exist and be writable by the server process. |
+| `sqlite`   | `sqlite://./data/auth.db?mode=rwc`                                | Single binary, no external service. The connection enables `WAL` journal mode + `foreign_keys = ON` + a 5 s busy timeout. The data directory (`./data/`) is auto-created on boot. |
 | `postgres` | `postgres://nagent:pwd@db.internal/nagent`                        | Standard Postgres 14+. The schema uses `TEXT PRIMARY KEY` for UUIDs (not the native `uuid` type) so the migrations stay portable across engines. |
 
 `PRAGMA foreign_keys = ON` is set on every sqlite connection so the
@@ -329,28 +362,34 @@ a 5-attempts / 15-min budget (progressive, in-process via `DashMap`).
 Loopback IPs bypass. On exhaustion the server returns `429 Too Many
 Requests` with a `Retry-After` header.
 
-### Bootstrap walkthrough
+### Bootstrap
 
-A fresh install starts, finds an empty `users` table, and serves
-the login panel — but every login attempt fails because no user
-exists yet. The first user must be created **out-of-band** via the
-`stt-server auth create-admin` CLI subcommand:
+On server boot, when `auth.enabled = true`:
+
+1. The server connects to the auth DB and runs the migrations
+   (idempotent — sqlx tracks applied versions in its
+   `_sqlx_migrations` table).
+2. **SQLite only**: if the `users` table has zero rows, the server
+   auto-bootstraps the first local admin with a random 24-char
+   password, hashes it with argon2id, and logs the credentials to
+   stderr at `WARN` level (along with a one-time "save this now"
+   reminder). Postgres deployments never auto-create — admins
+   must be created via the CLI to avoid silent privilege grants on
+   a shared cluster.
+
+To create additional admins after the bootstrap, run the CLI:
 
 ```bash
-# SQLite, default location. The CLI opens the pool, runs the
-# migration, and inserts the row — the server does NOT need to be
-# running. It refuses (without --force) when data/server.pid
-# points at a live process.
+# The CLI opens the pool, runs the migration, and inserts the row
+# — the server does NOT need to be running. It refuses (without
+# --force) when data/server.pid points at a live process.
 stt-server auth create-admin \
   --email admin@example.com \
   --from-stdin           # password read from stdin to avoid argv / shell history
 ```
 
-The CLI returns the new `user_id` on stdout and exits 0. The
-operator then logs in via the browser, registers a passkey, and
-(optionally) wires up OIDC so the rest of the team can log in via
-their IdP. Three additional CLI subcommands round out the operator
-surface:
+The CLI returns the new `user_id` on stdout and exits 0. Two
+additional CLI subcommands round out the operator surface:
 
 ```bash
 stt-server auth list-users [--provider local|oidc|passkey]   # tab-separated
@@ -360,16 +399,6 @@ stt-server auth delete-user --email <email> [--yes]          # refuses to remove
 The CLI reads the same `[auth.db]` configuration + env vars the
 server uses, so there is no second source of truth. Boot the server
 once to apply the schema; the CLI can run before or after.
-
-### Migration status
-
-PR1 keeps cryptographic signature verification of the OIDC
-`id_token` out of scope (the JWT is parsed and the standard claims
-`iss` / `aud` / `exp` / `nonce` are checked, but the `RS256` /
-`PS256` signature is not yet verified against the IdP's JWKS). This
-is acceptable for HTTPS deployments where the transport handles
-peer authentication; deployments behind a hostile network should
-hold off on OIDC until PR2 adds the JWKS fetch. The implementation
 note lives in `crates/stt-server/src/auth/oidc.rs`.
 
 ### Kubernetes overlays
@@ -789,7 +818,7 @@ and drop the matching files into `TTS_MODEL_DIR` directly.
 | `noise_w` | `TTS_NOISE_W` | `0.8` | Piper upstream default; controls phoneme variability. |
 | `max_input_chars` | `TTS_MAX_INPUT_CHARS` | `2000` | Hard cap on a single `/v1/audio/speech` request body. |
 
-Example TOML block (mirrors `examples/config.toml.example`):
+Example TOML block (mirrors `docs/examples/config.toml.example`):
 
 ```toml
 [tts]

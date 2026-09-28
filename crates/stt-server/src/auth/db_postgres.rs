@@ -5,36 +5,24 @@
 //! mapping for `BLOB` ↔ `BYTEA` (sqlx handles this transparently
 //! when the `uuid` feature is on, which it is).
 
-#[cfg(feature = "auth")]
 use chrono::{DateTime, Utc};
-#[cfg(feature = "auth")]
 use sqlx::postgres::PgPoolOptions;
-#[cfg(feature = "auth")]
 use sqlx::{PgPool, Row};
-#[cfg(feature = "auth")]
 use std::time::Duration;
-#[cfg(feature = "auth")]
 use uuid::Uuid;
 
-#[cfg(feature = "auth")]
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
 use crate::auth::session::SessionRecord;
-#[cfg(feature = "auth")]
 use crate::auth::store::{AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord};
-#[cfg(feature = "auth")]
 use crate::config::AuthConfig;
 
-#[cfg(feature = "auth")]
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-#[cfg(feature = "auth")]
 #[derive(Clone, Debug)]
 pub struct PgStore {
     pool: PgPool,
 }
 
-#[cfg(feature = "auth")]
 impl PgStore {
     pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
         let pool = PgPoolOptions::new()
@@ -354,11 +342,20 @@ impl PgStore {
     }
 
     pub(crate) async fn record_event(&self, event: NewAuthEvent) {
+        // UUIDv4 — matches the `id TEXT PRIMARY KEY` pattern every
+        // other table in the schema uses. The DB enforces uniqueness
+        // via the PRIMARY KEY constraint; the value is generated in
+        // Rust so it is portable across sqlite (no built-in UUID
+        // function) and postgres. Pre-`0002_auth_events_uuid.sql`
+        // this column was a BIGINT fed by a process-local counter
+        // that reset to 1 on every server restart and collided with
+        // rows from the previous run.
+        let id = Uuid::new_v4();
         let res = sqlx::query(
             "INSERT INTO auth_events (id, user_id, kind, provider, ip, user_agent, occurred_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
-        .bind(next_event_id() as i64)
+        .bind(id.to_string())
         .bind(event.user_id)
         .bind(&event.kind)
         .bind(&event.provider)
@@ -373,7 +370,6 @@ impl PgStore {
     }
 }
 
-#[cfg(feature = "auth")]
 fn row_to_user(row: sqlx::postgres::PgRow) -> AuthUserRecord {
     AuthUserRecord {
         id: Uuid::parse_str(&row.get::<String, _>("id")).expect("DB UUID must parse"),
@@ -385,16 +381,8 @@ fn row_to_user(row: sqlx::postgres::PgRow) -> AuthUserRecord {
     }
 }
 
-#[cfg(feature = "auth")]
 fn parse_rfc3339(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
-}
-
-#[cfg(feature = "auth")]
-fn next_event_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }

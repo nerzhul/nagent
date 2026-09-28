@@ -12,20 +12,13 @@
 //! layer at all, so a server that has not opted in keeps the
 //! pre-PR1 single-user trust boundary.
 
-#[cfg(feature = "auth")]
 use axum::extract::Request;
-#[cfg(feature = "auth")]
 use axum::http::{header, HeaderValue, StatusCode};
-#[cfg(feature = "auth")]
 use axum::middleware::Next;
-#[cfg(feature = "auth")]
 use axum::response::{IntoResponse, Response};
 
-#[cfg(feature = "auth")]
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
 use crate::auth::session::{self, AuthUser};
-#[cfg(feature = "auth")]
 use crate::auth::store::AuthStore;
 
 /// Shared state passed into the middleware closure. Cheap to
@@ -33,7 +26,6 @@ use crate::auth::store::AuthStore;
 /// handlers as their `State<S>` so the auth subtree can be merged
 /// into the application router without a state-type mismatch
 /// (axum 0.7 requires the merged routers to share one `S`).
-#[cfg(feature = "auth")]
 #[derive(Clone, Debug)]
 pub struct AuthState {
     pub store: AuthStore,
@@ -48,7 +40,6 @@ pub struct AuthState {
     pub rate_limiter: crate::auth::rate_limit::LoginRateLimiter,
 }
 
-#[cfg(feature = "auth")]
 impl AuthState {
     pub fn new(store: AuthStore, cfg: std::sync::Arc<crate::config::Config>) -> Self {
         Self {
@@ -70,7 +61,6 @@ impl AuthState {
 /// handlers can also call it (e.g. the `register` handler needs to
 /// check the caller's identity without going through the
 /// middleware).
-#[cfg(feature = "auth")]
 pub async fn extract_auth_user(
     headers: &axum::http::HeaderMap,
     state: &AuthState,
@@ -111,7 +101,6 @@ pub async fn extract_auth_user(
 /// cannot be tricked into cross-site submissions, so the check is
 /// skipped for them). Returns `Err(AuthError::Forbidden)` on a
 /// mismatch.
-#[cfg(feature = "auth")]
 pub fn check_csrf(headers: &axum::http::HeaderMap, user: &AuthUser) -> Result<(), AuthError> {
     // Skip for bearer requests — the Authorization header proves
     // the caller is the API client itself, not a victim of a CSRF
@@ -136,7 +125,6 @@ pub fn check_csrf(headers: &axum::http::HeaderMap, user: &AuthUser) -> Result<()
 
 /// The actual axum middleware. Wired via
 /// `axum::middleware::from_fn_with_state(state.clone(), require_auth_middleware)`.
-#[cfg(feature = "auth")]
 pub async fn require_auth_middleware(
     axum::extract::State(state): axum::extract::State<AuthState>,
     mut req: Request,
@@ -153,15 +141,24 @@ pub async fn require_auth_middleware(
                     return e.into_response();
                 }
             }
+            // Inject the resolved `AuthUser` on BOTH the request
+            // (so the route handler can pick it up via
+            // `axum::Extension<AuthUser>`) and the response (so the
+            // outer `access_log` middleware can attribute the
+            // request to a user without doing its own DB lookup).
+            // The clone is cheap — `AuthUser` is a small
+            // `String`-heavy struct.
+            let user_for_log = user.clone();
             req.extensions_mut().insert(user);
-            next.run(req).await
+            let mut response = next.run(req).await;
+            response.extensions_mut().insert(user_for_log);
+            response
         }
         Ok(None) => unauthorized_response(),
         Err(e) => e.into_response(),
     }
 }
 
-#[cfg(feature = "auth")]
 fn unauthorized_response() -> Response {
     let mut resp = (StatusCode::UNAUTHORIZED, "authentication required").into_response();
     resp.headers_mut().insert(
@@ -171,7 +168,7 @@ fn unauthorized_response() -> Response {
     resp
 }
 
-#[cfg(all(test, feature = "auth"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::store::AuthStore;

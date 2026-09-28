@@ -19,39 +19,125 @@
 //! stt-server auth delete-user --email <email> [--yes] [--force]
 //! ```
 
-#[cfg(feature = "auth")]
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
 use crate::config::{CliArgs, Config};
-#[cfg(feature = "auth")]
 use std::path::PathBuf;
-#[cfg(feature = "auth")]
 use std::process::ExitCode;
 
 /// Top-level dispatch: called from `main` when `argv[1] == "auth"`.
 /// Returns `Ok(exit_code)` so the binary returns the right status
 /// to the shell on each subcommand.
-#[cfg(feature = "auth")]
+///
+/// `args` is the full argv after the binary name. It MAY include
+/// global flags (`--config FOO`) before the literal `auth` token
+/// when the operator used `stt-server --config FOO auth …`, so
+/// we split out the global flags first then strip the `auth`
+/// literal before looking at the subcommand name.
 pub async fn run_auth_cli(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
-    let mut iter = args.into_iter();
+    let (cli_args, rest) = split_global_flags(args);
+    // Strip the `auth` literal if present.
+    let mut rest = rest;
+    if rest.first().map(|s| s.as_str()) == Some("auth") {
+        rest.remove(0);
+    }
+    let mut iter = rest.into_iter();
     let sub = iter.next().unwrap_or_default();
-    match sub.as_str() {
-        "create-admin" => Ok(create_admin(iter.collect()).await?),
-        "list-users" => Ok(list_users(iter.collect()).await?),
-        "delete-user" => Ok(delete_user(iter.collect()).await?),
+    let result = match sub.as_str() {
+        "create-admin" => create_admin(iter.collect(), &cli_args).await,
+        "list-users" => list_users(iter.collect(), &cli_args).await,
+        "delete-user" => delete_user(iter.collect(), &cli_args).await,
         "help" | "--help" | "-h" | "" => {
             print_help();
-            Ok(ExitCode::from(0))
+            return Ok(ExitCode::from(0));
         }
         other => {
             eprintln!("error: unknown auth subcommand: {other:?}");
             eprintln!("(run `stt-server auth help` for usage)");
-            Ok(ExitCode::from(2))
+            return Ok(ExitCode::from(2));
         }
-    }
+    };
+    result
 }
 
-#[cfg(feature = "auth")]
+/// Extract the `--config <path>` flag pair (if any) from the auth
+/// CLI argv. Returns the parsed [`CliArgs`] plus the remainder
+/// without the global flags — the subcommand-specific parsers
+/// then operate on a clean slice.
+fn split_global_flags(args: Vec<String>) -> (crate::config::CliArgs, Vec<String>) {
+    let mut cli = crate::config::CliArgs::default();
+    let mut rest = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(a) = iter.next() {
+        if a == "--config" {
+            if let Some(v) = iter.next() {
+                cli.config = Some(std::path::PathBuf::from(v));
+            } else {
+                eprintln!("error: --config requires a path argument");
+                std::process::exit(2);
+            }
+        } else if let Some(v) = a.strip_prefix("--config=") {
+            cli.config = Some(std::path::PathBuf::from(v));
+        } else {
+            rest.push(a);
+        }
+    }
+    (cli, rest)
+}
+
+/// Best-effort `mkdir -p` for the parent of a sqlite file:// URL.
+/// Mirrors the same helper in `auth::boot::ensure_sqlite_parent_dir`
+/// so the CLI works on a fresh host even when the operator pointed
+/// it at a relative path under `./data/`. The server's `auto_bootstrap`
+/// already does this — we duplicate the logic here rather than
+/// export the boot helper because the CLI should not need to know
+/// about the boot internals.
+fn ensure_sqlite_parent_dir(url: &str) -> Result<(), anyhow::Error> {
+    let path_part = if let Some(rest) = url.strip_prefix("sqlite://") {
+        rest.split('?').next().unwrap_or("")
+    } else if let Some(rest) = url.strip_prefix("sqlite:") {
+        rest.split('?').next().unwrap_or("")
+    } else {
+        return Ok(());
+    };
+    if path_part.is_empty() || path_part == ":memory:" {
+        return Ok(());
+    }
+    let path = path_part.trim_start_matches('/');
+    if path.is_empty() {
+        return Ok(());
+    }
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to create sqlite parent dir {}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Connect + migrate the auth DB, ensuring the sqlite parent
+/// directory exists first. Used by every CLI subcommand that
+/// touches the DB so the operator does not have to `mkdir -p
+/// ./data/` before running the very first command.
+async fn open_store(
+    cfg: &crate::config::Config,
+) -> Result<crate::auth::store::AuthStore, anyhow::Error> {
+    ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
+    let store = crate::auth::store::AuthStore::connect(&cfg.auth)
+        .await
+        .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))?;
+    store
+        .migrate()
+        .await
+        .map_err(|e| anyhow::anyhow!("auth migrations failed: {e}"))?;
+    Ok(store)
+}
+
 fn print_help() {
     println!("stt-server auth — operator CLI for the auth subsystem");
     println!();
@@ -75,14 +161,12 @@ fn print_help() {
     println!("    --force       Run even when a server PID file is present (data/server.pid).");
 }
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Default)]
 #[allow(dead_code)]
 struct CommonOpts {
     force: bool,
 }
 
-#[cfg(feature = "auth")]
 #[allow(dead_code)]
 fn parse_common(args: &[String]) -> (CommonOpts, Vec<String>) {
     let mut opts = CommonOpts::default();
@@ -99,7 +183,6 @@ fn parse_common(args: &[String]) -> (CommonOpts, Vec<String>) {
 
 /// Refuse to run if the server PID file exists AND points at a live
 /// process AND `--force` was not supplied.
-#[cfg(feature = "auth")]
 fn check_running_server(force: bool) -> Result<(), anyhow::Error> {
     let pid_path = pid_file_path();
     if !pid_path.exists() {
@@ -147,7 +230,6 @@ fn check_running_server(force: bool) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-#[cfg(feature = "auth")]
 fn pid_file_path() -> PathBuf {
     // Path is relative to the current working directory to match
     // `data/` everywhere else in the project. A future PR may move
@@ -158,7 +240,6 @@ fn pid_file_path() -> PathBuf {
 
 // ---- create-admin ----------------------------------------------------------
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Default)]
 struct CreateAdminOpts {
     email: Option<String>,
@@ -167,7 +248,6 @@ struct CreateAdminOpts {
     force: bool,
 }
 
-#[cfg(feature = "auth")]
 fn parse_create_admin(args: Vec<String>) -> Result<CreateAdminOpts, anyhow::Error> {
     let mut o = CreateAdminOpts::default();
     let mut iter = args.into_iter();
@@ -200,13 +280,11 @@ fn parse_create_admin(args: Vec<String>) -> Result<CreateAdminOpts, anyhow::Erro
     Ok(o)
 }
 
-#[cfg(feature = "auth")]
-async fn create_admin(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
+async fn create_admin(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error> {
     let opts = parse_create_admin(args)?;
     check_running_server(opts.force)?;
 
-    let cli = CliArgs::default();
-    let cfg = Config::load(&cli)?;
+    let cfg = Config::load(cli)?;
     if !cfg.auth.enabled {
         return Err(anyhow::anyhow!(
             "auth is not enabled in the active configuration; set [auth].enabled = true (or NAGENT_AUTH_ENABLED=true)"
@@ -230,8 +308,7 @@ async fn create_admin(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
         ));
     }
 
-    let store = crate::auth::store::AuthStore::connect(&cfg.auth).await?;
-    store.migrate().await?;
+    let store = open_store(&cfg).await?;
 
     if let Some(existing) = store.get_user_by_email(email).await? {
         return Err(anyhow::anyhow!(
@@ -268,7 +345,6 @@ async fn create_admin(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
 /// Read one line from stdin, trimming the trailing newline. Used
 /// for `--from-stdin` so the password never goes through argv /
 /// shell history.
-#[cfg(feature = "auth")]
 fn read_password_from_stdin() -> Result<String, anyhow::Error> {
     use std::io::Read;
     let mut s = String::new();
@@ -278,14 +354,12 @@ fn read_password_from_stdin() -> Result<String, anyhow::Error> {
 
 // ---- list-users ------------------------------------------------------------
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Default)]
 struct ListUsersOpts {
     provider: Option<String>,
     force: bool,
 }
 
-#[cfg(feature = "auth")]
 fn parse_list_users(args: Vec<String>) -> Result<ListUsersOpts, anyhow::Error> {
     let mut o = ListUsersOpts::default();
     let mut iter = args.into_iter();
@@ -308,14 +382,11 @@ fn parse_list_users(args: Vec<String>) -> Result<ListUsersOpts, anyhow::Error> {
     Ok(o)
 }
 
-#[cfg(feature = "auth")]
-async fn list_users(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
+async fn list_users(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error> {
     let opts = parse_list_users(args)?;
     check_running_server(opts.force)?;
-    let cli = CliArgs::default();
-    let cfg = Config::load(&cli)?;
-    let store = crate::auth::store::AuthStore::connect(&cfg.auth).await?;
-    store.migrate().await?;
+    let cfg = Config::load(cli)?;
+    let store = open_store(&cfg).await?;
     let users = store.list_users(opts.provider.as_deref()).await?;
     for u in users {
         println!(
@@ -331,7 +402,6 @@ async fn list_users(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
 
 // ---- delete-user -----------------------------------------------------------
 
-#[cfg(feature = "auth")]
 #[derive(Debug, Default)]
 struct DeleteUserOpts {
     email: Option<String>,
@@ -339,7 +409,6 @@ struct DeleteUserOpts {
     force: bool,
 }
 
-#[cfg(feature = "auth")]
 fn parse_delete_user(args: Vec<String>) -> Result<DeleteUserOpts, anyhow::Error> {
     let mut o = DeleteUserOpts::default();
     let mut iter = args.into_iter();
@@ -363,14 +432,11 @@ fn parse_delete_user(args: Vec<String>) -> Result<DeleteUserOpts, anyhow::Error>
     Ok(o)
 }
 
-#[cfg(feature = "auth")]
-async fn delete_user(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
+async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error> {
     let opts = parse_delete_user(args)?;
     check_running_server(opts.force)?;
-    let cli = CliArgs::default();
-    let cfg = Config::load(&cli)?;
-    let store = crate::auth::store::AuthStore::connect(&cfg.auth).await?;
-    store.migrate().await?;
+    let cfg = Config::load(cli)?;
+    let store = open_store(&cfg).await?;
     let email = opts
         .email
         .as_deref()
@@ -414,13 +480,11 @@ async fn delete_user(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
 
 // Helper so callers can keep `common` parsed in one place even
 // when a subcommand doesn't need it.
-#[cfg(feature = "auth")]
 #[allow(dead_code)]
 fn _silence_parse_common(_o: CommonOpts) {}
 
 // Silence `AuthError` not being used directly in the CLI module
 // (it's the auth subsystem's error type, and the CLI propagates it
 // via `anyhow`).
-#[cfg(feature = "auth")]
 #[allow(dead_code)]
 fn _silence_auth_error(_e: AuthError) {}

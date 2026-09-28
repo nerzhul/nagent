@@ -11,7 +11,9 @@ and no npm install at runtime: every JS module, CSS file, and third-party
 library is shipped as a plain file and served by the Rust static handler
 (`crates/stt-server/src/static_assets.rs`). The page bootstraps two
 top-level modes — **Transcript** and **Discussion** — only one of which is
-visible at a time.
+visible at a time. When the operator enables `auth.enabled = true` on the
+server, the UI is also gated by a **global portal** so anonymous
+visitors never see the chat/voice controls at all — see §8.
 
 ## 1. Top-level structure
 
@@ -613,71 +615,194 @@ from `chat.js` on boot.
 - No light-theme toggle in the current UI; the colour scheme is
   fixed.
 
-## 8. Authentication (PR1 — backend only)
+## 8. Authentication (global portal)
 
-The auth backend ships in PR1 but the UI integration is staged
-across the next PRs. This section documents what exists today so
-reviewers can see the seam.
+When the operator sets `auth.enabled = true` on the server, the
+UI is gated by a **global portal** with two layers of defence so
+that an anonymous visitor never sees — and cannot inspect in
+DevTools — the chat/voice controls. The portal is implemented as
+a coordination between three files:
 
-### 8.1 Backend surface
+- `crates/stt-server/src/static/index.html` — the HTML shell.
+- `crates/stt-server/src/static/auth.js` — the only script
+  loaded directly in the body, owns the probe + login form +
+  template mount/unmount lifecycle.
+- `crates/stt-server/src/static/app.js` — runs *inside* the
+  cloned template, renders the auth pill, dispatches the
+  `nagent:logout` event.
 
-- `GET  /api/me` — returns the [`AuthUser`] resolved by the
-  `RequireAuth` middleware (`json` payload, `401` when anonymous).
-  This is the canonical probe the SPA uses on boot to decide
-  whether to render the chat view or a login panel.
-- `POST /api/auth/logout` — deletes the current session row + clears
-  the `nagent_session` cookie. Requires both the session cookie
-  AND the matching `x-csrf-token` header (constant-time compared).
-- `POST /api/auth/login/password` — `local` backend. Body is
-  `{ "email": ..., "password": ... }`; sets the cookie + echoes the
-  session id so API clients can store it.
-- `POST /api/auth/login/passkey/start` + `/finish` — `passkey`
-  backend. The start response carries an opaque `state_token` the
-  browser echoes back to the finish handler.
-- `POST /api/auth/login/passkey/register/start` + `/finish` —
-  passkey enrollment; gated by `RequireAuth` and
-  `auth.passkey.self_registration`.
-- `GET  /api/auth/login/oidc/start` + `/callback` — OIDC
-  authorisation-code redirect with PKCE + per-flow `state`
-  persisted in the `pending_oidc_states` table.
-- `POST /api/auth/password/register` — bootstraps a new local
-  account. Requires an existing session AND
-  `auth.password.allow_registration`.
+The backend wiring is described in the README §"Authentication";
+this section only covers the UI behaviour and the rationale for
+the template split.
 
-### 8.2 Cookie + CSRF model
+### 8.1 DOM absence (template split)
+
+The page body has three top-level children:
+
+```html
+<body>
+  <dialog id="login-modal">…</dialog>           <!-- always in DOM -->
+  <div id="app-root"></div>                     <!-- empty mount point -->
+  <template id="app-shell-template">
+    <header>…</header>                          <!-- chat/voice UI -->
+    <main id="view-transcript">…</main>
+    <main id="view-discussion">…</main>
+    <div id="shortcuts-modal">…</div>
+    <script src="/static/mode.js" defer></script>
+    <script type="module" src="/static/chat.js"></script>
+    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/shortcuts.js"></script>
+  </template>
+  <script type="module" src="/static/auth.js"></script>
+</body>
+```
+
+The login `<dialog>` sits outside the template because
+`auth.js` needs to show it *before* the rest of the UI exists.
+Everything else — the header (with the auth pill, the mode
+toggle, the version line), both mode views, the shortcuts help
+modal, and every UI script other than `auth.js` — lives inside
+`<template id="app-shell-template">`. While the template is
+inert, its content is **not in the document tree**: a logged-out
+visitor inspecting the page in DevTools sees only the empty
+mount point and the login dialog. The chat controls, voice
+graph, transcript list, and chat input do not exist in the DOM
+and cannot be queried, clicked, or leaked via a screenshot tool.
+
+The template is paired with a static-assets test
+(`index_html_wraps_app_shell_in_template` in
+`tests/static_assets.rs`) that asserts every UI element that
+should be hidden from anonymous visitors is positioned *inside*
+the template, while the login dialog and the `auth.js` script
+tag are positioned *outside*.
+
+### 8.2 Auth probe and mount lifecycle
+
+`auth.js` is the first script to run on the page (it's the
+last `<script>` tag in the body, so all preceding markup is
+parsed). On module load it:
+
+1. Fetches `GET /api/me` with `cache: "no-store"` and
+   `credentials: "same-origin"`. The response status drives the
+   rest of the boot:
+   - `200` — server returns the `AuthUser` JSON. The user is
+     authenticated. `auth.js` stores the user on a private
+     `state` object, exposes it via
+     `window.nagentAuth.getUser()`, and calls
+     `mountShell()` to clone the template into `#app-root`.
+   - `404` — auth subsystem not configured on the server (the
+     default). The pill is hidden and the pre-PR1 single-user
+     trust boundary holds. `auth.js` still clones the template
+     so the chat UI is visible to anyone reaching the page.
+   - `401` — auth enabled and the visitor is anonymous. `auth.js`
+     does **not** clone the template. It opens the login modal
+     in *forced* mode (see §8.3) so the user has to authenticate
+     before the UI is created. The chat controls are genuinely
+     absent from the DOM.
+   - Any other status — logged to the console, no mount. (The
+     server's `/healthz` endpoint stays reachable without auth
+     so ops tooling can probe the server.)
+2. Wires the login form (`#login-form`), the Cancel button
+   (`#login-cancel`), and the modal's `cancel` event handler
+   (§8.3) once, regardless of which boot branch ran.
+3. Listens for the `nagent:logout` `CustomEvent` on
+   `window`. When the cloned `app.js` dispatches it (because
+   the user clicked the auth pill's **Sign out** button),
+   `auth.js` clears the mount point with
+   `appRoot.replaceChildren()`, marks the user as anonymous,
+   and opens the forced modal again — re-creating the
+   DOM-absence invariant after every logout.
+
+The `mountShell()` helper is idempotent: if the template is
+already cloned into `#app-root` (e.g. the user is already
+authenticated and re-runs the probe for any reason), the second
+call is a no-op. Conversely `unmountShell()` is unconditional:
+it removes every cloned child so the next `mountShell()` call
+re-runs the inline scripts cleanly (a fresh closure per clone).
+
+### 8.3 Forced login modal
+
+The login dialog uses the native `<dialog>` element. It is
+shown with `dialog.showModal()` so it sits in the browser's
+top layer and the rest of the page is inert while it is open.
+Two cosmetic layers finish the lockdown:
+
+- **Cancel hidden in forced mode.** When `auth.js` opens the
+  modal with `force=true` (the only call site is the 401 boot
+  branch and the `nagent:logout` handler), it adds the
+  `login-modal--forced` class to the dialog and sets
+  `#login-cancel[hidden]`. The CSS rule
+  `.login-modal--forced .login-cancel { display: none; }` keeps
+  the button out of the layout as well. The "Sign in" submit
+  button remains visible and is the only way to dismiss the
+  modal.
+- **ESC re-opens the dialog.** The dialog's native `cancel`
+  event fires when the user presses ESC or clicks the
+  backdrop. A listener on `#login-modal` calls
+  `e.preventDefault()` and re-opens the dialog with
+  `showModal()` + `loginEmailInput.focus()` whenever both the
+  `login-modal--forced` class is present *and* the user is
+  still anonymous. After a successful login the class is
+  removed (in `hideLoginModal()`) and the listener is a no-op.
+
+The modal is hidden in non-forced mode as well — a non-forced
+`showLoginModal(false)` call only happens when the user clicks
+the auth pill's **Sign in** button (visible only when the
+server returns 200 with no user, an edge case for a revoked
+session). In that branch the user *can* dismiss the modal
+with Cancel or ESC and continue using the app.
+
+### 8.4 Inter-module coordination
+
+The cloned `app.js` does not own authentication state. It reads
+the current user from `window.nagentAuth` on boot, renders the
+auth pill, and dispatches `nagent:logout` on Sign out. The
+exposed object is frozen so the cloned app cannot mutate the
+authoritative state:
+
+```js
+window.nagentAuth = Object.freeze({
+  getUser: () => state.user,
+  isProbed: () => state.probed,
+  showLoginModal: (force = false) => showLoginModal(force),
+  hideLoginModal: () => hideLoginModal(),
+});
+```
+
+The auth pill is hidden entirely when `authState.probed` is
+false (the 404 boot branch). When probed and the user is set,
+the pill shows `Logged in as <email>` and a **Sign out**
+button. When probed but the user is missing (an unusual
+state — typically a 200 with a transient session), the pill
+shows **Sign in** and a click delegates to
+`window.nagentAuth.showLoginModal(false)`.
+
+`app.js`'s **Sign out** click handler POSTs to
+`/api/auth/logout` with the per-session `x-csrf-token` header
+(unset on the server cookie name, configurable via
+`auth.csrf_header`), then dispatches `nagent:logout` and
+returns. The actual shell teardown happens in `auth.js` so
+that `app.js` does not have to know about the template
+machinery.
+
+### 8.5 Cookie + CSRF model
 
 Authenticated browser clients carry a `nagent_session` cookie
 holding a UUID v4. API clients can pass the same id via
 `Authorization: Bearer <session-id>`. State-changing browser
 requests (POST/PUT/PATCH/DELETE) must also send an
-`x-csrf-token` header (configurable via `auth.csrf_header`) whose
-value matches the per-session `csrf_token` (32 bytes of OS RNG,
-hex-encoded). Bearer requests skip the CSRF check.
+`x-csrf-token` header (configurable via `auth.csrf_header`)
+whose value matches the per-session `csrf_token` (32 bytes of
+OS RNG, hex-encoded). Bearer requests skip the CSRF check
+because the `Authorization` header proves the caller is the
+API client itself, not a victim of a CSRF attack.
 
 The cookie `Secure` flag is **auto-disabled on
-`http://localhost`/`http://127.0.0.1`** so the dev experience works
-out of the box; for every other origin the flag mirrors the URL
-scheme. Sessions are absolute (NIST SP 800-63B): `expires_at =
-now() + auth.session_ttl_days` and never extends on activity.
-
-### 8.3 What's not in the UI yet (PR2+)
-
-The HTTP routes above work but the JS hooks that call them are
-landed in a follow-up PR. Specifically:
-
-- The `Logged in as` pill in the header (currently empty) does not
-  yet fetch `/api/me` on boot; the SPA still treats every request
-  as anonymous.
-- The login panel (modal containing one button per enabled backend
-  + a password form for the local backend) is not yet rendered.
-- The `x-csrf-token` header is not yet injected into the
-  `$fetch` wrapper; PR2 adds it.
-- The `Authorization: Bearer <session-id>` path is only used by
-  `curl`/API clients in PR1; the SPA relies entirely on the
-  cookie jar.
-
-This is intentional — splitting the backend wiring from the
-frontend wiring keeps each PR reviewable.
+`http://localhost`/`http://127.0.0.1`** so the dev experience
+works out of the box; for every other origin the flag mirrors
+the URL scheme. Sessions are absolute (NIST SP 800-63B):
+`expires_at = now() + auth.session_ttl_days` and never extends
+on activity.
 
 ## 9. Out of scope (today)
 

@@ -15,10 +15,6 @@
 -- * `BLOB` for binary columns (password_hash, credential_id,
 --   public_key, aaguid) becomes `bytea` on postgres and stays
 --   `BLOB` on sqlite — sqlx maps the two transparently.
--- * `BIGINT PRIMARY KEY` (without `AUTOINCREMENT` / `BIGSERIAL`)
---   for `auth_events.id` so the DDL is portable; the application
---   generates the id with an atomic counter (see
---   `next_event_id()` in `db_sqlite.rs` / `db_postgres.rs`).
 -- * `CURRENT_TIMESTAMP` is the default for every timestamp column.
 --   Both engines return a string in the same RFC 3339-like form
 --   so the Rust parser (`parse_rfc3339`) does not have to branch
@@ -93,13 +89,15 @@ CREATE INDEX sessions_expires_at_idx ON sessions(expires_at);
 
 -- ---------------------------------------------------------------------------
 -- auth_events: append-only audit trail. `user_id` is NULL on failed
--- login attempts where we never matched a user row. `id` is generated
--- by the application (see `next_event_id()`) so the DDL stays
--- portable across sqlite (no AUTOINCREMENT) and postgres (no
--- BIGSERIAL).
+-- login attempts where we never matched a user row. `id` is a UUIDv4
+-- generated in Rust via the `uuid` crate (matching every other table
+-- in this schema) — both engines just store it as TEXT, and the
+-- PRIMARY KEY constraint enforces uniqueness across processes. The
+-- Rust code binds a fresh `Uuid::new_v4()` on every `record_event`
+-- call (see `db_sqlite.rs` / `db_postgres.rs`).
 -- ---------------------------------------------------------------------------
 CREATE TABLE auth_events (
-    id              BIGINT PRIMARY KEY,
+    id              TEXT PRIMARY KEY,
     user_id         TEXT,
     kind            TEXT NOT NULL,
     provider        TEXT NOT NULL,

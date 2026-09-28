@@ -53,6 +53,44 @@
   <script src="/static/vendor/katex/contrib/auto-render.min.js" defer></script>
 </head>
 <body>
+  <!--
+    Login modal: lives in the body (not in the app template) so it
+    can be shown before the app shell is mounted. `auth.js` is
+    loaded directly at the bottom of the body and probes `/api/me`
+    before deciding whether to clone the app template (showing the
+    UI) or open this modal (hiding the UI entirely from the DOM
+    until the user authenticates).
+  -->
+  <dialog id="login-modal" class="login-modal" aria-labelledby="login-modal-title">
+    <form id="login-form" method="dialog">
+      <h2 id="login-modal-title">Sign in</h2>
+      <label>
+        Login
+        <input type="email" name="email" id="login-email" autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input type="password" name="password" id="login-password" autocomplete="current-password" required />
+      </label>
+      <p id="login-error" class="login-error" role="alert" hidden></p>
+      <div class="login-modal-actions">
+        <button type="button" id="login-cancel" class="login-cancel">Cancel</button>
+        <button type="submit" id="login-submit" class="login-submit">Sign in</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!--
+    Mount point for the app shell. `auth.js` clones
+    `#app-shell-template` into this container after a successful
+    `/api/me` probe. While the container is empty, the entire UI
+    is genuinely absent from the DOM (DevTools shows nothing) so
+    anonymous users on an auth-enabled server cannot inspect or
+    interact with the chat/voice controls.
+  -->
+  <div id="app-root"></div>
+
+  <template id="app-shell-template">
   <header>
     <h1>nagent</h1>
     <p class="subtitle">Local Whisper transcription and local-model chat.</p>
@@ -60,6 +98,17 @@
       <span>backend <code id="backend-version">…</code></span>
       <span>frontend <code id="frontend-version-self">…</code></span>
     </p>
+
+    <!-- Auth pill: shows "Logged in as <email>" when authenticated,
+         a "Sign in" link when not. Hidden entirely when the
+         runtime config sets `auth.enabled = false` (the `/api/me`
+         probe returns 404, see `auth.js`). -->
+    <div id="auth-pill" class="auth-pill" hidden>
+      <span id="auth-pill-text">…</span>
+      <button id="auth-pill-action" type="button" class="auth-pill-action" hidden></button>
+      <button id="auth-pill-logout" type="button" class="auth-pill-action" hidden>Sign out</button>
+    </div>
+
     <nav id="mode-toggle" role="tablist" aria-label="Mode">
       <button role="tab" id="mode-transcript-btn" aria-selected="true"
               data-mode="transcript">Transcript</button>
@@ -435,5 +484,15 @@
     </div>
   </div>
   <script type="module" src="/static/shortcuts.js"></script>
+  </template>
+
+  <!--
+    `auth.js` is the only script that lives outside the app-shell
+    template. It owns the initial `/api/me` probe, the login
+    form, and the mount/unmount lifecycle of the template above.
+    It is the only thing that can show the login modal before the
+    rest of the UI exists in the DOM.
+  -->
+  <script type="module" src="/static/auth.js"></script>
 </body>
 </html>

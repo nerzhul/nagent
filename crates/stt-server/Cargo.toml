@@ -23,9 +23,9 @@ web-agent = []
 # off, the corresponding agent module is not compiled and the agent
 # is not registered. `dep:chrono` is pulled by the three of them for
 # `Utc::now()` timestamping; `chrono-tz` only by the datetime agent.
-datetime-agent = ["dep:chrono", "dep:chrono-tz"]
-weather-agent = ["dep:chrono"]
-stock-agent = ["dep:chrono"]
+datetime-agent = ["dep:chrono-tz"]
+weather-agent = []
+stock-agent = []
 # `calculate-agent` registers the `calculate` tool (a thin wrapper over
 # `meval` with a strict deny-list on the expression grammar). Pulls
 # `meval` for the AST evaluator.
@@ -51,34 +51,6 @@ dictionary-agent = []
 # text-to-speech. The Discussion-mode UI silently hides the
 # "Read response aloud" checkbox when the feature is off.
 tts = ["dep:piper-rs"]
-# `auth` enables the multi-user authentication subsystem (PR1).
-# Pulls in `sqlx` (with both `sqlite` + `postgres` features so the
-# operator picks the engine at runtime via `[auth.db].backend`), the
-# `argon2` password hasher, the `openidconnect` OIDC client, the
-# `webauthn-rs` passkey backend, plus the small cookie + RNG deps
-# used by `auth/session.rs`. The optional finer-grained features
-# (`auth-local`, `auth-oidc`, `auth-passkey`) let operators compile
-# out a single backend without recompiling the whole subsystem —
-# the default `auth` feature compiles all three.
-auth = [
-    "dep:sqlx",
-    "dep:argon2",
-    "dep:openidconnect",
-    "dep:webauthn-rs",
-    "dep:rand",
-    "dep:cookie",
-    "dep:hex",
-    "dep:base64",
-    "dep:chrono",
-]
-# Optional backend selection features. Off by default; when `auth` is
-# on and these are all off, all three backends compile. Setting e.g.
-# `auth-oidc = []` does NOT disable the others — it currently acts as
-# documentation that the operator *chose* to keep OIDC compiled in.
-# Wiring the actual compile-out is a follow-up (see plan D3).
-auth-local = []
-auth-oidc = []
-auth-passkey = []
 
 [build-dependencies]
 # sha2 is only used at build time to fingerprint the static frontend
@@ -112,11 +84,12 @@ futures-util       = "0.3"
 # OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 url = "2"
-# `chrono` powers the `datetime-agent` (`get_datetime` tool). We pull
-# only the bits the agent actually uses (`clock` for `Utc::now`,
+# `chrono` powers the `datetime-agent` (`get_datetime` tool) AND the
+# auth subsystem (RFC 3339 timestamps on session / auth_events rows).
+# We pull only the bits we actually use (`clock` for `Utc::now`,
 # `std` for the `SystemTime` plumbing). `wasmbind`/`serde`/`now`
 # remain off to keep the dependency surface minimal.
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # `chrono-tz` brings the IANA timezone database so the datetime agent
 # can resolve "Europe/Paris", "Asia/Tokyo", … without falling back to
 # the system tzdata (which isn't always present on minimal Docker
@@ -145,7 +118,7 @@ piper-rs = { version = "0.2", optional = true }
 # cap) on top of meval's grammar so user-supplied expressions can
 # never reach `eval`-style code paths.
 meval = { version = "0.2", optional = true }
-# `sqlx` powers the auth DB layer (PR1). The runtime is async; both
+# `sqlx` powers the auth DB layer. The runtime is async; both
 # the `sqlite` and `postgres` drivers are enabled so the operator
 # picks the engine at runtime via `[auth.db].backend`. `rustls` keeps
 # the dep tree free of OpenSSL (matches `reqwest`'s TLS stack);
@@ -153,11 +126,12 @@ meval = { version = "0.2", optional = true }
 # and UUID primary keys on both engines transparently. `macros`
 # is required for `sqlx::migrate!` — we use the non-macro
 # `sqlx::query` (runtime-checked SQL) elsewhere so the binary
-# does not need `DATABASE_URL` at build time (plan D5).
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"], optional = true }
+# does not need `DATABASE_URL` at build time. Always compiled in
+# (no cargo feature) — auth is a core subsystem of PR1.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"] }
 # `argon2` for argon2id password hashing (OWASP 2025 default params).
 # Pure Rust, no system deps.
-argon2 = { version = "0.5", optional = true }
+argon2 = "0.5"
 # `openidconnect` for the OIDC backend. Discovery + PKCE + nonce
 # validation are all built in; the crate handles the
 # `end_session_endpoint` discovery for free. We pull the
@@ -166,28 +140,30 @@ argon2 = { version = "0.5", optional = true }
 # disable the default features to skip the bundled `color-backtrace`,
 # `env_logger`, and `serde_derive` pulls. Use `oauth2`'s `reqwest`
 # feature so we re-use the workspace's HTTP stack.
-openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"], optional = true }
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 # `webauthn-rs` for the WebAuthn / passkey backend. The pre-release
 # 0.6.x line replaced the OpenSSL dependency with `crypto-glue`,
 # keeping the auth build pure-Rust (the 0.5.x line hard-pulled
 # `openssl-sys`). The `attestation` feature is enabled by default in
-# both lines. The `danger-allow-state-serialisation` feature is not
-# enabled — passkey state must stay server-side only.
-webauthn-rs = { version = "0.6.1-dev", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"], optional = true }
+# both lines. The `danger-allow-state-serialisation` feature is
+# enabled so the passkey ceremony state can be serialised in the
+# `DashMap<state_token, CeremonyEntry>` — without it the ceremony
+# state cannot cross the HTTP round-trip.
+webauthn-rs = { version = "0.6.1-dev", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"] }
 # `rand` is used to mint session ids, CSRF tokens, and OIDC state
 # nonces (each via 32 bytes of `OsRng`). Pulled without default
 # features so we only get what we actually need (`std` + `getrandom`
 # via the OS RNG).
-rand = { version = "0.8", default-features = false, features = ["std", "getrandom"], optional = true }
+rand = { version = "0.8", default-features = false, features = ["std", "getrandom"] }
 # `cookie` parses `Cookie:` headers and builds `Set-Cookie:` values
 # for `auth/session.rs`. We don't pull `time` so cookies are emitted
 # without the `Expires` attribute (the session DB row is the source
 # of truth for expiry — see plan D6/D6a).
-cookie = { version = "0.18", features = ["percent-encode"], optional = true }
+cookie = { version = "0.18", features = ["percent-encode"] }
 # `hex` / `base64` are used to encode session ids and passkey
 # challenge payloads for the JSON wire format.
-hex = { version = "0.4", optional = true }
-base64 = { version = "0.22", optional = true }
+hex = "0.4"
+base64 = "0.22"
 # `hound` writes the WAV bytes served by `POST /v1/audio/speech`.
 # We emit PCM 16-bit mono at the model's declared rate (typically
 # 22 050 Hz) and let the browser resample on playback. Lightweight,
@@ -195,11 +171,11 @@ base64 = { version = "0.22", optional = true }
 # used by the HTTP integration tests works without the `tts`
 # feature.
 hound = "3.5"
+# `tower::ServiceExt::oneshot` is used by the auth middleware
+# integration tests (`auth/middleware.rs::tests`).
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures = "0.3"
 tokio-tungstenite = "0.24"
-# `tower::ServiceExt::oneshot` is used by the auth middleware
-# integration tests (`auth/middleware.rs::tests`).
-tower = { version = "0.5", features = ["util"] }

@@ -1,15 +1,19 @@
 # SQLite auth store config — drop-in for `stt-server --config
-# examples/auth.sqlite.toml`. Mirrors the [auth] block in
+# docs/examples/auth.sqlite.toml`. Mirrors the [auth] block in
 # `config.toml.example` but with a fully-populated sqlite backend
-# so a fresh install can run the server out of the box once the
-# admin user has been bootstrapped via `stt-server auth create-admin`.
+# so a fresh install can run the server out of the box.
+#
+# Auto-bootstrap: on first boot with an empty users table the
+# server auto-creates a local admin with a random 24-char password
+# and logs it at WARN level (one-time). The CLI is only needed
+# for adding additional admins afterwards.
 
 # Server knob — same shape as the main example. Tune to taste.
 [server]
 bind_addr = "127.0.0.1:8080"
 whisper_model_path = "/models/ggml-base.bin"
 
-# ---- Authentication (PR1) ----
+# ---- Authentication ----
 [auth]
 enabled = true
 backends = ["local"]
@@ -19,6 +23,12 @@ csrf_header = "x-csrf-token"
 
 [auth.db]
 backend = "sqlite"
+# `sqlite:///abs/path.db?mode=rwc` for an absolute path (3 slashes =
+# empty host + absolute path per the RFC). The parent directory is
+# created automatically by `auth::boot::auto_bootstrap`. For
+# relative paths (e.g. `./data/auth.db`) the parent must exist
+# before the server starts — `make run` does this for you by
+# creating `data/` on the first boot.
 url = "sqlite://./data/auth.db?mode=rwc"
 max_connections = 16
 

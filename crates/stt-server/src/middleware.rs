@@ -1,4 +1,4 @@
-//! HTTP middleware: security headers and CORS for the LLM proxy.
+//! HTTP middleware: security headers, CORS, and the access log.
 //!
 //! Two `tower_http` layers are exposed:
 //!
@@ -35,8 +35,24 @@
 //! `'self'` (no remote WASM) so the practical exposure is limited to
 //! same-origin binaries — i.e. files we explicitly vendored under
 //! `static/vendor/`.
+//!
+//! [`access_log_middleware`] is wired as the **outermost** layer on
+//! the whole router (above the security headers) so it sees every
+//! request and the final status, including 401s from `RequireAuth`.
+//! The resolved `AuthUser` flows in via the response extensions —
+//! `RequireAuth` injects it on the way back, so the access log
+//! attributes the request to a user without doing its own DB
+//! lookup. When `RequireAuth` short-circuits (no cookie / bearer /
+//! expired session), the response carries no `AuthUser` extension
+//! and the line is logged with `user_id = None` and an empty
+//! `email` — exactly the right shape for "anonymous request" in a
+//! log aggregator.
 
+use axum::extract::{ConnectInfo, Request};
 use axum::http::{header, HeaderValue};
+use axum::middleware::Next;
+use axum::response::Response;
+use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -147,4 +163,129 @@ pub fn cors_layer(allow_origins: &[String]) -> CorsLayer {
     // reverse proxy serve one origin's `Access-Control-Allow-Origin`
     // to a different origin and break CORS isolation. See
     // tower-http `cors/vary.rs::Default for Vary`.
+}
+
+/// Per-request access log. Emits one `tracing` event per HTTP
+/// request with method, path, status, duration, peer IP, and
+/// (when authenticated) the resolved `user_id` / `email`.
+///
+/// Wired as the outermost layer in [`crate::build_router`] so it
+/// sees every request, including the 401s returned by
+/// `RequireAuth` for missing/expired sessions. The user info
+/// flows in via the response extensions: `RequireAuth` injects
+/// the resolved `AuthUser` on the way back so this middleware
+/// can attribute the request without doing its own DB lookup.
+/// An anonymous request shows up with `user_id = None` and an
+/// empty `email` — the same shape a log aggregator needs to
+/// count "unauthenticated 401s" cleanly.
+///
+/// The level is `INFO` for 2xx/3xx, `WARN` for 4xx, and
+/// `ERROR` for 5xx. A noisy CI test can down-grade to `INFO`
+/// for everything with `RUST_LOG=info` (the access log line
+/// is tagged `event = "http.access"` so it is easy to filter
+/// out with `RUST_LOG=info,stt_server::middleware::access=off`).
+///
+/// The peer IP comes from `ConnectInfo<SocketAddr>` — the same
+/// extension that the LLM rate limiter reads. We pull it
+/// directly from the request extensions instead of using it as
+/// an extractor, so the middleware degrades gracefully when the
+/// request did not come through `axum::serve(...)` (test harness
+/// using `tower::ServiceExt::oneshot`, in-process CLI
+/// subcommands, etc.). Without that fallback the extractor
+/// would 500 every test that does not spin up a real TCP
+/// listener.
+pub async fn access_log_middleware(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let user_agent = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // The peer IP lives on the request extensions when the
+    // service was started via `axum::serve(..., app
+    // .into_make_service_with_connect_info::<SocketAddr>())`.
+    // Anything else (test harness, in-process) just sees `None`
+    // and we log the line with `ip = ""` — the request still
+    // gets through to the handler.
+    let peer: Option<ConnectInfo<SocketAddr>> = req.extensions().get().cloned();
+    let ip = peer
+        .map(|ConnectInfo(addr)| addr.ip().to_string())
+        .unwrap_or_default();
+    let started = std::time::Instant::now();
+
+    let response = next.run(req).await;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let status = response.status();
+
+    // `RequireAuth` (when wired) puts the resolved `AuthUser` on the
+    // response extensions. Anonymous requests and 401/403 responses
+    // have no such extension and the line is logged with the user
+    // fields empty — exactly the right shape for a log aggregator.
+    let user = response.extensions().get::<crate::auth::AuthUser>();
+    let user_id = user.map(|u| u.id);
+    let email = user.map(|u| u.email.as_str()).unwrap_or("");
+
+    let level = if status.is_server_error() {
+        tracing::Level::ERROR
+    } else if status.is_client_error() {
+        tracing::Level::WARN
+    } else {
+        tracing::Level::INFO
+    };
+
+    // Dispatch on the resolved level. The per-level macros
+    // (`tracing::info!` / `warn!` / `error!`) accept the same
+    // field syntax as `tracing::event!`; the duplication is the
+    // price of using a runtime-computed level (the `level = expr`
+    // form requires a constant and the positional form has a
+    // fragile macro path through the tracing crate).
+    match level {
+        tracing::Level::ERROR => {
+            tracing::error!(
+                event = "http.access",
+                method = %method,
+                path = %path,
+                status = status.as_u16(),
+                duration_ms = elapsed_ms,
+                user_id = ?user_id,
+                email = %email,
+                ip = %ip,
+                user_agent = %user_agent,
+                "http {method} {path} -> {status} in {elapsed_ms}ms from {ip}"
+            );
+        }
+        tracing::Level::WARN => {
+            tracing::warn!(
+                event = "http.access",
+                method = %method,
+                path = %path,
+                status = status.as_u16(),
+                duration_ms = elapsed_ms,
+                user_id = ?user_id,
+                email = %email,
+                ip = %ip,
+                user_agent = %user_agent,
+                "http {method} {path} -> {status} in {elapsed_ms}ms from {ip}"
+            );
+        }
+        _ => {
+            tracing::info!(
+                event = "http.access",
+                method = %method,
+                path = %path,
+                status = status.as_u16(),
+                duration_ms = elapsed_ms,
+                user_id = ?user_id,
+                email = %email,
+                ip = %ip,
+                user_agent = %user_agent,
+                "http {method} {path} -> {status} in {elapsed_ms}ms from {ip}"
+            );
+        }
+    }
+
+    response
 }

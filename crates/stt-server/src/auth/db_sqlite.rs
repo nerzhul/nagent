@@ -18,39 +18,26 @@
 //! at first call rather than at `cargo build`; integration tests
 //! cover every query path.
 
-#[cfg(feature = "auth")]
 use chrono::{DateTime, Utc};
-#[cfg(feature = "auth")]
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-#[cfg(feature = "auth")]
 use sqlx::{Row, SqlitePool};
-#[cfg(feature = "auth")]
 use std::str::FromStr;
-#[cfg(feature = "auth")]
 use std::time::Duration;
-#[cfg(feature = "auth")]
 use uuid::Uuid;
 
-#[cfg(feature = "auth")]
 use crate::auth::error::AuthError;
-#[cfg(feature = "auth")]
 use crate::auth::session::SessionRecord;
-#[cfg(feature = "auth")]
 use crate::auth::store::{AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord};
-#[cfg(feature = "auth")]
 use crate::config::AuthConfig;
 
-#[cfg(feature = "auth")]
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Cheap to clone — the underlying pool is `Arc`-backed.
-#[cfg(feature = "auth")]
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     pool: SqlitePool,
 }
 
-#[cfg(feature = "auth")]
 impl SqliteStore {
     pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
         let opts = SqliteConnectOptions::from_str(&cfg.db.url)
@@ -391,11 +378,20 @@ impl SqliteStore {
     }
 
     pub(crate) async fn record_event(&self, event: NewAuthEvent) {
+        // UUIDv4 — matches the `id TEXT PRIMARY KEY` pattern every
+        // other table in the schema uses. The DB enforces uniqueness
+        // via the PRIMARY KEY constraint; the value is generated in
+        // Rust so it is portable across sqlite (no built-in UUID
+        // function) and postgres. Pre-`0002_auth_events_uuid.sql`
+        // this column was a BIGINT fed by a process-local counter
+        // that reset to 1 on every server restart and collided with
+        // rows from the previous run.
+        let id = Uuid::new_v4();
         let res = sqlx::query(
             "INSERT INTO auth_events (id, user_id, kind, provider, ip, user_agent, occurred_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(next_event_id() as i64)
+        .bind(id.to_string())
         .bind(event.user_id.map(|u| u.to_string()))
         .bind(&event.kind)
         .bind(&event.provider)
@@ -410,7 +406,6 @@ impl SqliteStore {
     }
 }
 
-#[cfg(feature = "auth")]
 fn row_to_user(row: sqlx::sqlite::SqliteRow) -> AuthUserRecord {
     AuthUserRecord {
         id: Uuid::parse_str(&row.get::<String, _>("id")).expect("DB UUID must parse"),
@@ -422,29 +417,16 @@ fn row_to_user(row: sqlx::sqlite::SqliteRow) -> AuthUserRecord {
     }
 }
 
-#[cfg(feature = "auth")]
 fn parse_rfc3339(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
 }
 
-#[cfg(feature = "auth")]
 fn is_sqlite_unique_violation(db_err: &dyn sqlx::error::DatabaseError) -> bool {
     // SQLite uses `SQLITE_CONSTRAINT_UNIQUE` (code 2067) and
     // `SQLITE_CONSTRAINT_PRIMARYKEY` (code 1555). Both translate
     // to a unique-constraint violation from the application's
     // point of view.
     db_err.code().as_deref() == Some("2067") || db_err.code().as_deref() == Some("1555")
-}
-
-/// Monotonic counter for `auth_events.id` so the DDL stays
-/// portable. PR1 does not need any guarantees beyond "no two writes
-/// in the same process pick the same id" — see the comment in
-/// `record_event` for the rationale.
-#[cfg(feature = "auth")]
-fn next_event_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }

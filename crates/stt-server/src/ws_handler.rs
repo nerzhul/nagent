@@ -341,16 +341,29 @@ pub async fn static_path_handler(
     serve_static(&path)
 }
 
-fn serve_static(path: &str) -> (axum::http::HeaderMap, Vec<u8>) {
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static(mime_for(path)),
-    );
+fn serve_static(path: &str) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::response::Response;
     let bytes = StaticAssets::get(path)
         .map(|f| f.data.into_owned())
         .unwrap_or_default();
-    (headers, bytes)
+    let mut response = Response::new(Body::from(bytes));
+    let h = response.headers_mut();
+    h.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(mime_for(path)),
+    );
+    // Force the browser to revalidate on every request. The frontend
+    // is small (a few hundred KB including vendor/ and worker/) and
+    // `/static/version.txt` is the single source of truth for the
+    // `fetchServerVersion()` drift check. A stale JS bundle would
+    // mean the auth pill and the chat-pill code paths diverge, so
+    // we explicitly tell the browser not to cache.
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// `/healthz` handler.

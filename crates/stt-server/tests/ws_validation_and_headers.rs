@@ -118,6 +118,10 @@ async fn start_test_server_with_rate_limit(
         tts: None,
         stt_rate_limiter: stt_limiter.clone(),
         llm_rate_limiter: llm_limiter.clone(),
+        auth_store: None,
+        auth_oidc: None,
+        auth_passkey: None,
+        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

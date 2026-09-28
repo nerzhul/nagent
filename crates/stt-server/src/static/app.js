@@ -197,6 +197,106 @@ new AudioCapture({
   },
 });
 
+// ---- Authentication --------------------------------------------------------
+//
+// The server exposes `/api/me` (returns 200 with the AuthUser JSON
+// when authenticated, 401 when auth is enabled and the user is
+// anonymous, 404 when the auth subsystem is not configured at all)
+// and `POST /api/auth/login/password`.
+//
+// The boot-time probe, the login form, and the modal control logic
+// all live in `auth.js` (loaded directly in the body, outside the
+// app-shell template). By the time this module is executed the
+// template has already been cloned, the modal handlers are wired,
+// and the user is either authenticated or the shell was mounted
+// because the server returned 404 (no auth configured).
+//
+// Here we only render the auth pill based on the state exposed by
+// `window.nagentAuth` and dispatch a `nagent:logout` event when
+// the user clicks "Sign out" — `auth.js` listens for it and tears
+// down the shell + opens the forced modal again.
+
+const authState = {
+  /** @type {null | {id:string,email:string,display_name:string,provider:string,csrf_token:string,session_expires_at:string}} */
+  user: null,
+  /** True after `auth.js` has made the first /api/me probe. */
+  probed: false,
+};
+
+const authPill = document.getElementById("auth-pill");
+const authPillText = document.getElementById("auth-pill-text");
+const authPillLoginBtn = document.getElementById("auth-pill-action");
+const authPillLogoutBtn = document.getElementById("auth-pill-logout");
+
+/** Read the current user + probed flag from `auth.js` and re-render
+ *  the pill. The shell only mounts after a 200 or 404, so the pill
+ *  is always visible at this point. */
+function refreshAuthState() {
+  const auth = window.nagentAuth;
+  if (!auth) {
+    // Should not happen — `auth.js` is always loaded first.
+    authPill.setAttribute("hidden", "");
+    return;
+  }
+  authState.user = auth.getUser();
+  authState.probed = auth.isProbed();
+  renderAuthPill();
+}
+
+/** Hide or show the auth pill depending on the probe result. */
+function renderAuthPill() {
+  if (!authState.probed) {
+    // 404 from /api/me — auth subsystem not configured, hide the pill
+    // entirely. Pre-PR1 single-user trust boundary.
+    authPill.setAttribute("hidden", "");
+    return;
+  }
+  authPill.removeAttribute("hidden");
+  if (authState.user) {
+    authPillText.textContent = `Logged in as ${authState.user.email}`;
+    authPillLoginBtn.setAttribute("hidden", "");
+    authPillLogoutBtn.removeAttribute("hidden");
+  } else {
+    // Auth is enabled but the server returned 200 with no user
+    // row — an edge case (e.g. session was revoked server-side
+    // between the initial probe and the pill render). Offer the
+    // Sign in button so the user can recover.
+    authPillText.textContent = "Sign in to access the chat view";
+    authPillLoginBtn.textContent = "Sign in";
+    authPillLoginBtn.removeAttribute("hidden");
+    authPillLogoutBtn.setAttribute("hidden", "");
+  }
+}
+
+if (authPillLoginBtn) {
+  authPillLoginBtn.addEventListener("click", () => {
+    window.nagentAuth?.showLoginModal(false);
+  });
+}
+
+if (authPillLogoutBtn) {
+  authPillLogoutBtn.addEventListener("click", async () => {
+    if (!authState.user) return;
+    const csrf = authState.user.csrf_token;
+    authPillLogoutBtn.disabled = true;
+    try {
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "x-csrf-token": csrf },
+        credentials: "same-origin",
+      });
+    } catch (e) {
+      console.warn("logout request failed:", e);
+    }
+    // Hand control back to auth.js: it will unmount the app shell
+    // (so the chat/voice UI is no longer in the DOM) and pop the
+    // forced login modal back up. We don't need to re-render the
+    // pill — the entire shell is about to be removed.
+    authPillLogoutBtn.disabled = false;
+    window.dispatchEvent(new CustomEvent("nagent:logout"));
+  });
+}
+
 // ---- Version drift detection ------------------------------------------------
 
 const VERSION_POLL_MS = 30_000;
@@ -253,6 +353,10 @@ if (updateBannerDismiss) {
   if (!versionPollId) {
     versionPollId = setInterval(fetchServerVersion, VERSION_POLL_MS);
   }
+  // The `/api/me` probe, login form, and shell mount/unmount are
+  // owned by `auth.js` (which ran before this module was cloned
+  // into the DOM). Read its exposed state and render the pill.
+  refreshAuthState();
 })();
 
 // ---- Export (SRT / VTT / JSON / TXT) ----------------------------------------
@@ -387,7 +491,6 @@ function exportAs(format) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-const downloadMenu = document.getElementById("download-menu");
 if (downloadMenu) {
   downloadMenu.addEventListener("click", (e) => {
     const target = e.target.closest("[data-format]");

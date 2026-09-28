@@ -184,6 +184,10 @@ fn make_app_state(
         llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
             RateLimitConfig::default().llm_per_min,
         )),
+        auth_store: None,
+        auth_oidc: None,
+        auth_passkey: None,
+        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
     })
 }
 

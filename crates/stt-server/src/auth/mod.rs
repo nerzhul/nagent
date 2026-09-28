@@ -1,12 +1,16 @@
 //! `auth/` — multi-user authentication & user identity (PR1).
 //!
-//! The subsystem is gated behind the `auth` cargo feature. When the
-//! feature is off this entire module compiles to a stub so the rest
-//! of the crate does not need `#[cfg(feature = "auth")]` guards at
-//! every call site.
+//! Always compiled in (no cargo feature gate). When the runtime
+//! config sets `auth.enabled = false` the server keeps the pre-PR1
+//! single-user trust boundary; the modules in this tree still exist
+//! but the `auth::boot::auto_bootstrap` function short-circuits and
+//! the HTTP routes (registered in `lib::build_router`) are guarded
+//! by the runtime flag.
 //!
 //! ## Sub-modules
 //!
+//! - [`mod@boot`] — auto-bootstrap invoked by `main.rs` (migrate +
+//!   optional sqlite first-admin creation).
 //! - [`mod@store`] — DB-agnostic data access (users + sessions +
 //!   passkeys + auth events). The public type is [`store::AuthStore`]
 //!   which is a `match`-dispatched enum over the sqlite / postgres
@@ -35,36 +39,26 @@
 //!                                     └─► db_sqlite / db_postgres
 //! ```
 
-#[cfg(feature = "auth")]
+pub mod boot;
 pub mod cli;
-#[cfg(feature = "auth")]
 pub mod db_postgres;
-#[cfg(feature = "auth")]
 pub mod db_sqlite;
-#[cfg(feature = "auth")]
 pub mod error;
-#[cfg(feature = "auth")]
 pub mod middleware;
-#[cfg(feature = "auth")]
 pub mod oidc;
-#[cfg(feature = "auth")]
 pub mod passkey;
-#[cfg(feature = "auth")]
 pub mod password;
-#[cfg(feature = "auth")]
 pub mod rate_limit;
-#[cfg(feature = "auth")]
+pub mod router;
 pub mod routes;
-#[cfg(feature = "auth")]
 pub mod session;
-#[cfg(feature = "auth")]
 pub mod store;
 
-#[cfg(feature = "auth")]
 pub use error::AuthError;
-#[cfg(feature = "auth")]
+pub use error::{require_auth_store, require_oidc_state, require_passkey_state};
+pub use oidc::OidcState;
+pub use passkey::PasskeyState;
 pub use session::{AuthUser, SessionRecord};
-#[cfg(feature = "auth")]
 pub use store::AuthStore;
 
 /// Names of the auth backends an operator can enable.
@@ -72,6 +66,5 @@ pub use store::AuthStore;
 /// The string form (`"local"`, `"oidc"`, `"passkey"`) is what shows
 /// up in `[auth].backends` and `NAGENT_AUTH_BACKENDS`. The enum is
 /// defined in `crate::config::AuthBackendKind` so the config code
-/// stays free of `#[cfg(feature = "auth")]` gates.
-#[cfg(feature = "auth")]
+/// stays free of feature gates.
 pub use crate::config::AuthBackendKind;

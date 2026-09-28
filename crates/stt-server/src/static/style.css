@@ -1964,3 +1964,135 @@ kbd {
   min-width: 1.4rem;
   text-align: center;
 }
+/* ---- Auth pill + login modal (PR1) -------------------------------------- */
+
+.auth-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0.75rem;
+  margin-top: 0.5rem;
+  background: var(--bg-elev, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
+.auth-pill-text {
+  color: var(--fg, inherit);
+}
+
+.auth-pill-action {
+  background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  color: var(--accent, #5aa9ff);
+  padding: 0.15rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.auth-pill-action:hover {
+  background: var(--bg-elev, rgba(255, 255, 255, 0.06));
+}
+
+.auth-pill-logout {
+  /* subtle variant — same look as auth-pill-action */
+}
+
+.login-modal {
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+  background: var(--bg, #1a1a1a);
+  color: var(--fg, inherit);
+  border-radius: 12px;
+  padding: 1.5rem;
+  min-width: 320px;
+  max-width: 90vw;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.login-modal::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.login-modal h2 {
+  margin: 0 0 1rem 0;
+  font-size: 1.1rem;
+}
+
+.login-modal label {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+
+.login-modal input {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-elev, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+  border-radius: 6px;
+  color: var(--fg, inherit);
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
+.login-modal input:focus {
+  outline: 2px solid var(--accent, #5aa9ff);
+  outline-offset: 1px;
+}
+
+.login-error {
+  color: var(--error, #ff6b6b);
+  font-size: 0.8rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  background: rgba(255, 107, 107, 0.08);
+  border-radius: 6px;
+}
+
+.login-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.login-modal-actions button {
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.login-cancel {
+  background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+  color: var(--fg, inherit);
+}
+
+.login-submit {
+  background: var(--accent, #5aa9ff);
+  border: 1px solid var(--accent, #5aa9ff);
+  color: white;
+}
+
+.login-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Portal mode: the server has `auth.enabled = true` and the user is
+   anonymous, so every protected endpoint 401s. The login modal is
+   the only thing the user can interact with until they authenticate.
+   Hide the Cancel button (the JS also adds `login-modal--forced` to
+   the dialog and intercepts the `cancel` event to re-open the modal
+   on ESC). The dialog's `::backdrop` already blocks pointer events
+   to the rest of the page, so the chat UI is naturally inert. */
+.login-modal--forced .login-cancel {
+  display: none;
+}

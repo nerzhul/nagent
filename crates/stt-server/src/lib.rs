@@ -17,7 +17,6 @@
 #![warn(missing_debug_implementations)]
 
 pub mod agents;
-#[cfg(feature = "auth")]
 pub mod auth;
 pub mod config;
 pub mod config_file;
@@ -87,6 +86,19 @@ pub struct AppState {
     pub stt_rate_limiter: RateLimiter,
     /// Per-source-IP token bucket for the `/v1/*` LLM proxy.
     pub llm_rate_limiter: RateLimiter,
+    /// Auth DB handle (PR1). `Some(_)` when `auth.enabled = true`,
+    /// `None` otherwise so existing tests that do not care about
+    /// auth keep building unmodified. Populated by `auth::boot::
+    /// auto_bootstrap` at server start.
+    pub auth_store: Option<auth::AuthStore>,
+    /// OIDC sub-state — `None` when OIDC is not enabled (or
+    /// `auth.enabled = false`).
+    pub auth_oidc: Option<auth::oidc::OidcState>,
+    /// Passkey sub-state — `None` when passkey is not enabled.
+    pub auth_passkey: Option<auth::passkey::PasskeyState>,
+    /// Login-attempt rate limiter. Shared between the `RequireAuth`
+    /// middleware (unused) and the password login handler.
+    pub auth_rate_limiter: auth::rate_limit::LoginRateLimiter,
 }
 
 impl std::fmt::Debug for AppState {
@@ -107,25 +119,54 @@ impl std::fmt::Debug for AppState {
 }
 
 /// Build the axum router around [`AppState`]. Exposed for tests.
+///
+/// When `auth.enabled = true` the router applies the [`RequireAuth`]
+/// middleware (PR1) to every endpoint **except** a small set of
+/// public carve-outs: the index page, `/static/*`, `/healthz`,
+/// `/api/version`, and the auth login routes. The carve-out exists
+/// so the browser can fetch the login page and submit credentials
+/// without already being authenticated. Everything else — STT
+/// WebSocket upgrade, `/v1/chat/completions`, agents, TTS,
+/// `/api/me`, `/api/auth/logout` — requires a valid session cookie
+/// (or `Authorization: Bearer <session-id>`).
+///
+/// When `auth.enabled = false` the router is unchanged: no
+/// `RequireAuth` layer is installed anywhere and the pre-PR1
+/// single-user trust boundary holds.
+///
+/// [`RequireAuth`]: crate::auth::middleware::require_auth_middleware
 pub fn build_router(state: Arc<AppState>) -> Router {
     // Always-on security headers applied to *every* response (static
-    // frontend, health checks, version probe, WS upgrade, LLM proxy).
+    // frontend, health checks, version probe, WS upgrade, LLM proxy,
+    // auth subtree). Applied as the outermost layer on the merged
+    // router so a single header copy runs regardless of which
+    // subtree handled the request.
     let security_layers = (
         middleware::security_headers_layer(),
         middleware::referrer_policy_layer(),
         middleware::nosniff_layer(),
     );
 
-    // STT routes are always registered. The LLM routes are gated on
-    // `LLM_ENABLED` so disabling the feature leaves no trace of it
-    // (the chat view simply sees 404 on `/v1/*`).
-    let mut stt_app = Router::new()
+    // ----- Public subtree (no auth required) -----------------------------
+    // These endpoints stay reachable even when `auth.enabled = true`
+    // so the browser can load the login page, fetch its assets,
+    // submit credentials, and have ops tooling (health probes,
+    // version probes) keep working. The auth login routes are
+    // merged into `public` further down.
+    let public = Router::new()
         .route("/", get(ws_handler::index_handler))
         .route("/healthz", get(ws_handler::healthz))
         .route("/api/version", get(ws_handler::version_handler))
-        .route("/ws", get(ws_handler::ws_upgrade))
-        .route("/static/*path", get(ws_handler::static_path_handler))
-        .layer(security_layers.clone());
+        .route("/static/*path", get(ws_handler::static_path_handler));
+
+    // ----- Protected subtree (auth required when enabled) ----------------
+    // The STT WebSocket upgrade, LLM proxy, agents, TTS, and the
+    // auth-protected identity routes (`/api/me`, `/api/auth/logout`,
+    // passkey register). Each optional subtree keeps its own
+    // rate-limit + CORS envelope; the global `RequireAuth` layer is
+    // applied below, after we know whether auth is enabled.
+    let mut protected: Router<Arc<AppState>> =
+        Router::new().route("/ws", get(ws_handler::ws_upgrade));
 
     // The agents routes are gated independently from the LLM proxy so
     // direct curl invocation (`POST /v1/agents/web_fetch/invoke`) keeps
@@ -161,16 +202,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 let limiter = llm_limiter.clone();
                 async move { llm_rate_limit_middleware(limiter, req, next).await }
             }))
-            .layer(cors)
-            .layer(security_layers.clone());
-        stt_app = stt_app.merge(agents_app);
+            .layer(cors);
+        protected = protected.merge(agents_app);
     }
 
     if let Some(llm) = &state.llm {
         // The LLM proxy gets its own CORS layer driven by
         // `LLM_CORS_ALLOW_ORIGINS`, a per-IP rate limiter, the
-        // bearer-auth gate driven by `LLM_AUTH_MODE` / `LLM_API_KEY`,
-        // and the same security headers.
+        // bearer-auth gate driven by `LLM_AUTH_MODE` / `LLM_API_KEY`.
         let cors = middleware::cors_layer(&llm.cfg().cors_allow_origins);
         let llm_limiter = state.llm_rate_limiter.clone();
         let llm_cfg = Arc::new(llm.cfg().clone());
@@ -185,9 +224,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 let limiter = llm_limiter.clone();
                 async move { llm_rate_limit_middleware(limiter, req, next).await }
             }))
-            .layer(cors)
-            .layer(security_layers.clone());
-        stt_app = stt_app.merge(llm_app);
+            .layer(cors);
+        protected = protected.merge(llm_app);
     }
 
     // TTS routes share the LLM proxy's CORS / rate-limit envelope
@@ -214,12 +252,52 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 let limiter = llm_limiter.clone();
                 async move { llm_rate_limit_middleware(limiter, req, next).await }
             }))
-            .layer(cors)
-            .layer(security_layers);
-        stt_app = stt_app.merge(tts_app);
+            .layer(cors);
+        protected = protected.merge(tts_app);
     }
 
-    stt_app.with_state(state)
+    // ----- Auth subtree (PR1) --------------------------------------------
+    // When `auth.enabled = true`:
+    //   - login routes (`/api/auth/login/*`) live in `public` so they
+    //     are reachable without a session;
+    //   - protected identity routes (`/api/me`, `/api/auth/logout`,
+    //     passkey register start/finish) live in `protected`;
+    //   - `protected` is wrapped with `RequireAuth` so anonymous
+    //     requests get `401 authentication required`.
+    // When `auth.enabled = false`: nothing is mounted; the server
+    // keeps the pre-PR1 single-user trust boundary.
+    if state.config.auth.enabled {
+        let auth_store = state
+            .auth_store
+            .clone()
+            .expect("auth_store must be Some when auth is enabled");
+        let auth_layer = axum::middleware::from_fn_with_state(
+            crate::auth::middleware::AuthState::new(auth_store, state.config.clone()),
+            crate::auth::middleware::require_auth_middleware,
+        );
+        let login = crate::auth::router::build_public_auth_router(state.clone());
+        let identity = crate::auth::router::build_protected_auth_router(state.clone());
+        let protected_with_auth = protected.merge(identity).layer(auth_layer);
+        // Layer order is applied bottom-up; the LAST `.layer()`
+        // becomes the OUTERMOST. The access log is the outermost
+        // so it sees the final response status (after `RequireAuth`
+        // and the security-header layers have run) and the
+        // `ConnectInfo` IP from the axum server. Security headers
+        // are second-outermost so they can mutate the response
+        // before the access log snapshots the status.
+        public
+            .merge(login)
+            .merge(protected_with_auth)
+            .layer(security_layers)
+            .layer(axum::middleware::from_fn(middleware::access_log_middleware))
+            .with_state(state)
+    } else {
+        public
+            .merge(protected)
+            .layer(security_layers)
+            .layer(axum::middleware::from_fn(middleware::access_log_middleware))
+            .with_state(state)
+    }
 }
 
 /// axum middleware that consumes one token from the supplied LLM
