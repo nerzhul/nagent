@@ -35,4 +35,5 @@ kustomize-build/
 # the source of truth lives in the embedded assets themselves.
 crates/stt-server/src/static/version.txt
 
-.kilo/
+.kilo/**
+!.kilo/plans/**
