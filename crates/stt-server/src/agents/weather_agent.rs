@@ -172,7 +172,7 @@ impl Agent for WeatherAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         // The API key is a server-side config knob, not an LLM
         // argument. Surface a clear, actionable error when it's
         // missing so the operator knows exactly what to fix.

@@ -165,7 +165,7 @@ without a default and is required.
 | `NAGENT_AUTH_OIDC_ROLE_CLAIM` | `groups`                                    | Auth / OIDC    | IdP claim name to map onto the local `roles` list. Reserved for a future RBAC layer; ignored at the HTTP layer today. |
 | `NAGENT_AUTH_PASSKEY_SELF_REGISTRATION` | `true`                             | Auth / passkey | When `true`, any logged-in user can enrol a new passkey without an admin.                                      |
 | `NAGENT_AUTH_PASSKEY_RP_ID`  | _(empty)_                                     | Auth / passkey | WebAuthn relying party id (no scheme, no port — e.g. `nagent.example.com`). MUST match the browser's effective domain. |
-| `NAGENT_AUTH_PASSKEY_RP_NAME` | `nagent`                                    | Auth / passkey | Human-readable RP name shown by the authenticator.                                                            |
+| `NAGENT_AUTH_PASSKEY_RP_NAME` | `nagent`                                    | Auth / passkey | Human-readable RP name shown by the authenticator.                                                              |
 | `NAGENT_AUTH_PASSKEY_ORIGINS` | _(empty)_                                   | Auth / passkey | Comma-separated allowed origins — each entry MUST include scheme + port (e.g. `https://nagent.example.com`). |
 | `RUST_LOG`                   | `info,stt_server=debug,stt_core=debug` (local); `info,stt_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
 
@@ -214,6 +214,7 @@ for per-source-IP rate limits:
 | `[server.rate_limits].*`          | `STT_RATE_PER_MIN`, `LLM_*` | Per-IP buckets.                                |
 | `[llm].*`                         | `LLM_*`, `OLLAMA_*`         | OpenAI-compatible proxy.                       |
 | `[auth].*`                        | `NAGENT_AUTH_*`             | Multi-user authentication (see "Authentication" below). `[auth.db]` selects sqlite vs postgres at runtime. |
+| `[auth.credentials].key`          | _(none)_                    | AES-256-GCM encryption key for the per-user credentials vault, in plaintext inside the TOML file (64 hex chars / 32 bytes). REQUIRED when `auth.enabled = true` AND at least one agent is registered; the server refuses to boot otherwise. See "Per-user credentials" below for the key-generation recipe and the secret-handling caveat. |
 
 The `[agents]` section is a general block for chat-agent settings: it
 carries the master switches (`enabled`, `llm_max_tool_rounds`) plus
@@ -284,8 +285,8 @@ and ops tooling keeps working:
 
 Everything else — the STT WebSocket upgrade (`/ws`),
 `/v1/chat/completions`, `/v1/models`, `/v1/agents*`,
-`/v1/audio/*`, `/api/me`, `POST /api/auth/logout`, the
-passkey register start/finish routes — requires a valid session
+`/v1/audio/*`, `/api/me`, `/api/integrations*`, `POST /api/auth/logout`,
+the passkey register start/finish routes — requires a valid session
 cookie (or `Authorization: Bearer <session-id>`). Anonymous
 requests get `401 authentication required` with a
 `WWW-Authenticate: Cookie realm="nagent"` header.
@@ -401,6 +402,148 @@ The CLI reads the same `[auth.db]` configuration + env vars the
 server uses, so there is no second source of truth. Boot the server
 once to apply the schema; the CLI can run before or after.
 note lives in `crates/stt-server/src/auth/oidc.rs`.
+
+### Per-user credentials (framework)
+
+The server ships a **per-user credentials vault** so chat agents can
+read hostnames, logins, and tokens the user has configured for
+third-party integrations (IMAP/SMTP, CalDAV, Home Assistant, GitHub,
+…) without leaking those secrets to the LLM prompt or to logs. This
+section documents the framework only; concrete services land in
+follow-up PRs.
+
+#### Threat model
+
+- Plaintext credentials are encrypted at rest with **AES-256-GCM**.
+  The encryption key (64 hex chars / 32 raw bytes) is held in
+  plaintext inside `[auth.credentials].key` in the server's TOML
+  config. Operators who want to keep the secret out of disk should
+  mount the TOML file from an encrypted volume (k8s `Secret` via
+  `subPath`, Vault Agent, …) — the configuration shape itself does
+  not force plaintext storage on disk, only on the source-of-truth
+  file.
+- Each agent call constructs a fresh `UserContext` that owns one
+  in-memory `SecretCache`. The cache zeroises on drop, so
+  plaintexts only live for the duration of one LLM tool round (or
+  one direct `/v1/agents/:name/invoke` HTTP call). There is no
+  long-lived plaintext cache anywhere in the process.
+- Every successful credential read writes one `auth_events` row
+  (`kind = "credential_access"`, `target_service = <service-id>`).
+  Missing rows write `"credential_missing"`; AES-GCM authentication
+  failures write `"credential_decrypt_failed"`. Secret values are
+  never stored in `auth_events`.
+- Sessions are **per-user**: the credential owner is always the
+  resolved `AuthUser`. There is no `?as=…` parameter and no admin
+  override.
+
+#### Boot wiring
+
+The server refuses to boot when **`auth.enabled = true` AND at
+least one agent is registered AND `[auth.credentials].key` is unset
+or malformed**. Generate a 32-byte key once at install time and
+paste it under `[auth.credentials].key` in the TOML config:
+
+```bash
+# 64 hex chars = 32 bytes. Paste the output under
+# [auth.credentials].key in the TOML file. Rotating means:
+# generate a new key, then re-encrypt every row in
+# `user_credentials` (rotation is NOT supported in v1 — see
+# "Risks" below).
+openssl rand -hex 32
+```
+
+The matching TOML block:
+
+```toml
+[auth.credentials]
+# 64 hex chars = 32 raw bytes (AES-256-GCM). Treat this file as
+# a secret — encrypted volume, restricted ACLs, never VCS.
+key = "<paste the 64-char hex string here>"
+```
+
+When `auth.enabled = false` OR every agent is disabled, the field
+is silently ignored and the framework stays dormant (the
+pre-credentials single-user trust boundary is preserved).
+
+#### HTTP surface
+
+All routes are mounted under the existing `RequireAuth` middleware
+— there is no anonymous access. The credential owner is always the
+session user.
+
+| Method   | Path                                       | Description                                                                                       |
+| -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/integrations`                        | List every registered service with `configured: bool` per service for the caller.                 |
+| `GET`    | `/api/integrations/:id`                    | Single-service summary. `404` (via `400 unknown service`) on unknown id.                            |
+| `PUT`    | `/api/integrations/:id/credentials`        | Atomic replace of every field for the service. `204 No Content` on success.                       |
+| `DELETE` | `/api/integrations/:id/credentials`        | Clear every field for the service. `204 No Content` on success.                                   |
+
+`PUT` / `DELETE` are CSRF-protected via the same `x-csrf-token`
+header that guards the auth subtree. `GET` responses never carry
+plaintext values; only the per-field `filled` boolean is exposed.
+
+Example (configure an integration):
+
+```bash
+# 1. Log in to obtain a session cookie + CSRF token.
+# 2. PUT the credentials (plaintext — encrypted server-side at rest).
+curl -X PUT http://localhost:8080/api/integrations/email_imap/credentials \
+  -b "nagent_session=$SESSION_ID" \
+  -H "x-csrf-token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{"fields": {"host": "imap.example.com", "port": "993", "username": "alice", "password": "…"}}'
+```
+
+The browser UI surfaces the same flow under **Advanced → Integrations**
+in the Discussion view (hidden until `auth.enabled = true` and the
+user is logged in). The drawer lists every registered service with
+a "Configured" / "Not configured" pill and a Configure / Edit
+button that opens a per-field modal.
+
+#### Agent trait
+
+Every `Agent::invoke` now takes `&UserContext` as its first
+argument. Agents that do not need credentials ignore the parameter
+(let-binding `_ctx: &UserContext`). Agents that need a credential
+call:
+
+```rust
+let password = ctx.secret("email_imap", "password").await?
+    .ok_or_else(|| anyhow::anyanyhow!("missing email_imap.password"))?;
+// `password` is a `SecretString`; the compiler will refuse to log it.
+```
+
+Failures surface as `AgentError::CredentialsMissing { service,
+field }` (the user has not configured it) or
+`AgentError::CredentialsDecryptFailed { service, field }` (the
+server-side key was rotated without re-encrypting the row). The
+chat UI detects the first variant and renders a clickable
+"configure `<service>`" link so the LLM can recover without a
+round-trip.
+
+#### Schema
+
+The `0002_credentials.sql` migration adds:
+
+- `auth_events.target_service TEXT` — backfilled as `NULL` for
+  pre-migration rows. Never carries a secret value.
+- `user_credentials` — one row per `(user, service, field)`. Holds
+  the AES-256-GCM nonce + ciphertext. FK-cascades on `users.id`
+  so deleting a user wipes their creds.
+
+#### Risks & follow-ups
+
+- **Key rotation is NOT supported in v1.** The
+  `[auth.credentials].key` value is read once at boot. Rotating
+  requires re-encrypting every row in `user_credentials`; a
+  follow-up PR will add a double-write migration helper.
+- **Server-wide fallback credentials** are not in v1. The
+  framework is per-user only; shared agents (e.g. weather) keep
+  their global config (`[agents.get_weather].api_key`).
+- **Concrete integrations** (IMAP, CalDAV, GitHub, Home Assistant,
+  …) land in their own follow-up PRs. Adding one is a single
+  `ServiceDef` to `crates/stt-server/src/agents/services.rs` plus
+  an agent that reads creds via `ctx.secret(...)`.
 
 ### Kubernetes overlays
 
@@ -521,6 +664,12 @@ keeps the fetched content in the LLM's context without re-fetching.
 | `WEB_FETCH_ALLOWLIST`     | _(empty)_ | Comma-separated hostname allow-list (suffix match, `*.foo` wildcards, bare `*` for everything). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
 | `WEB_FETCH_MAX_BYTES`     | `2097152` | Maximum response size the agent will read (2 MiB). The agent iteratively doubles the budget on overflow, capped here. |
 | `WEB_FETCH_TIMEOUT_MS`    | `30000` | Per-request timeout in milliseconds.                                                |
+
+Every `Agent::invoke` carries a `&UserContext` (the per-request
+context built by the LLM proxy). Agents that ignore credentials
+let-bind `_ctx: &UserContext`; agents that need them call
+`ctx.secret("service_id", "field_key").await` to decrypt on demand
+— see the "Per-user credentials" section below.
 
 ### Daily agents (datetime, weather, stock quote, calculate, unit convert, wikipedia, dictionary)
 

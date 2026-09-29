@@ -24,6 +24,7 @@ use stt_proto::{
     decode_frame, encode, AudioFrame, Config, FinalTranscript, Payload, StartSession, Tag,
 };
 use stt_server::{
+    agents::ServiceRegistry,
     build_router,
     config::{LlmAuthMode, RateLimitConfig},
     rate_limit::{RateLimitPolicy, RateLimiter},
@@ -101,6 +102,9 @@ async fn start_test_server() -> (String, SessionMap) {
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     });
 
     let app = build_router(state);

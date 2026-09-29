@@ -129,7 +129,7 @@ impl Agent for DictionaryAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
         let url = build_entries_url(&self.cfg.base_url, &req.word);
         let body = fetch_json(&self.http, &url).await?;

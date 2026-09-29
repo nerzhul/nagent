@@ -77,7 +77,7 @@ impl Agent for DateTimeAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
         let now_utc: DateTime<Utc> = Utc::now();
 
@@ -163,7 +163,11 @@ mod tests {
     #[tokio::test]
     async fn invoke_utc_when_timezone_omitted() {
         let agent = DateTimeAgent::new();
-        let result = agent.invoke(json!({})).await.expect("invoke");
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
+        let result = agent.invoke(&ctx, json!({})).await.expect("invoke");
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["ok"], true);
         assert_eq!(parsed["source"], "system");
@@ -176,8 +180,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_paris_returns_positive_offset() {
         let agent = DateTimeAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let result = agent
-            .invoke(json!({"timezone": "Europe/Paris"}))
+            .invoke(&ctx, json!({"timezone": "Europe/Paris"}))
             .await
             .expect("invoke");
         let parsed: Value = serde_json::from_str(&result).unwrap();
@@ -193,8 +201,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_unknown_timezone() {
         let agent = DateTimeAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = agent
-            .invoke(json!({"timezone": "Mars/Olympus_Mons"}))
+            .invoke(&ctx, json!({"timezone": "Mars/Olympus_Mons"}))
             .await
             .expect_err("should reject");
         match err {
@@ -208,8 +220,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_non_object_arguments() {
         let agent = DateTimeAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = agent
-            .invoke(json!("not-an-object"))
+            .invoke(&ctx, json!("not-an-object"))
             .await
             .expect_err("should reject");
         assert!(matches!(err, AgentError::InvalidArguments(_)));
@@ -221,7 +237,11 @@ mod tests {
         // trims and filters empty strings, so the agent falls through
         // to the UTC branch.
         let agent = DateTimeAgent::new();
-        let result = agent.invoke(json!({"timezone": "  "})).await.unwrap();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
+        let result = agent.invoke(&ctx, json!({"timezone": "  "})).await.unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["data"]["timezone"], "UTC");
     }

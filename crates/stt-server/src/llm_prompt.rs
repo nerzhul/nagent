@@ -34,6 +34,43 @@ pub const USER_LOCATION_MARKER: &str = "User's approximate location:";
 /// vice versa).
 pub const USER_TIMEZONE_MARKER: &str = "The user's local timezone is";
 
+/// Prefix that the server-prepended per-user integrations block
+/// always carries. The server emits the block (listing the
+/// integrations the calling user has configured) and the
+/// `LLM_ALLOW_INTEGRATIONS_LIST=false` admin kill-switch matches
+/// on this prefix to drop the block before it reaches the upstream
+/// model.
+pub const USER_INTEGRATIONS_MARKER: &str = "The user has the following integrations configured:";
+
+/// Build the "configured integrations" system block for the calling
+/// user. Returns `None` when the user has no configured integrations
+/// (saves a useless system message).
+///
+/// `configured` is the list of service ids the user has set up; the
+/// human-readable names come from the static `ServiceRegistry`.
+pub fn build_integrations_block(
+    configured: &[String],
+    registry: &crate::agents::ServiceRegistry,
+) -> Option<String> {
+    if configured.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::with_capacity(configured.len() + 1);
+    lines.push(USER_INTEGRATIONS_MARKER.to_string());
+    for id in configured {
+        let Some(svc) = registry.get(id) else {
+            continue;
+        };
+        lines.push(format!(
+            "- {} (`{}`): {}",
+            svc.display_name,
+            svc.id,
+            svc.description_line()
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 /// Built-in default system prompt. English by `AGENTS.md` rule #1;
 /// admins override it via `LLM_SYSTEM_PROMPT` or `[llm].system_prompt`
 /// in TOML. The agent names match `Agent::name()` in

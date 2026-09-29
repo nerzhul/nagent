@@ -28,6 +28,7 @@ use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, Whisper
 use stt_proto::{decode_frame, Tag};
 use stt_server::config::RateLimitConfig;
 use stt_server::{
+    agents::ServiceRegistry,
     build_router,
     config::{LlmAuthMode, LlmConfig},
     rate_limit::RateLimiter,
@@ -107,6 +108,9 @@ async fn start_test_server_with(
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

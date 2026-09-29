@@ -19,6 +19,7 @@ use axum::http::{header, StatusCode};
 use dashmap::DashMap;
 use stt_core::{InferenceJob, MockBackend, PoolDispatch, WhisperBackend};
 use stt_server::{
+    agents::ServiceRegistry,
     build_router,
     config::{LlmAuthMode, LlmConfig, RateLimitConfig},
     rate_limit::{RateLimitPolicy, RateLimiter},
@@ -77,6 +78,9 @@ fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     })
 }
 

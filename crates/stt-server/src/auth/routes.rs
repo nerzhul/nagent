@@ -59,13 +59,11 @@ pub async fn logout_handler(
         provider = %user.provider,
         "auth logout ok"
     );
-    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
-        user_id: Some(user.id),
-        kind: "logout".into(),
-        provider: user.provider.clone(),
-        ip: None,
-        user_agent: None,
-    });
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+        Some(user.id),
+        "logout",
+        user.provider.clone(),
+    ));
     let mut response = (StatusCode::NO_CONTENT, "").into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,

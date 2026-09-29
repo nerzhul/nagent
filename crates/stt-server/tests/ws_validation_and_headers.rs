@@ -21,6 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, WhisperBackend};
 use stt_proto::{decode_frame, encode, error_code, AudioFrame, Config, Payload, StartSession, Tag};
 use stt_server::{
+    agents::ServiceRegistry,
     build_router,
     config::{LimitsConfig, LlmAuthMode, LlmConfig, RateLimitConfig},
     llm::LlmClient,
@@ -123,6 +124,9 @@ async fn start_test_server_with_rate_limit(
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

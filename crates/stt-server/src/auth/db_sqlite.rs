@@ -27,7 +27,9 @@ use uuid::Uuid;
 
 use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
-use crate::auth::store::{AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord};
+use crate::auth::store::{
+    AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord, UserCredentialRow,
+};
 use crate::config::AuthConfig;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -388,8 +390,8 @@ impl SqliteStore {
         // rows from the previous run.
         let id = Uuid::new_v4();
         let res = sqlx::query(
-            "INSERT INTO auth_events (id, user_id, kind, provider, ip, user_agent, occurred_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO auth_events (id, user_id, kind, provider, ip, user_agent, target_service, occurred_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(event.user_id.map(|u| u.to_string()))
@@ -397,12 +399,110 @@ impl SqliteStore {
         .bind(&event.provider)
         .bind(event.ip.as_deref())
         .bind(event.user_agent.as_deref())
+        .bind(event.target_service.as_deref())
         .bind(Utc::now().to_rfc3339())
         .execute(self.pool())
         .await;
         if let Err(e) = res {
             tracing::warn!(error = %e, "failed to write auth_events row");
         }
+    }
+
+    pub(crate) async fn upsert_user_credentials(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        fields: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), AuthError> {
+        let user_id_str = user_id.to_string();
+        let mut tx = self.pool.begin().await?;
+        // Wipe first so a partial PUT cannot leave a service half
+        // configured (the `UNIQUE (user_id, service_id, field_key)`
+        // would otherwise reject a duplicate insert with a 409 we
+        // would have to map manually).
+        sqlx::query("DELETE FROM user_credentials WHERE user_id = ? AND service_id = ?")
+            .bind(&user_id_str)
+            .bind(service_id)
+            .execute(&mut *tx)
+            .await?;
+        for (field_key, nonce, ciphertext) in fields {
+            if nonce.len() != 12 {
+                return Err(AuthError::BadRequest(format!(
+                    "nonce for field {field_key:?} must be 12 bytes, got {}",
+                    nonce.len()
+                )));
+            }
+            let id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO user_credentials \
+                 (id, user_id, service_id, field_key, nonce, ciphertext, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            )
+            .bind(&id)
+            .bind(&user_id_str)
+            .bind(service_id)
+            .bind(field_key)
+            .bind(nonce)
+            .bind(ciphertext)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_service_credentials(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+    ) -> Result<u64, AuthError> {
+        let res = sqlx::query("DELETE FROM user_credentials WHERE user_id = ? AND service_id = ?")
+            .bind(user_id.to_string())
+            .bind(service_id)
+            .execute(self.pool())
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    pub(crate) async fn list_configured_field_keys(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+    ) -> Result<Vec<String>, AuthError> {
+        let rows = sqlx::query(
+            "SELECT field_key FROM user_credentials \
+             WHERE user_id = ? AND service_id = ? ORDER BY field_key",
+        )
+        .bind(user_id.to_string())
+        .bind(service_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("field_key"))
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) async fn fetch_user_credential(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        field_key: &str,
+    ) -> Result<Option<UserCredentialRow>, AuthError> {
+        let row = sqlx::query(
+            "SELECT nonce, ciphertext FROM user_credentials \
+             WHERE user_id = ? AND service_id = ? AND field_key = ?",
+        )
+        .bind(user_id.to_string())
+        .bind(service_id)
+        .bind(field_key)
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        Ok(Some(UserCredentialRow {
+            nonce: r.try_get("nonce")?,
+            ciphertext: r.try_get("ciphertext")?,
+        }))
     }
 }
 

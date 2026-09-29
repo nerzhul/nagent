@@ -131,7 +131,7 @@ impl Agent for WebFetchAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
         let parsed = url::Url::parse(&req.url)
             .map_err(|e| AgentError::InvalidArguments(format!("url parse: {e}")))?;
@@ -841,10 +841,14 @@ mod tests {
     fn rejects_invalid_args() {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let agent = WebFetchAgent::new(WebFetchConfig::default());
-        let err = rt.block_on(agent.invoke(json!({}))).unwrap_err();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
+        let err = rt.block_on(agent.invoke(&ctx, json!({}))).unwrap_err();
         matches!(err, AgentError::InvalidArguments(_));
         let err = rt
-            .block_on(agent.invoke(json!("not-an-object")))
+            .block_on(agent.invoke(&ctx, json!("not-an-object")))
             .unwrap_err();
         matches!(err, AgentError::InvalidArguments(_));
     }
@@ -853,8 +857,12 @@ mod tests {
     fn rejects_unsupported_scheme() {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let agent = WebFetchAgent::new(WebFetchConfig::default());
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = rt
-            .block_on(agent.invoke(json!({"url": "file:///etc/passwd"})))
+            .block_on(agent.invoke(&ctx, json!({"url": "file:///etc/passwd"})))
             .unwrap_err();
         matches!(err, AgentError::InvalidArguments(_));
     }
@@ -864,8 +872,12 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let cfg = WebFetchConfig::default();
         let agent = WebFetchAgent::new(cfg.clone());
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = rt
-            .block_on(agent.invoke(json!({"url": "http://10.0.0.1/"})))
+            .block_on(agent.invoke(&ctx, json!({"url": "http://10.0.0.1/"})))
             .unwrap_err();
         matches!(err, AgentError::SandboxDenied(_));
     }
@@ -878,8 +890,12 @@ mod tests {
             ..WebFetchConfig::default()
         };
         let agent = WebFetchAgent::new(cfg);
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = rt
-            .block_on(agent.invoke(json!({"url": "http://evil.com/"})))
+            .block_on(agent.invoke(&ctx, json!({"url": "http://evil.com/"})))
             .unwrap_err();
         matches!(err, AgentError::SandboxDenied(_));
     }

@@ -1763,6 +1763,93 @@ select, input[type="checkbox"] {
   margin-top: 0.6rem;
 }
 
+/* Per-user integrations drawer. Renders one row per registered
+ * service with an icon, label, status pill, and a Configure / Edit
+ * button. The modal form (`.chat-integration-modal`) is a child of
+ * `<body>` so its z-index can sit above the Advanced disclosure
+ * without needing to escape `overflow: hidden`. */
+.chat-integrations {
+  margin-top: 0.6rem;
+}
+.chat-integrations > summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.chat-integrations-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.chat-integration-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.chat-integration-icon {
+  width: 1.4rem;
+  text-align: center;
+}
+.chat-integration-label {
+  flex: 1;
+}
+.chat-integration-status {
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+.chat-integration-edit {
+  margin: 0;
+}
+.chat-integrations-empty {
+  opacity: 0.75;
+  font-style: italic;
+  padding: 0.2rem 0;
+}
+.chat-integration-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.chat-integration-modal {
+  background: var(--chat-modal-bg, #1d1f23);
+  color: var(--chat-modal-fg, #f1f1f1);
+  padding: 1.2rem;
+  border-radius: 0.5rem;
+  max-width: 480px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.chat-integration-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.chat-integration-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.chat-integration-field input {
+  padding: 0.4rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--chat-input-border, #444);
+  background: var(--chat-input-bg, #2a2c30);
+  color: inherit;
+}
+.chat-integration-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 /* Per-message replay button. Renders inside each assistant bubble,
  * top-right corner, hidden by default until the user enables TTS
  * (see `refreshReplayButtonVisibility` in chat.js). When clicked,

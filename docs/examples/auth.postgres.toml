@@ -4,6 +4,15 @@
 # Use this when you have an existing Postgres server (e.g. shared
 # with the LLM proxy's metadata DB) and want all durable state on
 # one engine.
+#
+# Per-user credentials: AGENTS_ENABLED defaults to `true`, so the
+# server requires `[auth.credentials].key` (64 hex chars / 32
+# bytes) at boot. In a shared cluster, mount this TOML file from
+# an encrypted volume (k8s Secret, Vault Agent, etc.) so the key
+# does not land in plaintext on the host's filesystem. Keep the
+# same key across every replica in a rolling deployment — a key
+# change requires re-encrypting every `user_credentials` row
+# (rotation is NOT supported in v1).
 
 # Server knob — same shape as the main example.
 [server]
@@ -41,6 +50,14 @@ client_secret = ""                       # env: NAGENT_AUTH_OIDC_CLIENT_SECRET
 scopes = ["openid", "email", "profile"]
 required_groups = ["nagent-users"]       # empty = no restriction
 role_claim = "groups"
+
+# Per-user credentials vault. 64 hex chars = 32 raw bytes
+# (AES-256-GCM). Generate with `openssl rand -hex 32`. Keep the
+# same key across every replica; rotation is NOT supported in v1
+# (changing the key makes every existing `user_credentials`
+# row unrecoverable).
+[auth.credentials]
+key = "REPLACE_ME_WITH_64_HEX_CHARS_FROM_OPENSSL_RAND_HEX_32______________"
 
 # Passkey deliberately omitted — the deployment relies on OIDC
 # + the local password backend only. Add `[auth.passkey]` here +

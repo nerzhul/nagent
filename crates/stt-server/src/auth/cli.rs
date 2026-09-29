@@ -330,13 +330,11 @@ async fn create_admin(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyh
         .create_user(email, email, "local", Some(&hash))
         .await
         .map_err(|e| anyhow::anyhow!("create_user failed: {e}"))?;
-    store.record_event(crate::auth::store::NewAuthEvent {
-        user_id: Some(user_id),
-        kind: "create_admin".into(),
-        provider: "local".into(),
-        ip: None,
-        user_agent: None,
-    });
+    store.record_event(crate::auth::store::NewAuthEvent::auth(
+        Some(user_id),
+        "create_admin",
+        "local",
+    ));
 
     println!("{user_id}");
     Ok(ExitCode::from(0))

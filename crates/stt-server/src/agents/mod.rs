@@ -28,11 +28,31 @@
 //! ```
 //!
 //! See the [`crate::llm`] module for how these events are emitted.
+//!
+//! ## Per-user credentials
+//!
+//! Every [`Agent::invoke`] receives a `&UserContext`. Agents that
+//! need to talk to a third-party service on the user's behalf call
+//! [`UserContext::secret`] which decrypts a per-(user, service,
+//! field) ciphertext on demand, caches the plaintext for the rest of
+//! the request, and writes one `auth_events` audit row. Agents that
+//! do not need credentials ignore the argument.
+
+pub mod services;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use secrecy::SecretString;
 use serde_json::Value;
+use uuid::Uuid;
+
+use crate::credentials::cache::SecretCache;
+use crate::credentials::resolver::{CredentialError, CredentialResolver};
+
+pub use services::{
+    FieldDef, FieldKind, FieldSummary, ServiceDef, ServiceRegistry, ServiceSummary,
+};
 
 /// Errors surfaced by [`Agent::invoke`].
 ///
@@ -64,6 +84,34 @@ pub enum AgentError {
     /// signal rather than a hard `502`.
     #[error("response exceeded max_bytes={budget}")]
     ResponseExceeded { budget: usize },
+    /// The agent tried to read a per-user credential but the user
+    /// has not configured that (service, field) yet. Surfaced as a
+    /// 4xx-class signal to the LLM so the chat UI can prompt the
+    /// user to configure the integration; never logged at WARN.
+    #[error("credentials not configured for service={service} field={field}")]
+    CredentialsMissing { service: String, field: String },
+    /// The persisted ciphertext for a credential failed AES-GCM
+    /// authentication. Almost always means
+    /// `[auth.credentials].key` was rotated without re-encrypting
+    /// the rows; the row is now unrecoverable.
+    #[error("credentials decrypt failed for service={service} field={field}")]
+    CredentialsDecryptFailed { service: String, field: String },
+}
+
+impl From<CredentialError> for AgentError {
+    fn from(e: CredentialError) -> Self {
+        match e {
+            CredentialError::Missing { service, field } => {
+                AgentError::CredentialsMissing { service, field }
+            }
+            CredentialError::DecryptFailed { service, field } => {
+                AgentError::CredentialsDecryptFailed { service, field }
+            }
+            CredentialError::Store(e) => {
+                AgentError::AgentFailed(format!("credentials store error: {e}"))
+            }
+        }
+    }
 }
 
 /// One registered chat agent.
@@ -93,7 +141,131 @@ pub trait Agent: Send + Sync {
     /// `role: "tool"` `content` — JSON keeps it parseable, lets the
     /// LLM pick the fields it cares about, and matches what
     /// OpenAI's Python SDK produces for a tool result.
-    async fn invoke(&self, args: Value) -> Result<String, AgentError>;
+    ///
+    /// `ctx` carries the calling user's identity and the per-request
+    /// plaintext cache. Agents that do not need credentials may
+    /// ignore it (let-binding `_ctx: &UserContext`).
+    async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError>;
+}
+
+/// Per-call context handed to every [`Agent::invoke`]. Cheap to
+/// construct (the `SecretCache` allocates one DashMap); the `Drop`
+/// impl zeroises the cache so plaintexts never outlive the request.
+///
+/// Constructed once per LLM tool round (or once per direct
+/// `/v1/agents/:name/invoke` call) so each call has its own cache —
+/// no long-lived plaintext cache anywhere in the process.
+pub struct UserContext {
+    user_id: Uuid,
+    services: Arc<ServiceRegistry>,
+    /// `None` for `for_tests()` contexts (no DB available) and for
+    /// any agent path that has not been wired with a resolver.
+    /// When `None`, [`UserContext::secret`] returns
+    /// `CredentialsMissing` without touching the DB.
+    resolver: Option<Arc<CredentialResolver>>,
+    cache: SecretCache,
+}
+
+impl std::fmt::Debug for UserContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserContext")
+            .field("user_id", &self.user_id)
+            .field("services", &self.services)
+            .field("resolver", &self.resolver.as_ref().map(|_| "<resolver>"))
+            .field("cache_entries", &self.cache.len())
+            .finish()
+    }
+}
+
+impl UserContext {
+    /// Build a fresh context for one request. The caller owns the
+    /// `ServiceRegistry` and `CredentialResolver` for the lifetime
+    /// of the process (both live in `AppState`); we clone the
+    /// `Arc`s into the per-request ctx.
+    pub fn new(
+        user_id: Uuid,
+        services: Arc<ServiceRegistry>,
+        resolver: Arc<CredentialResolver>,
+    ) -> Self {
+        Self {
+            user_id,
+            services,
+            resolver: Some(resolver),
+            cache: SecretCache::new(),
+        }
+    }
+
+    /// Test-only constructor that omits the credential resolver.
+    ///
+    /// Existing agent unit tests that ignore `ctx` (the vast
+    /// majority) call this and keep working without a database.
+    /// Tests that exercise `ctx.secret(...)` must use the real
+    /// [`UserContext::new`] with a wired resolver.
+    pub fn for_tests(user_id: Uuid, services: Arc<ServiceRegistry>) -> Self {
+        Self {
+            user_id,
+            services,
+            resolver: None,
+            cache: SecretCache::new(),
+        }
+    }
+
+    /// The calling user's UUID. Agents can use it for audit rows
+    /// outside the credential path (the credential resolver
+    /// already records its own rows).
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    /// Look up a service by id.
+    pub fn service_def(&self, id: &str) -> Option<&'static ServiceDef> {
+        self.services.get(id)
+    }
+
+    /// Iterate every registered service (used by the LLM prompt to
+    /// emit the configured-only integrations block).
+    pub fn services(&self) -> &'static [ServiceDef] {
+        self.services.list()
+    }
+
+    /// Resolve a single credential field for the calling user.
+    ///
+    /// Returns:
+    /// - `Ok(Some(plaintext))` on hit (subsequent calls within the
+    ///   same request hit the cache);
+    /// - `Err(AgentError::CredentialsMissing)` when the field has
+    ///   not been configured OR when no resolver is wired (test
+    ///   contexts);
+    /// - `Err(AgentError::CredentialsDecryptFailed)` when AES-GCM
+    ///   authentication fails.
+    pub async fn secret(
+        &self,
+        service: &str,
+        field: &str,
+    ) -> Result<Option<SecretString>, AgentError> {
+        let Some(resolver) = &self.resolver else {
+            return Err(AgentError::CredentialsMissing {
+                service: service.to_string(),
+                field: field.to_string(),
+            });
+        };
+        match resolver
+            .get(self.user_id, service, field, &self.cache)
+            .await
+        {
+            Ok(opt) => Ok(opt),
+            Err(e) => Err(AgentError::from(e)),
+        }
+    }
+}
+
+impl Drop for UserContext {
+    fn drop(&mut self) {
+        // Zeroise the in-memory plaintext cache. The
+        // `SecretString::Drop` impl already wipes each entry;
+        // clearing the DashMap drives the `Drop` for every entry.
+        self.cache.zeroize();
+    }
 }
 
 /// Registry of every agent exposed by this server.

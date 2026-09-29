@@ -46,6 +46,7 @@ mod tests {
             password: stt_server::config::AuthPasswordConfig::default(),
             oidc: stt_server::config::AuthOidcConfig::default(),
             passkey: stt_server::config::AuthPasskeyConfig::default(),
+            credentials: stt_server::config::AuthCredentialsConfig::default(),
         }
     }
 
@@ -231,6 +232,7 @@ mod tests {
             provider: "test".into(),
             ip: None,
             user_agent: None,
+            target_service: None,
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
         let count = raw_query_scalar_i64(
@@ -341,6 +343,7 @@ mod tests {
                 provider: "test".into(),
                 ip: None,
                 user_agent: None,
+                target_service: None,
             });
         }
         // `AuthStore::record_event` spawns the actual write on the
@@ -384,6 +387,7 @@ mod tests {
                 provider: "test".into(),
                 ip: None,
                 user_agent: None,
+                target_service: None,
             });
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

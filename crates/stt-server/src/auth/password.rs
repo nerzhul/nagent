@@ -112,13 +112,11 @@ pub async fn login_handler(
             retry_after_secs,
             "password login rate-limited"
         );
-        require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
-            user_id: None,
-            kind: "login_rate_limited".into(),
-            provider: "local".into(),
-            ip: Some(ip.to_string()),
-            user_agent: None,
-        });
+        require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+            None,
+            "login_rate_limited",
+            "local",
+        ));
         return Err(AuthError::RateLimited { retry_after_secs });
     }
 
@@ -141,13 +139,11 @@ pub async fn login_handler(
                 ip = %ip,
                 "password login failed (unknown email or no password hash)"
             );
-            require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
-                user_id: None,
-                kind: "login_fail".into(),
-                provider: "local".into(),
-                ip: Some(ip.to_string()),
-                user_agent: None,
-            });
+            require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+                None,
+                "login_fail",
+                "local",
+            ));
             return Err(AuthError::InvalidCredentials);
         }
     };
@@ -163,13 +159,11 @@ pub async fn login_handler(
             ip = %ip,
             "password login failed (wrong password)"
         );
-        require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
-            user_id: Some(user.id),
-            kind: "login_fail".into(),
-            provider: "local".into(),
-            ip: Some(ip.to_string()),
-            user_agent: None,
-        });
+        require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+            Some(user.id),
+            "login_fail",
+            "local",
+        ));
         return Err(AuthError::InvalidCredentials);
     }
 
@@ -190,13 +184,11 @@ pub async fn login_handler(
         session_id = %session.id,
         "password login ok"
     );
-    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
-        user_id: Some(user.id),
-        kind: "login_ok".into(),
-        provider: "local".into(),
-        ip: Some(ip.to_string()),
-        user_agent: None,
-    });
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+        Some(user.id),
+        "login_ok",
+        "local",
+    ));
 
     let auth_user = AuthUser {
         id: user.id,
@@ -318,13 +310,11 @@ pub async fn register_handler(
         ip = %ip,
         "password register ok"
     );
-    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
-        user_id: Some(user_id),
-        kind: "register_local".into(),
-        provider: "local".into(),
-        ip: Some(ip.to_string()),
-        user_agent: None,
-    });
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+        Some(user_id),
+        "register_local",
+        "local",
+    ));
 
     let user = require_auth_store(&state)?
         .get_user_by_id(user_id)

@@ -136,7 +136,7 @@ impl Agent for WikipediaAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
         let url = build_summary_url(&self.cfg.base_url, &req.title);
         let body = fetch_json(&self.http, &self.cfg.user_agent, &url).await?;

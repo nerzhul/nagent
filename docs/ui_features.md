@@ -220,6 +220,18 @@ is hidden and the `#chat-disabled-notice` is shown instead
     involving the LLM proxy.
 - **Agents banner** (`#chat-agents-banner`): shown when the server
   advertises tools, naming the agents the model can call.
+- **Integrations drawer** (`#chat-integrations`, hidden until
+  `auth.enabled = true` AND the user is logged in): one row per
+  registered service with an icon, label, "Configured" /
+  "Not configured" status pill, and a Configure / Edit button.
+  The Configure / Edit button opens a modal with a `<form>` per
+  field (`<input type="password">` for `password` fields,
+  `<input type="url">` for `url` fields). PUT sends the values to
+  `PUT /api/integrations/:id/credentials` (CSRF-protected); a
+  separate Remove button issues `DELETE`. The v1 framework ships
+  with an empty registry so the drawer shows "No integrations
+  available yet" until follow-up PRs add concrete `ServiceDef`
+  entries — the HTTP surface is fully wired in advance.
 - **System prompt** (`#chat-system` textarea): appended to the server's
   default system prompt.
 - **Temperature** (`#chat-temperature`, `0…2`, step `0.1`, default `0.8`):

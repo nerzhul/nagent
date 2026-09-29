@@ -6,10 +6,11 @@
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use stt_server::agents::ServiceRegistry;
 use stt_server::config::AuthBackendKind;
 use stt_server::{
-    agents, auth, build_rate_limiters, build_router, llm, router, session, tts, watchdog, AppState,
-    CliArgs, Config,
+    agents, auth, build_rate_limiters, build_router, credentials, llm, router, session, tts,
+    watchdog, AppState, CliArgs, Config,
 };
 
 /// Locate the directory containing the bundled `espeak-ng-data/`
@@ -291,6 +292,38 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .await
         .map_err(|e| anyhow::anyhow!("TTS init failed: {e}"))?
         .map(Arc::new);
+    // Per-user credentials resolver. Required when `auth.enabled`
+    // AND at least one agent is registered — the boot fails
+    // loudly otherwise so a misconfigured deployment does not
+    // silently lose the ability to decrypt per-user credentials.
+    // The encryption key comes from `[auth.credentials].key` in
+    // the resolved config (TOML-only, no env-var indirection).
+    let services = ServiceRegistry::empty().into_arc();
+    let (credential_resolver, credentials_key) = if auth_store.is_some() && !agents.is_empty() {
+        let key = match credentials::key::CredentialsKey::from_hex(&cfg.auth.credentials.key) {
+            Ok(k) => Arc::new(k),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "[auth.credentials].key is required when auth.enabled and \
+                     agents.enabled (per-user credentials framework): {e}"
+                ));
+            }
+        };
+        let resolver = credentials::CredentialResolver::new(
+            auth_store.clone().expect("auth_store checked above"),
+            key.clone(),
+            None,
+            None,
+        );
+        tracing::info!("per-user credentials framework enabled");
+        (Some(Arc::new(resolver)), Some(key))
+    } else {
+        tracing::info!(
+            "per-user credentials framework disabled (auth.enabled or agents.enabled is off)"
+        );
+        (None, None)
+    };
+
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),
@@ -314,6 +347,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         auth_oidc: auth_oidc.clone(),
         auth_passkey: auth_passkey.clone(),
         auth_rate_limiter: auth::rate_limit::LoginRateLimiter::new(),
+        services,
+        credential_resolver,
+        credentials_key,
     });
 
     let app = build_router(state);

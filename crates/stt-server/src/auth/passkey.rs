@@ -266,13 +266,11 @@ pub async fn register_finish_handler(
         passkey_id = %pk_id,
         "passkey register ok"
     );
-    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent {
-        user_id: Some(user_id),
-        kind: "passkey_register".into(),
-        provider: "passkey".into(),
-        ip: None,
-        user_agent: None,
-    });
+    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+        Some(user_id),
+        "passkey_register",
+        "passkey",
+    ));
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"passkey_id": pk_id})),
@@ -447,13 +445,11 @@ pub async fn login_finish_handler(
         session_id = %session.id,
         "passkey login ok"
     );
-    require_auth_store(&state)?.record_event(NewAuthEvent {
-        user_id: Some(user.id),
-        kind: "login_ok".into(),
-        provider: "passkey".into(),
-        ip: Some(ip.to_string()),
-        user_agent: None,
-    });
+    require_auth_store(&state)?.record_event(NewAuthEvent::auth(
+        Some(user.id),
+        "login_ok",
+        "passkey",
+    ));
 
     let auth_user = AuthUser {
         id: user.id,

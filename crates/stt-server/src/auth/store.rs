@@ -307,6 +307,80 @@ impl AuthStore {
             }
         });
     }
+
+    // ---- Per-user credentials --------------------------------------
+
+    /// Atomic upsert of all `(field_key, nonce, ciphertext)` triples
+    /// for one `(user_id, service_id)`. Implemented as
+    /// `DELETE THEN INSERT` inside a single transaction so partial
+    /// writes never leave a service half-configured (the
+    /// `UNIQUE (user_id, service_id, field_key)` would otherwise
+    /// reject a duplicate insert with a 409 we would have to map
+    /// manually).
+    ///
+    /// `fields` is the new full set — the caller is responsible for
+    /// pre-validating unknown `field_key`s against the
+    /// `ServiceRegistry` and for encrypting the plaintexts with the
+    /// `CredentialsKey` before calling.
+    pub async fn upsert_user_credentials(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        fields: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.upsert_user_credentials(user_id, service_id, fields).await,
+            AuthStore::Postgres(s) => s.upsert_user_credentials(user_id, service_id, fields).await,
+        }
+    }
+
+    /// Delete every `(field_key)` row for one `(user_id, service_id)`.
+    /// Returns the number of fields cleared.
+    pub async fn delete_service_credentials(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+    ) -> Result<u64, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.delete_service_credentials(user_id, service_id).await,
+            AuthStore::Postgres(s) => s.delete_service_credentials(user_id, service_id).await,
+        }
+    }
+
+    /// List the `field_key`s the user has configured for a service.
+    /// Used by `GET /api/integrations/:id` to compute the per-field
+    /// `filled` boolean without exposing the ciphertexts.
+    pub async fn list_configured_field_keys(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+    ) -> Result<Vec<String>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.list_configured_field_keys(user_id, service_id).await,
+            AuthStore::Postgres(s) => s.list_configured_field_keys(user_id, service_id).await,
+        }
+    }
+
+    /// Fetch the encrypted blob for one `(user_id, service, field)`.
+    /// `None` if no row exists. The resolver decrypts with the
+    /// server-side `CredentialsKey`.
+    pub async fn fetch_user_credential(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        field_key: &str,
+    ) -> Result<Option<UserCredentialRow>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => {
+                s.fetch_user_credential(user_id, service_id, field_key)
+                    .await
+            }
+            AuthStore::Postgres(s) => {
+                s.fetch_user_credential(user_id, service_id, field_key)
+                    .await
+            }
+        }
+    }
 }
 
 /// Public-facing user record. Mirrors the row in the `users` table
@@ -352,11 +426,41 @@ pub struct PasskeyRecord {
 }
 
 /// Parameters for [`AuthStore::record_event`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NewAuthEvent {
     pub user_id: Option<Uuid>,
     pub kind: String,
     pub provider: String,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
+    /// Integration name the audit row is correlated with (set for
+    /// `credential_access` / `credential_missing` /
+    /// `credential_decrypt_failed`; `None` for the auth subtree).
+    /// Added by the `0002_credentials.sql` migration.
+    pub target_service: Option<String>,
+}
+
+impl NewAuthEvent {
+    /// Build a non-credential audit row (the auth subtree never sets
+    /// `target_service`).
+    pub fn auth(
+        user_id: Option<Uuid>,
+        kind: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
+        Self {
+            user_id,
+            kind: kind.into(),
+            provider: provider.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// One row from the `user_credentials` table — only the columns the
+/// resolver needs to decrypt.
+#[derive(Debug, Clone)]
+pub struct UserCredentialRow {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }

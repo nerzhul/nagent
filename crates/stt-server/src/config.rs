@@ -1283,6 +1283,9 @@ pub struct AuthConfig {
     pub oidc: AuthOidcConfig,
     /// Passkey (WebAuthn) backend knobs.
     pub passkey: AuthPasskeyConfig,
+    /// Per-user credentials vault knobs. Required when
+    /// `enabled = true` AND at least one agent is registered.
+    pub credentials: AuthCredentialsConfig,
 }
 
 impl Default for AuthConfig {
@@ -1297,8 +1300,24 @@ impl Default for AuthConfig {
             password: AuthPasswordConfig::default(),
             oidc: AuthOidcConfig::default(),
             passkey: AuthPasskeyConfig::default(),
+            credentials: AuthCredentialsConfig::default(),
         }
     }
+}
+
+/// Per-user credentials vault knobs. The AES-256-GCM key lives in
+/// plaintext inside `[auth.credentials].key` (64 hex chars / 32
+/// bytes). Operators who want to keep the secret out of disk should
+/// mount the TOML file from an encrypted volume (k8s `Secret`
+/// mounted as `subPath`, Vault Agent, etc.); the configuration
+/// shape itself does not force plaintext storage on disk.
+#[derive(Debug, Clone, Default)]
+pub struct AuthCredentialsConfig {
+    /// 64 hex chars = 32 raw bytes. Empty string means "unset" —
+    /// the `AuthConfig::from_env_with_toml` resolution fails
+    /// with a clear error when `auth.enabled = true` AND at
+    /// least one agent is registered AND this is empty.
+    pub key: String,
 }
 
 /// Names of the auth backends an operator can enable. Matches the
@@ -1586,6 +1605,7 @@ impl AuthConfig {
         )?;
         let oidc = AuthOidcConfig::from_toml_with_env(toml.oidc.as_ref())?;
         let passkey = AuthPasskeyConfig::from_toml(toml.passkey.as_ref())?;
+        let credentials = AuthCredentialsConfig::from_toml(toml.credentials.as_ref())?;
 
         Ok(Self {
             enabled,
@@ -1597,6 +1617,7 @@ impl AuthConfig {
             password,
             oidc,
             passkey,
+            credentials,
         })
     }
 
@@ -1656,6 +1677,23 @@ impl AuthDbConfig {
                 "NAGENT_AUTH_DB_MAX_CONNECTIONS",
             )?
             .max(1),
+        })
+    }
+}
+
+impl AuthCredentialsConfig {
+    /// Read the per-user credentials vault knobs from TOML. The
+    /// `key` field holds the AES-256-GCM encryption key in
+    /// plaintext (64 hex chars). No env-var indirection: the
+    /// value comes from `[auth.credentials].key` and nowhere else,
+    /// so operators who want secret confidentiality can mount
+    /// the TOML file from an encrypted volume.
+    fn from_toml(
+        toml: Option<&crate::config_file::TomlAuthCredentialsConfig>,
+    ) -> Result<Self, ConfigError> {
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            key: toml.key.unwrap_or_default().trim().to_string(),
         })
     }
 }

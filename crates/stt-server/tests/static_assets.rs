@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use stt_core::{MockBackend, PoolDispatch};
 use stt_server::{
+    agents::ServiceRegistry,
     build_router,
     config::{LlmAuthMode, RateLimitConfig},
     rate_limit::{RateLimitPolicy, RateLimiter},
@@ -79,6 +80,9 @@ async fn serve_once() -> String {
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

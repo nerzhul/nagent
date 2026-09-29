@@ -156,13 +156,11 @@ async fn bootstrap_first_admin(store: &AuthStore, cfg: &Config) -> Result<(), an
         .create_user(&email, &email, "local", Some(&hash))
         .await
         .map_err(|e| anyhow::anyhow!("create bootstrap user: {e}"))?;
-    store.record_event(NewAuthEvent {
-        user_id: Some(user_id),
-        kind: "bootstrap_admin".into(),
-        provider: "local".into(),
-        ip: None,
-        user_agent: None,
-    });
+    store.record_event(NewAuthEvent::auth(
+        Some(user_id),
+        "bootstrap_admin",
+        "local",
+    ));
 
     // The password is shown EXACTLY ONCE — on a fresh install with
     // an empty `users` table. Two channels:
@@ -318,6 +316,7 @@ mod tests {
                 password: Default::default(),
                 oidc: Default::default(),
                 passkey: Default::default(),
+                credentials: Default::default(),
             },
         }
     }

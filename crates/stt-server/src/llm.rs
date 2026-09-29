@@ -656,10 +656,24 @@ async fn run_tool_loop(
 
             let args_value: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
             let result = match agents.get(&name) {
-                Some(agent) => match agent.invoke(args_value).await {
-                    Ok(s) => Ok(s),
-                    Err(e) => Err(e.to_string()),
-                },
+                Some(agent) => {
+                    // Per-tool-round `UserContext`. The chat-completions
+                    // handler does not (yet) read the authenticated
+                    // user off the request, so per-user agents that
+                    // call `ctx.secret(...)` will surface
+                    // `CredentialsMissing` from this anonymous
+                    // pathway — wired-up production deployments must
+                    // thread the session user through to this ctx in
+                    // a follow-up. The plumbing here (resolver,
+                    // services, cache) is already in place; only the
+                    // user-id source needs wiring.
+                    let services = crate::agents::ServiceRegistry::empty().into_arc();
+                    let ctx = crate::agents::UserContext::for_tests(uuid::Uuid::nil(), services);
+                    match agent.invoke(&ctx, args_value).await {
+                        Ok(s) => Ok(s),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
                 None => Err(format!("unknown agent: `{name}`")),
             };
             let (ok, payload) = match &result {
@@ -997,7 +1011,15 @@ pub async fn agent_invoke(
         .cloned()
         .unwrap_or(Value::Object(Default::default()));
 
-    match agent.invoke(args).await {
+    // `/v1/agents/:name/invoke` is the anonymous curl-style escape
+    // hatch. It has no authenticated user, so per-user agents that
+    // read `ctx.secret(...)` will surface `CredentialsMissing` —
+    // operators must exercise those through the chat-completions
+    // path (which carries the session cookie) instead.
+    let services = state.services.clone();
+    let ctx = crate::agents::UserContext::for_tests(uuid::Uuid::nil(), services);
+
+    match agent.invoke(&ctx, args).await {
         Ok(result) => {
             let body = json!({ "name": name, "result": result }).to_string();
             Ok(Response::builder()
@@ -1026,6 +1048,13 @@ pub async fn agent_invoke(
             "response exceeded max_bytes={budget}"
         ))),
         Err(AgentError::AgentFailed(msg)) => Err(LlmError::BadRequest(msg)),
+        // Per-user credentials not configured / decrypt failed —
+        // surfaced as 400 with a stable message so the chat UI can
+        // detect it and offer a "configure integration" link.
+        Err(AgentError::CredentialsMissing { service, .. })
+        | Err(AgentError::CredentialsDecryptFailed { service, .. }) => Err(LlmError::BadRequest(
+            format!("credentials not configured for service={service}"),
+        )),
     }
 }
 

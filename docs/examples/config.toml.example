@@ -169,3 +169,19 @@
 # rp_id = "nagent.example.com"                # MUST match the browser's effective domain (no scheme, no port)
 # rp_name = "nagent"
 # origins = ["https://nagent.example.com"]    # scheme + port; first entry must match public_url's origin
+
+# ---------------------------------------------------------------------------
+# Per-user credentials vault (framework)
+# ---------------------------------------------------------------------------
+# Plaintext credentials are encrypted at rest with AES-256-GCM. The
+# encryption key lives in plaintext inside `[auth.credentials].key`
+# (64 hex chars / 32 bytes). The server refuses to boot when
+# auth.enabled is true AND at least one agent is registered AND the
+# key is missing or malformed. Treat this file as a secret
+# (encrypted volume, restricted ACLs, no VCS). The v1 framework
+# ships with an empty ServiceRegistry (no concrete integrations);
+# follow-up PRs add per-service entries.
+#
+# [auth.credentials]
+# key = "0123…64 hex chars, generate with `openssl rand -hex 32`…"
+

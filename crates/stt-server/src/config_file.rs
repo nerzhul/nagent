@@ -346,6 +346,29 @@ pub struct TomlAuthConfig {
     /// Passkey (WebAuthn) backend knobs.
     #[serde(default)]
     pub passkey: Option<TomlAuthPasskeyConfig>,
+    /// Per-user credentials vault knobs. Required when
+    /// `auth.enabled = true` AND at least one agent is registered.
+    #[serde(default)]
+    pub credentials: Option<TomlAuthCredentialsConfig>,
+}
+
+/// Per-user credentials vault knobs. Mirrors
+/// [`crate::config::AuthCredentialsConfig`].
+///
+/// The AES-256-GCM key is held in plaintext inside `[auth.credentials].key`
+/// (64 hex chars / 32 raw bytes). Operators who want to keep the
+/// secret out of disk should mount the TOML file from an encrypted
+/// volume (k8s `Secret` via `subPath`, Vault Agent, …); the
+/// configuration shape itself does not force plaintext storage on
+/// disk.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlAuthCredentialsConfig {
+    /// 64 hex chars = 32 bytes (AES-256-GCM). Required when
+    /// `auth.enabled = true` AND at least one agent is registered.
+    /// Generate once with `openssl rand -hex 32` and paste the
+    /// value here.
+    pub key: Option<String>,
 }
 
 /// DB connection knobs for the auth store. Mirrors
@@ -677,6 +700,24 @@ fn merge_toml_auth(
             password: merge_toml_auth_password(e.password.as_ref(), l.password.as_ref()),
             oidc: merge_toml_auth_oidc(e.oidc.as_ref(), l.oidc.as_ref()),
             passkey: merge_toml_auth_passkey(e.passkey.as_ref(), l.passkey.as_ref()),
+            credentials: merge_toml_auth_credentials(
+                e.credentials.as_ref(),
+                l.credentials.as_ref(),
+            ),
+        }),
+    }
+}
+
+fn merge_toml_auth_credentials(
+    earlier: Option<&TomlAuthCredentialsConfig>,
+    later: Option<&TomlAuthCredentialsConfig>,
+) -> Option<TomlAuthCredentialsConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlAuthCredentialsConfig {
+            key: l.key.clone().or_else(|| e.key.clone()),
         }),
     }
 }

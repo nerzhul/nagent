@@ -20,6 +20,7 @@ use axum::Router;
 use serde_json::Value;
 use stt_core::{MockBackend, PoolDispatch, WhisperBackend};
 use stt_server::{
+    agents::ServiceRegistry,
     build_router,
     config::{LlmConfig, RateLimitConfig},
     llm::LlmClient,
@@ -165,6 +166,9 @@ async fn start_test_server_with_llm_and_system_prompt(
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     });
 
     let app = build_router(state);
@@ -240,6 +244,9 @@ async fn start_test_server_disabled() -> String {
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     });
 
     let app = build_router(state);
@@ -643,6 +650,9 @@ async fn start_test_server_with_llm_auth(
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

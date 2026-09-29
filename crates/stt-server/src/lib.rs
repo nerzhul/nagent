@@ -13,6 +13,8 @@
 //! - [`llm`] — optional OpenAI-compatible proxy to a local LLM (Ollama).
 //! - [`agents`] — server-side chat agents (e.g. `web_fetch`) callable
 //!   from the LLM proxy through OpenAI-style tool/function calling.
+//! - [`credentials`] — per-user credentials vault (AES-256-GCM at rest,
+//!   decrypted on demand through a per-request `UserContext`).
 
 #![warn(missing_debug_implementations)]
 
@@ -20,6 +22,7 @@ pub mod agents;
 pub mod auth;
 pub mod config;
 pub mod config_file;
+pub mod credentials;
 pub mod llm;
 pub mod llm_prompt;
 pub mod middleware;
@@ -99,6 +102,31 @@ pub struct AppState {
     /// Login-attempt rate limiter. Shared between the `RequireAuth`
     /// middleware (unused) and the password login handler.
     pub auth_rate_limiter: auth::rate_limit::LoginRateLimiter,
+    /// Catalogue of per-user integrations. `Arc`-wrapped because
+    /// every per-request `UserContext` clones it; the inner slice is
+    /// `&'static` so the registry can be built once at boot.
+    pub services: std::sync::Arc<crate::agents::ServiceRegistry>,
+    /// Per-request credential resolver. `None` until the auth
+    /// subsystem boots AND a server-side encryption key is
+    /// available; per-user agents that call `ctx.secret()` will
+    /// surface `CredentialsMissing` when the resolver is missing.
+    pub credential_resolver: Option<std::sync::Arc<crate::credentials::CredentialResolver>>,
+    /// Server-side encryption key for the credentials vault.
+    /// `None` when the resolver is `None`. Held separately because
+    /// the route handlers need to encrypt on PUT — the resolver
+    /// only exposes reads.
+    pub credentials_key: Option<std::sync::Arc<crate::credentials::CredentialsKey>>,
+}
+
+impl AppState {
+    /// Helper for the credentials routes: clone the encryption
+    /// key. Panics if the resolver is set but the key is missing
+    /// (a programmer error in `main.rs`).
+    pub fn credential_encryption_key(&self) -> std::sync::Arc<crate::credentials::CredentialsKey> {
+        self.credentials_key
+            .clone()
+            .expect("credentials_key must match credential_resolver")
+    }
 }
 
 impl std::fmt::Debug for AppState {
@@ -114,6 +142,10 @@ impl std::fmt::Debug for AppState {
             .field("tts", &self.tts.as_ref().map(|_| "<TtsEngine>"))
             .field("stt_rate_limiter", &self.stt_rate_limiter)
             .field("llm_rate_limiter", &self.llm_rate_limiter)
+            .field(
+                "credential_resolver",
+                &self.credential_resolver.as_ref().map(|_| "<resolver>"),
+            )
             .finish()
     }
 }
@@ -277,7 +309,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         );
         let login = crate::auth::router::build_public_auth_router(state.clone());
         let identity = crate::auth::router::build_protected_auth_router(state.clone());
-        let protected_with_auth = protected.merge(identity).layer(auth_layer);
+        let credentials_routes =
+            crate::credentials::routes::build_protected_credentials_router(state.clone());
+        let protected_with_auth = protected
+            .merge(identity)
+            .merge(credentials_routes)
+            .layer(auth_layer);
         // Layer order is applied bottom-up; the LAST `.layer()`
         // becomes the OUTERMOST. The access log is the outermost
         // so it sees the final response status (after `RequireAuth`

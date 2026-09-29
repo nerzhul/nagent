@@ -114,7 +114,7 @@ impl Agent for CalculateAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
         let value = meval::eval_str(&req.expression)
             .map_err(|e| AgentError::AgentFailed(format!("could not evaluate expression: {e}")))?;
@@ -306,8 +306,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_basic_arithmetic() {
         let agent = CalculateAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let out = agent
-            .invoke(json!({"expression": "15*87.5/100"}))
+            .invoke(&ctx, json!({"expression": "15*87.5/100"}))
             .await
             .expect("invoke");
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -327,8 +331,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_functions_and_constants() {
         let agent = CalculateAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let out = agent
-            .invoke(json!({"expression": "sqrt(2) + 1"}))
+            .invoke(&ctx, json!({"expression": "sqrt(2) + 1"}))
             .await
             .expect("invoke");
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -340,10 +348,14 @@ mod tests {
     async fn invoke_rejects_unknown_identifier() {
         // `meval` returns an error for unknown identifiers. The
         // agent surfaces it as `AgentFailed` so the LLM sees
-        // "could not evaluate expression: …" and can correct itself.
+        // the underlying reason.
         let agent = CalculateAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = agent
-            .invoke(json!({"expression": "nosuchfunc(1)"}))
+            .invoke(&ctx, json!({"expression": "nosuchfunc(1)"}))
             .await
             .expect_err("should fail");
         match err {
@@ -357,8 +369,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_non_object_arguments() {
         let agent = CalculateAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = agent
-            .invoke(json!("not-an-object"))
+            .invoke(&ctx, json!("not-an-object"))
             .await
             .expect_err("should reject");
         assert!(matches!(err, AgentError::InvalidArguments(_)));
@@ -367,7 +383,14 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_missing_expression() {
         let agent = CalculateAgent::new();
-        let err = agent.invoke(json!({})).await.expect_err("should reject");
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
+        let err = agent
+            .invoke(&ctx, json!({}))
+            .await
+            .expect_err("should reject");
         match err {
             AgentError::InvalidArguments(msg) => {
                 assert!(msg.contains("`expression`"));
@@ -382,8 +405,12 @@ mod tests {
         // character must trigger `InvalidArguments` so the LLM sees
         // a clear message rather than a `meval` parser error.
         let agent = CalculateAgent::new();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = agent
-            .invoke(json!({"expression": "1; rm -rf /"}))
+            .invoke(&ctx, json!({"expression": "1; rm -rf /"}))
             .await
             .expect_err("should reject");
         match err {

@@ -158,7 +158,7 @@ impl Agent for UnitConvertAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
         let result = convert(req.value, &req.from, &req.to)?;
         Ok(serde_json::to_string(&json!({
@@ -1101,8 +1101,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_basic_length() {
         let agent = UnitConvertAgent::default();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let out = agent
-            .invoke(json!({"value": 12, "from": "mile", "to": "km"}))
+            .invoke(&ctx, json!({"value": 12, "from": "mile", "to": "km"}))
             .await
             .expect("invoke");
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -1125,8 +1129,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_missing_value() {
         let agent = UnitConvertAgent::default();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = agent
-            .invoke(json!({"from": "km", "to": "mile"}))
+            .invoke(&ctx, json!({"from": "km", "to": "mile"}))
             .await
             .expect_err("should reject");
         assert!(matches!(err, AgentError::InvalidArguments(_)));
@@ -1135,8 +1143,12 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_non_object_arguments() {
         let agent = UnitConvertAgent::default();
+        let ctx = super::UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        );
         let err = agent
-            .invoke(json!("nope"))
+            .invoke(&ctx, json!("nope"))
             .await
             .expect_err("should reject");
         assert!(matches!(err, AgentError::InvalidArguments(_)));

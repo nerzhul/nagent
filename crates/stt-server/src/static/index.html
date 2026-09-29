@@ -388,6 +388,24 @@
         </label>
         <p id="chat-timezone-status" class="chat-timezone-status">…</p>
       </div>
+      <!--
+        Per-user credentials drawer. Hidden until `chat.js` boots
+        and confirms the user is authenticated (the routes require
+        `RequireAuth` so an anonymous GET would 401 and the section
+        would stay empty). Each row is one service; the status pill
+        and the Configure / Edit button live next to the service
+        icon + name. The form modal is rendered by
+        `static/integrations.js`; the form here is the placeholder
+        before JS hydrates.
+      -->
+      <details id="chat-integrations" class="chat-integrations" hidden>
+        <summary>Integrations</summary>
+        <ul id="chat-integrations-list" class="chat-integrations-list">
+          <li class="chat-integrations-empty">
+            No integrations available yet.
+          </li>
+        </ul>
+      </details>
     </details>
     <form id="chat-form">
       <textarea id="chat-input" rows="1"
@@ -509,5 +527,14 @@
     rest of the UI exists in the DOM.
   -->
   <script type="module" src="/static/auth.js"></script>
+  <!--
+    Per-user integrations UI. Loaded after `auth.js` so the
+    `onAuthStateChanged` callback the module installs can fire on
+    the initial auth check (otherwise the section would only render
+    after the next login / logout). The module is a no-op when
+    `auth.enabled` is false so dev builds do not see a dead "No
+    integrations available yet" pill.
+  -->
+  <script type="module" src="/static/integrations.js"></script>
 </body>
 </html>

@@ -174,6 +174,16 @@ hound = "3.5"
 # `tower::ServiceExt::oneshot` is used by the auth middleware
 # integration tests (`auth/middleware.rs::tests`).
 tower = { version = "0.5", features = ["util"] }
+# `aes-gcm` powers the per-user credential vault. AES-256-GCM
+# authenticated encryption with a 12-byte random nonce per secret;
+# the tag is appended to the ciphertext as the aes-gcm crate does
+# by default. `zeroize` + `secret` are required so the in-memory
+# `Secret<[u8; 32]>` key zeroises on drop. `secrecy` (the same
+# family as `zeroize`) wraps plaintext values so accidental
+# `Debug`/log output cannot leak them.
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+secrecy = { version = "0.10", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

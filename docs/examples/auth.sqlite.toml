@@ -7,6 +7,20 @@
 # server auto-creates a local admin with a random 24-char password
 # and logs it at WARN level (one-time). The CLI is only needed
 # for adding additional admins afterwards.
+#
+# Per-user credentials: AGENTS_ENABLED defaults to `true` AND this
+# example keeps agents enabled, so the server requires
+# `[auth.credentials].key` (64 hex chars / 32 bytes) at boot. The
+# value is held in plaintext inside this file. Keep the file out
+# of version control and on an encrypted volume (k8s Secret,
+# Vault Agent, etc.) if the deployment is shared.
+#
+# Generate once with: `openssl rand -hex 32`, paste the 64-char
+# output under `[auth.credentials].key` below. The placeholder
+# below is a known-bad value used so the example stays
+# copy-paste-safe — replace before booting the server, otherwise
+# the boot will fail with
+# `ConfigError: invalid hex in auth.credentials.key`.
 
 # Server knob — same shape as the main example. Tune to taste.
 [server]
@@ -38,6 +52,13 @@ argon2_iterations = 2
 argon2_parallelism = 1
 min_password_length = 8
 allow_registration = true               # logged-in users can create accounts
+
+# Per-user credentials vault. 64 hex chars = 32 raw bytes
+# (AES-256-GCM). Generate with `openssl rand -hex 32` and paste
+# the output here. The value lives in plaintext; treat this file
+# as a secret (encrypted volume, restricted ACLs, no VCS).
+[auth.credentials]
+key = "REPLACE_ME_WITH_64_HEX_CHARS_FROM_OPENSSL_RAND_HEX_32______________"
 
 # Leave [auth.oidc] / [auth.passkey] commented — a fresh install
 # only needs the local backend to validate the bootstrap. Uncomment

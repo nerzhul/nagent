@@ -233,7 +233,7 @@ impl Agent for StockAgent {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, AgentError> {
+    async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
 
         // Step 1: static company-name shortcut. When the user

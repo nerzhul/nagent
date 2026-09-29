@@ -57,6 +57,7 @@ use stt_server::agents::weather_agent::WeatherAgent;
 use stt_server::agents::web_fetch::WebFetchAgent;
 #[cfg(feature = "wikipedia-agent")]
 use stt_server::agents::wikipedia_agent::WikipediaAgent;
+use stt_server::agents::ServiceRegistry;
 use stt_server::{
     agents::{Agent, AgentRegistry},
     build_router,
@@ -188,6 +189,9 @@ fn make_app_state(
         auth_oidc: None,
         auth_passkey: None,
         auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        services: ServiceRegistry::empty().into_arc(),
+        credential_resolver: None,
+        credentials_key: None,
     })
 }
 
