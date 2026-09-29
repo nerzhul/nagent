@@ -38,11 +38,29 @@ time and written asynchronously after dispatch.
 
 ## Constraints and decisions
 
-- **Identity**: memory requires auth (`users.id`). When `AGENTS_ENABLED=false`
-  *and* auth is off, the memory tools return a clear "memory disabled" error.
-  Anon-cookie identity is a follow-up.
+- **Identity & RBAC**: memory requires auth (`users.id`); writes and reads
+  are always scoped to the calling user. Every storage query MUST filter on
+  `user_id = ?` so users can never see or mutate each other's rows. The
+  multi-user plan's **PR2** (AgentContext + scopes + audit sink) is a hard
+  prerequisite for the scope names below; this plan lands once PR2 is in.
+  Scope contract that the memory agents must declare at registration:
+  - `remember_fact` requires `"agent:memory:write"`.
+  - `recall` requires `"agent:memory:read"`.
+  - `forget_fact` requires `"agent:memory:write"` (user-side deletion).
+  When `AGENTS_ENABLED=false` *and* auth is off, the memory tools return a
+  clear "memory disabled" error. Anon-cookie identity is a follow-up.
 - **Cargo feature**: `memory-agent`, off by default. Opted in by the same
   `make run-llm` convention used for the LLM feature today.
+- **Supersedes the F1 memory sketch in the multi-user plan**: this plan is
+  the canonical design for the `memory-agent` feature. The multi-user plan's
+  F1 still owns the sibling identity/audit agents (`whoami`, `audit_log_self`)
+  and the RBAC contract (scopes, audit sink); F1's per-user isolation
+  guarantee (`WHERE user_id = ?`) is restated in the **Identity & RBAC**
+  bullet above and is non-negotiable here. The `memories` table replaces the
+  F1 `user_memory(user_id, key, value, embedding BLOB, updated_at)` sketch
+  — same per-user isolation, plus `confidence`, `use_count`, `last_used_at`,
+  `superseded_by` for the LLM-learning use case. Embeddings remain deferred
+  (out of scope below).
 - **Capture** is always opt-in: explicit via the tools, plus the observer
   only when the operator enables it. Raw user messages are never auto-facts.
 - **Bounded**: `memory.max_user_facts` (default 50, FIFO prune) and

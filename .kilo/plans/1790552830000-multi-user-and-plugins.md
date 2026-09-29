@@ -52,15 +52,26 @@ These workstreams are sequenced PR2 → PR3 (PR1 already shipped). Each is a sep
 
 ### F1. Memory & identity agents
 
-**Goal:** persistent per-user memory the LLM can read/write.
-**Agents:** `memory_remember`, `memory_recall`, `memory_forget`, `whoami`, `audit_log_self`.
-**Storage:** SQLite, table `user_memory(user_id, key, value, embedding BLOB, updated_at)`. Embedding optional, powered by a future local embedding model (out of scope for this plan).
-**Tasks:**
-1. Add `memory-agent` cargo feature + module.
-2. Schema with `(user_id, key)` unique, `value` JSON, optional embedding.
-3. `memory_remember` scopes: `"agent:memory:write"`. `memory_recall`: `"agent:memory:read"`. Default-deny for read of other users' rows via SQL `WHERE user_id = ?`.
-4. `whoami` is zero-cost (reads from `AgentContext`), no DB hit.
-5. `audit_log_self` queries the audit log filtered by `user_id`, paginated.
+**Goal:** persistent per-user memory the LLM can read/write, plus a few
+zero-cost identity/audit helpers that ship with PR2.
+**Agents:** `remember_fact`, `recall`, `forget_fact`, `whoami`, `audit_log_self`.
+
+**Memory agents (`remember_fact`, `recall`, `forget_fact`):** the canonical
+design — `memories` table schema, the `memory-agent` cargo feature, the
+`AgentRegistry::from_config` wiring, the system-prompt injection, the
+opt-in observer/classifier worker, and the test matrix — lives in
+`.kilo/plans/1790623943495-llm-learning-memory.md`. This section only pins
+the **RBAC contract** that plan must honour:
+- `remember_fact` requires scope `"agent:memory:write"`.
+- `recall` requires scope `"agent:memory:read"`.
+- `forget_fact` requires scope `"agent:memory:write"`.
+- Every memory query filters on `user_id = ?` — no cross-user reads.
+- Embeddings remain out of scope (deferred to a follow-up; first cut uses
+  literal `LIKE` retrieval).
+
+**Other F1 agents (not memory):**
+- `whoami` is zero-cost (reads from `AgentContext`), no DB hit.
+- `audit_log_self` queries the audit log filtered by `user_id`, paginated.
 
 ### F2. Personal productivity agents
 
