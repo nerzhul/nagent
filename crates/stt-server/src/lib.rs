@@ -26,6 +26,7 @@ pub mod credentials;
 pub mod llm;
 pub mod llm_prompt;
 pub mod middleware;
+pub mod migrate_cli;
 pub mod rate_limit;
 pub mod router;
 pub mod session;

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use stt_server::agents::ServiceRegistry;
 use stt_server::config::AuthBackendKind;
 use stt_server::{
-    agents, auth, build_rate_limiters, build_router, credentials, llm, router, session, tts,
-    watchdog, AppState, CliArgs, Config,
+    agents, auth, build_rate_limiters, build_router, credentials, llm, migrate_cli, router,
+    session, tts, watchdog, AppState, CliArgs, Config,
 };
 
 /// Locate the directory containing the bundled `espeak-ng-data/`
@@ -122,6 +122,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let mut combined = argv;
         combined.extend(trailing);
         return auth::cli::run_auth_cli(combined).await;
+    }
+    if let Some(idx) = argv.iter().position(|a| a == "migrate") {
+        // Same dispatcher trick as the `auth` branch above. Order
+        // matters: `auth` stays first so existing behaviour is
+        // unchanged, then `migrate`, then fallthrough to server
+        // boot.
+        let mut argv = argv;
+        let trailing = argv.split_off(idx + 1);
+        let mut combined = argv;
+        combined.extend(trailing);
+        return migrate_cli::run_migrate_cli(combined).await;
     }
 
     init_tracing();

@@ -361,7 +361,18 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
     use serde_json::json;
+
+    /// Build a fresh `UserContext` for tests that ignore
+    /// credentials. Mirrors `UserContext::for_tests` without
+    /// bringing the helper into the agent's public API.
+    fn test_ctx() -> UserContext {
+        UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        )
+    }
 
     #[test]
     fn name_and_schema_are_stable() {
@@ -491,7 +502,9 @@ mod tests {
     fn parse_args_rejects_missing_title() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = WikipediaAgent::default();
-        let err = rt.block_on(agent.invoke(json!({}))).unwrap_err();
+        let err = rt
+            .block_on(agent.invoke(&test_ctx(), json!({})))
+            .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
                 assert!(msg.contains("`title`"));
@@ -505,7 +518,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = WikipediaAgent::default();
         let err = rt
-            .block_on(agent.invoke(json!({"title": "  "})))
+            .block_on(agent.invoke(&test_ctx(), json!({"title": "  "})))
             .unwrap_err();
         assert!(matches!(err, AgentError::InvalidArguments(_)));
     }
@@ -515,7 +528,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = WikipediaAgent::default();
         let err = rt
-            .block_on(agent.invoke(json!({"title": "x".repeat(MAX_TITLE_LEN + 1)})))
+            .block_on(agent.invoke(&test_ctx(), json!({"title": "x".repeat(MAX_TITLE_LEN + 1)})))
             .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
@@ -532,7 +545,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = WikipediaAgent::default();
         let err = rt
-            .block_on(agent.invoke(json!({"title": "foo\u{0}bar"})))
+            .block_on(agent.invoke(&test_ctx(), json!({"title": "foo\u{0}bar"})))
             .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {

@@ -1,11 +1,16 @@
--- 0001_init.sql — single-file auth schema for PR1.
+-- 0001_init.up.sql — single-file auth schema for PR1.
+--
+-- Reversed by `0001_init.down.sql`; keep the two siblings in sync
+-- (sqlx 0.8.6 pairs them via the `<version>_<name>.up.sql` /
+-- `<version>_<name>.down.sql` filename convention — see
+-- `sqlx-core/src/migrate/migration_type.rs`).
 --
 -- All tables live in one migration because the schema is small and
 -- the tables are tightly coupled (sessions + passkeys reference
 -- users; pending OIDC states reference nothing but are part of the
 -- auth subsystem as a whole). Future PRs that need to evolve the
--- schema land in their own timestamped files (`0002_*.sql`,
--- `0003_*.sql`, …).
+-- schema land in their own timestamped files (`0002_*.up.sql`,
+-- `0003_*.up.sql`, …).
 --
 -- Portability notes:
 --

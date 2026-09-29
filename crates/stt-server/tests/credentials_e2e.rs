@@ -38,6 +38,7 @@ async fn temp_store() -> AuthStore {
                 Uuid::new_v4()
             ),
             max_connections: 1,
+            auto_migrate: true,
         },
         ..Default::default()
     };
@@ -219,6 +220,7 @@ async fn http_list_integrations_empty_registry_returns_empty_data() {
             Uuid::new_v4()
         ),
         max_connections: 1,
+        auto_migrate: true,
     };
     let cfg = Arc::new(cfg);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());

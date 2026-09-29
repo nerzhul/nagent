@@ -68,6 +68,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", static_dir.display());
     // Rerun if the script itself is updated.
     println!("cargo:rerun-if-changed=build.rs");
+    // Rerun when any migration file changes. `sqlx::migrate!`
+    // emits `include_str!` for each known migration at compile
+    // time, so without this directive adding a new migration
+    // would NOT trigger a rebuild of the binaries / tests that
+    // embed the migrator static.
+    println!("cargo:rerun-if-changed=migrations");
 
     // Build-time invariant: we need a stable hash even when the static
     // directory is empty (first build, freshly cloned repo). We still

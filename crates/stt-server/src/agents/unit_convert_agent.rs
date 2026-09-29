@@ -922,6 +922,7 @@ fn format_number(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
     use serde_json::json;
 
     #[test]
@@ -1101,7 +1102,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_basic_length() {
         let agent = UnitConvertAgent::default();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -1129,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_missing_value() {
         let agent = UnitConvertAgent::default();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -1143,7 +1144,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_non_object_arguments() {
         let agent = UnitConvertAgent::default();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );

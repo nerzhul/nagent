@@ -14,7 +14,8 @@ use uuid::Uuid;
 use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
 use crate::auth::store::{
-    AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord, UserCredentialRow,
+    AuthUserRecord, MigrationRow, MigrationStatus, NewAuthEvent, NewPasskeyRecord, PasskeyRecord,
+    UserCredentialRow,
 };
 use crate::config::AuthConfig;
 
@@ -39,6 +40,73 @@ impl PgStore {
             .run(&self.pool)
             .await
             .map_err(|e| AuthError::Internal(format!("postgres migrations failed: {e}")))
+    }
+
+    /// Read `_sqlx_migrations` and diff it against the embedded
+    /// `MIGRATOR` static. On a fresh DB `_sqlx_migrations` does not
+    /// exist; postgres surfaces that as
+    /// `SqlState::UNDEFINED_TABLE` (42P01). Anything else is a real
+    /// error.
+    pub(crate) async fn migration_status(&self) -> Result<MigrationStatus, AuthError> {
+        let rows = sqlx::query(
+            "SELECT version, description FROM _sqlx_migrations \
+             WHERE success = TRUE ORDER BY version",
+        )
+        .fetch_all(self.pool())
+        .await;
+        let applied: Vec<MigrationRow> = match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|r| {
+                    Ok::<_, sqlx::Error>(MigrationRow {
+                        version: r.try_get::<i64, _>("version")?,
+                        description: r.try_get::<String, _>("description")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("42P01") => {
+                Vec::new()
+            }
+            Err(e) => return Err(AuthError::Database(e)),
+        };
+
+        let applied_versions: std::collections::HashSet<i64> =
+            applied.iter().map(|r| r.version).collect();
+        // Deduplicate by version: `MIGRATOR.iter()` returns one
+        // entry per file (`.up.sql` + `.down.sql` for each
+        // reversible migration). See `db_sqlite.rs::migration_status`
+        // for the rationale.
+        let mut pending: Vec<MigrationRow> = Vec::new();
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for m in MIGRATOR.iter() {
+            if applied_versions.contains(&m.version) {
+                continue;
+            }
+            if !seen.insert(m.version) {
+                continue;
+            }
+            pending.push(MigrationRow {
+                version: m.version,
+                description: m.description.to_string(),
+            });
+        }
+        pending.sort_by_key(|r| r.version);
+        let highest_applied = applied.iter().map(|r| r.version).max();
+        Ok(MigrationStatus {
+            applied,
+            pending,
+            highest_applied,
+        })
+    }
+
+    /// Reverse every applied migration whose version is strictly
+    /// greater than `target_version`. The target itself stays
+    /// applied (matches sqlx 0.8.6 `Migrator::undo` semantics).
+    pub(crate) async fn revert_to(&self, target_version: i64) -> Result<(), AuthError> {
+        MIGRATOR
+            .undo(&self.pool, target_version)
+            .await
+            .map_err(|e| AuthError::Internal(format!("postgres migrations undo failed: {e}")))
     }
 
     pub(crate) fn pool(&self) -> &PgPool {

@@ -83,6 +83,34 @@ impl AuthStore {
         }
     }
 
+    /// Inspect the `_sqlx_migrations` table and cross-reference it
+    /// against the `MIGRATOR` static to surface the applied /
+    /// pending split. Returns an empty applied set when the
+    /// `_sqlx_migrations` table does not exist yet (fresh DB), so the
+    /// `migrate status` CLI prints "all pending" rather than
+    /// crashing on a brand-new install.
+    pub async fn migration_status(&self) -> Result<MigrationStatus, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.migration_status().await,
+            AuthStore::Postgres(s) => s.migration_status().await,
+        }
+    }
+
+    /// Roll back every applied migration with a version strictly
+    /// greater than `target_version`. `target_version` itself stays
+    /// applied (sqlx 0.8.6 semantics — see `Migrator::undo`).
+    ///
+    /// The CLI computes the target from the applied set:
+    /// `latest - N` for `--steps N`, or an explicit version for
+    /// `--to`. Operators can therefore always inspect the plan with
+    /// `migrate status` before running `migrate down`.
+    pub async fn revert_to(&self, target_version: i64) -> Result<(), AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.revert_to(target_version).await,
+            AuthStore::Postgres(s) => s.revert_to(target_version).await,
+        }
+    }
+
     /// Return a `AnyPool` handle for subsystem code that needs to
     /// run a one-off SQL query outside the trait surface (OIDC
     /// state persistence, etc.).
@@ -463,4 +491,41 @@ impl NewAuthEvent {
 pub struct UserCredentialRow {
     pub nonce: Vec<u8>,
     pub ciphertext: Vec<u8>,
+}
+
+/// One row of the migration status. `description` is the free-text
+/// label after the version prefix in the migration filename
+/// (`0001_init` → `"init"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationRow {
+    pub version: i64,
+    pub description: String,
+}
+
+/// Snapshot of the migration state at one point in time. Returned by
+/// [`AuthStore::migration_status`] and serialised by the
+/// `stt-server migrate status` CLI (`--json`).
+///
+/// `applied` reflects `_sqlx_migrations` rows with `success = 1`,
+/// `pending` is the set of known migrations (from the
+/// `sqlx::migrate!` static) that are NOT in `applied`. `highest_applied`
+/// is `None` on a fresh DB where `_sqlx_migrations` does not exist
+/// yet — every migration is then `pending`.
+#[derive(Debug, Clone, Default)]
+pub struct MigrationStatus {
+    pub applied: Vec<MigrationRow>,
+    pub pending: Vec<MigrationRow>,
+    pub highest_applied: Option<i64>,
+}
+
+impl MigrationStatus {
+    /// True when at least one migration is pending.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// True when no migration is applied (fresh DB).
+    pub fn is_empty(&self) -> bool {
+        self.applied.is_empty()
+    }
 }

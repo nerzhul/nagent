@@ -1,4 +1,8 @@
--- 0002_credentials.sql — per-user credentials vault + audit column.
+-- 0002_credentials.up.sql — per-user credentials vault + audit column.
+--
+-- Reversed by `0002_credentials.down.sql`; keep the two siblings in
+-- sync (sqlx 0.8.6 pairs them via the `<version>_<name>.up.sql` /
+-- `<version>_<name>.down.sql` filename convention).
 --
 -- This migration extends the auth schema with the per-user
 -- credentials framework: one row per (user, service, field) holds

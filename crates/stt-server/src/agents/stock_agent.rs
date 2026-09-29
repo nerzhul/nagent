@@ -633,7 +633,18 @@ fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
     use serde_json::json;
+
+    /// Build a fresh `UserContext` for tests that ignore
+    /// credentials. Mirrors `UserContext::for_tests` without
+    /// bringing the helper into the agent's public API.
+    fn test_ctx() -> UserContext {
+        UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        )
+    }
 
     #[test]
     fn name_and_schema_are_stable() {
@@ -865,7 +876,9 @@ mod tests {
     fn rejects_missing_ticker() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = StockAgent::new();
-        let err = rt.block_on(agent.invoke(json!({}))).unwrap_err();
+        let err = rt
+            .block_on(agent.invoke(&test_ctx(), json!({})))
+            .unwrap_err();
         assert!(matches!(err, AgentError::InvalidArguments(_)));
     }
 
@@ -874,7 +887,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = StockAgent::new();
         let err = rt
-            .block_on(agent.invoke(json!({"ticker": "x".repeat(41)})))
+            .block_on(agent.invoke(&test_ctx(), json!({"ticker": "x".repeat(41)})))
             .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
@@ -889,7 +902,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = StockAgent::new();
         let err = rt
-            .block_on(agent.invoke(json!({"ticker": "AA; DROP TABLE"})))
+            .block_on(agent.invoke(&test_ctx(), json!({"ticker": "AA; DROP TABLE"})))
             .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
@@ -908,7 +921,7 @@ mod tests {
         // covered by the unit-testable helpers above.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = StockAgent::new();
-        let result = rt.block_on(agent.invoke(json!({"ticker": "Atos"})));
+        let result = rt.block_on(agent.invoke(&test_ctx(), json!({"ticker": "Atos"})));
         match result {
             Ok(_) => { /* network ok, lucky */ }
             Err(AgentError::AgentFailed(msg)) => {
@@ -936,7 +949,7 @@ mod tests {
         // motivating example.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = StockAgent::new();
-        let result = rt.block_on(agent.invoke(json!({"ticker": "L'Oreal"})));
+        let result = rt.block_on(agent.invoke(&test_ctx(), json!({"ticker": "L'Oreal"})));
         if let Err(AgentError::InvalidArguments(msg)) = result {
             panic!("L'Oreal should be a valid input, got InvalidArguments: {msg}");
         }

@@ -383,6 +383,11 @@ pub struct TomlAuthDbConfig {
     pub url: Option<String>,
     /// Maximum simultaneous connections. Defaults to 16.
     pub max_connections: Option<u32>,
+    /// When `true` (default), the server runs `migrate up` against
+    /// the auth DB at boot. Operators who want full control over the
+    /// schema lifecycle can flip this to `false` and run
+    /// `stt-server migrate up` manually before each boot.
+    pub auto_migrate: Option<bool>,
 }
 
 /// Password backend (argon2id) knobs. Mirrors
@@ -734,6 +739,7 @@ fn merge_toml_auth_db(
             backend: l.backend.clone().or_else(|| e.backend.clone()),
             url: l.url.clone().or_else(|| e.url.clone()),
             max_connections: l.max_connections.or(e.max_connections),
+            auto_migrate: l.auto_migrate.or(e.auto_migrate),
         }),
     }
 }

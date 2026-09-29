@@ -459,7 +459,18 @@ fn is_allowed_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
     use serde_json::json;
+
+    /// Build a fresh `UserContext` for tests that ignore
+    /// credentials. Mirrors `UserContext::for_tests` without
+    /// bringing the helper into the agent's public API.
+    fn test_ctx() -> UserContext {
+        UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        )
+    }
 
     #[test]
     fn name_and_schema_are_stable() {
@@ -688,7 +699,9 @@ mod tests {
     fn parse_args_rejects_missing_word() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = DictionaryAgent::default();
-        let err = rt.block_on(agent.invoke(json!({}))).unwrap_err();
+        let err = rt
+            .block_on(agent.invoke(&test_ctx(), json!({})))
+            .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
                 assert!(msg.contains("`word`"));
@@ -702,7 +715,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = DictionaryAgent::default();
         let err = rt
-            .block_on(agent.invoke(json!({"word": "  "})))
+            .block_on(agent.invoke(&test_ctx(), json!({"word": "  "})))
             .unwrap_err();
         assert!(matches!(err, AgentError::InvalidArguments(_)));
     }
@@ -712,7 +725,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = DictionaryAgent::default();
         let err = rt
-            .block_on(agent.invoke(json!({"word": "x".repeat(MAX_WORD_LEN + 1)})))
+            .block_on(agent.invoke(&test_ctx(), json!({"word": "x".repeat(MAX_WORD_LEN + 1)})))
             .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
@@ -728,7 +741,9 @@ mod tests {
         for bad in ["hell0", "hello!", "héllo", "hello;", "héllo"] {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let agent = DictionaryAgent::default();
-            let err = rt.block_on(agent.invoke(json!({"word": bad}))).unwrap_err();
+            let err = rt
+                .block_on(agent.invoke(&test_ctx(), json!({"word": bad})))
+                .unwrap_err();
             match err {
                 AgentError::InvalidArguments(msg) => {
                     assert!(

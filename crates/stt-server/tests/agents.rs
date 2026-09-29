@@ -58,6 +58,7 @@ use stt_server::agents::web_fetch::WebFetchAgent;
 #[cfg(feature = "wikipedia-agent")]
 use stt_server::agents::wikipedia_agent::WikipediaAgent;
 use stt_server::agents::ServiceRegistry;
+use stt_server::agents::UserContext;
 use stt_server::{
     agents::{Agent, AgentRegistry},
     build_router,
@@ -71,6 +72,15 @@ use stt_server::{
     AppState, Config as ServerConfig,
 };
 use tokio::net::TcpListener;
+
+/// Build a fresh `UserContext` for tests that exercise agents which
+/// ignore the context. Mirrors the `UserContext::for_tests` helper
+/// already used inside the per-agent unit tests in the lib crate;
+/// we can't `pub(crate)`-export that, so this is a thin duplicate
+/// of the two-argument call.
+fn test_ctx() -> UserContext {
+    UserContext::for_tests(uuid::Uuid::new_v4(), Arc::new(ServiceRegistry::empty()))
+}
 
 /// Spawn a tiny HTTP server with the given axum Router.
 async fn spawn_router(app: Router) -> String {
@@ -333,7 +343,7 @@ async fn web_fetch_invoke_succeeds_against_loopback() {
     let agent = WebFetchAgent::new(cfg);
 
     let args = serde_json::json!({"url": page_url});
-    let result = agent.invoke(args).await.expect("invoke");
+    let result = agent.invoke(&test_ctx(), args).await.expect("invoke");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed["title"], "Fixture");
     assert!(parsed["text"].as_str().unwrap().contains("Hello world."));
@@ -363,7 +373,7 @@ async fn web_fetch_adaptive_retry_fetches_larger_pages() {
     // fits inside the server cap (default 2 MiB).
     let args = serde_json::json!({"url": page_url, "max_bytes": 10_000});
     let result = agent
-        .invoke(args)
+        .invoke(&test_ctx(), args)
         .await
         .expect("adaptive retry should converge");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -402,7 +412,7 @@ async fn web_fetch_adaptive_retry_caps_at_server_limit() {
     let agent = WebFetchAgent::new(cfg);
     let args = serde_json::json!({"url": page_url, "max_bytes": 1024});
     let err = agent
-        .invoke(args)
+        .invoke(&test_ctx(), args)
         .await
         .expect_err("should fail when page exceeds server cap");
     let msg = err.to_string();
@@ -688,7 +698,7 @@ async fn tool_loop_aborts_after_max_rounds() {
 async fn datetime_agent_returns_now_in_paris() {
     let agent = DateTimeAgent::new();
     let result = agent
-        .invoke(serde_json::json!({"timezone": "Europe/Paris"}))
+        .invoke(&test_ctx(), serde_json::json!({"timezone": "Europe/Paris"}))
         .await
         .expect("invoke");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -707,7 +717,7 @@ async fn datetime_agent_returns_now_in_paris() {
 async fn datetime_agent_rejects_unknown_timezone() {
     let agent = DateTimeAgent::new();
     let err = agent
-        .invoke(serde_json::json!({"timezone": "Not/A_Zone"}))
+        .invoke(&test_ctx(), serde_json::json!({"timezone": "Not/A_Zone"}))
         .await
         .expect_err("should reject");
     match err {
@@ -779,7 +789,7 @@ async fn weather_agent_parses_weatherapi_fixture() {
         base_url,
     });
     let result = agent
-        .invoke(serde_json::json!({"location": "Paris"}))
+        .invoke(&test_ctx(), serde_json::json!({"location": "Paris"}))
         .await
         .expect("invoke");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -808,7 +818,7 @@ async fn weather_agent_surfaces_upstream_error_message() {
         base_url,
     });
     let err = agent
-        .invoke(serde_json::json!({"location": "Atlantis"}))
+        .invoke(&test_ctx(), serde_json::json!({"location": "Atlantis"}))
         .await
         .expect_err("upstream error should surface");
     match err {
@@ -846,7 +856,7 @@ async fn weather_agent_missing_api_key_is_a_clear_error() {
     // at the signup URL rather than 401-ing confusingly.
     let agent = WeatherAgent::new(WeatherConfig::default());
     let err = agent
-        .invoke(serde_json::json!({"location": "Paris"}))
+        .invoke(&test_ctx(), serde_json::json!({"location": "Paris"}))
         .await
         .expect_err("missing key should fail");
     match err {
@@ -893,7 +903,7 @@ async fn stock_agent_rejects_invalid_ticker() {
     // company names like "BNP Paribas"). A `;` is unambiguous
     // garbage, so the gate fires before any network call.
     let err = agent
-        .invoke(serde_json::json!({"ticker": "AA;DROP"}))
+        .invoke(&test_ctx(), serde_json::json!({"ticker": "AA;DROP"}))
         .await
         .expect_err("semicolons are not allowed");
     match err {
@@ -902,7 +912,7 @@ async fn stock_agent_rejects_invalid_ticker() {
     }
     // Length check: anything over 40 chars is rejected up-front.
     let err = agent
-        .invoke(serde_json::json!({"ticker": "x".repeat(41)}))
+        .invoke(&test_ctx(), serde_json::json!({"ticker": "x".repeat(41)}))
         .await
         .expect_err("too long");
     assert!(matches!(
@@ -937,7 +947,10 @@ async fn stock_agent_invoke_endpoint_returns_400_for_bad_ticker() {
 async fn calculate_agent_evaluates_arithmetic() {
     let agent = CalculateAgent::new();
     let result = agent
-        .invoke(serde_json::json!({"expression": "15*87.5/100"}))
+        .invoke(
+            &test_ctx(),
+            serde_json::json!({"expression": "15*87.5/100"}),
+        )
         .await
         .expect("invoke");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -977,7 +990,10 @@ async fn unit_convert_agent_converts_miles_to_km() {
     // The canonical chat-user case. 12 mi × 1.609344 = 19.312128 km.
     let agent = UnitConvertAgent::new(stt_server::config::UnitConvertConfig::default());
     let result = agent
-        .invoke(serde_json::json!({"value": 12, "from": "mile", "to": "km"}))
+        .invoke(
+            &test_ctx(),
+            serde_json::json!({"value": 12, "from": "mile", "to": "km"}),
+        )
         .await
         .expect("invoke");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -1062,7 +1078,7 @@ async fn wikipedia_agent_parses_summary_fixture() {
         user_agent: "nagent-test/0.1".into(),
     });
     let result = agent
-        .invoke(serde_json::json!({"title": "Lyon"}))
+        .invoke(&test_ctx(), serde_json::json!({"title": "Lyon"}))
         .await
         .expect("invoke");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -1127,7 +1143,7 @@ async fn wikipedia_agent_sends_descriptive_user_agent() {
         user_agent: "nagent-test-wikipedia/42 (+https://example.test)".into(),
     });
     let _ = agent
-        .invoke(serde_json::json!({"title": "Lyon"}))
+        .invoke(&test_ctx(), serde_json::json!({"title": "Lyon"}))
         .await
         .unwrap();
     let sent = captured.lock().unwrap().clone();
@@ -1219,7 +1235,7 @@ async fn dictionary_agent_parses_entries_fixture() {
         timeout_ms: 2_000,
     });
     let result = agent
-        .invoke(serde_json::json!({"word": "hello"}))
+        .invoke(&test_ctx(), serde_json::json!({"word": "hello"}))
         .await
         .expect("invoke");
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

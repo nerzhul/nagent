@@ -745,6 +745,7 @@ fn format_bytes(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
     use serde_json::json;
 
     #[test]
@@ -841,7 +842,7 @@ mod tests {
     fn rejects_invalid_args() {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let agent = WebFetchAgent::new(WebFetchConfig::default());
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -857,7 +858,7 @@ mod tests {
     fn rejects_unsupported_scheme() {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let agent = WebFetchAgent::new(WebFetchConfig::default());
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -872,7 +873,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let cfg = WebFetchConfig::default();
         let agent = WebFetchAgent::new(cfg.clone());
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -890,7 +891,7 @@ mod tests {
             ..WebFetchConfig::default()
         };
         let agent = WebFetchAgent::new(cfg);
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );

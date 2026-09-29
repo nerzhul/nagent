@@ -1362,6 +1362,13 @@ pub struct AuthDbConfig {
     pub url: String,
     /// Maximum simultaneous connections. Defaults to 16.
     pub max_connections: u32,
+    /// When `true` (the default), `auth::boot::auto_bootstrap` runs
+    /// `migrate up` against the auth DB at server start. Set this
+    /// to `false` to disable boot-time auto-migration; operators
+    /// then run `stt-server migrate up` themselves before each boot
+    /// (e.g. as a separate init container in Kubernetes, or as a
+    /// pre-deploy hook in CI).
+    pub auto_migrate: bool,
 }
 
 impl Default for AuthDbConfig {
@@ -1370,6 +1377,7 @@ impl Default for AuthDbConfig {
             backend: String::new(),
             url: String::new(),
             max_connections: 16,
+            auto_migrate: true,
         }
     }
 }
@@ -1677,6 +1685,12 @@ impl AuthDbConfig {
                 "NAGENT_AUTH_DB_MAX_CONNECTIONS",
             )?
             .max(1),
+            auto_migrate: resolve_primitive(
+                env_opt("NAGENT_AUTH_DB_AUTO_MIGRATE").as_deref(),
+                toml.auto_migrate,
+                defaults.auto_migrate,
+                "NAGENT_AUTH_DB_AUTO_MIGRATE",
+            )?,
         })
     }
 }

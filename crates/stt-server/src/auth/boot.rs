@@ -71,11 +71,27 @@ pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<AuthStore>, anyh
     let store = AuthStore::connect(&cfg.auth)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))?;
-    store
-        .migrate()
-        .await
-        .map_err(|e| anyhow::anyhow!("auth migrations failed: {e}"))?;
-    tracing::info!("auth migrations applied");
+    // Boot-time migration is gated on `[auth.db].auto_migrate` (env
+    // `NAGENT_AUTH_DB_AUTO_MIGRATE`). When false the operator is
+    // expected to run `stt-server migrate up` separately — useful for
+    // init containers in Kubernetes or pre-deploy hooks in CI. The
+    // CLI subcommands (`auth create-admin`, etc.) do NOT honour this
+    // gate: they always connect + migrate via
+    // `auth::cli::open_store` so a one-shot admin creation never
+    // fails on an unmigrated DB.
+    if cfg.auth.db.auto_migrate {
+        store
+            .migrate()
+            .await
+            .map_err(|e| anyhow::anyhow!("auth migrations failed: {e}"))?;
+        tracing::info!("auth migrations applied (auto)");
+    } else {
+        tracing::warn!(
+            backend = %cfg.auth.db.backend,
+            "auth.db.auto_migrate = false; skipping boot-time migrations. \
+             Run `stt-server migrate up` before starting the server."
+        );
+    }
 
     // SQLite-only auto-bootstrap: a fresh sqlite install starts with
     // an empty users table. Generate a strong random password, hash
@@ -83,7 +99,14 @@ pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<AuthStore>, anyh
     // WARN level so it shows up regardless of the operator's log
     // filter (most RUST_LOG defaults are at INFO so WARN is the
     // right level for a one-time secret).
-    if cfg.auth.db.backend == "sqlite" {
+    //
+    // Skip when `auto_migrate = false` — the `users` table may not
+    // exist yet (the operator is expected to run `stt-server
+    // migrate up` themselves before boot) so the count query would
+    // error out and the admin insert would fail. Operators in this
+    // mode create the first admin via `auth create-admin` after
+    // running the migrations.
+    if cfg.auth.db.backend == "sqlite" && cfg.auth.db.auto_migrate {
         let local_count = store
             .count_users_by_provider("local")
             .await
@@ -91,6 +114,12 @@ pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<AuthStore>, anyh
         if local_count == 0 {
             bootstrap_first_admin(&store, cfg).await?;
         }
+    } else if cfg.auth.db.backend == "sqlite" {
+        tracing::warn!(
+            "auth.db.auto_migrate = false; skipping first-admin auto-bootstrap. \
+             After running `stt-server migrate up`, create the first admin with \
+             `stt-server auth create-admin`."
+        );
     } else {
         tracing::info!(
             "auth DB is postgres-backed; skipping auto-bootstrap (use `stt-server auth create-admin` instead)"
@@ -312,6 +341,7 @@ mod tests {
                     backend: "sqlite".into(),
                     url: format!("sqlite://{}", path.display()),
                     max_connections: 1,
+                    auto_migrate: true,
                 },
                 password: Default::default(),
                 oidc: Default::default(),
@@ -375,6 +405,37 @@ mod tests {
             "bootstrap must skip when a local user already exists"
         );
         assert_eq!(users[0].email, "alice@example.com");
+    }
+
+    #[tokio::test]
+    async fn auto_bootstrap_skips_migrations_when_auto_migrate_false() {
+        // Fresh sqlite DB + `auto_migrate = false`. Boot must still
+        // succeed (the DB is opened for the auto-bootstrap admin
+        // path) and `_sqlx_migrations` must remain absent so the
+        // next `migrate up` correctly reports "all pending".
+        let cfg = sqlite_config("no-auto-migrate");
+        let mut cfg = cfg;
+        cfg.auth.db.auto_migrate = false;
+        let cfg = Arc::new(cfg);
+        let store = crate::auth::boot::auto_bootstrap(&cfg)
+            .await
+            .expect("bootstrap must succeed even with auto_migrate = false")
+            .expect("auth.enabled = true so store must be Some");
+
+        // `_sqlx_migrations` must NOT exist on the DB. We assert
+        // by asking the store for a fresh status — the helper
+        // returns the "all pending" sentinel when the table is
+        // missing, so the applied set must be empty.
+        let status = store.migration_status().await.expect("status");
+        assert!(
+            status.applied.is_empty(),
+            "auto_migrate = false must not apply migrations; got applied = {:?}",
+            status.applied
+        );
+        assert!(
+            status.highest_applied.is_none(),
+            "fresh DB without auto_migrate must report no applied migrations"
+        );
     }
 
     #[test]

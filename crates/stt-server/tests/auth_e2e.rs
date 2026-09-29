@@ -42,6 +42,7 @@ mod tests {
                     uuid::Uuid::new_v4()
                 ),
                 max_connections: 1,
+                auto_migrate: true,
             },
             password: stt_server::config::AuthPasswordConfig::default(),
             oidc: stt_server::config::AuthOidcConfig::default(),

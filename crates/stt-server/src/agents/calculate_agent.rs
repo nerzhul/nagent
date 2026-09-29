@@ -223,6 +223,7 @@ fn format_number(v: f64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
     use serde_json::json;
 
     #[test]
@@ -306,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_basic_arithmetic() {
         let agent = CalculateAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -331,7 +332,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_functions_and_constants() {
         let agent = CalculateAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -350,7 +351,7 @@ mod tests {
         // agent surfaces it as `AgentFailed` so the LLM sees
         // the underlying reason.
         let agent = CalculateAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -369,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_non_object_arguments() {
         let agent = CalculateAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -383,7 +384,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_missing_expression() {
         let agent = CalculateAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -405,7 +406,7 @@ mod tests {
         // character must trigger `InvalidArguments` so the LLM sees
         // a clear message rather than a `meval` parser error.
         let agent = CalculateAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );

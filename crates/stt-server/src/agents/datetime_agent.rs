@@ -146,6 +146,7 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
     use serde_json::json;
 
     #[test]
@@ -163,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_utc_when_timezone_omitted() {
         let agent = DateTimeAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -180,7 +181,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_paris_returns_positive_offset() {
         let agent = DateTimeAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -201,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_unknown_timezone() {
         let agent = DateTimeAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -220,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_rejects_non_object_arguments() {
         let agent = DateTimeAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );
@@ -237,7 +238,7 @@ mod tests {
         // trims and filters empty strings, so the agent falls through
         // to the UTC branch.
         let agent = DateTimeAgent::new();
-        let ctx = super::UserContext::for_tests(
+        let ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
         );

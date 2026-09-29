@@ -81,6 +81,7 @@ async fn build_state_with_auth() -> Arc<AppState> {
                 Uuid::new_v4()
             ),
             max_connections: 1,
+            auto_migrate: true,
         },
         ..AuthConfig::default()
     };

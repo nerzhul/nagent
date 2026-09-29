@@ -28,7 +28,8 @@ use uuid::Uuid;
 use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
 use crate::auth::store::{
-    AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord, UserCredentialRow,
+    AuthUserRecord, MigrationRow, MigrationStatus, NewAuthEvent, NewPasskeyRecord, PasskeyRecord,
+    UserCredentialRow,
 };
 use crate::config::AuthConfig;
 
@@ -69,6 +70,75 @@ impl SqliteStore {
             .run(&self.pool)
             .await
             .map_err(|e| AuthError::Internal(format!("sqlite migrations failed: {e}")))
+    }
+
+    /// Read `_sqlx_migrations` and diff it against the embedded
+    /// `MIGRATOR` static to compute the applied / pending split. A
+    /// fresh DB has no `_sqlx_migrations` table — the `query` call
+    /// fails with `SqliteError::Database` carrying the "no such
+    /// table" message; we catch that and return an empty `applied`
+    /// set so the CLI prints "all pending".
+    pub(crate) async fn migration_status(&self) -> Result<MigrationStatus, AuthError> {
+        let rows = sqlx::query(
+            "SELECT version, description FROM _sqlx_migrations \
+             WHERE success = 1 ORDER BY version",
+        )
+        .fetch_all(self.pool())
+        .await;
+        let applied: Vec<MigrationRow> = match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|r| {
+                    Ok::<_, sqlx::Error>(MigrationRow {
+                        version: r.try_get::<i64, _>("version")?,
+                        description: r.try_get::<String, _>("description")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Err(sqlx::Error::Database(db_err)) if is_table_missing(&*db_err) => Vec::new(),
+            Err(e) => return Err(AuthError::Database(e)),
+        };
+
+        let applied_versions: std::collections::HashSet<i64> =
+            applied.iter().map(|r| r.version).collect();
+        // `MIGRATOR.iter()` returns BOTH the `.up.sql` and the
+        // `.down.sql` entry for every version (sqlx 0.8.6 stores
+        // each file as its own migration record). We surface each
+        // version at most once in the `pending` set, picking the
+        // `ReversibleUp` entry when both halves exist so the
+        // printed description matches what an operator would write
+        // by hand (no `.up` suffix leakage).
+        let mut pending: Vec<MigrationRow> = Vec::new();
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for m in MIGRATOR.iter() {
+            if applied_versions.contains(&m.version) {
+                continue;
+            }
+            if !seen.insert(m.version) {
+                continue;
+            }
+            pending.push(MigrationRow {
+                version: m.version,
+                description: m.description.to_string(),
+            });
+        }
+        pending.sort_by_key(|r| r.version);
+        let highest_applied = applied.iter().map(|r| r.version).max();
+        Ok(MigrationStatus {
+            applied,
+            pending,
+            highest_applied,
+        })
+    }
+
+    /// Reverse every applied migration whose version is strictly
+    /// greater than `target_version`. The target itself stays
+    /// applied (matches sqlx 0.8.6 `Migrator::undo` semantics).
+    pub(crate) async fn revert_to(&self, target_version: i64) -> Result<(), AuthError> {
+        MIGRATOR
+            .undo(&self.pool, target_version)
+            .await
+            .map_err(|e| AuthError::Internal(format!("sqlite migrations undo failed: {e}")))
     }
 
     pub(crate) fn pool(&self) -> &SqlitePool {
@@ -529,4 +599,13 @@ fn is_sqlite_unique_violation(db_err: &dyn sqlx::error::DatabaseError) -> bool {
     // to a unique-constraint violation from the application's
     // point of view.
     db_err.code().as_deref() == Some("2067") || db_err.code().as_deref() == Some("1555")
+}
+
+/// True when the error is the sqlite "no such table" class. We only
+/// need this for `_sqlx_migrations` (fresh DB) so a tight match on the
+/// message text is sufficient — sqlite's "no such table: NAME"
+/// wording is stable across the 3.x line we support.
+fn is_table_missing(db_err: &dyn sqlx::error::DatabaseError) -> bool {
+    let msg = db_err.message();
+    msg.contains("no such table") || msg.contains("no such view")
 }

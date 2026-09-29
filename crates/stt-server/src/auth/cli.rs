@@ -11,6 +11,12 @@
 //! the operator passes `--force`. The PID file is written by
 //! `main` and removed on a clean shutdown (signal handler).
 //!
+//! Peer of the `migrate` namespace (`stt-server migrate {up, down,
+//! status, help}`) — same config + PID-file guard, different
+//! surface. The `migrate` CLI drives the migration primitives
+//! directly (no implicit `migrate up` on connect) so an operator
+//! can inspect the schema state without immediately applying it.
+//!
 //! Argparse grammar (one command per invocation):
 //!
 //! ```text
@@ -91,7 +97,7 @@ fn split_global_flags(args: Vec<String>) -> (crate::config::CliArgs, Vec<String>
 /// already does this — we duplicate the logic here rather than
 /// export the boot helper because the CLI should not need to know
 /// about the boot internals.
-fn ensure_sqlite_parent_dir(url: &str) -> Result<(), anyhow::Error> {
+pub fn ensure_sqlite_parent_dir(url: &str) -> Result<(), anyhow::Error> {
     let path_part = if let Some(rest) = url.strip_prefix("sqlite://") {
         rest.split('?').next().unwrap_or("")
     } else if let Some(rest) = url.strip_prefix("sqlite:") {

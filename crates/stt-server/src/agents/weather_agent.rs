@@ -564,6 +564,17 @@ fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
+
+    /// Build a fresh `UserContext` for tests that ignore
+    /// credentials. Mirrors `UserContext::for_tests` without
+    /// bringing the helper into the agent's public API.
+    fn test_ctx() -> UserContext {
+        UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::agents::ServiceRegistry::empty()),
+        )
+    }
 
     #[test]
     fn name_and_schema_are_stable() {
@@ -594,7 +605,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = WeatherAgent::new(WeatherConfig::default());
         let err = rt
-            .block_on(agent.invoke(json!({"location": "Paris"})))
+            .block_on(agent.invoke(&test_ctx(), json!({"location": "Paris"})))
             .expect_err("missing key should fail");
         match err {
             AgentError::AgentFailed(msg) => {
@@ -758,7 +769,9 @@ mod tests {
             api_key: "k".into(),
             ..WeatherConfig::default()
         });
-        let err = rt.block_on(agent.invoke(json!({}))).unwrap_err();
+        let err = rt
+            .block_on(agent.invoke(&test_ctx(), json!({})))
+            .unwrap_err();
         assert!(matches!(err, AgentError::InvalidArguments(_)));
     }
 
@@ -770,7 +783,7 @@ mod tests {
             ..WeatherConfig::default()
         });
         let err = rt
-            .block_on(agent.invoke(json!({"location": "   "})))
+            .block_on(agent.invoke(&test_ctx(), json!({"location": "   "})))
             .unwrap_err();
         assert!(matches!(err, AgentError::InvalidArguments(_)));
     }
@@ -783,7 +796,10 @@ mod tests {
             ..WeatherConfig::default()
         });
         let err = rt
-            .block_on(agent.invoke(json!({"location": "Paris", "date": "2026/06/15"})))
+            .block_on(agent.invoke(
+                &test_ctx(),
+                json!({"location": "Paris", "date": "2026/06/15"}),
+            ))
             .unwrap_err();
         match err {
             AgentError::InvalidArguments(msg) => {
