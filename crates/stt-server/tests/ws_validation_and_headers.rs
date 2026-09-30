@@ -68,6 +68,7 @@ async fn start_test_server_with_rate_limit(
         infer_timeout: Duration::from_secs(30),
         limits,
         rate_limit: rate_limit.clone(),
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: llm_enabled,
             base_url: "http://localhost:11434".into(),

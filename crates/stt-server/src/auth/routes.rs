@@ -46,7 +46,9 @@ pub async fn logout_handler(
     .await?
     .ok_or(AuthError::Unauthenticated)?;
     check_csrf(&headers, &user)?;
-    require_auth_store(&state)?.delete_session(user.id).await?;
+    require_auth_store(&state)?
+        .delete_session(user.session_id)
+        .await?;
     let cookie = session::build_clear_cookie(
         state.config.auth.cookie_name(),
         state.config.auth.cookie_secure(),
@@ -74,4 +76,256 @@ pub async fn logout_handler(
             })?,
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for security plan #1 ("logout does not revoke
+    //! the session"). The pre-fix bug: `logout_handler` called
+    //! `delete_session(user.id)` instead of
+    //! `delete_session(user.session_id)`, so the SQL `DELETE FROM
+    //! sessions WHERE id = ?` matched zero rows and the stolen
+    //! session stayed valid until expiry.
+    //!
+    //! The test exercises the full path:
+    //!   1. `extract_auth_user` populates `AuthUser.session_id`
+    //!      from the same row it authenticates against.
+    //!   2. `delete_session(user.session_id)` removes exactly that
+    //!      row.
+    //!   3. Reusing the same cookie on `/api/me` returns `401`.
+    //!   4. Reusing the same bearer on `/api/me` returns `401`.
+    //!
+    //! The tests exercise `extract_auth_user` + `delete_session`
+    //! directly (mirroring what `logout_handler` does) rather than
+    //! calling the handler itself, so there is nothing from the
+    //! outer module to import.
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use axum::middleware::from_fn_with_state;
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    async fn temp_store() -> (
+        crate::auth::store::AuthStore,
+        std::sync::Arc<crate::config::Config>,
+    ) {
+        let toml_text = r#"
+            [server]
+            whisper_model_path = "/tmp/m.bin"
+        "#;
+        let toml: crate::config_file::TomlConfig =
+            toml::from_str(toml_text).expect("TOML must parse");
+        let mut cfg =
+            crate::config::Config::from_env_with_toml(Some(&toml)).expect("default config");
+        cfg.auth.enabled = true;
+        cfg.auth.backends = vec![crate::config::AuthBackendKind::Local];
+        cfg.auth.public_url = "https://example.com".into();
+        cfg.auth.db.backend = "sqlite".into();
+        cfg.auth.db.url = format!(
+            "sqlite://file:test_{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4()
+        );
+        cfg.auth.db.max_connections = 1;
+        let cfg = std::sync::Arc::new(cfg);
+        let store = crate::auth::store::AuthStore::connect(&cfg.auth)
+            .await
+            .expect("store must connect");
+        store.migrate().await.expect("migrations must apply");
+        (store, cfg)
+    }
+
+    /// `GET /api/me` shaped like the real router — extracts the
+    /// `AuthUser` extension and returns the email. Mirrors
+    /// [`crate::auth::routes::me_handler`].
+    async fn me_handler(
+        axum::Extension(user): axum::Extension<crate::auth::session::AuthUser>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "email": user.email }))
+    }
+
+    fn whoami_router(state: crate::auth::middleware::AuthState) -> Router {
+        Router::new()
+            .route("/api/me", get(me_handler))
+            .layer(from_fn_with_state(
+                state.clone(),
+                crate::auth::middleware::require_auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_session_so_cookie_returns_401() {
+        let (store, cfg) = temp_store().await;
+        let user_id = store
+            .create_user("alice@example.com", "Alice", "local", Some(b"hash"))
+            .await
+            .unwrap();
+        let session = store
+            .create_session(
+                user_id,
+                std::time::Duration::from_secs(60),
+                Some("127.0.0.1"),
+                None,
+            )
+            .await
+            .unwrap();
+        let state = crate::auth::middleware::AuthState::new(store.clone(), cfg.clone());
+        let app = whoami_router(state.clone());
+        let cookie = format!("{}={}", cfg.auth.cookie_name(), session.id);
+
+        // 1. Cookie authenticates BEFORE logout.
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/me")
+                    .header(axum::http::header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cookie must auth before logout"
+        );
+
+        // 2. Re-resolve via the middleware path and call
+        //    `delete_session(user.session_id)` exactly like
+        //    `logout_handler` does (this is the regression for the
+        //    pre-fix `delete_session(user.id)` bug).
+        let headers = {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(axum::http::header::COOKIE, cookie.parse().unwrap());
+            h
+        };
+        let user = crate::auth::middleware::extract_auth_user(&headers, &state)
+            .await
+            .unwrap()
+            .expect("user must be present");
+        assert_eq!(
+            user.session_id, session.id,
+            "extract_auth_user must populate user.session_id from the row"
+        );
+        let deleted = store.delete_session(user.session_id).await.unwrap();
+        assert_eq!(
+            deleted, 1,
+            "delete_session(user.session_id) must remove exactly 1 row (the bug pre-fix deleted 0 because user.id was passed)"
+        );
+
+        // 3. Same cookie on /api/me must now return 401.
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/me")
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "logout must revoke the cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_session_so_bearer_returns_401() {
+        let (store, cfg) = temp_store().await;
+        let user_id = store
+            .create_user("bob@example.com", "Bob", "local", Some(b"hash"))
+            .await
+            .unwrap();
+        let session = store
+            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .await
+            .unwrap();
+        let state = crate::auth::middleware::AuthState::new(store.clone(), cfg.clone());
+        let app = whoami_router(state.clone());
+
+        // 1. Bearer works before logout.
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/me")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", session.id),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "bearer must auth before logout"
+        );
+
+        // 2. Delete via session_id (the regression).
+        let deleted = store.delete_session(session.id).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        // 3. Bearer now 401.
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/me")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", session.id),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "logout must revoke the bearer too"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_does_not_revoke_other_sessions_for_the_same_user() {
+        // The pre-fix `delete_session(user.id)` was wrong; even if
+        // it had been rewritten to filter by `user_id`, it would
+        // have nuked every active session for that user — bad UX
+        // and a data-loss vector if `user_id` had been a magic
+        // value. The fix calls `delete_session(session.id)` so
+        // only the current session is revoked. This test pins that
+        // contract.
+        let (store, _cfg) = temp_store().await;
+        let user_id = store
+            .create_user("carol@example.com", "Carol", "local", Some(b"hash"))
+            .await
+            .unwrap();
+        let s1 = store
+            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .await
+            .unwrap();
+        let s2 = store
+            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .await
+            .unwrap();
+        assert_ne!(s1.id, s2.id);
+
+        let deleted = store.delete_session(s1.id).await.unwrap();
+        assert_eq!(deleted, 1, "only the targeted session is removed");
+
+        // s2 must still resolve (i.e. it was NOT deleted by s1's
+        // logout).
+        let s2_lookup = store.lookup_session(s2.id).await.unwrap();
+        assert!(
+            s2_lookup.is_some(),
+            "the other session must survive — confirms delete_session targets the session id, not the user id"
+        );
+    }
 }

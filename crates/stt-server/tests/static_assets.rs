@@ -38,6 +38,7 @@ async fn serve_once() -> String {
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
         rate_limit: RateLimitConfig::default(),
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: stt_server::config::LlmConfig {
             enabled: false,
             base_url: "http://localhost:11434".into(),

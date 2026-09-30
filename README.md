@@ -212,6 +212,7 @@ for per-source-IP rate limits:
 | `[server].infer_timeout_ms`       | `INFER_TIMEOUT_MS`          |                                                |
 | `[server.limits].*`               | `MAX_*`, `REQUIRED_*`       | WebSocket frame knobs.                         |
 | `[server.rate_limits].*`          | `STT_RATE_PER_MIN`, `LLM_*` | Per-IP buckets.                                |
+| `[server.trusted_proxies].*`      | `NAGENT_TRUSTED_PROXIES*`   | Reverse-proxy CIDR list (see "Trusted proxies" below). |
 | `[llm].*`                         | `LLM_*`, `OLLAMA_*`         | OpenAI-compatible proxy.                       |
 | `[auth].*`                        | `NAGENT_AUTH_*`             | Multi-user authentication (see "Authentication" below). `[auth.db]` selects sqlite vs postgres at runtime. |
 | `[auth.credentials].key`          | _(none)_                    | AES-256-GCM encryption key for the per-user credentials vault, in plaintext inside the TOML file (64 hex chars / 32 bytes). REQUIRED when `auth.enabled = true` AND at least one agent is registered; the server refuses to boot otherwise. See "Per-user credentials" below for the key-generation recipe and the secret-handling caveat. |
@@ -234,6 +235,10 @@ required_sample_rate = 16_000
 stt_per_min = 120
 llm_per_min = 30
 
+[server.trusted_proxies]
+cidr = "10.0.0.0/8,192.168.0.0/16"
+loopback_bypass = true
+
 [agents]
 enabled = true
 llm_max_tool_rounds = 4
@@ -254,6 +259,35 @@ Unknown sub-tables under `[agents]` (e.g. `[agents.web_fetxh]`) are
 rejected at load time. The five daily tools take small overrides
 (`unit_convert`, `wikipedia`, `dictionary`); `get_datetime`,
 `get_stock_quote`, and `calculate` need no configuration today.
+
+### Trusted proxies (security plan #5)
+
+When the server sits behind a reverse proxy (ingress-nginx, Caddy,
+an AWS ALB, a Cloudflare tunnel, …) every TCP connection peers
+from the proxy's IP — putting every client in the same
+`[server.rate_limits]` bucket. Configure
+`[server.trusted_proxies].cidr` (or `NAGENT_TRUSTED_PROXIES`) with
+the proxy's IP range so the rate-limit resolver honours
+`X-Forwarded-For` for those peers, while leaving the header
+ignored (and unspoofable) for direct connections:
+
+```toml
+[server.trusted_proxies]
+# Comma-separated CIDR list. Examples:
+#   k8s pod CIDR:        cidr = "10.0.0.0/8"
+#   Docker bridge:        cidr = "172.16.0.0/12"
+#   local sidecar:        cidr = "127.0.0.1/32"
+#   multiple ranges:      cidr = "10.0.0.0/8,192.168.0.0/16"
+cidr = "10.0.0.0/8,192.168.0.0/16"
+# Loopback IPs bypass the rate-limit bucket by default so local
+# dev / tests do not need to fight the limiter. Set to `false`
+# in production to remove the carve-out.
+loopback_bypass = true
+```
+
+Boot emits a `WARN` when the bind address is non-loopback and
+`trusted_proxies.cidr` is empty — that combination is almost
+always a misconfiguration behind a reverse proxy.
 
 ## Authentication
 

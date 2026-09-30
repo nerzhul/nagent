@@ -42,6 +42,7 @@ fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
         rate_limit: RateLimitConfig::default(),
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: false,
             base_url: "http://localhost:11434".into(),

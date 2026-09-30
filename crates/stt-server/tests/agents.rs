@@ -233,6 +233,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
         rate_limit: RateLimitConfig::default(),
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: true,
             base_url: upstream_url,

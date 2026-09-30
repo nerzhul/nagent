@@ -48,6 +48,26 @@
 # llm_per_min = 30
 
 # ---------------------------------------------------------------------------
+# Trusted-proxy CIDR list (security plan #5)
+# ---------------------------------------------------------------------------
+# When the server sits behind a reverse proxy, list the proxy's IP range
+# here so the rate-limit resolver can honour `X-Forwarded-For` for those
+# peers. Empty (the default) means the server never trusts XFF — every
+# client shares one bucket behind a reverse proxy, which is almost always
+# a misconfiguration. Boot emits a WARN when the bind address is
+# non-loopback and this list is empty.
+#
+# Examples:
+#   cidr = "10.0.0.0/8"                           # k8s pod CIDR
+#   cidr = "172.16.0.0/12"                        # Docker bridge
+#   cidr = "127.0.0.1/32"                         # local sidecar
+#   cidr = "10.0.0.0/8,192.168.0.0/16"             # multiple ranges
+
+# [server.trusted_proxies]
+# cidr = "10.0.0.0/8,192.168.0.0/16"
+# loopback_bypass = true
+
+# ---------------------------------------------------------------------------
 # LLM proxy (Ollama or any OpenAI-compatible upstream)
 # ---------------------------------------------------------------------------
 

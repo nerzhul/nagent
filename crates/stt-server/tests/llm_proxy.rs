@@ -119,6 +119,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
         rate_limit: RateLimitConfig::default(),
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: true,
             base_url: upstream_url,
@@ -207,6 +208,7 @@ async fn start_test_server_disabled() -> String {
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
         rate_limit: RateLimitConfig::default(),
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: false,
             base_url: "http://localhost:11434".into(),
@@ -613,6 +615,7 @@ async fn start_test_server_with_llm_auth(
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
         rate_limit: RateLimitConfig::default(),
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: true,
             base_url: upstream_url,

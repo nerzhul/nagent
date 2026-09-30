@@ -56,6 +56,7 @@ async fn start_test_server_with(
         infer_timeout: Duration::from_secs(30),
         limits: stt_server::config::LimitsConfig::default(),
         rate_limit,
+        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: llm_enabled,
             // Unresolvable upstream: any handler invocation would fail,

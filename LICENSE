@@ -1,0 +1,219 @@
+OpenCore Source-Available License 1.0
+
+Copyright (c) 2026 The nagent project owners.
+SPDX-License-Identifier: LicenseRef-OpenCore-Source-Available-1.0
+
+PREAMBLE
+
+This license governs the source code of the nagent project ("the Project").
+The Project is made available in source form so that the community can read,
+audit, modify, and run it for non-commercial purposes. It is NOT an open
+source license as defined by the Open Source Initiative; it is a
+source-available license with explicit restrictions on commercialization and
+redistribution.
+
+The Project owners (defined in Section 3) are FREELY authorized to
+redistribute and commercialize the Project, including under proprietary
+terms, without any obligation toward other contributors or users. Everyone
+else is granted only the permissions described in Section 1, and is bound
+by the restrictions of Section 2. This asymmetry between Project Owners
+and all other parties is a defining feature of this license and is not a
+drafting oversight.
+
+------------------------------------------------------------------------
+
+1. GRANT OF RIGHTS
+
+   Subject to your continuous compliance with the restrictions of
+   Section 2, each "Authorized User" is granted a worldwide, royalty-free,
+   non-exclusive, non-transferable, non-sublicensable license to:
+
+   a) Use, copy, and run the Project, in its original or modified form,
+      for any purpose that is NOT a "Commercial Use" as defined in
+      Section 2.1.
+
+   b) Modify the Project and prepare derivative works for such
+      non-Commercial Use.
+
+   c) Submit contributions (patches, pull requests, issues) back to the
+      official Project repository located at:
+
+         https://github.com/nerzhul/nagent
+
+      ("Official Repository").
+
+   "Authorized User" means any individual who has obtained a copy of the
+   Project source code directly from the Official Repository or from a
+   channel explicitly authorized in writing by a Project Owner.
+
+------------------------------------------------------------------------
+
+2. RESTRICTIONS
+
+2.1 Commercial Use prohibited.
+
+   You may NOT exercise any of the rights granted in Section 1 for any
+   purpose that is primarily intended for, or directed toward, commercial
+   advantage, monetary compensation, or financial gain (each, a
+   "Commercial Use"), including without limitation:
+
+   - selling, licensing, sub-licensing, renting, leasing, or otherwise
+     providing the Project (or any derivative work) to a third party in
+     exchange for payment of any kind;
+   - offering the Project (or any derivative work) as a hosted service,
+     Software-as-a-Service, managed service, or "AI agent" product, whether
+     free or paid;
+   - using the Project (or any derivative work) to provide paid
+     consulting, integration, support, or training services to a third
+     party where the Project itself is the primary deliverable;
+   - embedding or bundling the Project (or any derivative work) in a
+     commercial product or commercial offering.
+
+   Internal use within an organization that does NOT result in any of the
+   above activities is NOT a Commercial Use and remains permitted.
+
+2.2 Redistribution prohibited.
+
+   You may NOT redistribute, republish, sublicense, or otherwise make the
+   Project (or any modified or derivative version of it, in whole or in
+   part, in source or compiled form) available to any third party, by any
+   means (public mirror, package registry, container registry, app store,
+   file hosting, torrent, etc.), EXCEPT:
+
+   a) by way of contributions submitted to the Official Repository under
+      Section 1(c); and
+
+   b) verbatim copies of the unmodified Project source tree obtained from
+      the Official Repository and shared solely for the purpose of
+      reproducing the build or audit of the Project, with no modification
+      and no additional files, and provided that every such copy retains
+      this LICENSE file in full.
+
+2.3 No circumventing the restrictions.
+
+   You may not remove, alter, or circumvent any notice, watermark, or
+   technical measure intended to enforce Sections 2.1 or 2.2. You may not
+   combine the Project with other software solely to evade the restrictions
+   of this license.
+
+------------------------------------------------------------------------
+
+3. PROJECT OWNERS — SPECIAL RIGHTS
+
+   3.1 Definition.
+
+      The "Project Owners" are the individuals holding the `Owner` role
+      on the GitHub organization or repository hosting the Official
+      Repository at the time of the act in question (currently: the
+      owners of https://github.com/nerzhul/nagent, as listed in the
+      GitHub repository settings). The role assigned by GitHub is the
+      sole authoritative reference; no other claim to "Project Owner"
+      status is recognized under this license.
+
+   3.2 Freedom to redistribute and commercialize.
+
+      Project Owners may, FREELY and without seeking permission from
+      any other party, exercise each of the following rights with
+      respect to the Project, in whole or in part, in original or
+      modified form, in source or compiled form, and under any terms
+      they choose (including proprietary, closed-source, or otherwise
+      restrictive terms):
+
+        a) REDISTRIBUTE the Project, or any derivative work thereof,
+           through any channel, to any third party, for any purpose,
+           including for Commercial Use by the recipient;
+
+        b) COMMERCIALIZE the Project, or any derivative work thereof,
+           including by selling it, licensing it (whether per-seat,
+           per-instance, per-server, perpetual, subscription-based,
+           usage-based, royalty-bearing, or otherwise), bundling it
+           into a commercial product, offering it as a hosted or
+           managed service (SaaS / PaaS / agent-as-a-service),
+           sublicensing it under a different license, or relicensing
+           it under any other license (open source or proprietary);
+
+        c) CREATE and exploit derivative works, and redistribute and
+           commercialize such derivative works, without any obligation
+           to make the resulting work available to the community, to
+           disclose the source, to attribute the original Project, or
+           to share any revenue.
+
+      The rights in this Section 3 are granted by virtue of the
+      Project Owner role only. They may be exercised without prior
+      notice, without compensation to other contributors, and without
+      obligation to disclose the resulting distribution or commercial
+      terms.
+
+   3.3 No reciprocal rights for others.
+
+      No other party acquires any of the rights described in
+      Section 3.2 by virtue of contributing to the Project, accepting
+      this license, or otherwise interacting with the Project, unless
+      and until such party is granted the Project Owner role on the
+      Official Repository by GitHub.
+
+      In particular, contributors who are NOT Project Owners retain
+      only the rights described in Section 1, and remain bound by the
+      restrictions of Section 2.
+
+------------------------------------------------------------------------
+
+4. CONTRIBUTIONS
+
+   By submitting a contribution (patch, pull request, or any other
+   submission of code or documentation) to the Official Repository, you
+   represent that you have the right to submit the contribution under
+   these terms, and you grant the Project Owners a perpetual, worldwide,
+   royalty-free, irrevocable, sublicensable license to use, modify,
+   reproduce, distribute, sublicense, relicense, commercialize, and
+   otherwise exploit that contribution as part of the Project, with no
+   obligation to reciprocate.
+
+------------------------------------------------------------------------
+
+5. TERMINATION
+
+   Your rights under Section 1 terminate automatically and without notice
+   upon any breach of Section 2. Upon termination you must destroy any
+   copy of the Project in your possession. Termination does not affect
+   the rights and obligations of the Project Owners.
+
+------------------------------------------------------------------------
+
+6. NO WARRANTY
+
+   THE PROJECT IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY
+   OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+   WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+   TITLE, AND NON-INFRINGEMENT. THE ENTIRE RISK AS TO THE QUALITY AND
+   PERFORMANCE OF THE PROJECT IS WITH YOU.
+
+------------------------------------------------------------------------
+
+7. LIMITATION OF LIABILITY
+
+   IN NO EVENT SHALL THE PROJECT OWNERS, CONTRIBUTORS, OR COPYRIGHT
+   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+   IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF,
+   OR IN CONNECTION WITH THE PROJECT OR THE USE OR OTHER DEALINGS IN THE
+   PROJECT.
+
+------------------------------------------------------------------------
+
+8. GENERAL
+
+   This license is governed by the laws of the jurisdiction of the
+   Project Owners' primary residence, without regard to its conflict of
+   laws principles. If any provision of this license is held to be
+   unenforceable, the remaining provisions remain in full force and
+   effect. This license constitutes the entire agreement between you and
+   the Project Owners with respect to the Project and supersedes any
+   prior or contemporaneous understandings on that subject.
+
+   Failure by the Project Owners to enforce any provision of this license
+   shall not constitute a waiver of that provision or of any other
+   provision.
+
+------------------------------------------------------------------------
+
+END OF LICENSE
