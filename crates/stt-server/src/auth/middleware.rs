@@ -34,8 +34,7 @@ pub async fn extract_auth_user(
     headers: &axum::http::HeaderMap,
     state: &AuthState,
 ) -> Result<Option<AuthUser>, AuthError> {
-    let Some(extracted) = session::extract_session_token(headers, state.cfg.auth.cookie_name())
-    else {
+    let Some(extracted) = session::extract_session_token(headers, state.cfg.cookie_name()) else {
         return Ok(None);
     };
     // Security plan #7: hash the plaintext token here and never

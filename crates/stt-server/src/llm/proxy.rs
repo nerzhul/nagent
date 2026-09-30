@@ -11,8 +11,6 @@
 //!   historical `llm::agents_list` / `llm::agent_invoke` names so
 //!   integration tests keep compiling unchanged.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -29,7 +27,7 @@ use crate::llm::client::{parse_chat_session_header, LlmError};
 use crate::llm::privacy::{strip_user_location_if_disabled, strip_user_timezone_if_disabled};
 use crate::llm::prompt::inject_default_system_prompt;
 use crate::llm::tool_loop::run_tool_loop;
-use crate::AppState;
+use crate::state::{ArcAgentsConfig, ArcLlmState, ArcServices, OptArcAgentRegistry};
 
 /// Subset of the OpenAI chat request we care about.
 ///
@@ -62,16 +60,15 @@ struct ChatRequest {
 /// `run_tool_loop` for the user-scoping consequences (per-user
 /// agents surface a clear tool error).
 pub async fn chat_completions(
-    State(state): State<Arc<AppState>>,
+    State(llm_state): State<ArcLlmState>,
+    State(agents): State<OptArcAgentRegistry>,
+    State(agents_cfg): State<ArcAgentsConfig>,
+    State(services): State<ArcServices>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, LlmError> {
-    let llm = state
-        .llm
-        .as_ref()
-        .map(|l| &l.client)
-        .ok_or(LlmError::Disabled)?;
+    let llm = &llm_state.client;
 
     let req: ChatRequest = serde_json::from_slice(&body)
         .map_err(|e| LlmError::BadRequest(format!("invalid json body: {e}")))?;
@@ -116,11 +113,13 @@ pub async fn chat_completions(
         // this once, up front, so every round of the tool-loop carries
         // the same `tools` definition (Ollama expects the field on
         // every call). Client-supplied `tools` are preserved.
-        let server_tools = state
-            .agents
+        let server_tools = agents
+            .0
             .as_ref()
             .map(|a| a.tools_schema())
             .unwrap_or_default();
+        // Drop the `services` shadow so the parameter is used.
+        let _ = services;
         if !server_tools.is_empty() {
             let client_tools = obj
                 .get("tools")
@@ -201,8 +200,8 @@ pub async fn chat_completions(
     }
 
     let timeout = llm.cfg.request_timeout;
-    let max_rounds = state.config.agents.llm_max_tool_rounds;
-    let agents = state.agents.clone();
+    let max_rounds = agents_cfg.llm_max_tool_rounds;
+    let agents = agents.0.clone().map(|arc| (*arc).clone());
 
     // Channel that drives the response body. The tool-loop coroutine
     // pushes either upstream `data:` chunks (verbatim) or locally
@@ -228,7 +227,7 @@ pub async fn chat_completions(
     // allowlist down to the tool loop so the read_document →
     // web_fetch check can decide whether the URL host is already
     // pre-authorised.
-    let web_fetch_allowlist = state.config.agents.web_fetch.allowlist.clone();
+    let web_fetch_allowlist = agents_cfg.web_fetch.allowlist.clone();
     tokio::spawn(async move {
         run_tool_loop(
             http,
@@ -277,12 +276,8 @@ pub async fn chat_completions(
 /// When the upstream is unreachable we still return a JSON body with
 /// `[{ "id": "<OLLAMA_MODEL>" }]` so the UI dropdown always has at
 /// least one entry.
-pub async fn models_list(State(state): State<Arc<AppState>>) -> Result<Response, LlmError> {
-    let llm = state
-        .llm
-        .as_ref()
-        .map(|l| &l.client)
-        .ok_or(LlmError::Disabled)?;
+pub async fn models_list(State(llm_state): State<ArcLlmState>) -> Result<Response, LlmError> {
+    let llm = &llm_state.client;
 
     let url = format!("{}/v1/models", llm.cfg.base_url.trim_end_matches('/'));
     debug!(%url, "fetching upstream models");
@@ -348,20 +343,22 @@ pub async fn models_list(State(state): State<Arc<AppState>>) -> Result<Response,
 ///
 /// Returns an empty array when agents are disabled (so the browser
 /// can render the "no agents" hint without special-casing 404).
-pub async fn agents_list(State(state): State<Arc<AppState>>) -> Result<Response, LlmError> {
-    crate::agents::routes::agents_list(State(state)).await
+pub async fn agents_list(State(agents): State<AgentRegistry>) -> Result<Response, LlmError> {
+    crate::agents::routes::agents_list(State(agents)).await
 }
 
 /// `POST /v1/agents/:name/invoke` — direct agent invocation, used by
 /// tests and `curl`. The chat UI goes through `/v1/chat/completions`
 /// instead so the SSE stream stays consistent.
 pub async fn agent_invoke(
-    State(state): State<Arc<AppState>>,
+    State(agents): State<AgentRegistry>,
+    State(services): State<ArcServices>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<Response, LlmError> {
-    crate::agents::routes::agent_invoke(State(state), auth_user, Path(name), body).await
+    crate::agents::routes::agent_invoke(State(agents), State(services), auth_user, Path(name), body)
+        .await
 }
 
 // Silence the unused-import lint on `LlmConfig` / `AgentRegistry` if a

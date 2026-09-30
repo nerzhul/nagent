@@ -80,9 +80,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // a Router pre-wrapped in the shared CORS / rate-limit / bearer-auth
     // envelope (when applicable). The global `RequireAuth` layer is
     // applied below, after we know whether auth is enabled.
-    let mut protected: Router<Arc<AppState>> = Router::new()
-        .route("/ws", get(crate::stt::ws_handler::ws_upgrade))
-        .merge(mount_features(state.clone()));
+    //
+    // Every handler extracts its sub-state through
+    // `FromRef<Arc<AppState>>`, so the whole tree keeps the
+    // `Router<Arc<AppState>>` type. Start from `mount_features`
+    // (which already returns `Router<Arc<AppState>>`) so axum
+    // infers the state type from that branch's signature rather
+    // than from the first `State<T>` extractor on a fresh `Router`.
+    let mut protected: Router<Arc<AppState>> =
+        mount_features(state.clone()).route("/ws", get(crate::stt::ws_handler::ws_upgrade));
 
     if state.agents.is_some() {
         protected = protected.merge(mount_agents(state.clone()));
@@ -120,7 +126,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .clone()
             .expect("auth must be Some when auth is enabled");
         let auth_layer = axum::middleware::from_fn_with_state(
-            auth_state,
+            auth_state.clone(),
             crate::auth::middleware::require_auth_middleware,
         );
         let login = crate::auth::router::build_public_auth_router(state.clone());

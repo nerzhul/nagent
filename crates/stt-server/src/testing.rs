@@ -1,13 +1,9 @@
 //! Integration-test builder for [`crate::AppState`].
 //!
-//! Phase 5.B of the architecture refactor introduces this module
-//! behind the `test-util` cargo feature so the 14 hand-built
-//! `AppState { ... }` literals scattered across
-//! `crates/stt-server/tests/*.rs` (plus the one in `main.rs`
-//! before it was moved to `app::build_app`) are replaced by a
-//! single builder. New fields on any sub-state are picked up
-//! automatically by the builder; tests that need to set them
-//! explicitly go through the [`AppStateBuilder`] setters.
+//! Single builder replaces hand-built `AppState { ... }` literals
+//! across `crates/stt-server/tests/*.rs`. New fields on any
+//! sub-state are picked up automatically; tests that need to set
+//! them explicitly go through the [`AppStateBuilder`] setters.
 //!
 //! ## Usage
 //!
@@ -326,7 +322,7 @@ impl AppStateBuilder {
 
         let auth = self.auth_store.map(|store| AuthState {
             store,
-            cfg: Arc::clone(&self.config),
+            cfg: Arc::new(self.config.auth.clone()),
             oidc: self.auth_oidc,
             passkey: self.auth_passkey,
             login_rate_limiter: LoginRateLimiter::new(),
@@ -378,9 +374,7 @@ pub fn app_state() -> AppStateBuilder {
 }
 
 /// `Config` shape used by every integration test that does not
-/// care about any specific subsystem. Mirrors the `Config {
-/// ... }` literal that used to live inline in each test file
-/// before phase 5.B:
+/// care about any specific subsystem:
 /// - `bind_addr = 127.0.0.1:0` (ephemeral port for tests that
 ///   actually bind),
 /// - `whisper_model_path = /tmp/fake-model.bin` (so the no-TOML

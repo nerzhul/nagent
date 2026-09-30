@@ -1,23 +1,15 @@
 //! `app::build_app` — composition root.
 //!
-//! Phase 5.B of the architecture refactor extracts the boot
-//! wiring that used to live inline in `main.rs` into a single
-//! function that returns an `Arc<AppState>`. `main.rs` now does
-//! only the things that the binary itself owns:
+//! Owns the boot wiring that used to live inline in `main.rs`:
+//! auth store bootstrap, OIDC + passkey sub-states, the whisper
+//! backend + worker pool, the LLM client, the agent registry,
+//! the TTS engine, the documents store, and the per-IP rate
+//! limiters. Returns `Arc<AppState>`; `main.rs` calls it after
+//! CLI parsing and feeds the result to `http::build_router`.
 //!
-//! 1. CLI argument parsing (so `--config FOO` is honoured before
-//!    any subsystem boots).
-//! 2. CLI subcommand dispatch (`stt-server auth|documents|migrate …`)
-//!    so the subcommand argument vector reaches the right handler
-//!    without going through `Config::load`.
-//! 3. Tracing init.
-//! 4. Call `build_app(&cfg)` to construct the full `AppState`.
-//! 5. `axum::serve` the `build_router(state)` result.
-//!
-//! `build_app` itself is `pub` and reusable from tests (the
-//! `testing::app_state` builder is a thin wrapper that lets tests
-//! short-circuit specific subsystems without going through the
-//! full config → bootstrap → connect chain).
+//! `build_app` is `pub` so tests can drive the full boot path
+//! (or short-circuit specific subsystems through
+//! [`crate::testing`]).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -30,7 +22,7 @@ use crate::agents::ServiceRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::config::{AuthBackendKind, Config};
 use crate::credentials::{CredentialResolver, CredentialsKey};
-use crate::http::{build_rate_limiters, build_router};
+use crate::http::build_rate_limiters;
 use crate::llm::LlmClient;
 use crate::state::{
     AppState, AuthState, ChatSessionsState, DocumentsState, LlmState, SttState, TtsState,
@@ -313,7 +305,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // ---- Compose AuthState ----------------------------------------------
     let auth = auth_store.map(|store| AuthState {
         store,
-        cfg: cfg.clone(),
+        cfg: Arc::new(cfg.auth.clone()),
         oidc: auth_oidc,
         passkey: auth_passkey,
         login_rate_limiter: LoginRateLimiter::new(),
@@ -341,15 +333,6 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         tts,
         config: cfg,
     }))
-}
-
-/// Build the [`axum::Router`] around [`AppState`]. Re-exported
-/// from [`crate::http::build_router`] so callers do not need to
-/// know the internal split. Kept here as a thin shim so a future
-/// phase can move router construction into the composition root
-/// alongside `build_app`.
-pub fn build_http_router(state: Arc<AppState>) -> axum::Router {
-    build_router(state)
 }
 
 /// Build the backend: real `whisper-rs` when the `real-backend`

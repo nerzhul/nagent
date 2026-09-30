@@ -1,16 +1,39 @@
-//! Server configuration loaded from environment variables and an
-//! optional TOML overlay.
+//! `config/` — server configuration grouped by section.
 //!
-//! Precedence (highest wins):
-//! 1. Environment variable (or `.env` value — same precedence, since
-//!    `dotenvy` writes to `std::env`).
-//! 2. TOML file value, when `--config <path>` is supplied at startup
-//!    and the key is present in the file.
-//! 3. Hardcoded default baked into `Default::default()`.
+//! Each section has its own sub-module stub (see below). The
+//! runtime struct + resolver + inline tests for every section
+//! still live in this file; future commits will move them into
+//! the dedicated sub-modules. The stubs re-export each type so
+//! canonical paths like `crate::config::limits::LimitsConfig`
+//! already resolve.
 //!
-//! `WHISPER_MODEL_PATH` is the only required knob overall: if it is
-//! missing from both env and the TOML file, [`Config::load`] fails
-//! fast with [`ConfigError::MissingModelPath`].
+//! ## Section layout
+//!
+//! - [`server`] — `Config`, `CliArgs`, env/TOML merge helpers, `ConfigError`.
+//! - [`ratelimit`] — per-IP rate-limit knobs (`RateLimitConfig`).
+//! - [`trusted_proxies`] — `[server].trusted_proxies` CIDR list.
+//! - [`limits`] — inbound WebSocket frame limits (`LimitsConfig`).
+//! - [`llm`] — `[llm]` section + `LlmAuthMode`.
+//! - [`tts`] — `[tts]` section.
+//! - [`auth`] — `[auth]` section + per-backend sub-configs.
+//! - [`agents`] — `[agents]` section + per-agent sub-configs.
+//! - [`documents`] — `[documents]` section.
+
+pub mod agents;
+pub mod auth;
+pub mod documents;
+pub mod limits;
+pub mod llm;
+pub mod ratelimit;
+pub mod server;
+pub mod trusted_proxies;
+pub mod tts;
+
+// Re-export the TOML mirror module so `crate::config_file::TomlConfig`
+// keeps resolving unchanged. The mirror is kept separate from the
+// runtime resolvers here so a future operator-UI / `serde` schema
+// change does not drag the resolution logic along.
+pub use crate::config_file as file;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

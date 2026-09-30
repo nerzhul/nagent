@@ -253,7 +253,7 @@ pub struct ChatSessionResponse {
 /// {"id": "01234567-89ab-cdef-0123-456789abcdef"}
 /// ```
 pub async fn mint_handler(
-    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+    axum::extract::State(state): axum::extract::State<crate::ChatSessionsState>,
     axum::Extension(user): axum::Extension<crate::auth::session::AuthUser>,
 ) -> Result<axum::Json<ChatSessionResponse>, ChatSessionError> {
     // SEV 2 fix: server-bound chat session id. We mint a fresh
@@ -262,17 +262,8 @@ pub async fn mint_handler(
     // persists the returned id in localStorage and reuses it
     // across page reloads until the server rejects it with 403
     // (e.g. logout from another tab).
-    let chat_sessions = state
-        .chat_sessions
-        .as_ref()
-        .map(|c| &c.sessions)
-        .ok_or_else(|| {
-            ChatSessionError::Sqlx(sqlx::Error::Protocol(
-                "chat_sessions handle is not wired".into(),
-            ))
-        })?;
     let id = uuid::Uuid::new_v4();
-    chat_sessions.bind(id, user.id).await?;
+    state.sessions.bind(id, user.id).await?;
     Ok(axum::Json(ChatSessionResponse { id }))
 }
 

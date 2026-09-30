@@ -28,7 +28,7 @@ use crate::stt::result_router::send_to_session;
 use crate::stt::session::{register, unregister, OutboundMessage};
 use crate::stt::validation::FrameError;
 use crate::version::VersionInfo;
-use crate::AppState;
+use crate::SttState;
 
 /// Handle a WebSocket upgrade request.
 ///
@@ -39,7 +39,7 @@ use crate::AppState;
 /// the close frame.
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
+    State(bundle): State<crate::state::SttWithConfig>,
     headers: HeaderMap,
     peer: Option<ConnectInfo<SocketAddr>>,
 ) -> impl IntoResponse {
@@ -50,17 +50,20 @@ pub async fn ws_upgrade(
     // added to `trusted_proxies.cidr`) ends up bucketing real
     // client IPs, not the ingress pod IP.
     let client_ip = peer_ip.map(|peer_ip| {
-        crate::rate_limit::resolve_client_ip(&headers, peer_ip, &state.config.trusted_proxies)
+        crate::rate_limit::resolve_client_ip(&headers, peer_ip, &bundle.config.trusted_proxies)
     });
-    let limiter = state.stt.rate_limiter.clone();
-    let state_for_conn = Arc::clone(&state);
+    let limiter = bundle.stt.rate_limiter.clone();
+    let stt_for_conn = Arc::clone(&bundle.stt);
+    let config_for_conn = bundle.config.clone();
 
     // Decide whether to upgrade before consuming the upgrade itself;
     // this way a rejection is a plain 429 (no WS handshake started).
     match client_ip {
         Some(ip) => match limiter.check(ip) {
             Ok(()) => ws
-                .on_upgrade(move |socket| ws_connection(socket, state_for_conn, Some(ip)))
+                .on_upgrade(move |socket| {
+                    ws_connection(socket, stt_for_conn, config_for_conn, Some(ip))
+                })
                 .into_response(),
             Err(RateLimitError::Limited { retry_after_ms, .. }) => {
                 let secs = retry_after_ms.div_ceil(1000).max(1);
@@ -81,7 +84,7 @@ pub async fn ws_upgrade(
         // bypass the limiter. The rate-limit code path is unit-tested
         // independently.
         None => ws
-            .on_upgrade(move |socket| ws_connection(socket, state_for_conn, None))
+            .on_upgrade(move |socket| ws_connection(socket, stt_for_conn, config_for_conn, None))
             .into_response(),
     }
 }
@@ -93,26 +96,31 @@ pub async fn ws_upgrade(
 /// without a real TCP listener), per-frame checks are skipped — the
 /// HTTP upgrade gate still applied whenever a real peer address was
 /// available.
-pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>, peer_ip: Option<IpAddr>) {
+pub async fn ws_connection(
+    socket: WebSocket,
+    stt: Arc<SttState>,
+    config: Arc<crate::config::Config>,
+    peer_ip: Option<IpAddr>,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let limiter = app.stt.rate_limiter.clone();
+    let limiter = stt.rate_limiter.clone();
 
     // Register BEFORE any send so we know our session ID and the outbound
     // channel is owned exclusively by this task.
-    let (session_id, _state, mut outbound_rx) = register(&app.stt.sessions, 64);
+    let (session_id, _state, mut outbound_rx) = register(&stt.sessions, 64);
 
     info!(%session_id, "ws connection opened");
 
     // Send BackendInfo immediately so the client knows which model/GPU is in use.
     let info = BackendInfo {
-        model_id: app.stt.backend.model_id().to_string(),
-        gpu_backend: app.stt.backend.backend_name().to_string(),
+        model_id: stt.backend.model_id().to_string(),
+        gpu_backend: stt.backend.backend_name().to_string(),
     };
     match encode_frame(&Payload::Backend(info)) {
         Ok(bytes) => {
             if ws_tx.send(Message::Binary(bytes)).await.is_err() {
                 warn!(%session_id, "failed to send BackendInfo, closing");
-                unregister(&app.stt.sessions, session_id);
+                unregister(&stt.sessions, session_id);
                 return;
             }
         }
@@ -149,7 +157,7 @@ pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>, peer_ip: Optio
                             let _ = ws_tx.send(Message::Close(Some(close))).await;
                             break;
                         }
-                        if let Err(e) = handle_inbound(&app, session_id, &buf).await {
+                        if let Err(e) = handle_inbound(&stt, &config, session_id, &buf).await {
                             warn!(%session_id, "inbound error: {e}");
                             if matches!(e, InboundError::ClientStop) {
                                 break;
@@ -211,13 +219,14 @@ pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>, peer_ip: Optio
 
     // Connection ended — remove ourselves from the map so subsequent
     // results are dropped instead of being routed into a dead channel.
-    unregister(&app.stt.sessions, session_id);
+    unregister(&stt.sessions, session_id);
     info!(%session_id, "ws connection closed");
 }
 
 /// Decode an inbound frame and dispatch it.
 async fn handle_inbound(
-    app: &Arc<AppState>,
+    stt: &Arc<SttState>,
+    config: &Arc<crate::config::Config>,
     session_id: Uuid,
     bytes: &[u8],
 ) -> Result<(), InboundError> {
@@ -231,13 +240,13 @@ async fn handle_inbound(
             // sneak an oversized lang string into the worker-side
             // language cache.
             FrameError::validate_start(
-                &app.config.limits,
+                &config.limits,
                 start.sample_rate,
                 start.lang_hint.as_deref(),
             )
             .map_err(InboundError::Validation)?;
             // Snapshot the Arc out of the DashMap shard before any await.
-            let state_arc = app.stt.sessions.get(&session_id).map(|s| s.value().clone());
+            let state_arc = stt.sessions.get(&session_id).map(|s| s.value().clone());
             if let Some(state) = state_arc {
                 state.touch();
                 state.set_language(normalize_lang_hint(start.lang_hint));
@@ -249,9 +258,9 @@ async fn handle_inbound(
         }
         Payload::Config(cfg) => {
             debug!(%session_id, ?cfg, "Config");
-            FrameError::validate_config(&app.config.limits, cfg.language.as_deref())
+            FrameError::validate_config(&config.limits, cfg.language.as_deref())
                 .map_err(InboundError::Validation)?;
-            let state_arc = app.stt.sessions.get(&session_id).map(|s| s.value().clone());
+            let state_arc = stt.sessions.get(&session_id).map(|s| s.value().clone());
             if let Some(state) = state_arc {
                 state.touch();
                 state.set_language(normalize_lang_hint(cfg.language));
@@ -259,11 +268,11 @@ async fn handle_inbound(
             }
         }
         Payload::Audio(audio) => {
-            FrameError::validate_audio(&app.config.limits, &audio.samples)
+            FrameError::validate_audio(&config.limits, &audio.samples)
                 .map_err(InboundError::Validation)?;
             // Snapshot config from the session before we send the job;
             // never hold a DashMap shard lock across an .await.
-            let snapshot = app.stt.sessions.get(&session_id).map(|s| s.value().clone());
+            let snapshot = stt.sessions.get(&session_id).map(|s| s.value().clone());
             let Some(state) = snapshot else {
                 debug!(%session_id, "session already gone, dropping audio");
                 return Ok(());
@@ -285,15 +294,14 @@ async fn handle_inbound(
             // If the targeted worker's queue is full (or the pool has
             // been shut down) the send fails — surface an error to the
             // client so it knows the request did not reach a worker.
-            app.stt
-                .job_tx
+            stt.job_tx
                 .send(job)
                 .await
                 .map_err(|_| InboundError::WorkerUnavailable)?;
 
             // Spawn a small task that awaits the result and pushes it through
             // the result router (which looks up the session by ID).
-            let map = Arc::clone(&app.stt.sessions);
+            let map = Arc::clone(&stt.sessions);
             tokio::spawn(async move {
                 match resp_rx.await {
                     Ok(resp) => {
@@ -403,8 +411,8 @@ fn serve_static(path: &str) -> axum::response::Response {
 /// does not block the injection. A JSON-typed `<script>` block is
 /// not executed by the browser — only read via
 /// `/healthz` handler.
-pub async fn healthz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if state.stt.ready.load(std::sync::atomic::Ordering::Acquire) {
+pub async fn healthz(State(stt): State<SttState>) -> impl IntoResponse {
+    if stt.ready.load(std::sync::atomic::Ordering::Acquire) {
         (axum::http::StatusCode::OK, "ok")
     } else {
         (axum::http::StatusCode::SERVICE_UNAVAILABLE, "starting")

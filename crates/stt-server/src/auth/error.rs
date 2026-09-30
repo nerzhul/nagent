@@ -69,6 +69,16 @@ pub fn require_auth_store(
         })
 }
 
+/// Helper for auth handlers that already extracted an
+/// `AuthState` sub-state via `FromRef`. Same semantics as
+/// [`require_auth_store`] but skips the `Option` unwrap because
+/// the auth subtree is only mounted when `auth` is `Some`.
+pub fn require_auth_store_from_auth(
+    state: &crate::AuthState,
+) -> Result<&crate::auth::AuthStore, AuthError> {
+    Ok(&state.store)
+}
+
 /// Helper for auth handlers: pull the passkey sub-state off an
 /// `Arc<AppState>`. Returns `AuthError::Internal` when passkey is
 /// not enabled — the passkey routes are only mounted when
@@ -88,6 +98,19 @@ pub fn require_passkey_state(
         })
 }
 
+/// Helper for auth handlers: pull the passkey sub-state off an
+/// `AuthState`. Same semantics as [`require_passkey_state`] but
+/// assumes the caller already extracted the sub-state.
+pub fn require_passkey_state_from_auth(
+    state: &crate::AuthState,
+) -> Result<&crate::auth::passkey::PasskeyState, AuthError> {
+    state.passkey.as_ref().ok_or_else(|| {
+        AuthError::Internal(
+            "passkey backend is not configured; the passkey routes should not be mounted when passkey is disabled".into(),
+        )
+    })
+}
+
 /// Helper for auth handlers: pull the OIDC sub-state off an
 /// `Arc<AppState>`. Returns `AuthError::Internal` when OIDC is
 /// not enabled.
@@ -103,6 +126,19 @@ pub fn require_oidc_state(
                 "OIDC backend is not configured; the OIDC routes should not be mounted when OIDC is disabled".into(),
             )
         })
+}
+
+/// Helper for auth handlers: pull the OIDC sub-state off an
+/// `AuthState`. Same semantics as [`require_oidc_state`] but
+/// assumes the caller already extracted the sub-state.
+pub fn require_oidc_state_from_auth(
+    state: &crate::AuthState,
+) -> Result<&crate::auth::oidc::OidcState, AuthError> {
+    state.oidc.as_ref().ok_or_else(|| {
+        AuthError::Internal(
+            "OIDC backend is not configured; the OIDC routes should not be mounted when OIDC is disabled".into(),
+        )
+    })
 }
 
 impl IntoResponse for AuthError {

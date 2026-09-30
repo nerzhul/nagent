@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::tts::engine::{TtsEngine, TtsError, VoiceMeta};
-use crate::AppState;
+use crate::TtsState;
 
 /// Request body for `POST /v1/audio/speech`. Mirrors the fields the
 /// browser sends; everything except `input` is optional.
@@ -77,21 +77,10 @@ impl From<&VoiceMeta> for VoiceMetaJson {
 /// the blocking pool because piper-rs is synchronous and a single
 /// short-phrase inference can take 80-200 ms.
 pub async fn audio_speech(
-    State(state): State<Arc<AppState>>,
+    State(tts_state): State<TtsState>,
     Json(req): Json<SpeechRequest>,
 ) -> Response {
-    let Some(tts) = state.tts.as_ref().map(|t| &t.engine) else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )],
-            "TTS disabled on this server (TTS_ENABLED=false)",
-        )
-            .into_response();
-    };
-    let engine = Arc::clone(tts);
+    let engine = Arc::clone(&tts_state.engine);
     // Piper-rs is sync and CPU-bound; run on the blocking pool so we
     // do not stall the tokio runtime on a long inference.
     let join = tokio::task::spawn_blocking(move || {
@@ -179,18 +168,8 @@ pub async fn audio_speech(
 /// `model_dir`, plus the per-language defaults. Used by the discussion
 /// UI's voice selectors so they only ever offer voices that actually
 /// exist on disk.
-pub async fn audio_voices(State(state): State<Arc<AppState>>) -> Response {
-    let Some(tts) = state.tts.as_ref().map(|t| &t.engine) else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            )],
-            "TTS disabled on this server (TTS_ENABLED=false)",
-        )
-            .into_response();
-    };
+pub async fn audio_voices(State(tts_state): State<TtsState>) -> Response {
+    let tts = &tts_state.engine;
     let body = VoicesResponse {
         voices: tts.voices().iter().map(VoiceMetaJson::from).collect(),
         default_voice_en: tts.default_voice_for("en"),

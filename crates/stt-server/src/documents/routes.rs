@@ -52,21 +52,23 @@ use super::DocumentStore;
 /// anyway because the binding is missing — but the 404 still
 /// surfaces in the console).
 ///
-/// The router carries `Arc<AppState>` directly (not
-/// `DocumentHandlerState`) because the chat-session mint only
-/// reads `state.chat_sessions` — it has no need for the
-/// documents-specific store / config fields. Caller wires the
-/// same LLM-auth / rate-limit / CORS envelope used by the rest
-/// of `/v1/*`.
+/// The router carries `ChatSessionsState` directly so the mint
+/// handler can extract only what it needs. Caller wires the same
+/// LLM-auth / rate-limit / CORS envelope used by the rest of
+/// `/v1/*`.
 pub fn build_chat_session_router(
     state: Arc<crate::AppState>,
 ) -> axum::Router<Arc<crate::AppState>> {
+    let chat_sessions = state
+        .chat_sessions
+        .clone()
+        .expect("chat_sessions handle is wired when this router is mounted");
     axum::Router::new()
         .route(
             "/v1/chat/session",
             axum::routing::post(crate::chat::sessions::mint_handler),
         )
-        .with_state(state)
+        .with_state(chat_sessions)
 }
 
 /// Build the documents router subtree. Caller wires the same

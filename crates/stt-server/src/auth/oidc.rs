@@ -50,8 +50,8 @@ impl OidcConfig {
 }
 
 /// Pre-resolved OIDC endpoints + client credentials. The
-/// application router stores this in `AppState::auth_oidc` and
-/// passes it through to the handlers via `State<Arc<AppState>>`.
+/// application router stores this in `AppState.auth.oidc` and
+/// passes it through to the handlers via `State<AuthState>`.
 #[derive(Clone, Debug)]
 pub struct OidcState {
     pub cfg: Arc<OidcConfig>,
@@ -74,7 +74,7 @@ pub struct OidcLoginResponse {
 /// Stub that returns `501 Not Implemented` — see the module
 /// docstring. PR2 lands the discovery + PKCE flow.
 pub async fn start_handler(
-    axum::extract::State(_state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+    axum::extract::State(_state): axum::extract::State<crate::AuthState>,
 ) -> Result<axum::response::Response, AuthError> {
     Err(AuthError::Internal(
         "OIDC backend is not yet wired in the HTTP router (PR2)".into(),
@@ -83,7 +83,7 @@ pub async fn start_handler(
 
 /// `GET /api/auth/login/oidc/callback`
 pub async fn callback_handler(
-    axum::extract::State(_state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+    axum::extract::State(_state): axum::extract::State<crate::AuthState>,
     axum::extract::Query(_q): axum::extract::Query<CallbackQuery>,
 ) -> Result<axum::response::Response, AuthError> {
     Err(AuthError::Internal(

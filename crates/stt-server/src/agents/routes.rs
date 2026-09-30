@@ -13,8 +13,6 @@
 //! architecture refactor; the `llm::agents_list` / `llm::agent_invoke`
 //! names are kept as thin re-exports for backward compatibility.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -24,14 +22,13 @@ use serde_json::{json, Value};
 
 use crate::agents::{AgentError, AgentRegistry};
 use crate::llm::client::LlmError;
-use crate::AppState;
+use crate::state::ArcServices;
 
 /// `GET /v1/agents` — list every agent registered on this server.
 ///
 /// Returns an empty array when agents are disabled (so the browser
 /// can render the "no agents" hint without special-casing 404).
-pub async fn agents_list(State(state): State<Arc<AppState>>) -> Result<Response, LlmError> {
-    let agents = state.agents.as_ref().ok_or(LlmError::AgentsDisabled)?;
+pub async fn agents_list(State(agents): State<AgentRegistry>) -> Result<Response, LlmError> {
     let body = json!({ "data": agents.list() }).to_string();
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -47,13 +44,17 @@ pub async fn agents_list(State(state): State<Arc<AppState>>) -> Result<Response,
 /// `{"name": "<agent>", "result": "<json string>"}` on success, or
 /// an [`LlmError`] mapped to the appropriate HTTP status on failure
 /// (400 for invalid args, 404 for unknown agent, 502 for upstream).
+///
+/// Takes `AgentRegistry` directly (Arc-wrapped internally) and
+/// `ArcServices` (the newtype wrapper for `Arc<ServiceRegistry>`)
+/// so the per-user catalog is available for `UserContext`.
 pub async fn agent_invoke(
-    State(state): State<Arc<AppState>>,
+    State(agents): State<AgentRegistry>,
+    State(services): State<ArcServices>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<Response, LlmError> {
-    let agents = state.agents.as_ref().ok_or(LlmError::AgentsDisabled)?;
     let agent = agents
         .get(&name)
         .ok_or_else(|| LlmError::AgentNotFound(name.clone()))?;
@@ -76,12 +77,7 @@ pub async fn agent_invoke(
     let user_id = auth_user
         .map(|axum::Extension(u)| u.id)
         .unwrap_or_else(uuid::Uuid::nil);
-    let services = state
-        .auth
-        .as_ref()
-        .map(|a| a.services.clone())
-        .unwrap_or_else(|| crate::agents::ServiceRegistry::empty().into_arc());
-    let ctx = crate::agents::UserContext::for_tests(user_id, services);
+    let ctx = crate::agents::UserContext::for_tests(user_id, services.0.clone());
 
     match agent.invoke(&ctx, args).await {
         Ok(result) => {

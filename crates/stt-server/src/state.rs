@@ -1,21 +1,17 @@
-//! `state/` — application state grouping.
+//! `state/` — per-subsystem application state.
 //!
-//! Phase 5.B of the architecture refactor moves the flat
-//! `AppState` god-struct out of `lib.rs` and groups its fields into
-//! per-subsystem sub-states (`SttState`, `LlmState`, `AuthState`,
-//! `DocumentsState`, `ChatSessionsState`, `TtsState`). The goal
-//! is twofold:
+//! `AppState` groups its fields into sub-states (`SttState`,
+//! `LlmState`, `AuthState`, `DocumentsState`, `ChatSessionsState`,
+//! `TtsState`) and exposes an axum [`FromRef<Arc<AppState>>`] impl
+//! for each one. No handler outside `http/` and `app.rs` names
+//! `AppState` — each handler extracts only the sub-state it reads.
 //!
-//! 1. **Adding a field touches one sub-state, not `AppState`.** A
-//!    new STT knob lives on `SttState`, a new auth knob on
-//!    `AuthState`, etc.; the test builder in
-//!    [`crate::testing`] (feature `test-util`) does not have to
-//!    learn about any of them.
-//! 2. **Handlers can extract only what they need.** Handlers
-//!    currently still take `State<Arc<AppState>>` (the
-//!    per-handler migration is incremental — phase 5.H); the
-//!    sub-states exist as types so the migration is a sequence
-//!    of small, mechanical changes.
+//! `AuthState` carries the narrowed [`AuthConfig`] it needs
+//! (cookie / session / password / passkey knobs) instead of the
+//! whole resolved `Config`. The shared [`AppState`] still owns
+//! the full `Arc<Config>` for the `http/` composition root and
+//! the per-IP rate-limit resolver, both of which legitimately
+//! span subsystems.
 //!
 //! ## Composition
 //!
@@ -24,30 +20,23 @@
 //! ├── stt:          SttState       (always Some)
 //! ├── llm:          Option<LlmState>
 //! ├── agents:       Option<AgentRegistry>
-//! ├── auth:         Option<AuthState>    ← replaces auth::middleware::AuthState
+//! ├── auth:         Option<AuthState>
 //! ├── documents:    Option<DocumentsState>
 //! ├── chat_sessions:Option<ChatSessionsState>
 //! ├── tts:          Option<TtsState>
 //! └── config:       Arc<Config>
 //! ```
-//!
-//! `AuthState` is the union of every auth-related sub-field the
-//! previous flat `AppState` carried (`auth_store`, `auth_oidc`,
-//! `auth_passkey`, `auth_rate_limiter`, `credential_resolver`,
-//! `credentials_key`) plus the per-user `ServiceRegistry` and the
-//! resolved `Arc<Config>` that the middleware needs. The legacy
-//! `auth::middleware::AuthState` struct was deleted; `AuthState`
-//! is the single source of truth for the auth subtree's state.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use axum::extract::FromRef;
 use stt_core::{PoolDispatch, WhisperBackend};
 
 use crate::agents::ServiceRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::auth::{AuthStore, OidcState, PasskeyState};
-use crate::config::Config;
+use crate::config::{AuthConfig, Config};
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::rate_limit::RateLimiter;
 use crate::stt::session::SessionMap;
@@ -95,17 +84,13 @@ impl std::fmt::Debug for LlmState {
 /// Auth subsystem sub-state. `Some` when `auth.enabled = true`
 /// AND `auto_bootstrap` produced an `AuthStore`.
 ///
-/// This struct replaces the previous `auth::middleware::AuthState`
-/// (which carried only `store`, `cfg`, `oidc`, `passkey`,
-/// `rate_limiter`) plus the scattered `auth_store`,
-/// `auth_oidc`, `auth_passkey`, `auth_rate_limiter`,
-/// `credential_resolver`, `credentials_key`, and `services`
-/// fields of the old flat `AppState`. Every auth handler and
-/// the auth middleware now read from `AppState.auth`.
+/// `cfg` is `Arc<AuthConfig>` (not the whole `Config`) so the
+/// auth subtree cannot reach into unrelated sections (LLM,
+/// agents, documents, …).
 #[derive(Clone)]
 pub struct AuthState {
     pub store: AuthStore,
-    pub cfg: Arc<Config>,
+    pub cfg: Arc<AuthConfig>,
     pub oidc: Option<OidcState>,
     pub passkey: Option<PasskeyState>,
     pub login_rate_limiter: LoginRateLimiter,
@@ -144,7 +129,7 @@ impl AuthState {
     pub fn new(store: AuthStore, cfg: Arc<Config>) -> Self {
         Self {
             store,
-            cfg,
+            cfg: Arc::new(cfg.auth.clone()),
             oidc: None,
             passkey: None,
             login_rate_limiter: LoginRateLimiter::new(),
@@ -245,5 +230,303 @@ impl AppState {
             .as_ref()
             .expect("auth must be enabled for credential_encryption_key")
             .credential_encryption_key()
+    }
+}
+
+// axum `FromRef` impls — no handler outside `http/` and `app.rs` names
+// `AppState`; each handler extracts its sub-state through `FromRef`.
+//
+// Rust's orphan rule forbids `impl FromRef<Arc<AppState>> for Arc<T>` for
+// local `T` (the self type `Arc<T>` is foreign), so the few
+// `Arc<LocalType>` extractors used by handlers
+// (`Arc<Config>`, `Arc<LlmState>`, `Arc<AgentRegistry>`,
+// `Arc<ServiceRegistry>`) live behind local newtype wrappers.
+// The local-only sub-states (`SttState`, `LlmState`, `AuthState`,
+// `DocumentsState`, `ChatSessionsState`, `TtsState`, `AgentRegistry`)
+// have a direct `FromRef` impl because they are themselves local types.
+
+impl FromRef<Arc<AppState>> for SttState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        state.stt.clone()
+    }
+}
+
+impl FromRef<Arc<AppState>> for LlmState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        // The LLM subtree is mounted only when `llm.is_some()`; the
+        // handler that takes `State<LlmState>` therefore panics if
+        // the route is reached without the LLM being wired (a
+        // programmer error — the router never registers the route
+        // in that case).
+        state
+            .llm
+            .clone()
+            .expect("LLM proxy handler reached without an LlmState on AppState")
+    }
+}
+
+impl FromRef<Arc<AppState>> for AuthState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        // Same `Some(_)` precondition as `LlmState` — the
+        // auth-protected subtree is mounted only when auth is
+        // enabled.
+        state
+            .auth
+            .clone()
+            .expect("auth handler reached without an AuthState on AppState")
+    }
+}
+
+impl FromRef<Arc<AppState>> for DocumentsState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        state
+            .documents
+            .clone()
+            .expect("documents handler reached without a DocumentsState on AppState")
+    }
+}
+
+impl FromRef<Arc<AppState>> for ChatSessionsState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        state
+            .chat_sessions
+            .clone()
+            .expect("chat-session handler reached without a ChatSessionsState on AppState")
+    }
+}
+
+impl FromRef<Arc<AppState>> for TtsState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        state
+            .tts
+            .clone()
+            .expect("TTS handler reached without a TtsState on AppState")
+    }
+}
+
+impl FromRef<Arc<AppState>> for agents::AgentRegistry {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        state
+            .agents
+            .clone()
+            .expect("agents handler reached without an AgentRegistry on AppState")
+    }
+}
+
+// ----- Newtype wrappers for the Arc<LocalType> extractors ------------------
+//
+// These exist solely to satisfy Rust's orphan rule: `impl FromRef<…> for
+// Arc<LocalType>` is rejected because both `FromRef` (foreign) and `Arc`
+// (foreign) wrap a local type. Wrapping the Arc in a local newtype turns
+// the self type into a local type and the impl is accepted.
+//
+// Handlers that need the inner value should call `state.0.clone()` or
+// `&state.0` rather than going through `Arc::clone` directly — both
+// helpers below implement `Deref` for ergonomics.
+
+/// Combined STT + Config extractor for the `/ws` upgrade handler.
+/// Bundles the two sub-states the WS task needs so the handler
+/// signature has a single `State<…>` extractor (axum 0.7 infers
+/// the router's state type from the first `State<T>` it sees).
+pub struct SttWithConfig {
+    pub stt: Arc<SttState>,
+    pub config: Arc<Config>,
+}
+
+impl Clone for SttWithConfig {
+    fn clone(&self) -> Self {
+        Self {
+            stt: Arc::clone(&self.stt),
+            config: Arc::clone(&self.config),
+        }
+    }
+}
+
+impl std::fmt::Debug for SttWithConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SttWithConfig")
+            .field("stt", &self.stt)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl FromRef<Arc<AppState>> for SttWithConfig {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        Self {
+            stt: Arc::new(state.stt.clone()),
+            config: Arc::clone(&state.config),
+        }
+    }
+}
+
+/// `Arc<LlmState>` wrapper. The LLM proxy handler clones the underlying
+/// state once to hold it in the spawned tool-loop task.
+pub struct ArcLlmState(pub Arc<LlmState>);
+
+impl Clone for ArcLlmState {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for ArcLlmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArcLlmState")
+            .field("state", &"<LlmState>")
+            .finish()
+    }
+}
+
+impl std::ops::Deref for ArcLlmState {
+    type Target = LlmState;
+    fn deref(&self) -> &LlmState {
+        &self.0
+    }
+}
+
+impl FromRef<Arc<AppState>> for ArcLlmState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        ArcLlmState(Arc::new(state.llm.clone().expect(
+            "LLM proxy handler reached without an LlmState on AppState",
+        )))
+    }
+}
+
+/// `Arc<AgentRegistry>` wrapper. The agent HTTP routes keep the registry
+/// behind an Arc so the catalogue (`Arc<ServiceRegistry>` shared with the
+/// auth subtree) does not get duplicated on every call.
+pub struct ArcAgentRegistry(pub Arc<agents::AgentRegistry>);
+
+impl Clone for ArcAgentRegistry {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for ArcAgentRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArcAgentRegistry")
+            .field("registry", &"<AgentRegistry>")
+            .finish()
+    }
+}
+
+impl std::ops::Deref for ArcAgentRegistry {
+    type Target = agents::AgentRegistry;
+    fn deref(&self) -> &agents::AgentRegistry {
+        &self.0
+    }
+}
+
+impl FromRef<Arc<AppState>> for ArcAgentRegistry {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        ArcAgentRegistry(Arc::new(
+            state
+                .agents
+                .clone()
+                .expect("agents handler reached without an AgentRegistry on AppState"),
+        ))
+    }
+}
+
+/// `Option<Arc<AgentRegistry>>` — the chat-completions handler threads
+/// this through the tool loop. `None` is the expected value when agents
+/// are disabled (the proxy still works, the tool loop is a pass-through,
+/// and the `tools` array is empty).
+pub struct OptArcAgentRegistry(pub Option<Arc<agents::AgentRegistry>>);
+
+impl Clone for OptArcAgentRegistry {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for OptArcAgentRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OptArcAgentRegistry")
+            .field("registry", &self.0.as_ref().map(|_| "<AgentRegistry>"))
+            .finish()
+    }
+}
+
+impl FromRef<Arc<AppState>> for OptArcAgentRegistry {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        OptArcAgentRegistry(state.agents.clone().map(Arc::new))
+    }
+}
+
+/// `Arc<ServiceRegistry>` wrapper. The agents HTTP routes build a
+/// `UserContext` with this catalog so per-user agents (currently
+/// `read_document`) can resolve configured-only integrations.
+pub struct ArcServices(pub Arc<agents::ServiceRegistry>);
+
+impl Clone for ArcServices {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for ArcServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArcServices")
+            .field("services", &"<ServiceRegistry>")
+            .finish()
+    }
+}
+
+impl std::ops::Deref for ArcServices {
+    type Target = agents::ServiceRegistry;
+    fn deref(&self) -> &agents::ServiceRegistry {
+        &self.0
+    }
+}
+
+impl FromRef<Arc<AppState>> for ArcServices {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        // The agents subtree is mounted only when `state.agents`
+        // is `Some`, and `state.auth.services` is populated
+        // alongside the agents boot. When the operator runs with
+        // `agents.enabled = false` but `auth.enabled = true` we
+        // fall back to the empty registry so handlers that need
+        // the catalog still type-check; the catalog itself is
+        // empty in that case.
+        let services = state
+            .auth
+            .as_ref()
+            .map(|a| a.services.clone())
+            .unwrap_or_else(|| agents::ServiceRegistry::empty().into_arc());
+        ArcServices(services)
+    }
+}
+
+/// `Arc<AgentsConfig>` wrapper (the `[agents]` section of `Config`).
+/// Always present — the section is unconditional.
+pub struct ArcAgentsConfig(pub Arc<crate::config::AgentConfig>);
+
+impl Clone for ArcAgentsConfig {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for ArcAgentsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArcAgentsConfig")
+            .field("config", &"<AgentConfig>")
+            .finish()
+    }
+}
+
+impl std::ops::Deref for ArcAgentsConfig {
+    type Target = crate::config::AgentConfig;
+    fn deref(&self) -> &crate::config::AgentConfig {
+        &self.0
+    }
+}
+
+impl FromRef<Arc<AppState>> for ArcAgentsConfig {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        ArcAgentsConfig(Arc::new(state.config.agents.clone()))
     }
 }

@@ -8,7 +8,7 @@
 //! - [`agents`] — server-side chat agents (e.g. `web_fetch`,
 //!   `read_document`) callable from the LLM proxy through OpenAI-style
 //!   tool/function calling. Direct agent HTTP routes live in
-//!   [`crate::llm::proxy`].
+//!   [`crate::agents::routes`].
 //! - [`auth`] — multi-user authentication (password / OIDC / passkey)
 //!   plus the cookie + bearer session machinery. Login-attempt
 //!   rate-limit lives at [`crate::auth::login_rate_limit`].
@@ -77,6 +77,9 @@ pub mod stt;
 pub mod testing;
 pub mod tts;
 pub mod version;
+
+/// Convenience alias for the per-agent section of `Config`.
+pub type AgentsConfig = config::AgentConfig;
 
 pub use config::{CliArgs, Config};
 pub use state::{

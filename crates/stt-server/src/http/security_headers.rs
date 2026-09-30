@@ -247,55 +247,35 @@ pub async fn access_log_middleware(req: Request, next: Next) -> Response {
         tracing::Level::INFO
     };
 
-    // Dispatch on the resolved level. The per-level macros
-    // (`tracing::info!` / `warn!` / `error!`) accept the same
-    // field syntax as `tracing::event!`; the duplication is the
-    // price of using a runtime-computed level (the `level = expr`
-    // form requires a constant and the positional form has a
-    // fragile macro path through the tracing crate).
+    // Local macro: `tracing::event!` itself only accepts a
+    // constant `Level`, so we dispatch on the runtime-resolved
+    // level into the right per-level macro. The structured
+    // fields carry `method` / `path` / `user_agent` (so a log
+    // aggregator can index them without parsing the message);
+    // the message uses `{method:?}` / `{path:?}` / `{user_agent:?}`
+    // so spaces and embedded quotes in `path` (rare) and
+    // `user_agent` (always) are properly quoted in the line.
+    macro_rules! access_log {
+        ($lvl:expr) => {
+            tracing::event!(
+                $lvl,
+                event = "http.access",
+                method = %method,
+                path = %path,
+                status = status.as_u16(),
+                duration_ms = elapsed_ms,
+                user_id = %user_id,
+                email = %email,
+                ip = %ip,
+                user_agent = %user_agent,
+                "http {method:?} {path:?} -> {status} in {elapsed_ms}ms from {ip}"
+            )
+        };
+    }
     match level {
-        tracing::Level::ERROR => {
-            tracing::error!(
-                event = "http.access",
-                method = %method,
-                path = %path,
-                status = status.as_u16(),
-                duration_ms = elapsed_ms,
-                user_id = %user_id,
-                email = %email,
-                ip = %ip,
-                user_agent = %user_agent,
-                "http {method} {path} -> {status} in {elapsed_ms}ms from {ip}"
-            );
-        }
-        tracing::Level::WARN => {
-            tracing::warn!(
-                event = "http.access",
-                method = %method,
-                path = %path,
-                status = status.as_u16(),
-                duration_ms = elapsed_ms,
-                user_id = %user_id,
-                email = %email,
-                ip = %ip,
-                user_agent = %user_agent,
-                "http {method} {path} -> {status} in {elapsed_ms}ms from {ip}"
-            );
-        }
-        _ => {
-            tracing::info!(
-                event = "http.access",
-                method = %method,
-                path = %path,
-                status = status.as_u16(),
-                duration_ms = elapsed_ms,
-                user_id = %user_id,
-                email = %email,
-                ip = %ip,
-                user_agent = %user_agent,
-                "http {method} {path} -> {status} in {elapsed_ms}ms from {ip}"
-            );
-        }
+        tracing::Level::ERROR => access_log!(tracing::Level::ERROR),
+        tracing::Level::WARN => access_log!(tracing::Level::WARN),
+        _ => access_log!(tracing::Level::INFO),
     }
 
     response

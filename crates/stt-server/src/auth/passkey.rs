@@ -36,7 +36,7 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::auth::error::AuthError;
-use crate::auth::error::{require_auth_store, require_passkey_state};
+use crate::auth::error::{require_auth_store_from_auth, require_passkey_state_from_auth};
 use crate::auth::middleware::{check_csrf, extract_auth_user};
 use crate::auth::session::{self, AuthUser, SessionSource};
 use crate::auth::store::{AuthStore, NewAuthEvent, NewPasskeyRecord};
@@ -150,19 +150,14 @@ pub struct StartRegisterResponse {
 }
 
 pub async fn register_start_handler(
-    State(state): State<std::sync::Arc<crate::AppState>>,
+    State(state): State<crate::AuthState>,
     headers: HeaderMap,
 ) -> Result<Response, AuthError> {
-    let inner = require_passkey_state(&state)?;
-    if !state.config.auth.passkey.self_registration {
+    let inner = require_passkey_state_from_auth(&state)?;
+    if !state.cfg.passkey.self_registration {
         return Err(AuthError::Forbidden);
     }
-    let auth_state = state
-        .auth
-        .as_ref()
-        .expect("auth must be enabled for passkey_register_start")
-        .clone();
-    let user = extract_auth_user(&headers, &auth_state)
+    let user = extract_auth_user(&headers, &state)
         .await?
         .ok_or(AuthError::Unauthenticated)?;
     if session::requires_csrf_check(&axum::http::Method::POST) {
@@ -208,10 +203,10 @@ pub struct FinishRegisterRequest {
 }
 
 pub async fn register_finish_handler(
-    State(state): State<std::sync::Arc<crate::AppState>>,
+    State(state): State<crate::AuthState>,
     Json(req): Json<FinishRegisterRequest>,
 ) -> Result<Response, AuthError> {
-    let inner = require_passkey_state(&state)?;
+    let inner = require_passkey_state_from_auth(&state)?;
     let (_token, entry) = inner
         .ceremonies
         .remove(&req.state_token)
@@ -251,7 +246,7 @@ pub async fn register_finish_handler(
     let passkey_json = serde_json::to_vec(&passkey)
         .map_err(|e| AuthError::Internal(format!("serialise passkey: {e}")))?;
     let _ = passkey_json; // stored as separate column in a future PR
-    require_auth_store(&state)?
+    require_auth_store_from_auth(&state)?
         .insert_passkey(NewPasskeyRecord {
             id: pk_id,
             user_id,
@@ -270,7 +265,7 @@ pub async fn register_finish_handler(
         passkey_id = %pk_id,
         "passkey register ok"
     );
-    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+    require_auth_store_from_auth(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
         Some(user_id),
         "passkey_register",
         "passkey",
@@ -291,10 +286,10 @@ pub struct StartAuthResponse {
 }
 
 pub async fn login_start_handler(
-    State(state): State<std::sync::Arc<crate::AppState>>,
+    State(state): State<crate::AuthState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Response, AuthError> {
-    let inner = require_passkey_state(&state)?;
+    let inner = require_passkey_state_from_auth(&state)?;
     let _ = addr; // available for the audit row + rate-limit hook
     let (car, skr) = inner
         .webauthn
@@ -333,12 +328,12 @@ pub struct FinishAuthRequest {
 }
 
 pub async fn login_finish_handler(
-    State(state): State<std::sync::Arc<crate::AppState>>,
+    State(state): State<crate::AuthState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<FinishAuthRequest>,
 ) -> Result<Response, AuthError> {
     let ip = addr.ip();
-    let inner = require_passkey_state(&state)?;
+    let inner = require_passkey_state_from_auth(&state)?;
     let (_token, entry) = match inner.ceremonies.remove(&req.state_token) {
         Some(e) => e,
         None => {
@@ -382,7 +377,7 @@ pub async fn login_finish_handler(
     let assertion: PublicKeyCredential = serde_json::from_value(req.response)
         .map_err(|e| AuthError::BadRequest(format!("invalid assertion: {e}")))?;
     let cred_id_bytes = assertion.raw_id.clone();
-    let stored = match require_auth_store(&state)?
+    let stored = match require_auth_store_from_auth(&state)?
         .get_passkey_by_credential_id(&cred_id_bytes)
         .await?
     {
@@ -426,18 +421,17 @@ pub async fn login_finish_handler(
             );
             AuthError::BadRequest(format!("finish_discoverable_authentication: {e}"))
         })?;
-    require_auth_store(&state)?
+    require_auth_store_from_auth(&state)?
         .bump_passkey_counter(stored.id, passkey_counter_u32(&auth_result))
         .await?;
 
-    let user = require_auth_store(&state)?
+    let user = require_auth_store_from_auth(&state)?
         .get_user_by_id(stored.user_id)
         .await?
         .ok_or_else(|| AuthError::Internal("passkey user disappeared".into()))?;
 
-    let ttl =
-        std::time::Duration::from_secs((state.config.auth.session_ttl_days as u64) * 24 * 60 * 60);
-    let mut session = require_auth_store(&state)?
+    let ttl = std::time::Duration::from_secs((state.cfg.session_ttl_days as u64) * 24 * 60 * 60);
+    let mut session = require_auth_store_from_auth(&state)?
         .create_session(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
     // Security plan #7: pull the plaintext token out of the
@@ -464,7 +458,7 @@ pub async fn login_finish_handler(
         session_hash_prefix = %token_prefix,
         "passkey login ok"
     );
-    require_auth_store(&state)?.record_event(NewAuthEvent::auth(
+    require_auth_store_from_auth(&state)?.record_event(NewAuthEvent::auth(
         Some(user.id),
         "login_ok",
         "passkey",
@@ -491,9 +485,9 @@ pub async fn login_finish_handler(
         session_source: SessionSource::Cookie,
     };
     let cookie = session::build_set_cookie(
-        state.config.auth.cookie_name(),
+        state.cfg.cookie_name(),
         &session_token,
-        state.config.auth.cookie_secure(),
+        state.cfg.cookie_secure(),
         ttl.as_secs() as i64,
     );
     let mut response = (

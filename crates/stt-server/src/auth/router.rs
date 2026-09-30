@@ -1,16 +1,16 @@
 //! Builder for the auth subtree that `lib::build_router` merges
-//! into the main router. See the module-level docs of
-//! `crate::auth` for the route inventory.
+//! into the main router.
 //!
-//! Every auth handler takes `State<Arc<AppState>>` so the merged
-//! router has a single state type (matches the LLM / agents / TTS
-//! subtrees). The auth-specific bits (`auth_store`, `auth_oidc`,
-//! `auth_passkey`, `auth_rate_limiter`) are read directly from
-//! `AppState` by each handler.
+//! The subtree uses `Arc<AppState>` as its axum state (so it can
+//! be merged into the protected subtree without `Router<S>` interop)
+//! and each handler extracts only what it needs through
+//! `FromRef<Arc<AppState>>`. Auth-specific bits are read off the
+//! resolved `AuthState` sub-state.
+
+use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
-use std::sync::Arc;
 
 use crate::AppState;
 
@@ -35,19 +35,16 @@ use crate::auth::routes::{
 /// does discovery) and the passkey builder are sync here so this
 /// function can be called from `lib::build_router` without `await`.
 pub fn build_public_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    // Fail fast with a clear error if the auth subtree is mounted
-    // without an auth store — `auto_bootstrap` ensures
-    // `state.auth` is `Some` whenever `auth.enabled = true`.
-    let _ = crate::auth::error::require_auth_store(&state)
-        .ok()
-        .cloned()
-        .unwrap_or_else(|| unreachable!("auth enabled but auth_store missing"));
+    let auth_state = state
+        .auth
+        .clone()
+        .expect("auth must be Some when the public auth router is mounted");
     let mut public: Router<Arc<AppState>> = Router::new()
         .route("/api/auth/login/password", post(login_handler))
         .route("/api/auth/login/passkey/start", post(passkey_login_start))
         .route("/api/auth/login/passkey/finish", post(passkey_login_finish))
         .route("/api/auth/password/register", post(register_handler));
-    if state.auth.as_ref().and_then(|a| a.oidc.as_ref()).is_some() {
+    if auth_state.oidc.as_ref().is_some() {
         public = public
             .route("/api/auth/login/oidc/start", get(oidc_start))
             .route("/api/auth/login/oidc/callback", get(oidc_callback));
@@ -60,6 +57,10 @@ pub fn build_public_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// in `lib::build_router`) so the handler can read `AuthUser` from
 /// `axum::Extension`.
 pub fn build_protected_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let auth_state = state
+        .auth
+        .clone()
+        .expect("auth must be Some when the protected auth router is mounted");
     let mut protected: Router<Arc<AppState>> = Router::new()
         .route("/api/me", get(me_handler))
         // Per-user UI preferences. Mounted under the same RequireAuth
@@ -73,12 +74,7 @@ pub fn build_protected_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>
             get(get_preferences_handler).put(put_preferences_handler),
         )
         .route("/api/auth/logout", post(logout_handler));
-    if state
-        .auth
-        .as_ref()
-        .and_then(|a| a.passkey.as_ref())
-        .is_some()
-    {
+    if auth_state.passkey.as_ref().is_some() {
         protected = protected
             .route(
                 "/api/auth/login/passkey/register/start",

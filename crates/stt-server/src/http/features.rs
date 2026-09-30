@@ -148,6 +148,11 @@ impl Features {
 /// of the page (no auto-refresh) — operators who flip a feature
 /// at runtime need a server restart (or the operator can call the
 /// endpoint manually).
+///
+/// Takes the full `Arc<AppState>` on purpose: it intentionally
+/// reads every optional sub-state to build the snapshot. This is
+/// the only handler outside `http/` and `app.rs` that names
+/// `AppState`.
 pub async fn features_handler(State(state): State<Arc<AppState>>) -> Json<Features> {
     Json(Features::from_state(&state))
 }

@@ -21,8 +21,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::auth::error::require_auth_store;
-use crate::auth::error::AuthError;
+use crate::auth::error::{require_auth_store_from_auth, AuthError};
 use crate::auth::middleware::check_csrf;
 use crate::auth::session;
 use crate::auth::AuthUser;
@@ -39,10 +38,10 @@ pub async fn me_handler(axum::Extension(user): axum::Extension<AuthUser>) -> Jso
 /// drop-in replacement for `loadLocationEnabled` /
 /// `loadTimezoneEnabled`.
 pub async fn get_preferences_handler(
-    State(state): State<std::sync::Arc<crate::AppState>>,
+    State(state): State<crate::AuthState>,
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Result<Response, AuthError> {
-    let store = require_auth_store(&state)?;
+    let store = require_auth_store_from_auth(&state)?;
     let prefs = store.get_user_preferences(user.id).await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
@@ -72,7 +71,7 @@ pub struct PutPreferencesBody {
 /// every non-GET route on the protected subtree). Returns the
 /// updated row so the client can sync without a second GET.
 pub async fn put_preferences_handler(
-    State(state): State<std::sync::Arc<crate::AppState>>,
+    State(state): State<crate::AuthState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     headers: axum::http::HeaderMap,
     Json(body): Json<PutPreferencesBody>,
@@ -88,7 +87,7 @@ pub async fn put_preferences_handler(
             "share_timezone_enabled is required".into(),
         ));
     };
-    let store = require_auth_store(&state)?;
+    let store = require_auth_store_from_auth(&state)?;
     let prefs = store.upsert_user_preferences(user.id, loc, tz).await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
@@ -100,32 +99,23 @@ pub async fn put_preferences_handler(
 
 /// `POST /api/auth/logout`
 pub async fn logout_handler(
-    State(state): State<std::sync::Arc<crate::AppState>>,
+    State(state): State<crate::AuthState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AuthError> {
     // The middleware would normally have rejected anonymous
     // requests before we get here, but the handler is also called
     // from the per-route test helpers — be defensive.
-    let user = crate::auth::middleware::extract_auth_user(
-        &headers,
-        state
-            .auth
-            .as_ref()
-            .expect("auth must be enabled for logout_handler"),
-    )
-    .await?
-    .ok_or(AuthError::Unauthenticated)?;
+    let user = crate::auth::middleware::extract_auth_user(&headers, &state)
+        .await?
+        .ok_or(AuthError::Unauthenticated)?;
     check_csrf(&headers, &user)?;
     // Security plans #1 + #7: `delete_session` expects the
     // SHA-256 of the opaque session token (the
     // `sessions.token_hash` primary key), NOT the user id.
-    require_auth_store(&state)?
+    require_auth_store_from_auth(&state)?
         .delete_session(&user.session_token_hash)
         .await?;
-    let cookie = session::build_clear_cookie(
-        state.config.auth.cookie_name(),
-        state.config.auth.cookie_secure(),
-    );
+    let cookie = session::build_clear_cookie(state.cfg.cookie_name(), state.cfg.cookie_secure());
     tracing::info!(
         event = "auth.logout",
         outcome = "ok",
@@ -134,7 +124,7 @@ pub async fn logout_handler(
         provider = %user.provider,
         "auth logout ok"
     );
-    require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
+    require_auth_store_from_auth(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
         Some(user.id),
         "logout",
         user.provider.clone(),

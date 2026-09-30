@@ -1,25 +1,14 @@
-//! Server entry point.
-//!
-//! Phase 5.B of the architecture refactor trimmed this file to
-//! what the binary itself owns:
-//!
-//! 1. CLI subcommand dispatch (`auth`, `migrate`, `documents`)
-//!    so the subcommand argv reaches the right handler without
-//!    going through `Config::load` first.
-//! 2. Tracing init.
-//! 3. `Config::load` from the CLI args.
-//! 4. `app::build_app(&cfg)` to construct the full `AppState`.
-//! 5. `axum::serve` the `app::build_http_router(state)` result.
-//!
-//! All boot wiring (auth bootstrap, OIDC/passkey sub-states,
-//! whisper backend, worker pool, LLM client, agent registry, TTS
-//! engine, documents store, per-IP rate limiters) lives in
-//! [`app::build_app`].
+//! Server entry point. Owns CLI dispatch, tracing init, config
+//! load, and `axum::serve`. All boot wiring (auth bootstrap,
+//! OIDC/passkey sub-states, whisper backend, worker pool, LLM
+//! client, agent registry, TTS engine, documents store, per-IP
+//! rate limiters) lives in [`app::build_app`].
 
 use std::net::SocketAddr;
 
-use stt_server::app::{build_app, build_http_router};
+use stt_server::app::build_app;
 use stt_server::cli::{auth as auth_cli, documents as documents_cli, migrate as migrate_cli};
+use stt_server::http::build_router;
 use stt_server::{CliArgs, Config};
 use tracing_subscriber::EnvFilter;
 
@@ -76,7 +65,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tracing::info!(addr = %cfg.bind_addr, model = ?cfg.whisper_model_path, "starting nagent stt-server");
 
     let state = build_app(&cfg).await?;
-    let app = build_http_router(state);
+    let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     tracing::info!("listening on http://{}", cfg.bind_addr);
