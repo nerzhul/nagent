@@ -211,10 +211,15 @@ async fn postgres_status(pool: &PgPool) -> Result<MigrationStatus, AuthError> {
 use sqlx::{PgPool, SqlitePool};
 
 fn is_table_missing(db_err: &dyn sqlx::error::DatabaseError) -> bool {
-    // sqlx doesn't surface a clean "table doesn't exist" variant;
-    // the code/message combo is the most portable signal. Both
-    // engines use SQLSTATE 42S02 (undefined_table).
+    // sqlx doesn't surface a clean "table doesn't exist" variant.
+    // The signal differs per engine:
+    // - Postgres: SQLSTATE 42S02 (undefined_table).
+    // - SQLite: code 1 (SQLITE_ERROR) with a "no such table"
+    //   message — the SQLSTATE mapping is not consistent across
+    //   versions, so the message text is the portable fallback.
     db_err.code().as_deref() == Some("42S02")
+        || db_err.message().contains("no such table")
+        || db_err.message().contains("no such view")
 }
 
 #[cfg(test)]

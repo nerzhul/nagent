@@ -11,10 +11,10 @@
 //!
 //! - [`mod@boot`] — auto-bootstrap invoked by `main.rs` (migrate +
 //!   optional sqlite first-admin creation).
-//! - [`mod@store`] — DB-agnostic data access (users + sessions +
-//!   passkeys + auth events). The public type is [`store::AuthStore`]
-//!   which is a `match`-dispatched enum over the sqlite / postgres
-//!   implementations (see [`db_sqlite`] / [`db_postgres`]).
+//! - [`mod@store`] — DB-agnostic data access. The public type is
+//!   [`store::AuthStore`] which is a `match`-dispatched enum over
+//!   the sqlite / postgres engines; each variant now holds the
+//!   per-domain repositories from [`crate::db`] (plan 5.D).
 //! - [`mod@session`] — cookie + bearer parsing, session row type,
 //!   CSRF token generator, `Set-Cookie` builder.
 //! - [`mod@middleware`] — `require_auth_middleware` axum middleware
@@ -37,13 +37,11 @@
 //! HTTP request ──► require_auth_middleware ──► AuthUser extension
 //!                       │
 //!                       └─► session.rs (cookie/bearer/CSRF)
-//!                              └─► store.rs (UserStore/SessionStore)
-//!                                     └─► db_sqlite / db_postgres
+//!                              └─► store.rs (AuthStore facade)
+//!                                     └─► crate::db::{users,sessions,passkeys,…}
 //! ```
 
 pub mod boot;
-pub mod db_postgres;
-pub mod db_sqlite;
 pub mod error;
 pub mod login_rate_limit;
 pub mod middleware;

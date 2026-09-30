@@ -82,6 +82,19 @@ pub async fn connect_from_auth_config(cfg: &AuthConfig) -> Result<AnyPool, AuthE
     }
 }
 
+/// Build a [`SqlitePool`] from an [`AuthConfig`] without dispatching
+/// on `cfg.db.backend`. Used by [`crate::auth::store::SqliteStore`]
+/// when the caller already knows the engine.
+pub(crate) async fn connect_sqlite_for(cfg: &AuthConfig) -> Result<SqlitePool, AuthError> {
+    connect_sqlite(cfg).await
+}
+
+/// Build a [`PgPool`] from an [`AuthConfig`] without dispatching
+/// on `cfg.db.backend`. See [`connect_sqlite_for`].
+pub(crate) async fn connect_postgres_for(cfg: &AuthConfig) -> Result<PgPool, AuthError> {
+    connect_postgres(cfg).await
+}
+
 async fn connect_sqlite(cfg: &AuthConfig) -> Result<SqlitePool, AuthError> {
     let opts = SqliteConnectOptions::from_str(&cfg.db.url)
         .map_err(|e| AuthError::Internal(format!("invalid sqlite URL: {e}")))?

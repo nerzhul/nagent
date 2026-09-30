@@ -1,471 +1,35 @@
-//! DB-agnostic user + session storage.
+//! `auth/store` — thin facade over the per-domain `db/` repositories.
 //!
-//! The public type is [`AuthStore`], an enum that wraps either a
-//! sqlite pool or a postgres pool. Call sites use `match` on the
-//! variant — there is no `dyn Trait` indirection so the call graph
-//! stays small (important for a hot path like the auth middleware).
+//! Plan 5.D splits the god repository into per-domain modules
+//! ([`crate::db::users`], [`crate::db::sessions`], [`crate::db::passkeys`],
+//! [`crate::db::events`], [`crate::db::credentials`],
+//! [`crate::db::preferences`]). Each method on `AuthStore` is now a
+//! single-line dispatch into the matching repository so the call
+//! sites keep working while the SQL lives next to the rest of the
+//! `db/` code.
 //!
-//! [`SqliteStore`] and [`PgStore`] live in [`crate::auth::db_sqlite`]
-//! and [`crate::auth::db_postgres`] respectively. They both expose
-//! the same surface so the variants can be swapped without changing
-//! any handler code.
-//!
-//! All timestamps are stored as RFC 3339 strings in UTC (the Rust
-//! code converts with `chrono::{DateTime, Utc}`'s `to_rfc3339()` /
-//! `parse_from_rfc3339()`). The migration DDL uses `TEXT NOT NULL
-//! DEFAULT CURRENT_TIMESTAMP` so both engines pick a sensible
-//! default without a round-trip through the application.
+//! The `SqliteStore` / `PgStore` variants are kept so the
+//! `match self.store() { AuthStore::Sqlite(s) => … }` pattern used
+//! by [`crate::chat::sessions`] and the legacy [`crate::documents::db`]
+//! still resolves. Each variant now holds the per-domain
+//! repositories rather than the SQL methods themselves; the SQL
+//! moved to [`crate::db`] in this commit.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
+use crate::config::AuthConfig;
+use crate::db::{chat_sessions::ChatSessions as DbChatSessions, documents::Documents};
 
-pub use crate::auth::db_postgres::PgStore;
-pub use crate::auth::db_sqlite::SqliteStore;
+// Re-export the shared `AnyPool` enum from `db::pool` under the
+// legacy path so external callers (`tests/auth_e2e.rs`,
+// `tests/chat_sessions.rs`) keep resolving it through
+// `crate::auth::store::AnyPool`.
+pub use crate::db::pool::AnyPool;
 
-/// DB-pool handle returned by [`AuthStore::pool`].
-///
-/// Lets subsystem code (OIDC state persistence, passkey ceremonies
-/// that need to issue additional queries outside the trait surface)
-/// run a one-off query without re-plumbing the generic pool type.
-#[derive(Debug)]
-pub enum AnyPool {
-    Sqlite(sqlx::SqlitePool),
-    Postgres(sqlx::PgPool),
-}
-
-impl AnyPool {
-    pub fn sqlite(&self) -> Option<&sqlx::SqlitePool> {
-        match self {
-            AnyPool::Sqlite(p) => Some(p),
-            _ => None,
-        }
-    }
-    pub fn postgres(&self) -> Option<&sqlx::PgPool> {
-        match self {
-            AnyPool::Postgres(p) => Some(p),
-            _ => None,
-        }
-    }
-}
-
-/// DB-agnostic auth store. Cheap to clone (each variant wraps a
-/// sqlx pool which itself is `Arc`-backed).
-#[derive(Clone, Debug)]
-pub enum AuthStore {
-    Sqlite(SqliteStore),
-    Postgres(PgStore),
-}
-
-impl AuthStore {
-    /// Build the store from the runtime config. Returns an error if
-    /// the URL fails to parse, the pool cannot connect, or the
-    /// migration step fails.
-    pub async fn connect(cfg: &crate::config::AuthConfig) -> Result<Self, AuthError> {
-        match cfg.db.backend.as_str() {
-            "sqlite" => SqliteStore::connect(cfg).await.map(AuthStore::Sqlite),
-            "postgres" => PgStore::connect(cfg).await.map(AuthStore::Postgres),
-            other => Err(AuthError::Internal(format!(
-                "unsupported auth.db.backend: {other}"
-            ))),
-        }
-    }
-
-    /// Run the migrations directory. Idempotent — sqlx tracks which
-    /// migrations have already been applied in the `_sqlx_migrations`
-    /// table it creates on first run.
-    pub async fn migrate(&self) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.migrate().await,
-            AuthStore::Postgres(s) => s.migrate().await,
-        }
-    }
-
-    /// Inspect the `_sqlx_migrations` table and cross-reference it
-    /// against the `MIGRATOR` static to surface the applied /
-    /// pending split. Returns an empty applied set when the
-    /// `_sqlx_migrations` table does not exist yet (fresh DB), so the
-    /// `migrate status` CLI prints "all pending" rather than
-    /// crashing on a brand-new install.
-    pub async fn migration_status(&self) -> Result<MigrationStatus, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.migration_status().await,
-            AuthStore::Postgres(s) => s.migration_status().await,
-        }
-    }
-
-    /// Roll back every applied migration with a version strictly
-    /// greater than `target_version`. `target_version` itself stays
-    /// applied (sqlx 0.8.6 semantics — see `Migrator::undo`).
-    ///
-    /// The CLI computes the target from the applied set:
-    /// `latest - N` for `--steps N`, or an explicit version for
-    /// `--to`. Operators can therefore always inspect the plan with
-    /// `migrate status` before running `migrate down`.
-    pub async fn revert_to(&self, target_version: i64) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.revert_to(target_version).await,
-            AuthStore::Postgres(s) => s.revert_to(target_version).await,
-        }
-    }
-
-    /// Return a `AnyPool` handle for subsystem code that needs to
-    /// run a one-off SQL query outside the trait surface (OIDC
-    /// state persistence, etc.).
-    pub fn pool(&self) -> AnyPool {
-        match self {
-            AuthStore::Sqlite(s) => AnyPool::Sqlite(s.pool().clone()),
-            AuthStore::Postgres(s) => AnyPool::Postgres(s.pool().clone()),
-        }
-    }
-
-    /// Look up a user by id. Returns `None` if the user does not
-    /// exist or has been soft-disabled.
-    pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.get_user_by_id(id).await,
-            AuthStore::Postgres(s) => s.get_user_by_id(id).await,
-        }
-    }
-
-    /// Look up a user by email (case-insensitive on both engines
-    /// via the LOWER() comparison). Returns the active user only;
-    /// soft-disabled users are excluded.
-    pub async fn get_user_by_email(
-        &self,
-        email: &str,
-    ) -> Result<Option<AuthUserRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.get_user_by_email(email).await,
-            AuthStore::Postgres(s) => s.get_user_by_email(email).await,
-        }
-    }
-
-    /// Create a new user. `password_hash` is `Some(bytes)` for the
-    /// local backend and `None` for OIDC / passkey-only users.
-    /// Fails with [`AuthError::Conflict`] if the email already
-    /// exists.
-    pub async fn create_user(
-        &self,
-        email: &str,
-        display_name: &str,
-        provider: &str,
-        password_hash: Option<&[u8]>,
-    ) -> Result<Uuid, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => {
-                s.create_user(email, display_name, provider, password_hash)
-                    .await
-            }
-            AuthStore::Postgres(s) => {
-                s.create_user(email, display_name, provider, password_hash)
-                    .await
-            }
-        }
-    }
-
-    /// Update the local password hash for an existing user.
-    /// Returns the updated row count.
-    pub async fn set_password(
-        &self,
-        user_id: Uuid,
-        password_hash: &[u8],
-    ) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.set_password(user_id, password_hash).await,
-            AuthStore::Postgres(s) => s.set_password(user_id, password_hash).await,
-        }
-    }
-
-    /// Delete a user by id. Cascades to their sessions and passkeys
-    /// via the FK constraints in the migration. Returns the number
-    /// of rows removed (0 means the user did not exist).
-    pub async fn delete_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.delete_user(user_id).await,
-            AuthStore::Postgres(s) => s.delete_user(user_id).await,
-        }
-    }
-
-    /// Delete a user by email. Returns the deleted user id if any.
-    pub async fn delete_user_by_email(&self, email: &str) -> Result<Option<Uuid>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.delete_user_by_email(email).await,
-            AuthStore::Postgres(s) => s.delete_user_by_email(email).await,
-        }
-    }
-
-    /// Count users by provider (e.g. `"local"`, `"oidc:<issuer>"`).
-    /// Used by the `auth delete-user` CLI to refuse removing the
-    /// last local user when auth is enabled.
-    pub async fn count_users_by_provider(&self, provider: &str) -> Result<i64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.count_users_by_provider(provider).await,
-            AuthStore::Postgres(s) => s.count_users_by_provider(provider).await,
-        }
-    }
-
-    /// List all users, optionally filtered by `provider` prefix.
-    /// Used by `auth list-users`. PR1 returns the bare minimum for
-    /// operator auditing (id, email, provider, created_at).
-    pub async fn list_users(
-        &self,
-        provider_prefix: Option<&str>,
-    ) -> Result<Vec<AuthUserRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.list_users(provider_prefix).await,
-            AuthStore::Postgres(s) => s.list_users(provider_prefix).await,
-        }
-    }
-
-    // ---- Sessions ----------------------------------------------------
-
-    /// Create a fresh session row. Mints the opaque session token
-    /// AND the CSRF token internally and returns the new
-    /// `SessionRecord` (with `token_hash` for subsequent lookups
-    /// AND `csrf_token`).
-    /// Security plan #7: the **plaintext token is returned by the
-    /// call site** (see [`crate::auth::password::login_handler`]
-    /// AND [`crate::auth::passkey::finish_ceremony_handler`]) so
-    /// the caller can set the cookie AND the JSON body. The store
-    /// itself never holds the plaintext.
-    pub async fn create_session(
-        &self,
-        user_id: Uuid,
-        ttl: std::time::Duration,
-        ip: Option<&str>,
-        user_agent: Option<&str>,
-    ) -> Result<SessionRecord, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.create_session(user_id, ttl, ip, user_agent).await,
-            AuthStore::Postgres(s) => s.create_session(user_id, ttl, ip, user_agent).await,
-        }
-    }
-
-    /// Look up a session by the SHA-256 hash of its opaque token
-    /// and join the user row in a single round-trip. Returns
-    /// `Ok(None)` if the session does not exist or has expired
-    /// (`expires_at <= now`). Returns `Ok(Some((session, user)))`
-    /// on a hit.
-    ///
-    /// Security plan #7: the plaintext token is never reflected
-    /// back from the database — callers hand in the SHA-256 hash
-    /// (which they computed from the cookie / bearer header) and
-    /// get the matching row back. A DB leak no longer yields
-    /// usable session ids.
-    pub async fn lookup_session_by_token_hash(
-        &self,
-        token_hash: &crate::auth::session::SessionTokenHash,
-    ) -> Result<Option<(SessionRecord, AuthUserRecord)>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.lookup_session_by_token_hash(token_hash).await,
-            AuthStore::Postgres(s) => s.lookup_session_by_token_hash(token_hash).await,
-        }
-    }
-
-    /// Update `last_seen_at` to `now`. This is fire-and-forget
-    /// debug data — the absolute expiry is never extended (plan D6a).
-    /// Returns `Ok(())` if the session no longer exists (silently
-    /// skipped so a slow background task cannot resurrect a session
-    /// that was just deleted).
-    pub async fn touch_session(
-        &self,
-        token_hash: &crate::auth::session::SessionTokenHash,
-    ) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.touch_session(token_hash).await,
-            AuthStore::Postgres(s) => s.touch_session(token_hash).await,
-        }
-    }
-
-    /// Delete a session by its token hash. Returns the deleted row
-    /// count (0 means the session was already gone).
-    pub async fn delete_session(
-        &self,
-        token_hash: &crate::auth::session::SessionTokenHash,
-    ) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.delete_session(token_hash).await,
-            AuthStore::Postgres(s) => s.delete_session(token_hash).await,
-        }
-    }
-
-    /// Delete every session owned by `user_id`. Used by the
-    /// `DELETE /api/auth/sessions` (PR2) and the CLI's
-    /// "logout everywhere" path. PR1 exposes this on the route
-    /// only for the user's own sessions.
-    pub async fn delete_sessions_for_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.delete_sessions_for_user(user_id).await,
-            AuthStore::Postgres(s) => s.delete_sessions_for_user(user_id).await,
-        }
-    }
-
-    // ---- Passkeys ----------------------------------------------------
-
-    /// Persist a newly registered passkey. Returns `Conflict` if the
-    /// `credential_id` is already taken (the authenticator
-    /// generated a colliding id, which is astronomically unlikely
-    /// for the algorithm but worth checking).
-    pub async fn insert_passkey(&self, record: NewPasskeyRecord) -> Result<Uuid, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.insert_passkey(record).await,
-            AuthStore::Postgres(s) => s.insert_passkey(record).await,
-        }
-    }
-
-    /// Look up a passkey by its raw credential id bytes.
-    pub async fn get_passkey_by_credential_id(
-        &self,
-        credential_id: &[u8],
-    ) -> Result<Option<PasskeyRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.get_passkey_by_credential_id(credential_id).await,
-            AuthStore::Postgres(s) => s.get_passkey_by_credential_id(credential_id).await,
-        }
-    }
-
-    /// Increment the passkey counter after a successful assertion.
-    /// The WebAuthn spec requires this monotonic check to detect
-    /// cloned authenticators.
-    pub async fn bump_passkey_counter(
-        &self,
-        passkey_id: Uuid,
-        new_counter: u32,
-    ) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.bump_passkey_counter(passkey_id, new_counter).await,
-            AuthStore::Postgres(s) => s.bump_passkey_counter(passkey_id, new_counter).await,
-        }
-    }
-
-    // ---- Audit -------------------------------------------------------
-
-    /// Append an `auth_events` row. Best-effort — a write failure is
-    /// logged but never propagated to the caller (the audit row
-    /// would block a successful login). Spawned on the runtime so
-    /// the caller does not have to await the write.
-    pub fn record_event(&self, event: NewAuthEvent) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            match this {
-                AuthStore::Sqlite(s) => s.record_event(event).await,
-                AuthStore::Postgres(s) => s.record_event(event).await,
-            }
-        });
-    }
-
-    // ---- Per-user credentials --------------------------------------
-
-    /// Atomic upsert of all `(field_key, nonce, ciphertext)` triples
-    /// for one `(user_id, service_id)`. Implemented as
-    /// `DELETE THEN INSERT` inside a single transaction so partial
-    /// writes never leave a service half-configured (the
-    /// `UNIQUE (user_id, service_id, field_key)` would otherwise
-    /// reject a duplicate insert with a 409 we would have to map
-    /// manually).
-    ///
-    /// `fields` is the new full set — the caller is responsible for
-    /// pre-validating unknown `field_key`s against the
-    /// `ServiceRegistry` and for encrypting the plaintexts with the
-    /// `CredentialsKey` before calling.
-    pub async fn upsert_user_credentials(
-        &self,
-        user_id: Uuid,
-        service_id: &str,
-        fields: &[(String, Vec<u8>, Vec<u8>)],
-    ) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.upsert_user_credentials(user_id, service_id, fields).await,
-            AuthStore::Postgres(s) => s.upsert_user_credentials(user_id, service_id, fields).await,
-        }
-    }
-
-    /// Delete every `(field_key)` row for one `(user_id, service_id)`.
-    /// Returns the number of fields cleared.
-    pub async fn delete_service_credentials(
-        &self,
-        user_id: Uuid,
-        service_id: &str,
-    ) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.delete_service_credentials(user_id, service_id).await,
-            AuthStore::Postgres(s) => s.delete_service_credentials(user_id, service_id).await,
-        }
-    }
-
-    /// List the `field_key`s the user has configured for a service.
-    /// Used by `GET /api/integrations/:id` to compute the per-field
-    /// `filled` boolean without exposing the ciphertexts.
-    pub async fn list_configured_field_keys(
-        &self,
-        user_id: Uuid,
-        service_id: &str,
-    ) -> Result<Vec<String>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.list_configured_field_keys(user_id, service_id).await,
-            AuthStore::Postgres(s) => s.list_configured_field_keys(user_id, service_id).await,
-        }
-    }
-
-    /// Fetch the encrypted blob for one `(user_id, service, field)`.
-    /// `None` if no row exists. The resolver decrypts with the
-    /// server-side `CredentialsKey`.
-    pub async fn fetch_user_credential(
-        &self,
-        user_id: Uuid,
-        service_id: &str,
-        field_key: &str,
-    ) -> Result<Option<UserCredentialRow>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => {
-                s.fetch_user_credential(user_id, service_id, field_key)
-                    .await
-            }
-            AuthStore::Postgres(s) => {
-                s.fetch_user_credential(user_id, service_id, field_key)
-                    .await
-            }
-        }
-    }
-
-    /// Read the per-user UI preferences for one user. Returns a
-    /// default-shaped [`UserPreferences`] (everything off, `updated_at`
-    /// = the current epoch second) when no row exists yet, so the
-    /// GET handler can serialise a stable response without
-    /// special-casing "first request".
-    pub async fn get_user_preferences(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.get_user_preferences(user_id).await,
-            AuthStore::Postgres(s) => s.get_user_preferences(user_id).await,
-        }
-    }
-
-    /// Insert-or-update the per-user UI preferences. The row is
-    /// keyed by `user_id`, so calling the method on a user that
-    /// has no row yet creates one (matching the on-write semantics
-    /// of the legacy localStorage flags — a toggle ON is its own
-    /// record).
-    pub async fn upsert_user_preferences(
-        &self,
-        user_id: Uuid,
-        share_location_enabled: bool,
-        share_timezone_enabled: bool,
-    ) -> Result<UserPreferences, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => {
-                s.upsert_user_preferences(user_id, share_location_enabled, share_timezone_enabled)
-                    .await
-            }
-            AuthStore::Postgres(s) => {
-                s.upsert_user_preferences(user_id, share_location_enabled, share_timezone_enabled)
-                    .await
-            }
-        }
-    }
-}
+// ---- Row types ------------------------------------------------------------
 
 /// Public-facing user record. Mirrors the row in the `users` table
 /// minus the password hash (which stays inside the store).
@@ -527,23 +91,10 @@ pub struct NewAuthEvent {
 /// Per-user UI preferences fetched via `GET /api/me/preferences`
 /// and updated via `PUT /api/me/preferences`. Backed by the
 /// `user_preferences` table added in `0006_user_preferences.up.sql`.
-///
-/// The booleans are persisted as `INTEGER NOT NULL DEFAULT 0` so the
-/// schema works on both sqlite and postgres without a sqlx type
-/// adapter — the Rust side reads/writes them via `i64 != 0`.
 #[derive(Debug, Clone)]
 pub struct UserPreferences {
-    /// Mirror of the previous `nagent.chat.locationEnabled`
-    /// localStorage flag — when `true`, every chat request gets an
-    /// ephemeral "user's approximate location: …" system block.
     pub share_location_enabled: bool,
-    /// Mirror of the previous `nagent.chat.timezoneEnabled`
-    /// localStorage flag — when `true`, every chat request gets an
-    /// ephemeral "user's local timezone is …" system block.
     pub share_timezone_enabled: bool,
-    /// Timestamp the row was last written. Surfaced by the GET
-    /// handler so the UI can show "last changed at …" without a
-    /// second round-trip.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -572,39 +123,395 @@ pub struct UserCredentialRow {
     pub ciphertext: Vec<u8>,
 }
 
-/// One row of the migration status. `description` is the free-text
-/// label after the version prefix in the migration filename
-/// (`0001_init` → `"init"`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationRow {
-    pub version: i64,
-    pub description: String,
+// ---- Re-exports -----------------------------------------------------------
+
+pub use crate::db::migrate::{MigrationRow, MigrationStatus};
+
+// ---- Variants ------------------------------------------------------------
+
+/// SQLite engine arm of [`AuthStore`].
+#[derive(Clone, Debug)]
+pub struct SqliteStore {
+    pub(crate) pool: sqlx::SqlitePool,
+    pub(crate) users: crate::db::users::sqlite::SqliteUsers,
+    pub(crate) sessions: crate::db::sessions::sqlite::SqliteSessions,
+    pub(crate) passkeys: crate::db::passkeys::sqlite::SqlitePasskeys,
+    pub(crate) events: crate::db::events::sqlite::SqliteEvents,
+    pub(crate) credentials: crate::db::credentials::sqlite::SqliteCredentials,
+    pub(crate) preferences: crate::db::preferences::sqlite::SqlitePreferences,
+    pub(crate) documents: crate::db::documents::sqlite::SqliteDocuments,
+    pub(crate) chat_sessions: crate::db::chat_sessions::sqlite::SqliteChatSessions,
 }
 
-/// Snapshot of the migration state at one point in time. Returned by
-/// [`AuthStore::migration_status`] and serialised by the
-/// `stt-server migrate status` CLI (`--json`).
-///
-/// `applied` reflects `_sqlx_migrations` rows with `success = 1`,
-/// `pending` is the set of known migrations (from the
-/// `sqlx::migrate!` static) that are NOT in `applied`. `highest_applied`
-/// is `None` on a fresh DB where `_sqlx_migrations` does not exist
-/// yet — every migration is then `pending`.
-#[derive(Debug, Clone, Default)]
-pub struct MigrationStatus {
-    pub applied: Vec<MigrationRow>,
-    pub pending: Vec<MigrationRow>,
-    pub highest_applied: Option<i64>,
+/// Postgres engine arm of [`AuthStore`].
+#[derive(Clone, Debug)]
+pub struct PgStore {
+    pub(crate) pool: sqlx::PgPool,
+    pub(crate) users: crate::db::users::postgres::PgUsers,
+    pub(crate) sessions: crate::db::sessions::postgres::PgSessions,
+    pub(crate) passkeys: crate::db::passkeys::postgres::PgPasskeys,
+    pub(crate) events: crate::db::events::postgres::PgEvents,
+    pub(crate) credentials: crate::db::credentials::postgres::PgCredentials,
+    pub(crate) preferences: crate::db::preferences::postgres::PgPreferences,
+    pub(crate) documents: crate::db::documents::postgres::PgDocuments,
+    pub(crate) chat_sessions: crate::db::chat_sessions::postgres::PgChatSessions,
 }
 
-impl MigrationStatus {
-    /// True when at least one migration is pending.
-    pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+impl SqliteStore {
+    pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
+        let pool = crate::db::pool::connect_sqlite_for(cfg).await?;
+        Ok(Self {
+            users: crate::db::users::sqlite::SqliteUsers::new(pool.clone()),
+            sessions: crate::db::sessions::sqlite::SqliteSessions::new(pool.clone()),
+            passkeys: crate::db::passkeys::sqlite::SqlitePasskeys::new(pool.clone()),
+            events: crate::db::events::sqlite::SqliteEvents::new(pool.clone()),
+            credentials: crate::db::credentials::sqlite::SqliteCredentials::new(pool.clone()),
+            preferences: crate::db::preferences::sqlite::SqlitePreferences::new(pool.clone()),
+            documents: crate::db::documents::sqlite::SqliteDocuments::new(pool.clone()),
+            chat_sessions: crate::db::chat_sessions::sqlite::SqliteChatSessions::new(pool.clone()),
+            pool,
+        })
     }
 
-    /// True when no migration is applied (fresh DB).
-    pub fn is_empty(&self) -> bool {
-        self.applied.is_empty()
+    pub(crate) fn pool(&self) -> &sqlx::SqlitePool {
+        &self.pool
+    }
+
+    /// Public pool handle for legacy callers (`chat/sessions.rs`,
+    /// `documents/db.rs`) that still dispatch on
+    /// `AuthStore::Sqlite(s).pool()`.
+    pub fn pool_handle(&self) -> sqlx::SqlitePool {
+        self.pool.clone()
+    }
+}
+
+impl PgStore {
+    pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
+        let pool = crate::db::pool::connect_postgres_for(cfg).await?;
+        Ok(Self {
+            users: crate::db::users::postgres::PgUsers::new(pool.clone()),
+            sessions: crate::db::sessions::postgres::PgSessions::new(pool.clone()),
+            passkeys: crate::db::passkeys::postgres::PgPasskeys::new(pool.clone()),
+            events: crate::db::events::postgres::PgEvents::new(pool.clone()),
+            credentials: crate::db::credentials::postgres::PgCredentials::new(pool.clone()),
+            preferences: crate::db::preferences::postgres::PgPreferences::new(pool.clone()),
+            documents: crate::db::documents::postgres::PgDocuments::new(pool.clone()),
+            chat_sessions: crate::db::chat_sessions::postgres::PgChatSessions::new(pool.clone()),
+            pool,
+        })
+    }
+
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.pool
+    }
+
+    pub fn pool_handle(&self) -> sqlx::PgPool {
+        self.pool.clone()
+    }
+}
+
+// ---- AuthStore facade ----------------------------------------------------
+
+/// DB-agnostic auth store. Cheap to clone (each variant wraps a
+/// sqlx pool which itself is `Arc`-backed).
+#[derive(Clone, Debug)]
+pub enum AuthStore {
+    Sqlite(SqliteStore),
+    Postgres(PgStore),
+}
+
+impl AuthStore {
+    pub async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
+        match cfg.db.backend.as_str() {
+            "sqlite" => SqliteStore::connect(cfg).await.map(AuthStore::Sqlite),
+            "postgres" => PgStore::connect(cfg).await.map(AuthStore::Postgres),
+            other => Err(AuthError::Internal(format!(
+                "unsupported auth.db.backend: {other}"
+            ))),
+        }
+    }
+
+    pub async fn migrate(&self) -> Result<(), AuthError> {
+        crate::db::migrate::run(&self.pool()).await
+    }
+
+    pub async fn migration_status(&self) -> Result<MigrationStatus, AuthError> {
+        crate::db::migrate::status(&self.pool()).await
+    }
+
+    pub async fn revert_to(&self, target_version: i64) -> Result<(), AuthError> {
+        crate::db::migrate::revert_to(&self.pool(), target_version).await
+    }
+
+    pub fn pool(&self) -> AnyPool {
+        match self {
+            AuthStore::Sqlite(s) => AnyPool::Sqlite(s.pool.clone()),
+            AuthStore::Postgres(s) => AnyPool::Postgres(s.pool.clone()),
+        }
+    }
+
+    // ---- Users ------------------------------------------------------
+
+    pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.users.get_by_id(id).await,
+            AuthStore::Postgres(s) => s.users.get_by_id(id).await,
+        }
+    }
+
+    pub async fn get_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<AuthUserRecord>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.users.get_by_email(email).await,
+            AuthStore::Postgres(s) => s.users.get_by_email(email).await,
+        }
+    }
+
+    pub async fn create_user(
+        &self,
+        email: &str,
+        display_name: &str,
+        provider: &str,
+        password_hash: Option<&[u8]>,
+    ) -> Result<Uuid, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => {
+                s.users
+                    .create(email, display_name, provider, password_hash)
+                    .await
+            }
+            AuthStore::Postgres(s) => {
+                s.users
+                    .create(email, display_name, provider, password_hash)
+                    .await
+            }
+        }
+    }
+
+    pub async fn set_password(
+        &self,
+        user_id: Uuid,
+        password_hash: &[u8],
+    ) -> Result<u64, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.users.set_password(user_id, password_hash).await,
+            AuthStore::Postgres(s) => s.users.set_password(user_id, password_hash).await,
+        }
+    }
+
+    pub async fn delete_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.users.delete(user_id).await,
+            AuthStore::Postgres(s) => s.users.delete(user_id).await,
+        }
+    }
+
+    pub async fn delete_user_by_email(&self, email: &str) -> Result<Option<Uuid>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.users.delete_by_email(email).await,
+            AuthStore::Postgres(s) => s.users.delete_by_email(email).await,
+        }
+    }
+
+    pub async fn count_users_by_provider(&self, provider: &str) -> Result<i64, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.users.count_by_provider(provider).await,
+            AuthStore::Postgres(s) => s.users.count_by_provider(provider).await,
+        }
+    }
+
+    pub async fn list_users(
+        &self,
+        provider_prefix: Option<&str>,
+    ) -> Result<Vec<AuthUserRecord>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.users.list(provider_prefix).await,
+            AuthStore::Postgres(s) => s.users.list(provider_prefix).await,
+        }
+    }
+
+    // ---- Sessions ---------------------------------------------------
+
+    pub async fn create_session(
+        &self,
+        user_id: Uuid,
+        ttl: std::time::Duration,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<SessionRecord, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.sessions.create(user_id, ttl, ip, user_agent).await,
+            AuthStore::Postgres(s) => s.sessions.create(user_id, ttl, ip, user_agent).await,
+        }
+    }
+
+    pub async fn lookup_session_by_token_hash(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<Option<(SessionRecord, AuthUserRecord)>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.sessions.lookup_by_token_hash(token_hash).await,
+            AuthStore::Postgres(s) => s.sessions.lookup_by_token_hash(token_hash).await,
+        }
+    }
+
+    pub async fn touch_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<(), AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.sessions.touch(token_hash).await,
+            AuthStore::Postgres(s) => s.sessions.touch(token_hash).await,
+        }
+    }
+
+    pub async fn delete_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<u64, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.sessions.delete(token_hash).await,
+            AuthStore::Postgres(s) => s.sessions.delete(token_hash).await,
+        }
+    }
+
+    pub async fn delete_sessions_for_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.sessions.delete_for_user(user_id).await,
+            AuthStore::Postgres(s) => s.sessions.delete_for_user(user_id).await,
+        }
+    }
+
+    // ---- Passkeys ---------------------------------------------------
+
+    pub async fn insert_passkey(&self, record: NewPasskeyRecord) -> Result<Uuid, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.passkeys.insert(record).await,
+            AuthStore::Postgres(s) => s.passkeys.insert(record).await,
+        }
+    }
+
+    pub async fn get_passkey_by_credential_id(
+        &self,
+        credential_id: &[u8],
+    ) -> Result<Option<PasskeyRecord>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.passkeys.get_by_credential_id(credential_id).await,
+            AuthStore::Postgres(s) => s.passkeys.get_by_credential_id(credential_id).await,
+        }
+    }
+
+    pub async fn bump_passkey_counter(
+        &self,
+        passkey_id: Uuid,
+        new_counter: u32,
+    ) -> Result<(), AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.passkeys.bump_counter(passkey_id, new_counter).await,
+            AuthStore::Postgres(s) => s.passkeys.bump_counter(passkey_id, new_counter).await,
+        }
+    }
+
+    // ---- Audit ------------------------------------------------------
+
+    /// Append an `auth_events` row. Best-effort.
+    pub fn record_event(&self, event: NewAuthEvent) {
+        match self {
+            AuthStore::Sqlite(s) => s.events.record(event),
+            AuthStore::Postgres(s) => s.events.record(event),
+        }
+    }
+
+    // ---- Per-user credentials --------------------------------------
+
+    pub async fn upsert_user_credentials(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        fields: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.credentials.upsert(user_id, service_id, fields).await,
+            AuthStore::Postgres(s) => s.credentials.upsert(user_id, service_id, fields).await,
+        }
+    }
+
+    pub async fn delete_service_credentials(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+    ) -> Result<u64, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.credentials.delete_service(user_id, service_id).await,
+            AuthStore::Postgres(s) => s.credentials.delete_service(user_id, service_id).await,
+        }
+    }
+
+    pub async fn list_configured_field_keys(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+    ) -> Result<Vec<String>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.credentials.list_field_keys(user_id, service_id).await,
+            AuthStore::Postgres(s) => s.credentials.list_field_keys(user_id, service_id).await,
+        }
+    }
+
+    pub async fn fetch_user_credential(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        field_key: &str,
+    ) -> Result<Option<UserCredentialRow>, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.credentials.fetch(user_id, service_id, field_key).await,
+            AuthStore::Postgres(s) => s.credentials.fetch(user_id, service_id, field_key).await,
+        }
+    }
+
+    pub async fn get_user_preferences(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.preferences.get(user_id).await,
+            AuthStore::Postgres(s) => s.preferences.get(user_id).await,
+        }
+    }
+
+    pub async fn upsert_user_preferences(
+        &self,
+        user_id: Uuid,
+        share_location_enabled: bool,
+        share_timezone_enabled: bool,
+    ) -> Result<UserPreferences, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => {
+                s.preferences
+                    .upsert(user_id, share_location_enabled, share_timezone_enabled)
+                    .await
+            }
+            AuthStore::Postgres(s) => {
+                s.preferences
+                    .upsert(user_id, share_location_enabled, share_timezone_enabled)
+                    .await
+            }
+        }
+    }
+
+    // ---- Documents + chat sessions (legacy accessors) ---------------
+
+    pub fn documents(&self) -> Documents {
+        match self {
+            AuthStore::Sqlite(s) => Documents::Sqlite(s.documents.clone()),
+            AuthStore::Postgres(s) => Documents::Postgres(s.documents.clone()),
+        }
+    }
+
+    pub fn chat_sessions_repo(&self) -> DbChatSessions {
+        match self {
+            AuthStore::Sqlite(s) => DbChatSessions::Sqlite(s.chat_sessions.clone()),
+            AuthStore::Postgres(s) => DbChatSessions::Postgres(s.chat_sessions.clone()),
+        }
     }
 }
