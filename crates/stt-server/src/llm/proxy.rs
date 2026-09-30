@@ -19,6 +19,7 @@ use bytes::Bytes;
 use futures_util::stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::agents::AgentRegistry;
@@ -308,66 +309,109 @@ pub async fn chat_completions(
         .expect("static response builder is valid"))
 }
 
+/// Fetch the upstream `/v1/models` and return the parsed list of
+/// model ids. Used by [`crate::http::features::Features::from_state`]
+/// to populate the `llm_models` field of `GET /api/features` so the
+/// frontend can paint the Discussion-mode model dropdown without a
+/// dedicated `/v1/models` round-trip.
+///
+/// The fetch is bounded by [`UPSTREAM_MODELS_TIMEOUT`] — `/api/features`
+/// is on every page-load hot path, so we refuse to block the response
+/// on a slow / unreachable upstream. On timeout, network error, non-2xx
+/// upstream status, or any other parse failure we fall back to a
+/// single-entry list built around the operator-configured
+/// `[llm].default_model`. The fallback keeps the dropdown usable; a
+/// user who wants more models just fixes the upstream.
+///
+/// Returning `Vec<String>` (not the raw OpenAI JSON envelope) lets the
+/// features endpoint serialise it directly without re-shaping.
+pub(crate) async fn fetch_upstream_model_list(client: &crate::llm::client::LlmClient) -> Vec<String> {
+    let url = format!(
+        "{}/v1/models",
+        client.cfg().base_url.trim_end_matches('/')
+    );
+    debug!(%url, "fetching upstream models for /api/features");
+
+    let mut req = client.http.get(&url);
+    if let Some((name, value)) = client.auth_header() {
+        req = req.header(name, value);
+    }
+
+    let send_result = req.send().await;
+    let parse = async {
+        let resp = send_result.map_err(|e| format!("upstream send failed: {e}"))?;
+        if !resp.status().is_success() {
+            warn!(status = %resp.status(), "upstream models failed");
+            return Ok::<_, String>(None);
+        }
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("upstream read failed: {e}"))?;
+        let arr = body.get("data").and_then(|d| d.as_array());
+        let models = arr
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(Some(models))
+    };
+
+    match tokio::time::timeout(UPSTREAM_MODELS_TIMEOUT, parse).await {
+        Ok(Ok(Some(models))) if !models.is_empty() => models,
+        Ok(Ok(Some(_))) => {
+            // Upstream reachable but returned an empty list — still
+            // fall back to the default so the dropdown has at least
+            // one entry rather than rendering empty.
+            warn!("upstream models list empty; falling back to default_model");
+            vec![client.cfg().default_model.clone()]
+        }
+        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
+            warn!("upstream models fetch failed; falling back to default_model");
+            vec![client.cfg().default_model.clone()]
+        }
+    }
+}
+
+/// Hard ceiling on the upstream `/v1/models` fetch from inside
+/// `GET /api/features`. The endpoint is fetched on every page load
+/// (and on every `visibilitychange` from `chat.js`), so an unbounded
+/// upstream connect timeout would degrade page-load latency for any
+/// operator whose Ollama host happens to be down. 3 seconds is short
+/// enough to fail fast on a typical LAN miss while still tolerating
+/// a slow first-byte from a healthy Ollama under load.
+pub(crate) const UPSTREAM_MODELS_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// `GET /v1/models` — proxies the upstream's model list verbatim.
 ///
 /// When the upstream is unreachable we still return a JSON body with
 /// `[{ "id": "<OLLAMA_MODEL>" }]` so the UI dropdown always has at
 /// least one entry.
+///
+/// **Note**: this handler is kept for direct callers (`curl`, SDKs,
+/// out-of-tree integrations). The browser UI no longer hits it — the
+/// chat dropdown is populated from `GET /api/features`'s `llm_models`
+/// field instead. The body shape is unchanged so the legacy callers
+/// keep working without modification.
 pub async fn models_list(State(llm_state): State<ArcLlmState>) -> Result<Response, LlmError> {
     let llm = &llm_state.client;
-
-    let url = format!("{}/v1/models", llm.cfg.base_url.trim_end_matches('/'));
-    debug!(%url, "fetching upstream models");
-
-    let mut req = llm.http.get(&url);
-    if let Some((name, value)) = llm.auth_header() {
-        req = req.header(name, value);
-    }
-
-    match req.send().await {
-        Ok(upstream) => {
-            let status = upstream.status();
-            if !status.is_success() {
-                let status =
-                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let body = upstream.text().await.unwrap_or_default();
-                warn!(%status, "upstream models failed");
-                return Err(LlmError::Upstream { status, body });
-            }
-            // Pass the body through verbatim; OpenAI's response shape is
-            // a small JSON object we don't need to re-shape.
-            let bytes = upstream
-                .bytes()
-                .await
-                .map_err(|e| LlmError::BadRequest(format!("upstream read failed: {e}")))?;
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-store")
-                .body(Body::from(bytes))
-                .expect("static response builder is valid"))
-        }
-        Err(e) => {
-            warn!(error = %e, "upstream unreachable, returning fallback model");
-            // Offline fallback: a single-entry list built around the
-            // server-configured default. The UI is still usable; the
-            // user just can't pick another model without fixing the
-            // upstream.
-            let body = json!({
-                "object": "list",
-                "data": [
-                    { "id": llm.cfg.default_model, "object": "model" }
-                ]
-            })
-            .to_string();
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-store")
-                .body(Body::from(body))
-                .expect("static response builder is valid"))
-        }
-    }
+    let models = fetch_upstream_model_list(llm).await;
+    let body = json!({
+        "object": "list",
+        "data": models
+            .into_iter()
+            .map(|id| json!({ "id": id, "object": "model" }))
+            .collect::<Vec<_>>()
+    })
+    .to_string();
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .expect("static response builder is valid"))
 }
 
 // ---------------------------------------------------------------------------

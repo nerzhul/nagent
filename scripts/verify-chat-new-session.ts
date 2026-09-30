@@ -58,6 +58,83 @@ Deno.test("chat.js source: broken newSessionBtnEl pattern is removed", async () 
   );
 });
 
+Deno.test("chat.js source: loadModels() is not called at module top level", async () => {
+  // `loadModels()` writes to `<select id="chat-model">`, which lives
+  // inside `<template id="app-shell-template">` and is only cloned
+  // into the DOM after `auth.js` dispatches `app-shell-mounted`. A
+  // module-top-level call no-ops via the `lazyEl` proxy so the
+  // dropdown stays empty — the regression behind "ma liste reste vide".
+  //
+  // The contract today: `loadModels()` reads `feature("llm_models")`
+  // (populated from `/api/features` server-side) and is invoked
+  // from inside the `subscribeFeatures(loadModels)` subscriber wired
+  // in `rehydrateAfterMount`. The modechange listener keeps a
+  // fallback call for the (rare) case where features have not
+  // resolved by the time the user toggles modes. The
+  // visibility-change path triggers `refreshFeatures()` and the
+  // subscriber re-paints; it does NOT call `loadModels()` directly.
+  //
+  // We assert the contract structurally: there must be exactly one
+  // `loadModels();` statement (the modechange fallback — the
+  // subscriber wiring shows up as a function reference, not a
+  // call). The pre-mount top-level pattern must be gone.
+  const chatSrc = await Deno.readTextFile(
+    new URL("../crates/stt-server/src/static/chat.js", import.meta.url),
+  );
+
+  const callMatches = chatSrc.match(
+    /^\s*(?:if\s*\([^)]*\)\s*)?loadModels\(\);\s*$/gm,
+  ) ?? [];
+  assertEquals(
+    callMatches.length,
+    1,
+    `loadModels() is called from ${callMatches.length} statement sites (expected 1: \
+     the modechange fallback inside its if-block). The subscriber wiring \
+     is a function reference (subscribeFeatures(loadModels)), not a \
+     statement call. Any module-top-level call no-ops against the pre-mount \
+     lazyEl stub and the dropdown renders empty.`,
+  );
+
+  // The post-mount wiring has to exist. `rehydrateAfterMount` must
+  // (a) be wired to the `app-shell-mounted` event, AND (b)
+  // register `loadModels` as a feature subscriber (which fires on
+  // every `/api/features` emit, including the first one after the
+  // initial fetch).
+  assert(
+    /window\.addEventListener\(\s*"app-shell-mounted"\s*,\s*rehydrateAfterMount\s*\)/.test(
+      chatSrc,
+    ),
+    "chat.js must register rehydrateAfterMount as the app-shell-mounted listener",
+  );
+  assert(
+    /function rehydrateAfterMount\b[\s\S]*?subscribeFeatures\(\s*loadModels\s*\)/.test(
+      chatSrc,
+    ),
+    "rehydrateAfterMount must register loadModels as a subscribeFeatures callback so the \
+     dropdown paints from feature('llm_models') when /api/features resolves",
+  );
+
+  // The `loadModels()` body must NOT fetch `/v1/models` — the model
+  // list arrives inside the `/api/features` response now, so any
+  // fetch to `/v1/models` from chat.js would re-introduce the
+  // boot-time race the feature payload was meant to remove.
+  assertEquals(
+    /loadModels\([\s\S]*?fetch\(\s*"\/v1\/models"/.test(chatSrc),
+    false,
+    "loadModels() must not call fetch('/v1/models') — the model list now arrives inside \
+     feature('llm_models') from /api/features; a separate fetch re-introduces the boot \
+     race where the dropdown stays empty until the upstream finishes responding",
+  );
+  assert(
+    /function loadModels\b[\s\S]*?feature\(\s*"llm"\s*\)/.test(chatSrc),
+    "loadModels() must read feature('llm') to gate the disabled-notice toggle",
+  );
+  assert(
+    /function loadModels\b[\s\S]*?nagentFeatures\.llm_models/.test(chatSrc),
+    "loadModels() must read nagentFeatures.llm_models (the model list baked into /api/features)",
+  );
+});
+
 // ---- 2. Behavioural test: mount event wires the click handler --------------
 //
 // We mirror the production pattern in a minimal harness to validate
@@ -251,4 +328,108 @@ Deno.test("model dropdown: empty saved id falls back to first option", () => {
   const sel = makeSelect(["qwen2.5:14b", "llama3.1"]);
   restoreSavedSelection(sel, "");
   assertEquals(sel.value, "qwen2.5:14b");
+});
+
+// ---- Feature-payload dropdown contract ------------------------------------
+//
+// After the `llm_models` migration, `chat.js` no longer fetches
+// `/v1/models` — the model list arrives inside `GET /api/features`
+// (`feature("llm_models")`) and `loadModels()` paints the dropdown
+// from that array. The contract we test here (mirroring the real
+// implementation in chat.js) is:
+//
+//   1. Non-empty `llm_models` → one `<option>` per id, value === id,
+//      text === id. The first option is auto-selected by the
+//      browser.
+//   2. Empty `llm_models` (defensive — the server should never
+//      return this when `llm: true`) → a `(no models)` placeholder
+//      option so the dropdown is never visibly blank.
+//   3. `llm: false` → the dropdown is left empty and the form is
+//      hidden (no `<option>` appended, so the dropdown collapses to
+//      zero height — the `#chat-disabled-notice` is the visual
+//      signal).
+
+function makeSelectFromFeatures(items: string[]) {
+  const options: { value: string; text: string }[] = [];
+  for (const id of items) {
+    options.push({ value: id || "", text: id || "(unnamed)" });
+  }
+  let selected = options[0]?.value ?? "";
+  return {
+    options,
+    innerHTML: "",
+    get value() { return selected; },
+    set value(v: string) {
+      if (options.some((o) => o.value === v)) selected = v;
+    },
+  };
+}
+
+function populateFromFeatures(features: { llm: boolean; llm_models: string[] }) {
+  if (!features.llm) return { formHidden: true, options: [] as { value: string }[] };
+  return {
+    formHidden: false,
+    options: (features.llm_models ?? []).map((id) => ({
+      value: id || "",
+      text: id || "(unnamed)",
+    })),
+  };
+}
+
+Deno.test("features dropdown: llm_models populates one option per id", () => {
+  const result = populateFromFeatures({
+    llm: true,
+    llm_models: ["qwen2.5:14b", "llama3.1", "deepseek-r1:14b"],
+  });
+  assertEquals(result.formHidden, false);
+  assertEquals(result.options.length, 3);
+  assertEquals(result.options[0].value, "qwen2.5:14b");
+  assertEquals(result.options[1].value, "llama3.1");
+  assertEquals(result.options[2].value, "deepseek-r1:14b");
+});
+
+Deno.test("features dropdown: llm false hides the form and skips options", () => {
+  // When `llm: false` the server returns `llm_models: []`; the
+  // frontend hides the form and the `#chat-disabled-notice` is
+  // shown instead. The dropdown MUST NOT be populated with phantom
+  // models — that would mislead the user into thinking an LLM
+  // backend is wired when it isn't.
+  const result = populateFromFeatures({ llm: false, llm_models: [] });
+  assertEquals(result.formHidden, true);
+  assertEquals(result.options.length, 0);
+});
+
+Deno.test("features dropdown: empty llm_models shows the placeholder", () => {
+  // The server contract guarantees `llm_models` is non-empty when
+  // `llm: true` (it collapses to `[default_model]` on upstream
+  // failure). If it slipped through empty we still render a
+  // placeholder rather than an invisible dropdown — defensive
+  // against a server regression.
+  const result = populateFromFeatures({ llm: true, llm_models: [] });
+  assertEquals(result.formHidden, false);
+  // Caller code path renders `(no models)` when options is empty;
+  // we just verify the empty-array case is distinguishable from
+  // "no options at all because LLM is off".
+  assertEquals(result.options.length, 0);
+  // `populateFromFeatures` does not render the placeholder
+  // itself — chat.js owns that. The contract this test guards is
+  // that the empty-but-llm-on state is reachable and the caller
+  // can branch on `formHidden` vs `options.length === 0`.
+  assertEquals(
+    result.formHidden === false && result.options.length === 0,
+    true,
+    "empty llm_models with llm=true must reach the chat.js placeholder branch",
+  );
+});
+
+Deno.test("features dropdown: downstream select reflects the feature list", () => {
+  // End-to-end: feed the same shapes through both helpers (real
+  // chat.js does this). The dropdown must end up with the right
+  // selected option once the saved-model restore pass runs.
+  const sel = makeSelectFromFeatures(["qwen2.5:14b", "llama3.1"]);
+  assertEquals(sel.options.length, 2);
+  assertEquals(sel.value, "qwen2.5:14b", "first option is auto-selected");
+  // Saved model matches an entry → restore it.
+  restoreSavedSelection(sel, "llama3.1");
+  assertEquals(sel.value, "llama3.1");
 });

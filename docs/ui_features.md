@@ -178,8 +178,15 @@ fronted by a chat sidebar and a chat-main area.
 
 ### 4.2 Header / model picker
 
-- `#chat-model` populated from `GET /v1/models` (lazy-loaded on first
-  mode entry and on `modechange` re-entries).
+- `#chat-model` populated from `feature("llm_models")`, which is
+  populated server-side from the upstream `/v1/models` query inside
+  the `GET /api/features` response (see `crates/stt-server/src/http/features.rs`
+  and `crates/stt-server/src/llm/proxy.rs::fetch_upstream_model_list`).
+  The frontend never calls `/v1/models` directly — that route is
+  kept for direct callers (`curl`, SDKs) but the chat UI uses the
+  feature-flag payload exclusively. The server bounds the upstream
+  fetch with `UPSTREAM_MODELS_TIMEOUT` (3s) and collapses to
+  `[default_model]` on any failure so the dropdown is never empty.
 - `#chat-clear` wipes the current session.
 - `#chat-status` mirrors the same status-pill semantics as Transcript.
 - `#chat-location-pill` (hidden until geolocation is granted and a
@@ -200,9 +207,12 @@ fronted by a chat sidebar and a chat-main area.
 ### 4.4 Advanced panel (`<details class="chat-advanced">`)
 
 Folded into the main `<details>` rather than its own nested one.
-When `GET /v1/models` 404s (no LLM backend running) the whole panel
-is hidden and the `#chat-disabled-notice` is shown instead
-(chat.js:1473-1484), so the picker never offers an unusable list.
+When `feature("llm") === false` (LLM proxy not wired on this
+server) the whole panel is hidden and the `#chat-disabled-notice`
+is shown instead (chat.js:1473-1484), so the picker never offers an
+unusable list. A reachable upstream that returns no models still
+keeps the panel visible — the server falls back to
+`[default_model]` and the user sees at least the configured model.
 
 - **TTS sub-panel** (`#chat-tts-settings`, hidden when read-aloud is
   off):

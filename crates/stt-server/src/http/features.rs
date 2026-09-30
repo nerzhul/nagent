@@ -20,6 +20,7 @@
 //! {
 //!   "documents": true,          // [documents].enabled = true
 //!   "llm": true,                // LLM proxy is wired
+//!   "llm_models": ["qwen2.5:14b", "llama3.1"], // upstream models (or [default_model] fallback)
 //!   "tts": true,                // TTS engine wired
 //!   "agents": true,             // at least one agent registered
 //!   "agent_names": ["get_weather", "read_document", ...],
@@ -27,6 +28,15 @@
 //!   "tools": ["get_weather", "read_document", ...]
 //! }
 //! ```
+//!
+//! `llm_models` is populated only when `llm: true`. The frontend reads
+//! it once after `/api/me` succeeds and uses it to paint the
+//! Discussion-mode `<select id="chat-model">` without a separate
+//! `/v1/models` round-trip. The fetch is bounded by a short timeout
+//! (see [`crate::llm::proxy::UPSTREAM_MODELS_TIMEOUT`]) so a slow or
+//! unreachable Ollama does not delay page load — on any failure the
+//! list collapses to `[default_model]` and the dropdown still has one
+//! usable entry.
 //!
 //! The endpoint is authenticated (`RequireAuth` middleware) —
 //! the response is not user-specific but the same envelope
@@ -73,6 +83,15 @@ pub struct Features {
     /// completion would fail with a 503.
     #[serde(rename = "llm")]
     pub llm_enabled: bool,
+    /// Models served by the upstream LLM (Ollama / OpenAI-compatible).
+    /// Populated only when [`Self::llm_enabled`] is `true`; `[]`
+    /// otherwise. The frontend uses this to populate the
+    /// `<select id="chat-model">` dropdown without a separate
+    /// `/v1/models` round-trip. On upstream failure the list
+    /// collapses to a single-entry fallback (`[default_model]`) so
+    /// the dropdown is never empty.
+    #[serde(rename = "llm_models")]
+    pub llm_models: Vec<String>,
     /// TTS engine is wired (`state.tts.is_some()`). When false
     /// the TTS settings drawer is hidden and "Read aloud" is a
     /// no-op.
@@ -108,11 +127,29 @@ impl Features {
     /// Build a `Features` snapshot from the current `AppState`.
     /// Called on every `GET /api/features` request — the data is
     /// small and the call is cheap, so we don't cache.
-    pub fn from_state(state: &Arc<AppState>) -> Self {
+    ///
+    /// The `llm_models` field is `Some(_)` only when `llm_enabled`
+    /// is `true`; we still have to *fetch* the upstream list to
+    /// populate it, so `from_state` is async (and bound to a short
+    /// upstream timeout — see
+    /// [`crate::llm::proxy::UPSTREAM_MODELS_TIMEOUT`]). The fetch
+    /// is skipped entirely when LLM is disabled.
+    pub async fn from_state(state: &Arc<AppState>) -> Self {
         let documents_enabled = state.documents.is_some();
         let llm_enabled = state.llm.is_some();
         let tts_enabled = state.tts.is_some();
         let chat_sessions_enabled = state.chat_sessions.is_some();
+
+        // `llm_models` is populated only when the proxy is wired.
+        // The fetch is bounded by `UPSTREAM_MODELS_TIMEOUT` so a
+        // down / unreachable upstream does not delay page-load; on
+        // any failure the list collapses to `[default_model]` and
+        // the dropdown still has one usable entry.
+        let llm_models = if let Some(llm_state) = state.llm.as_ref() {
+            crate::llm::proxy::fetch_upstream_model_list(&llm_state.client).await
+        } else {
+            Vec::new()
+        };
 
         // Agent registry: empty when the master `agents.enabled`
         // toggle is off OR when no individual agent cargo
@@ -134,6 +171,7 @@ impl Features {
         Self {
             documents_enabled,
             llm_enabled,
+            llm_models,
             tts_enabled,
             agents_enabled,
             agent_names,
@@ -154,7 +192,7 @@ impl Features {
 /// the only handler outside `http/` and `app.rs` that names
 /// `AppState`.
 pub async fn features_handler(State(state): State<Arc<AppState>>) -> Json<Features> {
-    Json(Features::from_state(&state))
+    Json(Features::from_state(&state).await)
 }
 
 /// Build the `/api/features` router. Mounted under the protected

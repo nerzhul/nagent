@@ -1187,9 +1187,11 @@ async function renderModelNotFoundIfApplicable(assistantEl, err) {
       "Pick a model to swap the dropdown and re-send the last turn.";
     wrap.appendChild(hint);
   } else {
-    // Upstream `/v1/models` also failed — point the user at the
-    // operator docs so they can fix the upstream or set
-    // `[llm].default_model` to something the backend serves.
+    // The follow-up upstream `/v1/models` query (issued by the LLM
+    // proxy itself on a `model_not_found` upstream response) also
+    // failed — point the user at the operator docs so they can fix
+    // the upstream or set `[llm].default_model` to something the
+    // backend serves.
     const hint = document.createElement("p");
     hint.className = "chat-model-not-found-hint";
     hint.textContent =
@@ -1994,91 +1996,113 @@ async function loadAgentsBanner() {
   }
 }
 
-async function loadModels() {
-  try {
-    const r = await fetch("/v1/models", { cache: "no-store" });
-    // `chat-header` / `chat-audio` / `voice-graph` / `chat-advanced`
-    // only exist inside `#view-discussion`. On a transcript-mode boot
-    // they're not in the DOM, so any visibility mutation would throw
-    // `null.hidden`. The element handles (`disabledNoticeEl`, `formEl`,
-    // `statusEl`) are `lazyEl` proxies that no-op pre-mount, but raw
-    // `document.querySelector` calls don't, so we resolve them once
-    // and bail on null.
-    const chatHeaderEl = document.querySelector(".chat-header");
-    const chatAudioEl = document.querySelector(".chat-audio");
-    const voiceGraphEl = document.querySelector(".voice-graph");
-    const chatAdvancedEl = document.querySelector(".chat-advanced");
-    const inDiscussionView = chatHeaderEl !== null;
-    if (r.status === 404) {
-      disabledNoticeEl.hidden = false;
-      formEl.hidden = true;
-      if (inDiscussionView) {
-        chatHeaderEl.hidden = true;
-        chatAudioEl.hidden = true;
-        voiceGraphEl.hidden = true;
-        chatAdvancedEl.hidden = true;
-      }
-      statusEl.textContent = "disabled";
-      statusEl.className = "status idle";
-      modelsLoaded = true;
-      return;
-    }
-    if (!r.ok) throw new Error(`status ${r.status}`);
-    disabledNoticeEl.hidden = true;
-    formEl.hidden = false;
+// `loadModels()` is no longer a network call. The model list now
+// arrives inside the `GET /api/features` response (as the
+// `llm_models` field — see `http/features.rs`); the chat dropdown
+// reads it from the feature registry. Two consequences:
+//
+//   1. This function is synchronous and safe to call from a feature
+//      subscriber — no `await` round-trips, no race against
+//      `app-shell-mounted`.
+//   2. A slow / unreachable Ollama no longer blocks the dropdown
+//      paint: `/api/features` bounds the upstream fetch with
+//      `UPSTREAM_MODELS_TIMEOUT` (3s) and collapses to
+//      `[default_model]` on any failure, so the dropdown still has
+//      one usable entry when features resolve.
+//
+// The `disabled` toggle (hide form, show "disabled" notice when
+// LLM is off) is still owned by `loadModels` — that path doesn't
+// depend on the upstream at all, it just keys on `feature("llm")`.
+function loadModels() {
+  // Toggle the visible / hidden state of the form based on whether
+  // the LLM proxy is wired. This is the only "feature disabled"
+  // gate in the chat UI: when `llm: false` the form goes away and
+  // the user sees the `#chat-disabled-notice`. When `llm: true`
+  // the form comes back regardless of how many models the upstream
+  // actually served (the server-side fallback always returns at
+  // least `[default_model]`).
+  const chatHeaderEl = document.querySelector(".chat-header");
+  const chatAudioEl = document.querySelector(".chat-audio");
+  const voiceGraphEl = document.querySelector(".voice-graph");
+  const chatAdvancedEl = document.querySelector(".chat-advanced");
+  const inDiscussionView = chatHeaderEl !== null;
+  const llmOn = feature("llm");
+  if (!llmOn) {
+    disabledNoticeEl.hidden = false;
+    formEl.hidden = true;
     if (inDiscussionView) {
-      chatHeaderEl.hidden = false;
-      chatAudioEl.hidden = false;
-      voiceGraphEl.hidden = false;
-      chatAdvancedEl.hidden = false;
+      chatHeaderEl.hidden = true;
+      chatAudioEl.hidden = true;
+      voiceGraphEl.hidden = true;
+      chatAdvancedEl.hidden = true;
     }
-    // Refresh the pill so a previous "disabled" state disappears.
-    renderStatus();
-    const data = await r.json();
-    const items = Array.isArray(data?.data) ? data.data : [];
-    modelEl.innerHTML = "";
-    if (items.length === 0) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(no models)";
-      modelEl.appendChild(opt);
-      modelsLoaded = true;
-      return;
-    }
-    for (const item of items) {
-      const opt = document.createElement("option");
-      opt.value = item.id || item.name || "";
-      opt.textContent = item.id || item.name || "(unnamed)";
-      modelEl.appendChild(opt);
-    }
-    // Restore the user's last selection so a fresh page load lands
-    // on the model they were already using, instead of jumping back
-    // to the first entry of the list. A stale id (saved model no
-    // longer served by the backend) is silently ignored — the
-    // browser falls back to the first appended <option>, and the
-    // next `change` event will overwrite the stale entry with
-    // whatever the user picks.
-    const saved = loadSelectedModel();
-    if (saved && Array.from(modelEl.options).some((o) => o.value === saved)) {
-      modelEl.value = saved;
-    }
-    // First successful load wires the change listener so every
-    // future pick is persisted. The `_wired` guard makes the wire
-    // idempotent across `loadModels` re-runs (visibility refresh,
-    // error retry, etc.).
-    if (!_modelChangeWired && modelEl.addEventListener) {
-      _modelChangeWired = true;
-      modelEl.addEventListener("change", () => {
-        saveSelectedModel(modelEl.value);
-      });
-    }
+    statusEl.textContent = "disabled";
+    statusEl.className = "status idle";
     modelsLoaded = true;
-  } catch (e) {
-    // Surface failures in the status pill so an empty dropdown is
-    // not silently confusing — the user can see *why* nothing loaded.
-    console.warn("loadModels failed:", e);
-    setAudioStatus(`models: ${e?.message || e}`, "error");
+    return;
   }
+  disabledNoticeEl.hidden = true;
+  formEl.hidden = false;
+  if (inDiscussionView) {
+    chatHeaderEl.hidden = false;
+    chatAudioEl.hidden = false;
+    voiceGraphEl.hidden = false;
+    chatAdvancedEl.hidden = false;
+  }
+  // Refresh the pill so a previous "disabled" state disappears.
+  renderStatus();
+
+  // Read the model list from the feature registry. The server
+  // populates `feature("llm_models")` from the upstream `/v1/models`
+  // at `/api/features` time and collapses to `[default_model]` on
+  // any failure (see `UPSTREAM_MODELS_TIMEOUT` in `llm/proxy.rs`).
+  // We never have to defend against a missing field here — the
+  // `Object.freeze` `DEFAULT_FEATURES` keeps the default at `[]`,
+  // and the merge in `refreshFeatures` overwrites it with whatever
+  // the server sent.
+  const items = Array.isArray(nagentFeatures.llm_models)
+    ? nagentFeatures.llm_models
+    : [];
+  modelEl.innerHTML = "";
+  if (items.length === 0) {
+    // The server contract guarantees `llm_models` is non-empty when
+    // `llm: true`; if it slipped through empty we still render a
+    // placeholder rather than an invisible dropdown.
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(no models)";
+    modelEl.appendChild(opt);
+    modelsLoaded = true;
+    return;
+  }
+  for (const id of items) {
+    const opt = document.createElement("option");
+    opt.value = id || "";
+    opt.textContent = id || "(unnamed)";
+    modelEl.appendChild(opt);
+  }
+  // Restore the user's last selection so a fresh page load lands
+  // on the model they were already using, instead of jumping back
+  // to the first entry of the list. A stale id (saved model no
+  // longer served by the backend) is silently ignored — the
+  // browser falls back to the first appended <option>, and the
+  // next `change` event will overwrite the stale entry with
+  // whatever the user picks.
+  const saved = loadSelectedModel();
+  if (saved && Array.from(modelEl.options).some((o) => o.value === saved)) {
+    modelEl.value = saved;
+  }
+  // First successful load wires the change listener so every
+  // future pick is persisted. The `_wired` guard makes the wire
+  // idempotent across `loadModels` re-runs (visibility refresh,
+  // error retry, etc.).
+  if (!_modelChangeWired && modelEl.addEventListener) {
+    _modelChangeWired = true;
+    modelEl.addEventListener("change", () => {
+      saveSelectedModel(modelEl.value);
+    });
+  }
+  modelsLoaded = true;
 }
 
 // ---- Streaming reply -------------------------------------------------------
@@ -2940,6 +2964,12 @@ wireFormOnce();
 const DEFAULT_FEATURES = Object.freeze({
   documents: false,
   llm: false,
+  // `llm_models` is the list the server returned in its
+  // `/api/features` response — populated only when `llm: true`.
+  // Default is `[]` so a missing / failed feature fetch leaves the
+  // dropdown empty (the loadModels fallback then renders the
+  // "(no models)" placeholder).
+  llm_models: Object.freeze([]),
   tts: false,
   agents: false,
   agent_names: Object.freeze([]),
@@ -3016,6 +3046,15 @@ function rehydrateAfterMount() {
   // Documents panel: `initDocumentsPanel` already wired the
   // listeners; refresh now that the shell is mounted.
   Documents.setSessionId(sid);
+  // Subscribe to feature-flag updates BEFORE the fetch fires so we
+  // do not race against the response: the first `emitFeatures()`
+  // inside `refreshFeatures` already calls our subscriber, which
+  // calls `loadModels()` synchronously and paints the dropdown as
+  // soon as `/api/features` resolves. The model list now lives on
+  // `feature("llm_models")` (server fetches the upstream `/v1/models`
+  // when the request comes in and bakes the list into the response),
+  // so the chat UI does not need a separate `/v1/models` round-trip.
+  subscribeFeatures(loadModels);
   // Refresh feature flags once the shell is mounted so the
   // UI can hide disabled sections. The fetch is async; the
   // renderers that gated themselves on `feature(name)` will
@@ -3787,16 +3826,12 @@ activeSessionId(); // validates / falls back / creates, updates sidebar
 // would render against `null` elements — that's the bug behind the
 // inert "Refresh my location" / "New chat" buttons.
 
-// Load the model list once on page boot. The previous version only
-// fired on `modechange`, which meant a Discussion-mode-persisted user
-// saw an empty dropdown until they clicked away and back. Loading at
-// boot keeps the dropdown warm regardless of the persisted mode, and
-// the disabled-server notice still renders correctly on 404.
-if (globalThis.__nagentMode?.current() === "discussion") {
-  loadModels();
-}
-// Same for the agents banner: one fetch on boot. A reload on
-// /v1/agents that came back empty just hides the banner.
+// Warm the agents banner once on page boot. The Discussion-mode
+// model dropdown is warmed by `rehydrateAfterMount` via the
+// `subscribeFeatures(loadModels)` subscriber — when `/api/features`
+// resolves, `loadModels()` paints the `<select id="chat-model">`
+// from `feature("llm_models")` (no separate `/v1/models` request
+// from the browser).
 loadAgentsBanner();
 // Wire the Documents panel (sidebar upload + drag-drop + paste
 // handlers). The module is a no-op when the server reports the
@@ -3805,10 +3840,15 @@ Documents.initDocumentsPanel();
 Documents.setSessionId(currentSessionId);
 
 document.addEventListener("visibilitychange", () => {
-  // Re-fetch on tab return in case the server's model list changed
-  // while the tab was backgrounded (e.g. another `ollama pull`).
-  if (!document.hidden && globalThis.__nagentMode?.current() === "discussion") {
-    loadModels();
+  // Re-fetch `/api/features` on tab return in case the server's
+  // model list changed while the tab was backgrounded (e.g.
+  // another `ollama pull` while the user was away). The
+  // `subscribeFeatures(loadModels)` subscriber paints the dropdown
+  // when the response resolves; this path is just a nudge to make
+  // that happen. The agents banner still has its own fetch
+  // (`/v1/agents` is not part of `/api/features`).
+  if (!document.hidden) {
+    refreshFeatures();
     loadAgentsBanner();
   }
 });
@@ -3837,11 +3877,12 @@ document.addEventListener("visibilitychange", () => {
 // is a no-op — we already cancelled the in-flight reply on the way
 // out, and there is no new work to interrupt.
 document.addEventListener("modechange", (e) => {
-  // Switching INTO Discussion: warm the model dropdown if it has not
-  // been populated yet (a transcript-mode boot never calls
-  // `loadModels`, see the boot path above). The `modelsLoaded`
-  // guard makes this idempotent across multiple `modechange`
-  // fires and across a visibility-change re-fetch.
+  // Switching INTO Discussion: the dropdown is already populated by
+  // the `subscribeFeatures(loadModels)` subscriber wired in
+  // `rehydrateAfterMount`. Switching modes does not change the model
+  // list, so no work to do here — we only guard against the (rare)
+  // case of a features fetch that has not yet resolved by the time
+  // the user toggles modes.
   if (e?.detail?.mode === "discussion") {
     if (!modelsLoaded) loadModels();
     return;

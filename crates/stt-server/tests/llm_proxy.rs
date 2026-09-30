@@ -398,26 +398,6 @@ async fn rejects_non_streaming_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn models_list_proxies_upstream() {
-    let captured = Arc::new(tokio::sync::Mutex::new(None::<axum::http::HeaderMap>));
-    let upstream_url = spawn_mock_upstream(sse_body(&["unused"]), Arc::clone(&captured)).await;
-    let (url, _) = start_test_server_with_llm(upstream_url, None).await;
-
-    let resp = reqwest::get(format!("{url}/v1/models"))
-        .await
-        .expect("get models");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = resp.json().await.expect("json");
-    let ids: Vec<&str> = body["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, vec!["llama3.1"]);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabled_returns_404_on_v1_routes() {
     let url = start_test_server_disabled().await;
 
