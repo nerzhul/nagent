@@ -58,6 +58,7 @@ fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     });
     Arc::new(AppState {
         backend,
@@ -81,6 +82,8 @@ fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     })
 }
 

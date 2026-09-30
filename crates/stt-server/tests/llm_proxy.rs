@@ -135,6 +135,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -169,6 +170,8 @@ async fn start_test_server_with_llm_and_system_prompt(
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     });
 
     let app = build_router(state);
@@ -220,6 +223,7 @@ async fn start_test_server_disabled() -> String {
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -247,6 +251,8 @@ async fn start_test_server_disabled() -> String {
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     });
 
     let app = build_router(state);
@@ -623,6 +629,7 @@ async fn start_test_server_with_llm_auth(
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     });
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(server_cfg.llm.clone());
@@ -653,6 +660,8 @@ async fn start_test_server_with_llm_auth(
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

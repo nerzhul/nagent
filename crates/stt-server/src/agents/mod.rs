@@ -164,6 +164,16 @@ pub struct UserContext {
     /// `CredentialsMissing` without touching the DB.
     resolver: Option<Arc<CredentialResolver>>,
     cache: SecretCache,
+    /// Active chat session id, when the agent was invoked from the
+    /// `/v1/chat/completions` tool loop. The id is propagated from
+    /// the browser's `X-Chat-Session-Id` header; agents that are
+    /// scoped to a single conversation (currently `read_document`)
+    /// read it via [`UserContext::chat_session_id`].
+    ///
+    /// `None` for direct `/v1/agents/:name/invoke` calls and for
+    /// test contexts; the `read_document` agent panics with a clear
+    /// error when this is `None`.
+    chat_session_id: Option<Uuid>,
 }
 
 impl std::fmt::Debug for UserContext {
@@ -173,6 +183,7 @@ impl std::fmt::Debug for UserContext {
             .field("services", &self.services)
             .field("resolver", &self.resolver.as_ref().map(|_| "<resolver>"))
             .field("cache_entries", &self.cache.len())
+            .field("chat_session_id", &self.chat_session_id)
             .finish()
     }
 }
@@ -192,6 +203,7 @@ impl UserContext {
             services,
             resolver: Some(resolver),
             cache: SecretCache::new(),
+            chat_session_id: None,
         }
     }
 
@@ -207,7 +219,39 @@ impl UserContext {
             services,
             resolver: None,
             cache: SecretCache::new(),
+            chat_session_id: None,
         }
+    }
+
+    /// Constructor used by the LLM tool loop for one chat-completion
+    /// request. `chat_session_id` is propagated from the browser's
+    /// `X-Chat-Session-Id` header so per-session agents (currently
+    /// `read_document`) can scope their queries.
+    ///
+    /// The optional resolver mirrors `new` / `for_tests` semantics:
+    /// direct curl callers (no auth) get a `None` here, the
+    /// chat-completions path gets a `Some` whenever the auth
+    /// subsystem is enabled.
+    pub fn for_chat_session(
+        user_id: Uuid,
+        services: Arc<ServiceRegistry>,
+        resolver: Option<Arc<CredentialResolver>>,
+        chat_session_id: Uuid,
+    ) -> Self {
+        Self {
+            user_id,
+            services,
+            resolver,
+            cache: SecretCache::new(),
+            chat_session_id: Some(chat_session_id),
+        }
+    }
+
+    /// Active chat session id when the agent was invoked from the
+    /// LLM tool loop. `None` for direct `/v1/agents/:name/invoke`
+    /// calls (curl, integration tests) and for test contexts.
+    pub fn chat_session_id(&self) -> Option<Uuid> {
+        self.chat_session_id
     }
 
     /// The calling user's UUID. Agents can use it for audit rows
@@ -375,6 +419,53 @@ impl AgentRegistry {
         Self {
             inner: Arc::new(AgentRegistryInner { agents }),
         }
+    }
+
+    /// Variant of [`AgentRegistry::from_config`] that also wires
+    /// the `read_document` agent when the documents feature is
+    /// runtime-enabled. `from_config` stays unchanged so existing
+    /// call sites keep working unmodified.
+    pub fn from_config_with_documents(
+        cfg: &super::config::AgentConfig,
+        documents: &crate::config::DocumentsConfig,
+        document_store: Option<crate::documents::DocumentStore>,
+        chat_sessions: Option<crate::chat_sessions::ChatSessions>,
+    ) -> Self {
+        let mut registry = Self::from_config(cfg);
+        if !cfg.enabled {
+            return registry;
+        }
+        if !documents.enabled {
+            return registry;
+        }
+        if let Some(store) = document_store {
+            // Re-wrap into the mutable representation so we can
+            // append the new agent. The default `from_config`
+            // returned a registry with an internal `Arc`; cloning
+            // and re-wrapping would lose us the ability to
+            // mutate, so we build a fresh registry from scratch
+            // using the same set of agents as `from_config` PLUS
+            // the document agent.
+            let mut agents: Vec<Arc<dyn Agent>> = Vec::new();
+            if let Some(inner) = Arc::get_mut(&mut registry.inner) {
+                agents.extend(inner.agents.iter().cloned());
+            } else {
+                // First `Arc::get_mut` fails when the registry was
+                // already cloned (e.g. handed off to AppState).
+                // Rebuild from the public list.
+                for a in registry.list() {
+                    if let Some(arc) = registry.get(&a.name) {
+                        agents.push(arc);
+                    }
+                }
+            }
+            agents.push(Arc::new(crate::documents::agent::ReadDocumentAgent::new(
+                store,
+                chat_sessions,
+            )));
+            registry.inner = Arc::new(AgentRegistryInner { agents });
+        }
+        registry
     }
 
     /// Concise description used by `GET /v1/agents`. Schema details

@@ -54,6 +54,7 @@ async fn serve_once() -> String {
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     });
     let sessions = Arc::new(dashmap::DashMap::new());
     let (job_tx_inner, job_rx) = mpsc::channel::<stt_core::InferenceJob>(16);
@@ -83,6 +84,8 @@ async fn serve_once() -> String {
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -972,10 +975,22 @@ async fn app_and_chat_point_at_per_mode_voice_graph_ids() {
         .text()
         .await
         .unwrap();
+    // The Discussion-mode AudioCapture is constructed lazily (see
+    // `initAudioCaptureOnce` in chat.js — it lives inside
+    // `<template id="app-shell-template">` so constructing it at
+    // module top-level would crash on a null `cfg.buttonEl`).
+    // We accept either the `$("…")` shorthand or the
+    // `document.getElementById("…")` form.
+    let uses_discussion_ids = |src: &str| {
+        (src.contains("voice-graph-discussion-canvas")
+            || src.contains("getElementById(\"voice-graph-discussion-canvas\")"))
+            && (src.contains("voice-graph-discussion-level")
+                || src.contains("getElementById(\"voice-graph-discussion-level\")"))
+            && (src.contains("voice-graph-discussion")
+                || src.contains("getElementById(\"voice-graph-discussion\")"))
+    };
     assert!(
-        chat.contains("voice-graph-discussion-canvas")
-            && chat.contains("voice-graph-discussion-level")
-            && chat.contains(r#"$("voice-graph-discussion")"#),
+        uses_discussion_ids(&chat),
         "chat.js does not wire the Discussion-mode AudioCapture to its per-mode voice-graph ids. Per docs/ui_features.md §4.10 the Discussion instance must use its own canvas/level/graph ids so the inline voice bubble in #chat-messages renders independently of the Transcript view."
     );
     assert!(

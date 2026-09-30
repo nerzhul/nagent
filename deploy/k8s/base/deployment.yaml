@@ -52,6 +52,13 @@ spec:
             - name: model
               mountPath: /models
               readOnly: true
+            # Documents cache — mounted read-write so the
+            # upload handler can write the staged file before
+            # the DB insert. The PVC is sized to the operator's
+            # quota; the periodic sweep reclaims space.
+            - name: docs-cache
+              mountPath: /var/cache/nagent/docs
+              readOnly: false
           livenessProbe:
             httpGet:
               path: /healthz
@@ -78,3 +85,6 @@ spec:
         - name: model
           persistentVolumeClaim:
             claimName: stt-model
+        - name: docs-cache
+          persistentVolumeClaim:
+            claimName: nagent-docs-cache

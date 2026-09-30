@@ -71,6 +71,7 @@ async fn start_test_server() -> (String, SessionMap) {
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     });
 
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
@@ -105,6 +106,8 @@ async fn start_test_server() -> (String, SessionMap) {
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     });
 
     let app = build_router(state);

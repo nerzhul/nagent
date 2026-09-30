@@ -74,6 +74,7 @@ async fn start_test_server_with(
         agents: stt_server::config::AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     });
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let (job_tx_inner, job_rx) = mpsc::channel::<InferenceJob>(16);
@@ -111,6 +112,8 @@ async fn start_test_server_with(
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     });
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

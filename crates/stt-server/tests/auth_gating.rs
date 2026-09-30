@@ -124,6 +124,8 @@ async fn build_state_with_auth() -> Arc<AppState> {
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     })
 }
 

@@ -200,6 +200,30 @@
         <span>New chat</span>
       </button>
       <ul id="chat-sessions" class="chat-sessions" role="list"></ul>
+      <!--
+        Documents panel. Lives inside the chat sidebar so the
+        Discussion-mode layout stays a 2-column shell (sidebar +
+        chat). The panel itself is a sibling <details> so it
+        collapses by default and does not eat vertical space when
+        the user has not uploaded anything yet. `documents.js`
+        owns the panel behaviour; it is a no-op when the server
+        reports documents disabled (the `<details>` still ships
+        in the template so the build is identical across
+        configurations).
+      -->
+      <details id="documents-panel" class="documents-panel">
+        <summary class="documents-panel-summary">
+          <span>Documents</span>
+          <button id="documents-upload-btn" type="button"
+                  class="documents-upload-btn" aria-label="Upload document">+</button>
+          <input id="documents-upload-input" type="file"
+                 accept=".pdf,.txt,.md,.log" hidden multiple>
+        </summary>
+        <ul id="documents-list" class="documents-list" role="list"></ul>
+        <p id="documents-empty" class="documents-empty">
+          Drag a PDF or text file here, or paste one.
+        </p>
+      </details>
     </aside>
     <div class="chat-main">
     <header class="chat-header">
@@ -536,5 +560,13 @@
     integrations available yet" pill.
   -->
   <script type="module" src="/static/integrations.js"></script>
+  <!--
+    Documents panel. Loaded as a module so `chat.js` can import
+    the same `setSessionId` / `refresh` helpers it calls on
+    session switch. The module is a no-op when the server
+    reports documents disabled (the panel stays in the DOM but
+    shows no rows).
+  -->
+  <script type="module" src="/static/documents.js"></script>
 </body>
 </html>

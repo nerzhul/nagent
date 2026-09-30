@@ -15,14 +15,19 @@
 //!   from the LLM proxy through OpenAI-style tool/function calling.
 //! - [`credentials`] — per-user credentials vault (AES-256-GCM at rest,
 //!   decrypted on demand through a per-request `UserContext`).
+//! - [`documents`] — Discussion-mode document uploads + the
+//!   `read_document` LLM tool. Available only when the `documents`
+//!   cargo feature is on (gates the `pdf-extract` dependency).
 
 #![warn(missing_debug_implementations)]
 
 pub mod agents;
 pub mod auth;
+pub mod chat_sessions;
 pub mod config;
 pub mod config_file;
 pub mod credentials;
+pub mod documents_cli;
 pub mod llm;
 pub mod llm_prompt;
 pub mod middleware;
@@ -36,6 +41,8 @@ pub mod validation;
 pub mod version;
 pub mod watchdog;
 pub mod ws_handler;
+
+pub mod documents;
 
 use config::LlmConfig;
 pub use config::{CliArgs, Config};
@@ -117,6 +124,21 @@ pub struct AppState {
     /// the route handlers need to encrypt on PUT — the resolver
     /// only exposes reads.
     pub credentials_key: Option<std::sync::Arc<crate::credentials::CredentialsKey>>,
+    /// Document store handle (`Some` when `cfg.documents.enabled =
+    /// true` AND the auth DB is reachable). Mounts the
+    /// `/v1/documents*` routes and powers the `read_document`
+    /// agent.
+    pub documents: Option<crate::documents::DocumentStore>,
+    /// Server-bound chat session id binding (SEV 2 fix). The
+    /// `POST /v1/chat/session` mint handler reads from this
+    /// field; the documents routes / `read_document` agent read
+    /// it through `state.app.chat_sessions` to verify the
+    /// `(user, session)` binding before any DB lookup. Lives at
+    /// the `AppState` level (not under `documents`) because the
+    /// concept is broader than documents — a future plan may
+    /// scope agent conversations or chat-history entries to a
+    /// chat session too.
+    pub chat_sessions: Option<crate::chat_sessions::ChatSessions>,
 }
 
 impl AppState {
@@ -146,6 +168,14 @@ impl std::fmt::Debug for AppState {
             .field(
                 "credential_resolver",
                 &self.credential_resolver.as_ref().map(|_| "<resolver>"),
+            )
+            .field(
+                "documents",
+                &self.documents.as_ref().map(|_| "<DocumentStore>"),
+            )
+            .field(
+                "chat_sessions",
+                &self.chat_sessions.as_ref().map(|_| "<ChatSessions>"),
             )
             .finish()
     }
@@ -259,6 +289,67 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             }))
             .layer(cors);
         protected = protected.merge(llm_app);
+    }
+
+    // Document uploads + downloads share the LLM proxy's CORS /
+    // rate-limit envelope. Mounted only when the `documents`
+    // cargo feature is on AND the runtime flag is on AND the
+    // auth DB is reachable (so the table exists). The
+    // `state.documents` field is `Some` iff all three are true.
+    if state.documents.is_some() {
+        let cors_origins = state
+            .llm
+            .as_ref()
+            .map(|l| l.cfg().cors_allow_origins.clone())
+            .unwrap_or_default();
+        let cors = middleware::cors_layer(&cors_origins);
+        let llm_limiter = state.llm_rate_limiter.clone();
+        let llm_cfg = Arc::new(state.config.llm.clone());
+        let documents_app = crate::documents::routes::build_documents_router(state.clone())
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let cfg = llm_cfg.clone();
+                async move { llm_auth_middleware(Some(cfg), req, next).await }
+            }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let limiter = llm_limiter.clone();
+                async move { llm_rate_limit_middleware(limiter, req, next).await }
+            }))
+            .layer(cors);
+        protected = protected.merge(documents_app);
+    }
+
+    // `POST /v1/chat/session` is mounted independently of
+    // `[documents].enabled` — the SEV 2 server-bound chat
+    // session id binding is a general-purpose feature (chat
+    // history scoping may use it in a follow-up). On a build with
+    // `documents.enabled = false` the browser still calls the
+    // endpoint on every page load; mounting it here prevents the
+    // 404 the user was seeing before this split.
+    //
+    // The router is mounted only when `state.chat_sessions.is_some()`,
+    // which is true iff auth is enabled (the chat_sessions table
+    // lives in the auth DB). Without auth, the browser doesn't
+    // call this endpoint anyway, so 404'ing is fine.
+    if state.chat_sessions.is_some() {
+        let cors_origins = state
+            .llm
+            .as_ref()
+            .map(|l| l.cfg().cors_allow_origins.clone())
+            .unwrap_or_default();
+        let cors = middleware::cors_layer(&cors_origins);
+        let llm_limiter = state.llm_rate_limiter.clone();
+        let llm_cfg = Arc::new(state.config.llm.clone());
+        let chat_session_app = crate::documents::routes::build_chat_session_router(state.clone())
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let cfg = llm_cfg.clone();
+                async move { llm_auth_middleware(Some(cfg), req, next).await }
+            }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let limiter = llm_limiter.clone();
+                async move { llm_rate_limit_middleware(limiter, req, next).await }
+            }))
+            .layer(cors);
+        protected = protected.merge(chat_session_app);
     }
 
     // TTS routes share the LLM proxy's CORS / rate-limit envelope

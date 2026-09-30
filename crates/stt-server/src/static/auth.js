@@ -91,6 +91,13 @@ function mountShell() {
   if (!appRoot || !appShellTemplate) return;
   if (appRoot.firstChild) return; // already mounted
   appRoot.appendChild(appShellTemplate.content.cloneNode(true));
+  // Notify the other modules (`chat.js`, `app.js`,
+  // `documents.js`) that the app shell is now in the DOM. They
+  // use this to defer DOM lookups that previously failed at
+  // module top-level because the form / sidebar / chat input
+  // lived inside `<template id="app-shell-template">` and were
+  // only cloned into `#app-root` once `/api/me` returned.
+  window.dispatchEvent(new CustomEvent("app-shell-mounted"));
 }
 
 /** Remove the mounted shell. Triggers a fresh login flow. */

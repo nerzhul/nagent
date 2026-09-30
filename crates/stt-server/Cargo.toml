@@ -184,6 +184,15 @@ tower = { version = "0.5", features = ["util"] }
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
+# `pdf-extract` powers the `read_document` agent's PDF parsing. Pure
+# Rust (transitively depends on `lopdf`), no system deps. The cost
+# is paid unconditionally because the Documents panel is a core
+# Discussion-mode feature — operators can still gate it at runtime
+# via `[documents].enabled = false` in the config.
+pdf-extract = "0.7"
+# `mime_guess` sniffs a content-type from the file extension at upload
+# time. Tiny (~10 KB), pure Rust; required by the documents routes.
+mime_guess = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

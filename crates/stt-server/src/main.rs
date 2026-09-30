@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use stt_server::agents::ServiceRegistry;
 use stt_server::config::AuthBackendKind;
+use stt_server::documents_cli;
 use stt_server::{
     agents, auth, build_rate_limiters, build_router, credentials, llm, migrate_cli, router,
     session, tts, watchdog, AppState, CliArgs, Config,
@@ -134,6 +135,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         combined.extend(trailing);
         return migrate_cli::run_migrate_cli(combined).await;
     }
+    if let Some(idx) = argv.iter().position(|a| a == "documents") {
+        // Same dispatcher trick as the `auth` / `migrate` branches
+        // above. Sits after both so `--config FOO documents purge
+        // …` routes correctly.
+        let mut argv = argv;
+        let trailing = argv.split_off(idx + 1);
+        let mut combined = argv;
+        combined.extend(trailing);
+        return documents_cli::run_documents_cli(combined).await;
+    }
 
     init_tracing();
 
@@ -250,6 +261,89 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         watchdog::run(watchdog_sessions, watchdog_timeout).await;
     });
 
+    // ---- Documents ----------------------------------------------------------
+    //
+    // Build the `DocumentStore` whenever the cargo feature is on AND
+    // `documents.enabled = true` AND the auth DB is reachable (the
+    // documents table lives in the auth DB so `auth_store` must be
+    // `Some`). The check runs early — a misconfigured server refuses
+    // to boot with a clear error instead of 500-ing on every upload.
+    //
+    // The periodic purge sweep lives in its own `tokio::spawn` so a
+    // transient DB error does not block the rest of the server.
+    //
+    // SEV 2 fix: build the chat-session binding handle UP-FRONT so
+    // the `POST /v1/chat/session` mint endpoint is always reachable
+    // (when auth is enabled). The documents routes + the
+    // `read_document` agent also read this handle to verify
+    // `(user, session)` bindings on every request.
+    let chat_sessions_state: Option<stt_server::chat_sessions::ChatSessions> = auth_store
+        .clone()
+        .map(stt_server::chat_sessions::ChatSessions::new);
+    let documents_state: Option<stt_server::documents::DocumentStore> = if cfg.documents.enabled {
+        let store = match auth_store.clone() {
+            Some(s) => s,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "[documents].enabled = true requires auth.enabled = true; \
+                 the documents table lives in the auth DB."
+                ));
+            }
+        };
+        // Verify the cache dir is writable before opening the door to
+        // uploads — a misconfigured PVC should surface at boot, not at
+        // the first 5xx.
+        if let Err(e) = stt_server::documents::storage::check_writable(&cfg.documents.cache_dir) {
+            return Err(anyhow::anyhow!(
+                "[documents].cache_dir {} is not writable: {e}",
+                cfg.documents.cache_dir.display()
+            ));
+        }
+        // Run a sweep at boot so a long downtime does not leave the
+        // cache dir full. The first tick of the periodic task is
+        // skipped (see `run_periodic_purge`); this explicit one is
+        // the "boot" sweep.
+        let store = stt_server::documents::DocumentStore::new(
+            store,
+            cfg.documents.max_extracted_chars,
+            cfg.documents.cache_dir.clone(),
+        );
+        match stt_server::documents::purge::purge_older_than(
+            &store,
+            &cfg.documents.cache_dir,
+            std::time::Duration::from_secs(cfg.documents.default_ttl_days as u64 * 86_400),
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(purged = n, "documents: boot sweep removed {n} row(s)"),
+            Err(e) => tracing::warn!(error = %e, "documents: boot sweep failed"),
+        }
+        if cfg.documents.purge_interval_hours > 0 {
+            let interval =
+                std::time::Duration::from_secs(cfg.documents.purge_interval_hours * 3_600);
+            let ttl =
+                std::time::Duration::from_secs(cfg.documents.default_ttl_days as u64 * 86_400);
+            let store_for_task = store.clone();
+            let cache_dir = cfg.documents.cache_dir.clone();
+            tokio::spawn(async move {
+                stt_server::documents::purge::run_periodic_purge(
+                    store_for_task,
+                    cache_dir,
+                    interval,
+                    ttl,
+                )
+                .await;
+            });
+        }
+        Some(store)
+    } else {
+        // Documents module is always compiled in; runtime flag
+        // off → the routes are simply not mounted. No rebuild
+        // required.
+        None
+    };
+
     // ---- HTTP router -----------------------------------------------------
     let ready = Arc::new(AtomicBool::new(true));
     // Surface a startup warning when the operator is exposing the
@@ -287,7 +381,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         None
     };
     let (stt_rate_limiter, llm_rate_limiter) = build_rate_limiters(&cfg);
-    let agents = agents::AgentRegistry::from_config(&cfg.agents);
+    // Build the agent registry. When `documents.enabled = true` AND
+    // `documents_state` is `Some`, append the `read_document` agent
+    // so the LLM can pull text out of an uploaded file. The two-
+    // step build is intentional — `from_config` is the stable
+    // surface used by every binary variant;
+    // `from_config_with_documents` is the documents-specific
+    // extension.
+    let agents = agents::AgentRegistry::from_config_with_documents(
+        &cfg.agents,
+        &cfg.documents,
+        documents_state.clone(),
+        chat_sessions_state.clone(),
+    );
     if !agents.is_empty() {
         info!(count = agents.len(), "agent registry built");
     } else {
@@ -361,6 +467,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         services,
         credential_resolver,
         credentials_key,
+        documents: documents_state.clone(),
+        chat_sessions: chat_sessions_state.clone(),
     });
 
     let app = build_router(state);

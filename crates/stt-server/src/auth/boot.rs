@@ -348,6 +348,7 @@ mod tests {
                 passkey: Default::default(),
                 credentials: Default::default(),
             },
+            documents: Default::default(),
         }
     }
 

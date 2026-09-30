@@ -208,13 +208,30 @@ struct ChatRequest {
     model: Option<String>,
 }
 
+/// Header the browser uses to propagate the active chat-session id
+/// into per-session agents (`read_document` reads it through
+/// `UserContext::chat_session_id`). Lowercased per the SSE/header
+/// spec; case-insensitive lookup via `HeaderMap::get` makes this
+/// safe regardless.
+pub const CHAT_SESSION_HEADER: &str = "x-chat-session-id";
+
 /// `POST /v1/chat/completions` — OpenAI-compatible streaming proxy.
 ///
 /// Only `stream=true` is supported (the proxy exists to stream).
 /// The `model` field is honoured when present; otherwise the
 /// server-configured `OLLAMA_MODEL` is used.
+///
+/// `auth_user` is `Some` when `RequireAuth` middleware injected
+/// an `AuthUser` into the request extensions (production path
+/// when `auth.enabled = true`). `None` when the route is reached
+/// without auth (the `auth.enabled = false` trust boundary, or
+/// direct integration tests). The per-round `UserContext` uses
+/// `Uuid::nil()` when the extension is missing — see
+/// `run_tool_loop` for the user-scoping consequences (per-user
+/// agents surface a clear tool error).
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, LlmError> {
@@ -241,6 +258,15 @@ pub async fn chat_completions(
     }
 
     let model = req.model.unwrap_or_else(|| llm.cfg.default_model.clone());
+
+    // Read the chat-session id from the dedicated header (set by
+    // `chat.js` on every `/v1/*` request). When present, thread
+    // it into the per-tool-round `UserContext` so agents like
+    // `read_document` can scope their queries to the right
+    // session. A missing / malformed header is non-fatal — the
+    // session-scoped agents will then return a tool error and
+    // the LLM can recover.
+    let chat_session_id = parse_chat_session_header(&headers);
 
     // Rebuild the body so we can override `model` with our fallback
     // without disturbing the rest of the user's payload (messages,
@@ -353,6 +379,15 @@ pub async fn chat_completions(
     let url_clone = upstream_url.clone();
     let body_for_loop = forward_body.clone();
     let first_stream: UpstreamByteStream = Box::pin(first_upstream.bytes_stream());
+    // SEV 2 fix: thread the authenticated user id into the tool
+    // loop. `auth_user` is `None` on the `auth.enabled = false`
+    // path (and the integration tests that don't mount the
+    // RequireAuth middleware); fall back to `Uuid::nil()` so the
+    // per-user agents surface a clear tool error instead of
+    // panicking.
+    let user_id = auth_user
+        .map(|axum::Extension(u)| u.id)
+        .unwrap_or_else(uuid::Uuid::nil);
     tokio::spawn(async move {
         run_tool_loop(
             http,
@@ -364,6 +399,8 @@ pub async fn chat_completions(
             timeout,
             tx,
             first_stream,
+            chat_session_id,
+            user_id,
         )
         .await;
     });
@@ -478,6 +515,16 @@ type UpstreamByteStream =
 /// `first_stream` is the body stream of the upstream response that
 /// `chat_completions` already opened for round 0; round 1+ reuse the
 /// shared `http` client and open their own connection.
+///
+/// `chat_session_id` is the browser-supplied session id (read from
+/// `X-Chat-Session-Id`). Threaded into the per-round `UserContext`
+/// so session-scoped agents (`read_document`) can find their rows.
+/// `None` for direct curl callers and for sessions that did not
+/// send the header.
+///
+/// `user_id` is the authenticated user id from `AuthUser`
+/// (SEV 2 fix). Threaded into the per-round `UserContext` so
+/// per-user agents (`read_document`) can scope their queries.
 #[allow(clippy::too_many_arguments)]
 async fn run_tool_loop(
     http: reqwest::Client,
@@ -489,6 +536,8 @@ async fn run_tool_loop(
     idle_timeout: Duration,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     first_stream: UpstreamByteStream,
+    chat_session_id: Option<uuid::Uuid>,
+    user_id: uuid::Uuid,
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
@@ -667,8 +716,28 @@ async fn run_tool_loop(
                     // a follow-up. The plumbing here (resolver,
                     // services, cache) is already in place; only the
                     // user-id source needs wiring.
+                    //
+                    // When `chat_session_id` is set (browser sent
+                    // `X-Chat-Session-Id`), use `for_chat_session`
+                    // so agents like `read_document` can scope their
+                    // queries to the right session. Otherwise fall
+                    // back to `for_tests` and let the session-scoped
+                    // agents surface a clear tool error.
+                    //
+                    // SEV 2 fix: `user_id` is the authenticated
+                    // user id from `AuthUser`. The chat-completions
+                    // middleware extracts it from the session
+                    // cookie / bearer header and threads it through.
+                    // Per-user agents (currently `read_document`)
+                    // scope every DB query by `(user_id, session_id)`
+                    // so a user cannot read another user's docs.
                     let services = crate::agents::ServiceRegistry::empty().into_arc();
-                    let ctx = crate::agents::UserContext::for_tests(uuid::Uuid::nil(), services);
+                    let ctx = match chat_session_id {
+                        Some(sid) => crate::agents::UserContext::for_chat_session(
+                            user_id, services, None, sid,
+                        ),
+                        None => crate::agents::UserContext::for_tests(user_id, services),
+                    };
                     match agent.invoke(&ctx, args_value).await {
                         Ok(s) => Ok(s),
                         Err(e) => Err(e.to_string()),
@@ -878,6 +947,17 @@ fn sse_tool_call_event(id: &str, name: &str, arguments: &str, index: u32) -> Str
     format!("event: tool_call\ndata: {payload}\n\n")
 }
 
+/// Read the `X-Chat-Session-Id` header from `headers` and parse it
+/// as a UUID. Returns `None` for a missing header AND for a
+/// malformed value (the chat-completions handler treats both as
+/// "no session scoping"; the agent that needs a session id is
+/// responsible for surfacing a clear error).
+fn parse_chat_session_header(headers: &HeaderMap) -> Option<uuid::Uuid> {
+    let raw = headers.get(CHAT_SESSION_HEADER)?;
+    let s = raw.to_str().ok()?.trim();
+    uuid::Uuid::parse_str(s).ok()
+}
+
 fn sse_tool_result_event(id: &str, name: &str, ok: bool, payload: &str) -> String {
     let summary = if ok {
         // Pull a short "summary" out of the JSON payload when
@@ -996,6 +1076,7 @@ pub async fn agents_list(State(state): State<Arc<AppState>>) -> Result<Response,
 /// (400 for invalid args, 404 for unknown agent, 502 for upstream).
 pub async fn agent_invoke(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<Response, LlmError> {
@@ -1011,13 +1092,19 @@ pub async fn agent_invoke(
         .cloned()
         .unwrap_or(Value::Object(Default::default()));
 
-    // `/v1/agents/:name/invoke` is the anonymous curl-style escape
-    // hatch. It has no authenticated user, so per-user agents that
-    // read `ctx.secret(...)` will surface `CredentialsMissing` —
-    // operators must exercise those through the chat-completions
-    // path (which carries the session cookie) instead.
+    // SEV 2 fix: thread the authenticated user id into the
+    // `UserContext` so per-user agents (currently `read_document`)
+    // can scope their lookups. The `/v1/agents/:name/invoke` route
+    // is still reachable from any authenticated user; per-user
+    // agents that read `ctx.secret(...)` will surface
+    // `CredentialsMissing` because the resolver is not wired into
+    // this code path (the route handler escapes the LLM tool loop,
+    // which is where the resolver lives).
+    let user_id = auth_user
+        .map(|axum::Extension(u)| u.id)
+        .unwrap_or_else(uuid::Uuid::nil);
     let services = state.services.clone();
-    let ctx = crate::agents::UserContext::for_tests(uuid::Uuid::nil(), services);
+    let ctx = crate::agents::UserContext::for_tests(user_id, services);
 
     match agent.invoke(&ctx, args).await {
         Ok(result) => {
@@ -1296,5 +1383,36 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with(USER_LOCATION_MARKER));
+    }
+
+    #[test]
+    fn parse_chat_session_header_returns_uuid_when_valid() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            CHAT_SESSION_HEADER,
+            HeaderValue::from_static("01234567-89ab-cdef-0123-456789abcdef"),
+        );
+        let id = parse_chat_session_header(&h).expect("valid uuid must parse");
+        assert_eq!(
+            id,
+            uuid::Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_chat_session_header_returns_none_for_missing_header() {
+        let h = HeaderMap::new();
+        assert_eq!(parse_chat_session_header(&h), None);
+    }
+
+    #[test]
+    fn parse_chat_session_header_returns_none_for_malformed_value() {
+        // Garbage in the header must not crash the LLM proxy —
+        // direct callers (curl, SDKs) that forget the header still
+        // get a streaming response. The session-scoped agents
+        // surface a clear tool error when the header is missing.
+        let mut h = HeaderMap::new();
+        h.insert(CHAT_SESSION_HEADER, HeaderValue::from_static("not-a-uuid"));
+        assert_eq!(parse_chat_session_header(&h), None);
     }
 }

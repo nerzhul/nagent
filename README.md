@@ -889,6 +889,158 @@ make smoke-llm
 # equivalent to: curl -N POST /v1/chat/completions | grep '^data:'
 ```
 
+## Documents (Discussion-mode uploads + `read_document` tool)
+
+The Discussion-mode sidebar ships a **Documents** panel. Users
+upload `.txt` or `.pdf` files via the `+` button, drag-and-drop
+on the panel, or `Ctrl+V` from the OS clipboard. The LLM picks
+which document to consult through the `read_document` tool —
+the prompt includes the list of available documents by name +
+size, and the model calls the tool when it needs a specific
+file's text.
+
+### Cargo feature
+
+```sh
+make run-llm        # documents module is compiled in
+DOCS_ENABLED=false make run-llm   # runtime gate to disable routes
+```
+
+### Configuration
+
+Add a `[documents]` block to the TOML overlay (or rely on the
+env-var overrides listed below):
+
+```toml
+[documents]
+enabled = true
+cache_dir = "/var/cache/nagent/docs"   # must be writable; PVC in k8s
+max_file_size_bytes = 20_971_520
+max_extracted_chars = 100_000          # past the cap, a `[… truncated …]` marker is appended
+max_docs_per_session = 50
+pdf_extract_timeout_secs = 30
+purge_interval_hours = 24              # 0 disables the periodic task
+default_ttl_days = 30                  # rows + files older than this are purged
+```
+
+Equivalent env vars (env always wins over TOML):
+
+| Setting                | Env var                 |
+| ---------------------- | ----------------------- |
+| `enabled`              | `DOCS_ENABLED`          |
+| `cache_dir`            | `DOCS_CACHE_DIR`        |
+| `max_file_size_bytes`  | `DOCS_MAX_FILE_BYTES`   |
+| `max_extracted_chars`  | `DOCS_MAX_CHARS`        |
+| `max_docs_per_session` | `DOCS_MAX_PER_SESSION`  |
+| `pdf_extract_timeout_secs` | `DOCS_PDF_TIMEOUT_SECS` |
+| `purge_interval_hours` | `DOCS_PURGE_INTERVAL_H` |
+| `default_ttl_days`     | `DOCS_TTL_DAYS`         |
+
+`documents.enabled = true` requires `auth.enabled = true` (the
+table lives in the auth DB). The server refuses to boot when the
+cache dir is not writable at boot, surfacing a clear error in
+the startup log.
+
+### Disk layout
+
+Uploaded files land at
+`<cache_dir>/<aa>/<bb>/<uuid>.<ext>` — two hex characters
+from the UUID form a 2-level shard, capping any single
+directory at ~65 Ki entries. The DB row records the absolute
+`disk_path`; the `read_document` tool reads it back.
+
+### `read_document` tool
+
+```json
+{
+  "name": "read_document",
+  "description": "Read the text content of a document previously uploaded by the user to this chat session. Use the `name` field returned by GET /v1/documents. For PDFs, optionally restrict to a `page_range` (e.g. \"3-7\") to limit context size.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name":       { "type": "string", "description": "Document id (UUID)" },
+      "page_range": { "type": "string", "description": "Optional, format 'N' or 'N-M'" }
+    },
+    "required": ["name"]
+  }
+}
+```
+
+The tool looks up the document by `(id, user_id, session_id)` —
+uploads from another user, or from a different chat session in
+the same browser profile, are invisible to the caller. The
+browser sends the active session id on every `/v1/chat/completions`
+request as the `X-Chat-Session-Id` header.
+
+### Server-bound chat session id
+
+The `X-Chat-Session-Id` header value is **server-bound**, not
+client-minted (SEV 2 fix):
+
+```http
+POST /v1/chat/session
+Cookie: nagent_session=<id>
+x-csrf-token: <csrf>
+
+{"id": "01234567-89ab-cdef-0123-456789abcdef"}
+```
+
+The browser calls this endpoint on every page load to get a
+fresh UUID + binding to the authenticated user. The returned id
+is cached in `localStorage` and reused on every subsequent
+request. A `403` from any documents / chat-completions endpoint
+(typically because the binding was lost — e.g. logout from
+another tab) triggers an automatic re-mint + retry.
+
+Failure modes the tool surfaces (mapped to `role: "tool"` errors
+so the LLM can recover):
+
+- `name` not found in this session → `unknown document`
+- file on disk was purged between upload and call → `document
+  file no longer available on disk; ask the user to re-upload`
+- `page_range` malformed → `invalid page range`
+
+### CLI: `nagent documents purge`
+
+Sweep expired rows + files from a shell — useful for cron /
+k8s `CronJob`, recovery from a misconfigured TTL, or freeing
+disk space without restarting the server.
+
+```sh
+# Default: same TTL the periodic task uses.
+nagent documents purge --older-than 30d
+
+# Inspect only — print what WOULD be removed.
+nagent documents purge --older-than 30d --dry-run
+
+# Override the config-file path.
+nagent documents purge --older-than 7d --config /etc/nagent/config.toml
+
+# Run even when data/server.pid points at a live process.
+nagent documents purge --older-than 30d --force
+```
+
+`--older-than` accepts `Nd` / `Nh` / `Nm` / `Ns` (or bare
+seconds). Exit code is non-zero on any unlink / DB error so
+the CLI can be wired to cron / k8s `CronJob` without further
+plumbing.
+
+### Kubernetes
+
+The kustomize base (`deploy/k8s/base/`) ships a
+`nagent-docs-cache` PVC (5 Gi) mounted at `/var/cache/nagent/docs`
+in the server pod. Set `DOCS_ENABLED=true` in the configmap to
+enable it; the server refuses to boot otherwise (the cache dir
+is not writable without the PVC bound).
+
+### Hiding the panel when disabled
+
+When `[documents].enabled = false`, the server injects
+`window.nagentConfig = { documentsEnabled: false }` into the
+served `index.html` and the JS removes the panel from the DOM.
+Users on a build where the operator has not enabled the feature
+do not see an upload UI that 404s on every request.
+
 ## Text-to-Speech (Piper, local)
 
 The Discussion view can read the LLM's replies aloud in the browser

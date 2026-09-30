@@ -202,6 +202,8 @@ fn make_app_state(
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     })
 }
 
@@ -247,6 +249,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
         agents: AgentConfig::default(),
         tts: stt_server::config::TtsConfig::default(),
         auth: stt_server::config::AuthConfig::default(),
+        documents: stt_server::config::DocumentsConfig::default(),
     }
 }
 

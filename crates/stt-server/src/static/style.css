@@ -2222,3 +2222,145 @@ kbd {
 .login-modal--forced .login-cancel {
   display: none;
 }
+
+/* ---------------------------------------------------------------
+   Documents panel (Discussion-mode sidebar).
+   --------------------------------------------------------------- */
+
+.documents-panel {
+  margin-top: 0.75rem;
+  border-top: 1px solid var(--border, var(--bg-elev));
+  padding-top: 0.5rem;
+}
+
+.documents-panel-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg-dim, var(--fg));
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  padding: 0.25rem 0;
+}
+.documents-panel-summary::-webkit-details-marker {
+  display: none;
+}
+.documents-panel-summary::before {
+  content: "▸";
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 0.7rem;
+  width: 0.9rem;
+}
+.documents-panel[open] > .documents-panel-summary::before {
+  transform: rotate(90deg);
+}
+
+.documents-upload-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border, var(--bg-elev));
+  border-radius: 4px;
+  width: 1.5rem;
+  height: 1.5rem;
+  line-height: 1;
+  font-size: 0.95rem;
+  cursor: pointer;
+  color: var(--fg);
+}
+.documents-upload-btn:hover {
+  background: var(--bg-elev);
+}
+
+.documents-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.documents-item {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border, var(--bg-elev));
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 0.82rem;
+  transition: opacity 0.15s ease;
+}
+.documents-item.is-removing {
+  opacity: 0;
+}
+
+.documents-item-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.documents-item-mime {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+}
+.documents-item-mime--pdf {
+  background: #b73e3a;
+  color: #fff;
+}
+.documents-item-mime--plain,
+.documents-item-mime--txt,
+.documents-item-mime--md,
+.documents-item-mime--log {
+  background: #2d6a9f;
+  color: #fff;
+}
+
+.documents-item-meta {
+  font-size: 0.72rem;
+  color: var(--fg-dim, #888);
+}
+
+.documents-item-delete {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--fg-dim, #888);
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+.documents-item-delete:hover {
+  background: rgba(255, 0, 0, 0.12);
+  color: #c00;
+}
+
+.documents-empty {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--fg-dim, #888);
+  font-style: italic;
+}
+
+/* Drag-over highlight. The browser fires `dragenter` on every
+   child element which would otherwise flicker the highlight
+   off; the JS toggles `is-dragover` on dragover / dragleave of
+   the panel root only, so a single class keeps the cue
+   stable while the user moves the file over the children. */
+.documents-panel.is-dragover {
+  outline: 2px dashed var(--accent, #58a6ff);
+  outline-offset: 2px;
+  background: rgba(88, 166, 255, 0.06);
+  border-radius: 6px;
+}

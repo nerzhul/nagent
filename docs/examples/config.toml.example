@@ -185,3 +185,27 @@
 # [auth.credentials]
 # key = "0123…64 hex chars, generate with `openssl rand -hex 32`…"
 
+# ---------------------------------------------------------------------------
+# Document uploads (Discussion-mode)
+# ---------------------------------------------------------------------------
+# Lets the user upload `.txt` and `.pdf` files via the sidebar
+# Documents panel. The LLM picks which document to consult via the
+# `read_document` tool (scoped to the chat session id). The
+# documents module is always compiled in (pdf-extract +
+# mime_guess are unconditional deps). Requires `auth.enabled =
+# true` (the table lives in the auth DB). The cache dir must be
+# writable at boot — the kustomize base mounts a PVC at
+# `/var/cache/nagent/docs`.
+#
+# [documents]
+# enabled = false
+# cache_dir = "/var/cache/nagent/docs"     # PVC mount in k8s; ignored when enabled = false
+# max_file_size_bytes = 20_971_520         # 20 MiB hard cap
+# max_extracted_chars = 100_000            # per-call text return cap; past the cap a `[… truncated …]` marker is added
+# max_docs_per_session = 50                # per-session quota; the 51st upload is rejected
+# pdf_extract_timeout_secs = 30            # wraps the synchronous pdf-extract call
+# purge_interval_hours = 24                # background sweep cadence; set to 0 to disable
+# default_ttl_days = 30                    # rows + files older than this are purged
+# [auth.credentials]
+# key = "0123…64 hex chars, generate with `openssl rand -hex 32`…"
+

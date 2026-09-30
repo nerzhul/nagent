@@ -154,6 +154,14 @@ pub struct TomlConfig {
     /// build without `auth` does not even parse the section.
     #[serde(default)]
     pub auth: Option<TomlAuthConfig>,
+    /// Discussion-mode document-upload knobs. See
+    /// [`TomlDocumentsConfig`] and [`crate::config::DocumentsConfig`].
+    /// The section is always parsed (no cargo feature gate) so a
+    /// build without the `documents` feature still surfaces typos in
+    /// the section — the `documents` feature only controls the heavy
+    /// deps (`pdf-extract` + `mime_guess`).
+    #[serde(default)]
+    pub documents: Option<TomlDocumentsConfig>,
 }
 
 /// Server-side knobs grouped under `[server]`.
@@ -437,7 +445,7 @@ impl TomlConfig {
     /// Missing file is reported as `ConfigFileError::Io` with the OS
     /// error (typically `NotFound`) so the operator sees the exact path
     /// that failed. A parse error carries the underlying
-    /// `toml::de::Error` formatted string, which already includes a
+    /// `tomx::de::Error` formatted string, which already includes a
     /// line + column marker for fast debugging.
     pub fn from_file(path: &Path) -> Result<Self, ConfigFileError> {
         let text = std::fs::read_to_string(path)
@@ -445,6 +453,25 @@ impl TomlConfig {
         toml::from_str(&text)
             .map_err(|e| ConfigFileError::Parse(path.display().to_string(), e.to_string()))
     }
+}
+
+/// Knobs for the optional document-upload subsystem. Mirrors
+/// [`crate::config::DocumentsConfig`]. Always parsed (no cargo
+/// feature gate on the schema) so a build without `pdf-extract` still
+/// surfaces typos at boot — the `documents` feature only controls
+/// the heavy PDF parsing dep.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlDocumentsConfig {
+    pub enabled: Option<bool>,
+    /// Directory where uploaded files are staged on disk.
+    pub cache_dir: Option<String>,
+    pub max_file_size_bytes: Option<usize>,
+    pub max_extracted_chars: Option<usize>,
+    pub max_docs_per_session: Option<u32>,
+    pub pdf_extract_timeout_secs: Option<u64>,
+    pub purge_interval_hours: Option<u64>,
+    pub default_ttl_days: Option<u32>,
 }
 
 /// Errors produced when reading or parsing a TOML config file.
@@ -479,6 +506,28 @@ pub fn merge_toml_configs(earlier: &TomlConfig, later: &TomlConfig) -> TomlConfi
         agents: merge_toml_agents(earlier.agents.as_ref(), later.agents.as_ref()),
         tts: merge_toml_tts(earlier.tts.as_ref(), later.tts.as_ref()),
         auth: merge_toml_auth(earlier.auth.as_ref(), later.auth.as_ref()),
+        documents: merge_toml_documents(earlier.documents.as_ref(), later.documents.as_ref()),
+    }
+}
+
+fn merge_toml_documents(
+    earlier: Option<&TomlDocumentsConfig>,
+    later: Option<&TomlDocumentsConfig>,
+) -> Option<TomlDocumentsConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlDocumentsConfig {
+            enabled: l.enabled.or(e.enabled),
+            cache_dir: l.cache_dir.clone().or_else(|| e.cache_dir.clone()),
+            max_file_size_bytes: l.max_file_size_bytes.or(e.max_file_size_bytes),
+            max_extracted_chars: l.max_extracted_chars.or(e.max_extracted_chars),
+            max_docs_per_session: l.max_docs_per_session.or(e.max_docs_per_session),
+            pdf_extract_timeout_secs: l.pdf_extract_timeout_secs.or(e.pdf_extract_timeout_secs),
+            purge_interval_hours: l.purge_interval_hours.or(e.purge_interval_hours),
+            default_ttl_days: l.default_ttl_days.or(e.default_ttl_days),
+        }),
     }
 }
 

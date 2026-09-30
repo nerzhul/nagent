@@ -250,6 +250,8 @@ async fn http_list_integrations_empty_registry_returns_empty_data() {
         services,
         credential_resolver: None,
         credentials_key: None,
+        documents: None,
+        chat_sessions: None,
     });
     // Build the router the same way `build_router` does in lib.rs.
     let auth_layer = axum::middleware::from_fn_with_state(

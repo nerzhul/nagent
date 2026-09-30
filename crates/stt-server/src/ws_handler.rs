@@ -329,9 +329,14 @@ enum InboundError {
     Validation(#[from] FrameError),
 }
 
-/// Static handler for `/` and `/index.html`.
-pub async fn index_handler() -> impl IntoResponse {
-    serve_static("index.html")
+/// Static handler for `/` and `/index.html`. Injects a
+/// `window.nagentConfig` block so the JS can hide UI panels for
+/// server-side features that are runtime-disabled (currently just
+/// `[documents].enabled`; expand as needed).
+pub async fn index_handler(
+    axum::extract::State(state): axum::extract::State<Arc<crate::AppState>>,
+) -> impl IntoResponse {
+    serve_index_with_config(&state.config.documents.enabled)
 }
 
 /// Static handler for `/static/*`. Path is the remainder after `/static/`.
@@ -359,6 +364,72 @@ fn serve_static(path: &str) -> axum::response::Response {
     // `fetchServerVersion()` drift check. A stale JS bundle would
     // mean the auth pill and the chat-pill code paths diverge, so
     // we explicitly tell the browser not to cache.
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Like `serve_static("index.html")`, but injects a
+/// `<script>window.nagentConfig = …</script>` block right before
+/// `</head>` so the JS can hide runtime-disabled panels without an
+/// extra round trip.
+///
+/// Only `index.html` is rewritten — every other static asset is
+/// served verbatim so the cache fingerprint on
+/// `/static/version.txt` does not get poisoned by per-request
+/// output.
+///
+/// We use a non-executable `<script type="application/json">`
+/// block (NOT an inline `<script>`) so the page's
+/// `Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'`
+/// does not block the injection. A JSON-typed `<script>` block is
+/// not executed by the browser — only read via
+/// `document.getElementById(...)` — and is explicitly allowed by
+/// CSP. The id `nagent-config` is hard-coded; the JS reads it on
+/// boot.
+fn serve_index_with_config(documents_enabled: &bool) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::response::Response;
+    let mut bytes = StaticAssets::get("index.html")
+        .map(|f| f.data.into_owned())
+        .unwrap_or_default();
+    // Defensive: only inject when the marker is present. A
+    // regression in `index.html` (someone renames the closing
+    // tag) MUST NOT serve a broken page — we fall back to the
+    // static asset verbatim so the JS error log gets the real
+    // diagnostic.
+    let marker = b"</head>";
+    if let Some(pos) = bytes.windows(marker.len()).position(|w| w == marker) {
+        let mut injected = Vec::with_capacity(bytes.len() + 256);
+        injected.extend_from_slice(&bytes[..pos]);
+        // The `type="application/json"` marker tells the
+        // browser NOT to execute this block — CSP allows it
+        // through unconditionally, and JS reads it via
+        // `document.getElementById('nagent-config').textContent`.
+        let payload = serde_json::json!({ "documentsEnabled": documents_enabled });
+        injected.extend_from_slice(
+            format!(
+                r#"<script type="application/json" id="nagent-config">{}</script>"#,
+                payload,
+            )
+            .as_bytes(),
+        );
+        injected.extend_from_slice(&bytes[pos..]);
+        bytes = injected;
+    } else {
+        tracing::warn!(
+            "index.html: missing </head> marker; serving the page verbatim \
+             without the runtime-config injection"
+        );
+    }
+    let mut response = Response::new(Body::from(bytes));
+    let h = response.headers_mut();
+    h.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(mime_for("index.html")),
+    );
     h.insert(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),

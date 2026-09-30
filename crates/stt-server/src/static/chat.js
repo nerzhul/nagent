@@ -42,6 +42,7 @@
 import { AudioCapture } from "/static/audio.js";
 import { NagentTts } from "/static/tts.js";
 import { preselectFromBrowser } from "/static/lang-preselect.js";
+import * as Documents from "/static/documents.js";
 import {
   DEFAULT_TITLE,
   TIMEZONE_ENABLED_KEY,
@@ -70,6 +71,98 @@ import {
   saveCachedLocation,
   setLocationEnabled,
 } from "/static/geolocation.js";
+
+// ---- Chat session id (server-minted) ---------------------------------------
+//
+// The `X-Chat-Session-Id` header sent on every `/v1/*` request
+// was previously client-controlled (the browser minted a UUID
+// v4 in `chat-sessions.js`). The audit flagged that: a
+// logged-in user could send any UUID and reach another user's
+// docs if the value was leaked. The server now mints the id via
+// `POST /v1/chat/session`; we cache the returned value in
+// localStorage and re-mint on a 403 (binding lost — e.g. logout
+// from another tab).
+const SERVER_SESSION_STORAGE_KEY = "nagent.chat.serverSessionId";
+let serverSessionId = "";
+let serverSessionPromise = null;
+
+async function ensureServerSessionId() {
+  if (serverSessionId) return serverSessionId;
+  if (serverSessionPromise) return serverSessionPromise;
+  serverSessionPromise = (async () => {
+    try {
+      const rawCached = localStorage.getItem(SERVER_SESSION_STORAGE_KEY);
+      if (rawCached) serverSessionId = rawCached;
+      if (serverSessionId) return serverSessionId;
+      const resp = await fetch("/v1/chat/session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...window.nagentAuth?.csrfHeaders(),
+        },
+        body: "{}",
+      });
+      if (!resp.ok) {
+        // 404 / 405 = endpoint not mounted (e.g. a build with
+        // `chat_sessions` disabled). Treat silently — the chat
+        // session id is only useful for documents scoping, so a
+        // missing endpoint just means the scoping is off. We
+        // still fall back to "" which makes `X-Chat-Session-Id:
+        // ` (empty header) harmless on the server side.
+        if (resp.status !== 404 && resp.status !== 405) {
+          console.warn(
+            "chat.js: POST /v1/chat/session failed",
+            resp.status,
+            resp.statusText
+          );
+        }
+        return "";
+      }
+      const body = await resp.json();
+      if (!body || typeof body.id !== "string") {
+        console.warn("chat.js: POST /v1/chat/session returned no id");
+        return "";
+      }
+      serverSessionId = body.id;
+      try {
+        localStorage.setItem(SERVER_SESSION_STORAGE_KEY, serverSessionId);
+      } catch (e) {
+        // localStorage can throw under quota pressure; the
+        // session id is still cached in-memory for this page
+        // load so we keep working.
+        console.warn("chat.js: localStorage.setItem failed", e);
+      }
+      return serverSessionId;
+    } catch (e) {
+      console.warn("chat.js: POST /v1/chat/session network error", e);
+      return "";
+    } finally {
+      serverSessionPromise = null;
+    }
+  })();
+  return serverSessionPromise;
+}
+
+async function refreshServerSessionId() {
+  serverSessionId = "";
+  try {
+    localStorage.removeItem(SERVER_SESSION_STORAGE_KEY);
+  } catch (e) {
+    /* ignore */
+  }
+  return ensureServerSessionId();
+}
+
+async function getServerSessionId() {
+  if (serverSessionId) return serverSessionId;
+  return ensureServerSessionId();
+}
+
+export {
+  ensureServerSessionId,
+  refreshServerSessionId,
+  getServerSessionId,
+};
 
 // ---- Session storage -------------------------------------------------------
 //
@@ -525,23 +618,127 @@ function scheduleMarkdownRender(bubbleEl, getText) {
 }
 
 const $ = (id) => document.getElementById(id);
-const messagesEl   = $("chat-messages");
-const formEl       = $("chat-form");
-const inputEl      = $("chat-input");
-const sendBtn      = $("chat-send");
-const stopBtn      = $("chat-stop");
-const clearBtn     = $("chat-clear");
-const modelEl      = $("chat-model");
+// The chat UI lives inside `<template id="app-shell-template">`
+// and only enters the DOM after `auth.js` mounts the shell
+// (typically after a `/api/me` probe). A plain module-level
+// `document.getElementById` returns `null` for that reason — so
+// every access site that does `formEl.hidden = true` would
+// crash on the pre-mount null. We solve this with a `Proxy`
+// that re-queries the DOM on every property access; reads + writes
+// both forward to the live element (which may still be null, in
+// which case they no-op or return undefined). This keeps every
+// existing call site (`formEl.addEventListener`,
+// `stopBtn.hidden = false`, `inputEl.focus()`, …) unchanged.
+function lazyEl(id) {
+  // Pre-mount stub. Built fresh per access so the iterable
+  // markers (`Symbol.iterator`, `Symbol.toPrimitive`, …) point at
+  // the proxy itself, not at a shared frozen object that some
+  // other pre-mount code might mutate.
+  let preMountWarnings = 0;
+  const iterator = function* () {};
+  // Single canonical "pre-mount DOM stub" used as the value for
+  // every property access. The same stub object backs:
+  // - `messagesEl.children`            → iterable (empty)
+  // - `messagesEl.querySelectorAll(…)` → iterable (empty)
+  // - `messagesEl.querySelector(…)`    → itself (callers usually
+  //                                     check for null; the stub
+  //                                     is truthy so `if (el)`
+  //                                     branches still take the
+  //                                     "exists" path)
+  // - `messagesEl.appendChild(…)`      → no-op (function call)
+  // - `messagesEl.innerHTML = ""`      → setter no-op
+  // - `messagesEl.value`               → empty string
+  // - `messagesEl.focus()`             → no-op
+  //
+  // The get trap returns `makeStub()` for ANY property so chained
+  // access (`messagesEl.children.querySelectorAll(...)`) terminates
+  // in the same iterable stub — `[...stub]` and
+  // `for (const x of stub)` both yield zero iterations.
+  const makeStub = () => {
+    const stub = function () {};
+    return new Proxy(stub, {
+      get(_t, prop) {
+        if (prop === Symbol.iterator) return iterator;
+        if (prop === "length") return 0;
+        if (prop === "value"
+            || prop === "innerHTML"
+            || prop === "textContent"
+            || prop === "outerHTML") return "";
+        return makeStub();
+      },
+      has(_t, prop) {
+        return prop === Symbol.iterator
+          || prop === "length"
+          || prop === "value"
+          || prop === "innerHTML"
+          || prop === "textContent";
+      },
+      set() { return true; },
+      // Calling the stub as a function (`messagesEl.querySelectorAll(".x")`,
+      // `messagesEl.appendChild(node)`, `messagesEl.focus()`, …) must
+      // return an iterable stub, NOT `undefined`, so that the caller
+      // can spread / chain without throwing. Returning the stub
+      // itself makes every chain terminate in the same iterable
+      // no-op. Bind to a fresh `this` so callers that read the
+      // returned object's properties still see the stub markers.
+      apply() { return makeStub(); },
+      // `Symbol.iterator` is set via the `get` trap above; the
+      // constructor trap (`construct`) is needed so `new
+      // messagesEl.SomeCtor()` (rare, but a few libs do this on
+      // collections) also returns an iterable stub instead of
+      // throwing "is not a constructor".
+      construct() { return makeStub(); },
+    });
+  };
+  return new Proxy(
+    { _id: id },
+    {
+      get(_t, prop) {
+        if (prop === "_id") return id;
+        const el = document.getElementById(id);
+        if (el == null) {
+          if (preMountWarnings === 0) {
+            console.debug(
+              "lazyEl(`" + id + "`): element not in DOM yet; pre-mount calls are no-ops until app-shell-mounted",
+            );
+          }
+          preMountWarnings++;
+          return makeStub();
+        }
+        preMountWarnings = 0;
+        const v = el[prop];
+        return typeof v === "function" ? v.bind(el) : v;
+      },
+      set(_t, prop, value) {
+        const el = document.getElementById(id);
+        if (el == null) return true;
+        el[prop] = value;
+        return true;
+      },
+      has(_t, prop) {
+        const el = document.getElementById(id);
+        return el != null && prop in el;
+      },
+    },
+  );
+}
+const messagesEl   = lazyEl("chat-messages");
+const formEl       = lazyEl("chat-form");
+const inputEl      = lazyEl("chat-input");
+const sendBtn      = lazyEl("chat-send");
+const stopBtn      = lazyEl("chat-stop");
+const clearBtn     = lazyEl("chat-clear");
+const modelEl      = lazyEl("chat-model");
 // `systemEl.value` is an *extension* appended after the server's
 // default system prompt (env `LLM_SYSTEM_PROMPT` / TOML
 // `[llm].system_prompt`); the proxy prepends the admin's prompt as
 // `messages[0]`, our value goes second so the admin's intent stays
 // authoritative.
-const systemEl     = $("chat-system");
-const tempEl       = $("chat-temperature");
-const statusEl     = $("chat-status");
-const disabledNoticeEl = $("chat-disabled-notice");
-const sessionsListEl = $("chat-sessions");
+const systemEl     = lazyEl("chat-system");
+const tempEl       = lazyEl("chat-temperature");
+const statusEl     = lazyEl("chat-status");
+const disabledNoticeEl = lazyEl("chat-disabled-notice");
+const sessionsListEl = lazyEl("chat-sessions");
 const newSessionBtnEl = $("chat-new-session");
 const agentsBannerEl = $("chat-agents-banner");
 const agentsBannerNamesEl = $("chat-agents-banner-names");
@@ -1970,6 +2167,13 @@ function openAdvancedForLocation() {
 // persisted entry into the wrong conversation.
 
 async function streamReply(sessionId, userText) {
+  // SEV 2 fix: mint (or reuse) the server-bound chat session id.
+  // The first request on every page load triggers the POST. The
+  // returned id is cached in localStorage so subsequent requests
+  // skip the round trip. A 403 from any documents /
+  // chat-completions endpoint triggers a re-mint via
+  // `refreshServerSessionId()`.
+  const serverSid = await getServerSessionId();
   // Build the request from the captured history (the user turn was
   // already appended by `submitUserTurn`, so the last entry IS the
   // new user message — we re-include it explicitly so we don't depend
@@ -2016,7 +2220,10 @@ async function streamReply(sessionId, userText) {
   // a follow-up turn. They can click Record again afterwards. We call
   // this after `setStreamState` so the chat pill (priority) doesn't
   // briefly flash the audio idle status during the teardown.
-  audioCapture.stop();
+  // `audioCapture` may be null if the user is in Transcript mode
+  // (the Discussion shell is unmounted) — guard so a mode switch
+  // during an in-flight reply does not crash.
+  audioCapture?.stop();
 
   // TTS: lazily create the player on the first turn so the
   // AudioContext is created from a user-gesture path (we cannot
@@ -2084,7 +2291,20 @@ async function streamReply(sessionId, userText) {
       // returns `undefined` when the session is gone, which the
       // HeadersInit spread below silently drops (rather than
       // setting the header to the string "undefined").
-      headers: { "Content-Type": "application/json", ...window.nagentAuth?.csrfHeaders() },
+// `X-Chat-Session-Id` propagates the **server-bound** chat
+        // session id (SEV 2 fix). The browser mints this via
+        // `POST /v1/chat/session` and caches the returned UUID
+        // in localStorage; the server verifies the binding
+        // against `chat_sessions.user_id` on every request so
+        // a user cannot reach another user's docs by forging
+        // the header. The id is captured at request start
+        // (see `inflight.sessionId`) so a session switch
+        // mid-stream does not confuse the server.
+        headers: {
+          "Content-Type": "application/json",
+          "X-Chat-Session-Id": serverSid,
+          ...window.nagentAuth?.csrfHeaders(),
+        },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -2374,36 +2594,88 @@ function clearChat() {
 }
 
 // ---- Wire up the form -------------------------------------------------------
+//
+// `formEl`, `stopBtn`, etc. are `lazyEl` Proxies — every access
+// (read OR write) re-queries the DOM. Pre-mount accesses no-op
+// (write to null returns true; read returns undefined), so the
+// crash that surfaced with the inline `<script>` block change
+// (which moved `index.html` re-emission into the `app-shell-mount`
+// path) is gone. auth.js dispatches `app-shell-mounted` after
+// cloning the template into `#app-root`; every access after
+// that event sees the live element and the wire-up happens
+// automatically.
 
-formEl.addEventListener("submit", (e) => {
-  e.preventDefault();
-  sendTyped();
-});
-stopBtn.addEventListener("click", stop);
-clearBtn.addEventListener("click", clearChat);
-
-inputEl.addEventListener("keydown", (e) => {
-  // Keyboard model:
-  //   Enter           -> send
-  //   Ctrl/Cmd+Enter  -> newline (fall through to textarea default)
-  //   Shift+Enter     -> newline (fall through to textarea default)
-  //   Escape          -> stop an in-flight reply
-  //
-  // We only `preventDefault` on plain Enter so the newline insertion
-  // path stays the browser's default (no manual `value += "\n"` dance).
-  // The `isComposing` guard avoids hijacking Enter while an IME is
-  // open — pressing Enter to confirm a CJK candidate must not send
-  // the half-typed composition as a message.
-  if (e.key === "Enter"
-      && !e.shiftKey && !e.ctrlKey && !e.metaKey
-      && !e.isComposing) {
+let _formWired = false;
+function wireFormOnce() {
+  if (_formWired) return;
+  const form = document.getElementById("chat-form");
+  if (!form) return;
+  _formWired = true;
+  form.addEventListener("submit", (e) => {
     e.preventDefault();
     sendTyped();
-  } else if (e.key === "Escape" && inflight) {
-    e.preventDefault();
-    stop();
+  });
+  const stopBtnEl = document.getElementById("chat-stop");
+  const clearBtnEl = document.getElementById("chat-clear");
+  const inputElEl = document.getElementById("chat-input");
+  if (stopBtnEl) stopBtnEl.addEventListener("click", () => stop());
+  if (clearBtnEl) clearBtnEl.addEventListener("click", () => clearChat());
+  if (inputElEl) {
+    inputElEl.addEventListener("keydown", (e) => {
+      // Keyboard model:
+      //   Enter           -> send
+      //   Ctrl/Cmd+Enter  -> newline (fall through to textarea default)
+      //   Shift+Enter     -> newline (fall through to textarea default)
+      //   Escape          -> stop an in-flight reply
+      //
+      // We only `preventDefault` on plain Enter so the newline insertion
+      // path stays the browser's default (no manual `value += "\n"` dance).
+      // The `isComposing` guard avoids hijacking Enter while an IME is
+      // open — pressing Enter to confirm a CJK candidate must not send
+      // the half-typed composition as a message.
+      if (e.key === "Enter"
+          && !e.shiftKey && !e.ctrlKey && !e.metaKey
+          && !e.isComposing) {
+        e.preventDefault();
+        sendTyped();
+      } else if (e.key === "Escape" && inflight) {
+        e.preventDefault();
+        stop();
+      }
+    });
   }
-});
+}
+window.addEventListener("app-shell-mounted", wireFormOnce);
+// In the unlikely event the shell is already mounted (a cached
+// page reload with `appRoot.firstChild` already populated),
+// wire up immediately.
+wireFormOnce();
+
+// Post-mount rehydrate: every render that touched DOM elements
+// pre-mount was a no-op (the `lazyEl` Proxy swallows null-element
+// writes). After the shell mounts, re-run the relevant renderers
+// so the UI actually reflects the persisted state.
+//
+// `currentSessionId` was set during the pre-mount boot via
+// `activeSessionId()` (which falls back to the most-recent
+// session in localStorage or mints a fresh one). Re-rendering
+// here means the user immediately sees the session sidebar +
+// chat history on first load, without waiting for a tab click.
+function rehydrateAfterMount() {
+  // Make sure `currentSessionId` is bound before we render —
+  // `activeSessionId()` is idempotent (no-op when the persisted
+  // id is already current).
+  const sid = activeSessionId();
+  renderSessionList();
+  renderHistory(sid);
+  // Documents panel: `initDocumentsPanel` already wired the
+  // listeners; refresh now that the shell is mounted.
+  Documents.setSessionId(sid);
+}
+window.addEventListener("app-shell-mounted", rehydrateAfterMount);
+// Eager rehydrate when the shell is already mounted (a cached
+// page reload).
+rehydrateAfterMount();
 
 // Global voice shortcut: Ctrl+Shift+D (or Cmd+Shift+D on macOS)
 // toggles the voice recording session, regardless of which element
@@ -2424,37 +2696,61 @@ document.addEventListener("keydown", (e) => {
   if (!e.ctrlKey && !e.metaKey) return;
   if (e.altKey) return;
   e.preventDefault();
-  audioCapture.toggle();
+  // `audioCapture` is created on `app-shell-mounted`; null pre-mount.
+  audioCapture?.toggle();
 });
 
 // ---- Audio capture (Discussion mode) ---------------------------------------
-
-const audioCapture = new AudioCapture({
-  buttonEl: $("chat-record-btn"),
-  statusEl: null, // merged into #chat-status via the onStatusChange callback
-  // Discussion-mode instance of the shared voice oscilloscope widget.
-  // The DOM element lives inline as a voice bubble inside
-  // #chat-messages (see §4.10 of docs/ui_features.md), distinct from
-  // the Transcript-mode instance mounted at the top of the transcript
-  // view. Each `AudioCapture` owns its own canvas/level; the only
-  // shared resource is the underlying MicVAD singleton.
-  canvasEl: $("voice-graph-discussion-canvas"),
-  levelEl:  $("voice-graph-discussion-level"),
-  graphEl:  $("voice-graph-discussion"),
-  containerEl: document.getElementById("view-discussion"),
-  langSelectEl: $("chat-lang-select"),
-  translateCheckEl: $("chat-translate-check"),
-  backendInfoEl: $("chat-backend-info"),
-  onFinalTranscript: (text) => {
-    if (text && text.trim()) receiveTranscript(text);
-  },
-  onError: (code, message) => {
-    appendError(`audio ${code}: ${message}`);
-  },
-  onStatusChange: (text, cls) => {
-    setAudioStatus(text, cls);
-  },
-});
+//
+// `AudioCapture` accesses DOM elements (`buttonEl`,
+// `canvasEl`, …) in its constructor. Those elements live inside
+// `<template id="app-shell-template">` so they're null at module
+// load time — instantiating `AudioCapture` at the top of chat.js
+// would crash on `cfg.buttonEl.addEventListener(...)`. Defer the
+// construction to `app-shell-mounted` (dispatched by `auth.js`
+// after the template is cloned into `#app-root`) so every
+// element handle resolves.
+//
+// `audioCapture` is a `let` (not `const`) and starts as `null`;
+// the keyboard shortcut below no-ops when it's null. After mount,
+// the global Ctrl/Cmd+Shift+D listener delegates to
+// `audioCapture.toggle()` which now exists.
+let audioCapture = null;
+function initAudioCaptureOnce() {
+  if (audioCapture) return;
+  const buttonEl = document.getElementById("chat-record-btn");
+  if (!buttonEl) return; // shell not mounted yet
+  audioCapture = new AudioCapture({
+    buttonEl,
+    statusEl: null, // merged into #chat-status via the onStatusChange callback
+    // Discussion-mode instance of the shared voice oscilloscope widget.
+    // The DOM element lives inline as a voice bubble inside
+    // #chat-messages (see §4.10 of docs/ui_features.md), distinct from
+    // the Transcript-mode instance mounted at the top of the transcript
+    // view. Each `AudioCapture` owns its own canvas/level; the only
+    // shared resource is the underlying MicVAD singleton.
+    canvasEl: document.getElementById("voice-graph-discussion-canvas"),
+    levelEl:  document.getElementById("voice-graph-discussion-level"),
+    graphEl:  document.getElementById("voice-graph-discussion"),
+    containerEl: document.getElementById("view-discussion"),
+    langSelectEl: document.getElementById("chat-lang-select"),
+    translateCheckEl: document.getElementById("chat-translate-check"),
+    backendInfoEl: document.getElementById("chat-backend-info"),
+    onFinalTranscript: (text) => {
+      if (text && text.trim()) receiveTranscript(text);
+    },
+    onError: (code, message) => {
+      appendError(`audio ${code}: ${message}`);
+    },
+    onStatusChange: (text, cls) => {
+      setAudioStatus(text, cls);
+    },
+  });
+}
+window.addEventListener("app-shell-mounted", initAudioCaptureOnce);
+// Best-effort eager init: if the shell was already mounted (a
+// cached page reload), wire it up without waiting for the event.
+initAudioCaptureOnce();
 
 // ---- Text-to-Speech (Piper, local) -----------------------------------------
 //
@@ -2934,6 +3230,10 @@ function switchToSession(id) {
   // to swap the bubbles.
   renderHistory(id);
   renderSessionList();
+  // Refresh the documents panel so the list matches the now-active
+  // session. `setSessionId` updates the header the upload / list /
+  // delete endpoints use; `refresh()` re-fetches the rows.
+  Documents.setSessionId(id);
   inputEl.focus();
 }
 
@@ -2948,6 +3248,9 @@ function newSession() {
   setActiveId(session.id);
   renderSessionList();
   renderHistory(session.id);
+  // New session = empty document list. `setSessionId` triggers
+  // a refresh in `documents.js`.
+  Documents.setSessionId(session.id);
   inputEl.focus();
 }
 
@@ -3057,6 +3360,11 @@ loadModels();
 // Same for the agents banner: one fetch on boot. A reload on
 // /v1/agents that came back empty just hides the banner.
 loadAgentsBanner();
+// Wire the Documents panel (sidebar upload + drag-drop + paste
+// handlers). The module is a no-op when the server reports the
+// documents feature off — see `documents.js:initDocumentsPanel`.
+Documents.initDocumentsPanel();
+Documents.setSessionId(currentSessionId);
 
 document.addEventListener("visibilitychange", () => {
   // Re-fetch on tab return in case the server's model list changed
