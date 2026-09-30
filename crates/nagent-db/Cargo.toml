@@ -1,0 +1,30 @@
+[package]
+name = "nagent-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Per-domain repositories over a shared sqlx pool (sqlite + postgres)."
+
+[features]
+default = ["db-sqlite", "db-postgres"]
+db-sqlite = []
+db-postgres = []
+
+[dependencies]
+nagent-support = { path = "../nagent-support" }
+async-trait = { workspace = true }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+hex = "0.4"
+rand = { version = "0.8", default-features = false, features = ["std", "getrandom"] }
+serde = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+# sqlx is built with both drivers always-on; the `db-sqlite` /
+# `db-postgres` cargo features are forwarded from nagent-server
+# so an operator can build a slim binary that only ships the
+# driver their deployment uses (plan 4.G R6).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"] }

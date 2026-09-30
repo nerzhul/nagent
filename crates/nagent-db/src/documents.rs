@@ -9,11 +9,10 @@ use std::time::Duration;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::auth::error::AuthError;
-use crate::auth::store::MigrationStatus;
-use crate::db::migrate as migrate_runner;
-use crate::db::pool::AnyPool;
-use crate::documents::agent::DocumentRow;
+use crate::error::Error;
+use crate::migrate::{self as migrate_runner, MigrationStatus};
+use crate::pool::AnyPool;
+use crate::types::DocumentRow;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocumentError {
@@ -23,10 +22,10 @@ pub enum DocumentError {
     SchemaMissing,
 }
 
-impl From<AuthError> for DocumentError {
-    fn from(e: AuthError) -> Self {
+impl From<Error> for DocumentError {
+    fn from(e: Error) -> Self {
         match e {
-            AuthError::Database(inner) => DocumentError::Sqlx(inner),
+            Error::Database(inner) => DocumentError::Sqlx(inner),
             other => DocumentError::Sqlx(sqlx::Error::Protocol(other.to_string())),
         }
     }
@@ -187,8 +186,8 @@ pub mod sqlite {
     use sqlx::{Row, SqlitePool};
     use uuid::Uuid;
 
-    use crate::db::documents::DocumentError;
-    use crate::documents::agent::DocumentRow;
+    use crate::documents::DocumentError;
+    use crate::types::DocumentRow;
 
     #[derive(Clone, Debug)]
     pub struct SqliteDocuments {
@@ -196,7 +195,7 @@ pub mod sqlite {
     }
 
     impl SqliteDocuments {
-        pub(crate) fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -376,8 +375,8 @@ pub mod postgres {
     use sqlx::{PgPool, Row};
     use uuid::Uuid;
 
-    use crate::db::documents::DocumentError;
-    use crate::documents::agent::DocumentRow;
+    use crate::documents::DocumentError;
+    use crate::types::DocumentRow;
 
     #[derive(Clone, Debug)]
     pub struct PgDocuments {
@@ -385,7 +384,7 @@ pub mod postgres {
     }
 
     impl PgDocuments {
-        pub(crate) fn new(pool: PgPool) -> Self {
+        pub fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

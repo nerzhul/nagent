@@ -2,9 +2,9 @@
 
 use uuid::Uuid;
 
-use crate::auth::error::AuthError;
-use crate::auth::store::UserPreferences;
-use crate::db::pool::AnyPool;
+use crate::error::Error;
+use crate::pool::AnyPool;
+use crate::types::UserPreferences;
 
 #[derive(Debug, Clone)]
 pub enum Preferences {
@@ -20,7 +20,7 @@ impl Preferences {
         }
     }
 
-    pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
+    pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
         match self {
             Preferences::Sqlite(s) => s.get(user_id).await,
             Preferences::Postgres(s) => s.get(user_id).await,
@@ -32,7 +32,7 @@ impl Preferences {
         user_id: Uuid,
         share_location_enabled: bool,
         share_timezone_enabled: bool,
-    ) -> Result<UserPreferences, AuthError> {
+    ) -> Result<UserPreferences, Error> {
         match self {
             Preferences::Sqlite(s) => {
                 s.upsert(user_id, share_location_enabled, share_timezone_enabled)
@@ -51,8 +51,8 @@ pub mod sqlite {
     use sqlx::{Row, SqlitePool};
     use uuid::Uuid;
 
-    use crate::auth::error::AuthError;
-    use crate::auth::store::UserPreferences;
+    use crate::error::Error;
+    use crate::types::UserPreferences;
 
     #[derive(Clone, Debug)]
     pub struct SqlitePreferences {
@@ -60,11 +60,11 @@ pub mod sqlite {
     }
 
     impl SqlitePreferences {
-        pub(crate) fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
-        pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
+        pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
             let row = sqlx::query(
                 "SELECT share_location_enabled, share_timezone_enabled, updated_at \
                  FROM user_preferences WHERE user_id = ?",
@@ -91,7 +91,7 @@ pub mod sqlite {
             user_id: Uuid,
             share_location_enabled: bool,
             share_timezone_enabled: bool,
-        ) -> Result<UserPreferences, AuthError> {
+        ) -> Result<UserPreferences, Error> {
             let user_id_str = user_id.to_string();
             sqlx::query(
                 "INSERT INTO user_preferences \
@@ -111,7 +111,7 @@ pub mod sqlite {
         }
     }
 
-    fn row_to_bool(row: &sqlx::sqlite::SqliteRow, col: &str) -> Result<bool, AuthError> {
+    fn row_to_bool(row: &sqlx::sqlite::SqliteRow, col: &str) -> Result<bool, Error> {
         let n: i64 = row.try_get(col)?;
         Ok(n != 0)
     }
@@ -128,8 +128,8 @@ pub mod postgres {
     use sqlx::{PgPool, Row};
     use uuid::Uuid;
 
-    use crate::auth::error::AuthError;
-    use crate::auth::store::UserPreferences;
+    use crate::error::Error;
+    use crate::types::UserPreferences;
 
     #[derive(Clone, Debug)]
     pub struct PgPreferences {
@@ -137,11 +137,11 @@ pub mod postgres {
     }
 
     impl PgPreferences {
-        pub(crate) fn new(pool: PgPool) -> Self {
+        pub fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 
-        pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
+        pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
             let row = sqlx::query(
                 "SELECT share_location_enabled, share_timezone_enabled, updated_at \
                  FROM user_preferences WHERE user_id = $1",
@@ -168,7 +168,7 @@ pub mod postgres {
             user_id: Uuid,
             share_location_enabled: bool,
             share_timezone_enabled: bool,
-        ) -> Result<UserPreferences, AuthError> {
+        ) -> Result<UserPreferences, Error> {
             sqlx::query(
                 "INSERT INTO user_preferences \
                     (user_id, share_location_enabled, share_timezone_enabled, updated_at) \
@@ -187,7 +187,7 @@ pub mod postgres {
         }
     }
 
-    fn row_to_bool(row: &sqlx::postgres::PgRow, col: &str) -> Result<bool, AuthError> {
+    fn row_to_bool(row: &sqlx::postgres::PgRow, col: &str) -> Result<bool, Error> {
         let n: i64 = row.try_get(col)?;
         Ok(n != 0)
     }

@@ -14,9 +14,9 @@
 
 use uuid::Uuid;
 
-use crate::auth::error::AuthError;
-use crate::auth::store::AuthUserRecord;
-use crate::db::pool::AnyPool;
+use crate::error::Error;
+use crate::pool::AnyPool;
+use crate::types::AuthUserRecord;
 
 /// Backend-agnostic users repository. Dispatch matches the
 /// pattern used by the legacy [`crate::auth::store::AuthStore`].
@@ -37,7 +37,7 @@ impl Users {
 
     /// Look up a user by id. Returns `None` if the user does not
     /// exist or has been soft-disabled.
-    pub async fn get_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, AuthError> {
+    pub async fn get_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, Error> {
         match self {
             Users::Sqlite(s) => s.get_by_id(id).await,
             Users::Postgres(s) => s.get_by_id(id).await,
@@ -47,7 +47,7 @@ impl Users {
     /// Look up a user by email (case-insensitive on both engines
     /// via the LOWER() comparison). Returns the active user only;
     /// soft-disabled users are excluded.
-    pub async fn get_by_email(&self, email: &str) -> Result<Option<AuthUserRecord>, AuthError> {
+    pub async fn get_by_email(&self, email: &str) -> Result<Option<AuthUserRecord>, Error> {
         match self {
             Users::Sqlite(s) => s.get_by_email(email).await,
             Users::Postgres(s) => s.get_by_email(email).await,
@@ -56,7 +56,7 @@ impl Users {
 
     /// Create a new user. `password_hash` is `Some(bytes)` for the
     /// local backend and `None` for OIDC / passkey-only users.
-    /// Fails with [`AuthError::Conflict`] if the email already
+    /// Fails with [`Error::Conflict`] if the email already
     /// exists.
     pub async fn create(
         &self,
@@ -64,7 +64,7 @@ impl Users {
         display_name: &str,
         provider: &str,
         password_hash: Option<&[u8]>,
-    ) -> Result<Uuid, AuthError> {
+    ) -> Result<Uuid, Error> {
         match self {
             Users::Sqlite(s) => s.create(email, display_name, provider, password_hash).await,
             Users::Postgres(s) => s.create(email, display_name, provider, password_hash).await,
@@ -73,11 +73,7 @@ impl Users {
 
     /// Update the local password hash for an existing user.
     /// Returns the updated row count.
-    pub async fn set_password(
-        &self,
-        user_id: Uuid,
-        password_hash: &[u8],
-    ) -> Result<u64, AuthError> {
+    pub async fn set_password(&self, user_id: Uuid, password_hash: &[u8]) -> Result<u64, Error> {
         match self {
             Users::Sqlite(s) => s.set_password(user_id, password_hash).await,
             Users::Postgres(s) => s.set_password(user_id, password_hash).await,
@@ -87,7 +83,7 @@ impl Users {
     /// Delete a user by id. Cascades to their sessions and passkeys
     /// via the FK constraints in the migration. Returns the number
     /// of rows removed (0 means the user did not exist).
-    pub async fn delete(&self, user_id: Uuid) -> Result<u64, AuthError> {
+    pub async fn delete(&self, user_id: Uuid) -> Result<u64, Error> {
         match self {
             Users::Sqlite(s) => s.delete(user_id).await,
             Users::Postgres(s) => s.delete(user_id).await,
@@ -95,7 +91,7 @@ impl Users {
     }
 
     /// Delete a user by email. Returns the deleted user id if any.
-    pub async fn delete_by_email(&self, email: &str) -> Result<Option<Uuid>, AuthError> {
+    pub async fn delete_by_email(&self, email: &str) -> Result<Option<Uuid>, Error> {
         match self {
             Users::Sqlite(s) => s.delete_by_email(email).await,
             Users::Postgres(s) => s.delete_by_email(email).await,
@@ -105,7 +101,7 @@ impl Users {
     /// Count users by provider (e.g. `"local"`, `"oidc:<issuer>"`).
     /// Used by the `auth delete-user` CLI to refuse removing the
     /// last local user when auth is enabled.
-    pub async fn count_by_provider(&self, provider: &str) -> Result<i64, AuthError> {
+    pub async fn count_by_provider(&self, provider: &str) -> Result<i64, Error> {
         match self {
             Users::Sqlite(s) => s.count_by_provider(provider).await,
             Users::Postgres(s) => s.count_by_provider(provider).await,
@@ -114,10 +110,7 @@ impl Users {
 
     /// List all users, optionally filtered by `provider` prefix.
     /// Used by `auth list-users`.
-    pub async fn list(
-        &self,
-        provider_prefix: Option<&str>,
-    ) -> Result<Vec<AuthUserRecord>, AuthError> {
+    pub async fn list(&self, provider_prefix: Option<&str>) -> Result<Vec<AuthUserRecord>, Error> {
         match self {
             Users::Sqlite(s) => s.list(provider_prefix).await,
             Users::Postgres(s) => s.list(provider_prefix).await,
@@ -136,8 +129,8 @@ pub mod sqlite {
     use sqlx::{Row, SqlitePool};
     use uuid::Uuid;
 
-    use crate::auth::error::AuthError;
-    use crate::auth::store::AuthUserRecord;
+    use crate::error::Error;
+    use crate::types::AuthUserRecord;
 
     /// Cheap to clone — the underlying pool is `Arc`-backed.
     #[derive(Clone, Debug)]
@@ -146,11 +139,11 @@ pub mod sqlite {
     }
 
     impl SqliteUsers {
-        pub(crate) fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
-        pub async fn get_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, AuthError> {
+        pub async fn get_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, Error> {
             let row = sqlx::query(
                 "SELECT id, email, display_name, provider, password_hash, created_at \
                  FROM users WHERE id = ? AND disabled_at IS NULL",
@@ -161,7 +154,7 @@ pub mod sqlite {
             Ok(row.map(row_to_user))
         }
 
-        pub async fn get_by_email(&self, email: &str) -> Result<Option<AuthUserRecord>, AuthError> {
+        pub async fn get_by_email(&self, email: &str) -> Result<Option<AuthUserRecord>, Error> {
             let row = sqlx::query(
                 "SELECT id, email, display_name, provider, password_hash, created_at \
                  FROM users WHERE LOWER(email) = LOWER(?) AND disabled_at IS NULL",
@@ -178,7 +171,7 @@ pub mod sqlite {
             display_name: &str,
             provider: &str,
             password_hash: Option<&[u8]>,
-        ) -> Result<Uuid, AuthError> {
+        ) -> Result<Uuid, Error> {
             let id = Uuid::new_v4();
             let normalised = email.trim().to_ascii_lowercase();
             let res = sqlx::query(
@@ -195,9 +188,9 @@ pub mod sqlite {
             match res {
                 Ok(_) => Ok(id),
                 Err(sqlx::Error::Database(db_err)) if is_unique_violation(&*db_err) => Err(
-                    AuthError::Conflict(format!("user with email {normalised:?} already exists")),
+                    Error::Conflict(format!("user with email {normalised:?} already exists")),
                 ),
-                Err(e) => Err(AuthError::Database(e)),
+                Err(e) => Err(Error::Database(e)),
             }
         }
 
@@ -205,7 +198,7 @@ pub mod sqlite {
             &self,
             user_id: Uuid,
             password_hash: &[u8],
-        ) -> Result<u64, AuthError> {
+        ) -> Result<u64, Error> {
             let res = sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
                 .bind(password_hash)
                 .bind(user_id.to_string())
@@ -214,7 +207,7 @@ pub mod sqlite {
             Ok(res.rows_affected())
         }
 
-        pub async fn delete(&self, user_id: Uuid) -> Result<u64, AuthError> {
+        pub async fn delete(&self, user_id: Uuid) -> Result<u64, Error> {
             let res = sqlx::query("DELETE FROM users WHERE id = ?")
                 .bind(user_id.to_string())
                 .execute(&self.pool)
@@ -222,7 +215,7 @@ pub mod sqlite {
             Ok(res.rows_affected())
         }
 
-        pub async fn delete_by_email(&self, email: &str) -> Result<Option<Uuid>, AuthError> {
+        pub async fn delete_by_email(&self, email: &str) -> Result<Option<Uuid>, Error> {
             let row = sqlx::query("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
                 .bind(email)
                 .fetch_optional(&self.pool)
@@ -234,7 +227,7 @@ pub mod sqlite {
             Ok(Some(id))
         }
 
-        pub async fn count_by_provider(&self, provider: &str) -> Result<i64, AuthError> {
+        pub async fn count_by_provider(&self, provider: &str) -> Result<i64, Error> {
             let row = sqlx::query("SELECT COUNT(*) AS c FROM users WHERE provider = ?")
                 .bind(provider)
                 .fetch_one(&self.pool)
@@ -246,7 +239,7 @@ pub mod sqlite {
         pub async fn list(
             &self,
             provider_prefix: Option<&str>,
-        ) -> Result<Vec<AuthUserRecord>, AuthError> {
+        ) -> Result<Vec<AuthUserRecord>, Error> {
             let rows = if let Some(prefix) = provider_prefix {
                 sqlx::query(
                     "SELECT id, email, display_name, provider, password_hash, created_at \
@@ -305,8 +298,8 @@ pub mod postgres {
     use sqlx::{PgPool, Row};
     use uuid::Uuid;
 
-    use crate::auth::error::AuthError;
-    use crate::auth::store::AuthUserRecord;
+    use crate::error::Error;
+    use crate::types::AuthUserRecord;
 
     /// Cheap to clone — the underlying pool is `Arc`-backed.
     #[derive(Clone, Debug)]
@@ -315,11 +308,11 @@ pub mod postgres {
     }
 
     impl PgUsers {
-        pub(crate) fn new(pool: PgPool) -> Self {
+        pub fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 
-        pub async fn get_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, AuthError> {
+        pub async fn get_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, Error> {
             let row = sqlx::query(
                 "SELECT id::text AS id, email, display_name, provider, password_hash, \
                         created_at::text AS created_at \
@@ -331,7 +324,7 @@ pub mod postgres {
             Ok(row.map(row_to_user))
         }
 
-        pub async fn get_by_email(&self, email: &str) -> Result<Option<AuthUserRecord>, AuthError> {
+        pub async fn get_by_email(&self, email: &str) -> Result<Option<AuthUserRecord>, Error> {
             let row = sqlx::query(
                 "SELECT id::text AS id, email, display_name, provider, password_hash, \
                         created_at::text AS created_at \
@@ -349,7 +342,7 @@ pub mod postgres {
             display_name: &str,
             provider: &str,
             password_hash: Option<&[u8]>,
-        ) -> Result<Uuid, AuthError> {
+        ) -> Result<Uuid, Error> {
             let id = Uuid::new_v4();
             let normalised = email.trim().to_ascii_lowercase();
             let res = sqlx::query(
@@ -366,9 +359,9 @@ pub mod postgres {
             match res {
                 Ok(_) => Ok(id),
                 Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err(
-                    AuthError::Conflict(format!("user with email {normalised:?} already exists")),
+                    Error::Conflict(format!("user with email {normalised:?} already exists")),
                 ),
-                Err(e) => Err(AuthError::Database(e)),
+                Err(e) => Err(Error::Database(e)),
             }
         }
 
@@ -376,7 +369,7 @@ pub mod postgres {
             &self,
             user_id: Uuid,
             password_hash: &[u8],
-        ) -> Result<u64, AuthError> {
+        ) -> Result<u64, Error> {
             let res = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
                 .bind(password_hash)
                 .bind(user_id)
@@ -385,7 +378,7 @@ pub mod postgres {
             Ok(res.rows_affected())
         }
 
-        pub async fn delete(&self, user_id: Uuid) -> Result<u64, AuthError> {
+        pub async fn delete(&self, user_id: Uuid) -> Result<u64, Error> {
             let res = sqlx::query("DELETE FROM users WHERE id = $1")
                 .bind(user_id)
                 .execute(&self.pool)
@@ -393,7 +386,7 @@ pub mod postgres {
             Ok(res.rows_affected())
         }
 
-        pub async fn delete_by_email(&self, email: &str) -> Result<Option<Uuid>, AuthError> {
+        pub async fn delete_by_email(&self, email: &str) -> Result<Option<Uuid>, Error> {
             let row =
                 sqlx::query("SELECT id::text AS id FROM users WHERE LOWER(email) = LOWER($1)")
                     .bind(email)
@@ -406,7 +399,7 @@ pub mod postgres {
             Ok(Some(id))
         }
 
-        pub async fn count_by_provider(&self, provider: &str) -> Result<i64, AuthError> {
+        pub async fn count_by_provider(&self, provider: &str) -> Result<i64, Error> {
             let row = sqlx::query("SELECT COUNT(*) AS c FROM users WHERE provider = $1")
                 .bind(provider)
                 .fetch_one(&self.pool)
@@ -418,7 +411,7 @@ pub mod postgres {
         pub async fn list(
             &self,
             provider_prefix: Option<&str>,
-        ) -> Result<Vec<AuthUserRecord>, AuthError> {
+        ) -> Result<Vec<AuthUserRecord>, Error> {
             let rows = if let Some(prefix) = provider_prefix {
                 sqlx::query(
                     "SELECT id::text AS id, email, display_name, provider, password_hash, \

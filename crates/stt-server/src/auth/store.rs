@@ -1,131 +1,51 @@
-//! `auth/store` — thin facade over the per-domain `db/` repositories.
+//! `auth/store` — thin facade over the per-domain `nagent-db` repositories.
 //!
-//! Plan 5.D splits the god repository into per-domain modules
-//! ([`crate::db::users`], [`crate::db::sessions`], [`crate::db::passkeys`],
-//! [`crate::db::events`], [`crate::db::credentials`],
-//! [`crate::db::preferences`]). Each method on `AuthStore` is now a
-//! single-line dispatch into the matching repository so the call
-//! sites keep working while the SQL lives next to the rest of the
-//! `db/` code.
-//!
-//! The `SqliteStore` / `PgStore` variants are kept so the
-//! `match self.store() { AuthStore::Sqlite(s) => … }` pattern used
-//! by [`crate::chat::sessions`] and the legacy [`crate::documents::db`]
-//! still resolves. Each variant now holds the per-domain
-//! repositories rather than the SQL methods themselves; the SQL
-//! moved to [`crate::db`] in this commit.
-
-use chrono::{DateTime, Utc};
-use uuid::Uuid;
+//! The row types live in `nagent-db::types` since plan 4.G; the
+//! legacy `crate::auth::store::AuthUserRecord` and friends are
+//! re-exported from there so existing call sites in this crate
+//! keep resolving.
 
 use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
 use crate::config::AuthConfig;
-use crate::db::{chat_sessions::ChatSessions as DbChatSessions, documents::Documents};
+use uuid::Uuid;
 
-// Re-export the shared `AnyPool` enum from `db::pool` under the
-// legacy path so external callers (`tests/auth_e2e.rs`,
-// `tests/chat_sessions.rs`) keep resolving it through
-// `crate::auth::store::AnyPool`.
-pub use crate::db::pool::AnyPool;
-
-// ---- Row types ------------------------------------------------------------
-
-/// Public-facing user record. Mirrors the row in the `users` table
-/// minus the password hash (which stays inside the store).
-#[derive(Debug, Clone)]
-pub struct AuthUserRecord {
-    pub id: Uuid,
-    pub email: String,
-    pub display_name: String,
-    pub provider: String,
-    pub created_at: DateTime<Utc>,
-    /// `password_hash` is exposed only to the password backend —
-    /// other callers should not see it (defence in depth; the field
-    /// is on the struct so we don't need a second parallel type).
-    pub password_hash: Option<Vec<u8>>,
-}
-
-/// Parameters for [`AuthStore::insert_passkey`].
-#[derive(Debug, Clone)]
-pub struct NewPasskeyRecord {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub credential_id: Vec<u8>,
-    pub public_key: Vec<u8>,
-    pub counter: u32,
-    pub transports: String,
-    pub aaguid: Option<Vec<u8>>,
-}
-
-/// Passkey row. Returned by [`AuthStore::get_passkey_by_credential_id`].
-/// `public_key` carries the full `webauthn_rs::Passkey` serialised
-/// as JSON — keeping the entire struct (not just the COSE bytes)
-/// lets `passkey.rs` reconstruct the `Passkey` without poking at
-/// the crate's private `cred` field.
-#[derive(Debug, Clone)]
-pub struct PasskeyRecord {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub credential_id: Vec<u8>,
-    pub public_key: Vec<u8>,
-    pub counter: u32,
-    pub transports: String,
-}
-
-/// Parameters for [`AuthStore::record_event`].
-#[derive(Debug, Clone, Default)]
-pub struct NewAuthEvent {
-    pub user_id: Option<Uuid>,
-    pub kind: String,
-    pub provider: String,
-    pub ip: Option<String>,
-    pub user_agent: Option<String>,
-    /// Integration name the audit row is correlated with (set for
-    /// `credential_access` / `credential_missing` /
-    /// `credential_decrypt_failed`; `None` for the auth subtree).
-    /// Added by the `0002_credentials.sql` migration.
-    pub target_service: Option<String>,
-}
-
-/// Per-user UI preferences fetched via `GET /api/me/preferences`
-/// and updated via `PUT /api/me/preferences`. Backed by the
-/// `user_preferences` table added in `0006_user_preferences.up.sql`.
-#[derive(Debug, Clone)]
-pub struct UserPreferences {
-    pub share_location_enabled: bool,
-    pub share_timezone_enabled: bool,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl NewAuthEvent {
-    /// Build a non-credential audit row (the auth subtree never sets
-    /// `target_service`).
-    pub fn auth(
-        user_id: Option<Uuid>,
-        kind: impl Into<String>,
-        provider: impl Into<String>,
-    ) -> Self {
+/// Translate a server-side [`AuthConfig`] into the DB-layer
+/// [`nagent_db::DbOptions`]. Keeps the DB crate free of TOML /
+/// env / CLI concerns — the server is the only component that
+/// knows about those.
+impl From<&AuthConfig> for nagent_db::DbOptions {
+    fn from(cfg: &AuthConfig) -> Self {
+        use nagent_db::DbEngine;
+        let backend = match cfg.db.backend.as_str() {
+            "sqlite" => DbEngine::Sqlite,
+            "postgres" => DbEngine::Postgres,
+            other => DbEngine::Sqlite, // unreachable: connect() rejects unknown engines
+        };
         Self {
-            user_id,
-            kind: kind.into(),
-            provider: provider.into(),
-            ..Default::default()
+            backend,
+            url: cfg.db.url.clone(),
+            max_connections: cfg.db.max_connections,
+            auto_migrate: cfg.db.auto_migrate,
         }
     }
 }
 
-/// One row from the `user_credentials` table — only the columns the
-/// resolver needs to decrypt.
-#[derive(Debug, Clone)]
-pub struct UserCredentialRow {
-    pub nonce: Vec<u8>,
-    pub ciphertext: Vec<u8>,
-}
+// Re-export row types from nagent_db so legacy call sites
+// (`crate::auth::store::AuthUserRecord`, etc.) keep compiling.
+pub use nagent_db::{
+    AuthUserRecord, MigrationRow, MigrationStatus, NewAuthEvent, NewPasskeyRecord, PasskeyRecord,
+    UserCredentialRow, UserPreferences,
+};
 
-// ---- Re-exports -----------------------------------------------------------
+// Re-export the shared `AnyPool` enum from `nagent_db::pool` so
+// external callers (`tests/auth_e2e.rs`, `tests/chat_sessions.rs`)
+// keep resolving it through `crate::auth::store::AnyPool`.
+pub use nagent_db::AnyPool;
 
-pub use crate::db::migrate::{MigrationRow, MigrationStatus};
+use nagent_db::{chat_sessions::ChatSessions as DbChatSessions, documents::Documents};
+
+// ---- Row types are re-exported from `nagent_db::types` above. ----
 
 // ---- Variants ------------------------------------------------------------
 
@@ -133,42 +53,42 @@ pub use crate::db::migrate::{MigrationRow, MigrationStatus};
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     pub(crate) pool: sqlx::SqlitePool,
-    pub(crate) users: crate::db::users::sqlite::SqliteUsers,
-    pub(crate) sessions: crate::db::sessions::sqlite::SqliteSessions,
-    pub(crate) passkeys: crate::db::passkeys::sqlite::SqlitePasskeys,
-    pub(crate) events: crate::db::events::sqlite::SqliteEvents,
-    pub(crate) credentials: crate::db::credentials::sqlite::SqliteCredentials,
-    pub(crate) preferences: crate::db::preferences::sqlite::SqlitePreferences,
-    pub(crate) documents: crate::db::documents::sqlite::SqliteDocuments,
-    pub(crate) chat_sessions: crate::db::chat_sessions::sqlite::SqliteChatSessions,
+    pub(crate) users: nagent_db::users::sqlite::SqliteUsers,
+    pub(crate) sessions: nagent_db::sessions::sqlite::SqliteSessions,
+    pub(crate) passkeys: nagent_db::passkeys::sqlite::SqlitePasskeys,
+    pub(crate) events: nagent_db::events::sqlite::SqliteEvents,
+    pub(crate) credentials: nagent_db::credentials::sqlite::SqliteCredentials,
+    pub(crate) preferences: nagent_db::preferences::sqlite::SqlitePreferences,
+    pub(crate) documents: nagent_db::documents::sqlite::SqliteDocuments,
+    pub(crate) chat_sessions: nagent_db::chat_sessions::sqlite::SqliteChatSessions,
 }
 
 /// Postgres engine arm of [`AuthStore`].
 #[derive(Clone, Debug)]
 pub struct PgStore {
     pub(crate) pool: sqlx::PgPool,
-    pub(crate) users: crate::db::users::postgres::PgUsers,
-    pub(crate) sessions: crate::db::sessions::postgres::PgSessions,
-    pub(crate) passkeys: crate::db::passkeys::postgres::PgPasskeys,
-    pub(crate) events: crate::db::events::postgres::PgEvents,
-    pub(crate) credentials: crate::db::credentials::postgres::PgCredentials,
-    pub(crate) preferences: crate::db::preferences::postgres::PgPreferences,
-    pub(crate) documents: crate::db::documents::postgres::PgDocuments,
-    pub(crate) chat_sessions: crate::db::chat_sessions::postgres::PgChatSessions,
+    pub(crate) users: nagent_db::users::postgres::PgUsers,
+    pub(crate) sessions: nagent_db::sessions::postgres::PgSessions,
+    pub(crate) passkeys: nagent_db::passkeys::postgres::PgPasskeys,
+    pub(crate) events: nagent_db::events::postgres::PgEvents,
+    pub(crate) credentials: nagent_db::credentials::postgres::PgCredentials,
+    pub(crate) preferences: nagent_db::preferences::postgres::PgPreferences,
+    pub(crate) documents: nagent_db::documents::postgres::PgDocuments,
+    pub(crate) chat_sessions: nagent_db::chat_sessions::postgres::PgChatSessions,
 }
 
 impl SqliteStore {
     pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
-        let pool = crate::db::pool::connect_sqlite_for(cfg).await?;
+        let pool = nagent_db::pool::connect_sqlite(&cfg.into()).await?;
         Ok(Self {
-            users: crate::db::users::sqlite::SqliteUsers::new(pool.clone()),
-            sessions: crate::db::sessions::sqlite::SqliteSessions::new(pool.clone()),
-            passkeys: crate::db::passkeys::sqlite::SqlitePasskeys::new(pool.clone()),
-            events: crate::db::events::sqlite::SqliteEvents::new(pool.clone()),
-            credentials: crate::db::credentials::sqlite::SqliteCredentials::new(pool.clone()),
-            preferences: crate::db::preferences::sqlite::SqlitePreferences::new(pool.clone()),
-            documents: crate::db::documents::sqlite::SqliteDocuments::new(pool.clone()),
-            chat_sessions: crate::db::chat_sessions::sqlite::SqliteChatSessions::new(pool.clone()),
+            users: nagent_db::users::sqlite::SqliteUsers::new(pool.clone()),
+            sessions: nagent_db::sessions::sqlite::SqliteSessions::new(pool.clone()),
+            passkeys: nagent_db::passkeys::sqlite::SqlitePasskeys::new(pool.clone()),
+            events: nagent_db::events::sqlite::SqliteEvents::new(pool.clone()),
+            credentials: nagent_db::credentials::sqlite::SqliteCredentials::new(pool.clone()),
+            preferences: nagent_db::preferences::sqlite::SqlitePreferences::new(pool.clone()),
+            documents: nagent_db::documents::sqlite::SqliteDocuments::new(pool.clone()),
+            chat_sessions: nagent_db::chat_sessions::sqlite::SqliteChatSessions::new(pool.clone()),
             pool,
         })
     }
@@ -187,16 +107,16 @@ impl SqliteStore {
 
 impl PgStore {
     pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
-        let pool = crate::db::pool::connect_postgres_for(cfg).await?;
+        let pool = nagent_db::pool::connect_postgres(&cfg.into()).await?;
         Ok(Self {
-            users: crate::db::users::postgres::PgUsers::new(pool.clone()),
-            sessions: crate::db::sessions::postgres::PgSessions::new(pool.clone()),
-            passkeys: crate::db::passkeys::postgres::PgPasskeys::new(pool.clone()),
-            events: crate::db::events::postgres::PgEvents::new(pool.clone()),
-            credentials: crate::db::credentials::postgres::PgCredentials::new(pool.clone()),
-            preferences: crate::db::preferences::postgres::PgPreferences::new(pool.clone()),
-            documents: crate::db::documents::postgres::PgDocuments::new(pool.clone()),
-            chat_sessions: crate::db::chat_sessions::postgres::PgChatSessions::new(pool.clone()),
+            users: nagent_db::users::postgres::PgUsers::new(pool.clone()),
+            sessions: nagent_db::sessions::postgres::PgSessions::new(pool.clone()),
+            passkeys: nagent_db::passkeys::postgres::PgPasskeys::new(pool.clone()),
+            events: nagent_db::events::postgres::PgEvents::new(pool.clone()),
+            credentials: nagent_db::credentials::postgres::PgCredentials::new(pool.clone()),
+            preferences: nagent_db::preferences::postgres::PgPreferences::new(pool.clone()),
+            documents: nagent_db::documents::postgres::PgDocuments::new(pool.clone()),
+            chat_sessions: nagent_db::chat_sessions::postgres::PgChatSessions::new(pool.clone()),
             pool,
         })
     }
@@ -232,15 +152,21 @@ impl AuthStore {
     }
 
     pub async fn migrate(&self) -> Result<(), AuthError> {
-        crate::db::migrate::run(&self.pool()).await
+        nagent_db::migrate::run(&self.pool())
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn migration_status(&self) -> Result<MigrationStatus, AuthError> {
-        crate::db::migrate::status(&self.pool()).await
+        nagent_db::migrate::status(&self.pool())
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn revert_to(&self, target_version: i64) -> Result<(), AuthError> {
-        crate::db::migrate::revert_to(&self.pool(), target_version).await
+        nagent_db::migrate::revert_to(&self.pool(), target_version)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub fn pool(&self) -> AnyPool {
@@ -254,8 +180,8 @@ impl AuthStore {
 
     pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.users.get_by_id(id).await,
-            AuthStore::Postgres(s) => s.users.get_by_id(id).await,
+            AuthStore::Sqlite(s) => s.users.get_by_id(id).await.map_err(AuthError::from),
+            AuthStore::Postgres(s) => s.users.get_by_id(id).await.map_err(AuthError::from),
         }
     }
 
@@ -264,8 +190,8 @@ impl AuthStore {
         email: &str,
     ) -> Result<Option<AuthUserRecord>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.users.get_by_email(email).await,
-            AuthStore::Postgres(s) => s.users.get_by_email(email).await,
+            AuthStore::Sqlite(s) => s.users.get_by_email(email).await.map_err(AuthError::from),
+            AuthStore::Postgres(s) => s.users.get_by_email(email).await.map_err(AuthError::from),
         }
     }
 
@@ -277,16 +203,16 @@ impl AuthStore {
         password_hash: Option<&[u8]>,
     ) -> Result<Uuid, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => {
-                s.users
-                    .create(email, display_name, provider, password_hash)
-                    .await
-            }
-            AuthStore::Postgres(s) => {
-                s.users
-                    .create(email, display_name, provider, password_hash)
-                    .await
-            }
+            AuthStore::Sqlite(s) => s
+                .users
+                .create(email, display_name, provider, password_hash)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .users
+                .create(email, display_name, provider, password_hash)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -296,29 +222,53 @@ impl AuthStore {
         password_hash: &[u8],
     ) -> Result<u64, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.users.set_password(user_id, password_hash).await,
-            AuthStore::Postgres(s) => s.users.set_password(user_id, password_hash).await,
+            AuthStore::Sqlite(s) => s
+                .users
+                .set_password(user_id, password_hash)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .users
+                .set_password(user_id, password_hash)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
     pub async fn delete_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.users.delete(user_id).await,
-            AuthStore::Postgres(s) => s.users.delete(user_id).await,
+            AuthStore::Sqlite(s) => s.users.delete(user_id).await.map_err(AuthError::from),
+            AuthStore::Postgres(s) => s.users.delete(user_id).await.map_err(AuthError::from),
         }
     }
 
     pub async fn delete_user_by_email(&self, email: &str) -> Result<Option<Uuid>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.users.delete_by_email(email).await,
-            AuthStore::Postgres(s) => s.users.delete_by_email(email).await,
+            AuthStore::Sqlite(s) => s
+                .users
+                .delete_by_email(email)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .users
+                .delete_by_email(email)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
     pub async fn count_users_by_provider(&self, provider: &str) -> Result<i64, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.users.count_by_provider(provider).await,
-            AuthStore::Postgres(s) => s.users.count_by_provider(provider).await,
+            AuthStore::Sqlite(s) => s
+                .users
+                .count_by_provider(provider)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .users
+                .count_by_provider(provider)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -327,8 +277,8 @@ impl AuthStore {
         provider_prefix: Option<&str>,
     ) -> Result<Vec<AuthUserRecord>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.users.list(provider_prefix).await,
-            AuthStore::Postgres(s) => s.users.list(provider_prefix).await,
+            AuthStore::Sqlite(s) => s.users.list(provider_prefix).await.map_err(AuthError::from),
+            AuthStore::Postgres(s) => s.users.list(provider_prefix).await.map_err(AuthError::from),
         }
     }
 
@@ -342,8 +292,16 @@ impl AuthStore {
         user_agent: Option<&str>,
     ) -> Result<SessionRecord, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.sessions.create(user_id, ttl, ip, user_agent).await,
-            AuthStore::Postgres(s) => s.sessions.create(user_id, ttl, ip, user_agent).await,
+            AuthStore::Sqlite(s) => s
+                .sessions
+                .create(user_id, ttl, ip, user_agent)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .sessions
+                .create(user_id, ttl, ip, user_agent)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -352,8 +310,16 @@ impl AuthStore {
         token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<Option<(SessionRecord, AuthUserRecord)>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.sessions.lookup_by_token_hash(token_hash).await,
-            AuthStore::Postgres(s) => s.sessions.lookup_by_token_hash(token_hash).await,
+            AuthStore::Sqlite(s) => s
+                .sessions
+                .lookup_by_token_hash(token_hash)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .sessions
+                .lookup_by_token_hash(token_hash)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -362,8 +328,8 @@ impl AuthStore {
         token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<(), AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.sessions.touch(token_hash).await,
-            AuthStore::Postgres(s) => s.sessions.touch(token_hash).await,
+            AuthStore::Sqlite(s) => Ok(s.sessions.touch(token_hash).await?),
+            AuthStore::Postgres(s) => Ok(s.sessions.touch(token_hash).await?),
         }
     }
 
@@ -372,15 +338,23 @@ impl AuthStore {
         token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<u64, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.sessions.delete(token_hash).await,
-            AuthStore::Postgres(s) => s.sessions.delete(token_hash).await,
+            AuthStore::Sqlite(s) => s.sessions.delete(token_hash).await.map_err(AuthError::from),
+            AuthStore::Postgres(s) => s.sessions.delete(token_hash).await.map_err(AuthError::from),
         }
     }
 
     pub async fn delete_sessions_for_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.sessions.delete_for_user(user_id).await,
-            AuthStore::Postgres(s) => s.sessions.delete_for_user(user_id).await,
+            AuthStore::Sqlite(s) => s
+                .sessions
+                .delete_for_user(user_id)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .sessions
+                .delete_for_user(user_id)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -388,8 +362,8 @@ impl AuthStore {
 
     pub async fn insert_passkey(&self, record: NewPasskeyRecord) -> Result<Uuid, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.passkeys.insert(record).await,
-            AuthStore::Postgres(s) => s.passkeys.insert(record).await,
+            AuthStore::Sqlite(s) => s.passkeys.insert(record).await.map_err(AuthError::from),
+            AuthStore::Postgres(s) => s.passkeys.insert(record).await.map_err(AuthError::from),
         }
     }
 
@@ -398,8 +372,16 @@ impl AuthStore {
         credential_id: &[u8],
     ) -> Result<Option<PasskeyRecord>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.passkeys.get_by_credential_id(credential_id).await,
-            AuthStore::Postgres(s) => s.passkeys.get_by_credential_id(credential_id).await,
+            AuthStore::Sqlite(s) => s
+                .passkeys
+                .get_by_credential_id(credential_id)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .passkeys
+                .get_by_credential_id(credential_id)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -409,8 +391,16 @@ impl AuthStore {
         new_counter: u32,
     ) -> Result<(), AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.passkeys.bump_counter(passkey_id, new_counter).await,
-            AuthStore::Postgres(s) => s.passkeys.bump_counter(passkey_id, new_counter).await,
+            AuthStore::Sqlite(s) => s
+                .passkeys
+                .bump_counter(passkey_id, new_counter)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .passkeys
+                .bump_counter(passkey_id, new_counter)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -433,8 +423,16 @@ impl AuthStore {
         fields: &[(String, Vec<u8>, Vec<u8>)],
     ) -> Result<(), AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.credentials.upsert(user_id, service_id, fields).await,
-            AuthStore::Postgres(s) => s.credentials.upsert(user_id, service_id, fields).await,
+            AuthStore::Sqlite(s) => s
+                .credentials
+                .upsert(user_id, service_id, fields)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .credentials
+                .upsert(user_id, service_id, fields)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -444,8 +442,16 @@ impl AuthStore {
         service_id: &str,
     ) -> Result<u64, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.credentials.delete_service(user_id, service_id).await,
-            AuthStore::Postgres(s) => s.credentials.delete_service(user_id, service_id).await,
+            AuthStore::Sqlite(s) => s
+                .credentials
+                .delete_service(user_id, service_id)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .credentials
+                .delete_service(user_id, service_id)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -455,8 +461,16 @@ impl AuthStore {
         service_id: &str,
     ) -> Result<Vec<String>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.credentials.list_field_keys(user_id, service_id).await,
-            AuthStore::Postgres(s) => s.credentials.list_field_keys(user_id, service_id).await,
+            AuthStore::Sqlite(s) => s
+                .credentials
+                .list_field_keys(user_id, service_id)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .credentials
+                .list_field_keys(user_id, service_id)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
@@ -467,15 +481,23 @@ impl AuthStore {
         field_key: &str,
     ) -> Result<Option<UserCredentialRow>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.credentials.fetch(user_id, service_id, field_key).await,
-            AuthStore::Postgres(s) => s.credentials.fetch(user_id, service_id, field_key).await,
+            AuthStore::Sqlite(s) => s
+                .credentials
+                .fetch(user_id, service_id, field_key)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .credentials
+                .fetch(user_id, service_id, field_key)
+                .await
+                .map_err(AuthError::from),
         }
     }
 
     pub async fn get_user_preferences(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.preferences.get(user_id).await,
-            AuthStore::Postgres(s) => s.preferences.get(user_id).await,
+            AuthStore::Sqlite(s) => s.preferences.get(user_id).await.map_err(AuthError::from),
+            AuthStore::Postgres(s) => s.preferences.get(user_id).await.map_err(AuthError::from),
         }
     }
 
@@ -486,16 +508,16 @@ impl AuthStore {
         share_timezone_enabled: bool,
     ) -> Result<UserPreferences, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => {
-                s.preferences
-                    .upsert(user_id, share_location_enabled, share_timezone_enabled)
-                    .await
-            }
-            AuthStore::Postgres(s) => {
-                s.preferences
-                    .upsert(user_id, share_location_enabled, share_timezone_enabled)
-                    .await
-            }
+            AuthStore::Sqlite(s) => s
+                .preferences
+                .upsert(user_id, share_location_enabled, share_timezone_enabled)
+                .await
+                .map_err(AuthError::from),
+            AuthStore::Postgres(s) => s
+                .preferences
+                .upsert(user_id, share_location_enabled, share_timezone_enabled)
+                .await
+                .map_err(AuthError::from),
         }
     }
 

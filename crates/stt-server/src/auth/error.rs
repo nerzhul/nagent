@@ -141,6 +141,20 @@ pub fn require_oidc_state_from_auth(
     })
 }
 
+/// `nagent_db::Error` → `AuthError` conversion. The DB layer
+/// returns its own [`nagent_db::Error`]; this lets the auth layer
+/// use `?` to bubble DB failures up through the call chain.
+impl From<nagent_db::Error> for AuthError {
+    fn from(e: nagent_db::Error) -> Self {
+        match e {
+            nagent_db::Error::Database(inner) => AuthError::Database(inner),
+            nagent_db::Error::BadRequest(msg) => AuthError::BadRequest(msg),
+            nagent_db::Error::Conflict(msg) => AuthError::Conflict(msg),
+            nagent_db::Error::Internal(msg) => AuthError::Internal(msg),
+        }
+    }
+}
+
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         use axum::http::header::HeaderValue;

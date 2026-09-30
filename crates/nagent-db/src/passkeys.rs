@@ -2,9 +2,9 @@
 
 use uuid::Uuid;
 
-use crate::auth::error::AuthError;
-use crate::auth::store::{NewPasskeyRecord, PasskeyRecord};
-use crate::db::pool::AnyPool;
+use crate::error::Error;
+use crate::pool::AnyPool;
+use crate::types::{NewPasskeyRecord, PasskeyRecord};
 
 #[derive(Debug, Clone)]
 pub enum Passkeys {
@@ -20,7 +20,7 @@ impl Passkeys {
         }
     }
 
-    pub async fn insert(&self, record: NewPasskeyRecord) -> Result<Uuid, AuthError> {
+    pub async fn insert(&self, record: NewPasskeyRecord) -> Result<Uuid, Error> {
         match self {
             Passkeys::Sqlite(s) => s.insert(record).await,
             Passkeys::Postgres(s) => s.insert(record).await,
@@ -30,14 +30,14 @@ impl Passkeys {
     pub async fn get_by_credential_id(
         &self,
         credential_id: &[u8],
-    ) -> Result<Option<PasskeyRecord>, AuthError> {
+    ) -> Result<Option<PasskeyRecord>, Error> {
         match self {
             Passkeys::Sqlite(s) => s.get_by_credential_id(credential_id).await,
             Passkeys::Postgres(s) => s.get_by_credential_id(credential_id).await,
         }
     }
 
-    pub async fn bump_counter(&self, passkey_id: Uuid, new_counter: u32) -> Result<(), AuthError> {
+    pub async fn bump_counter(&self, passkey_id: Uuid, new_counter: u32) -> Result<(), Error> {
         match self {
             Passkeys::Sqlite(s) => s.bump_counter(passkey_id, new_counter).await,
             Passkeys::Postgres(s) => s.bump_counter(passkey_id, new_counter).await,
@@ -50,8 +50,8 @@ pub mod sqlite {
     use sqlx::{Row, SqlitePool};
     use uuid::Uuid;
 
-    use crate::auth::error::AuthError;
-    use crate::auth::store::{NewPasskeyRecord, PasskeyRecord};
+    use crate::error::Error;
+    use crate::types::{NewPasskeyRecord, PasskeyRecord};
 
     #[derive(Clone, Debug)]
     pub struct SqlitePasskeys {
@@ -59,11 +59,11 @@ pub mod sqlite {
     }
 
     impl SqlitePasskeys {
-        pub(crate) fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
-        pub async fn insert(&self, record: NewPasskeyRecord) -> Result<Uuid, AuthError> {
+        pub async fn insert(&self, record: NewPasskeyRecord) -> Result<Uuid, Error> {
             let res = sqlx::query(
                 "INSERT INTO passkeys (id, user_id, credential_id, public_key, counter, transports, aaguid, created_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -80,17 +80,17 @@ pub mod sqlite {
             .await;
             match res {
                 Ok(_) => Ok(record.id),
-                Err(sqlx::Error::Database(db_err)) if is_sqlite_unique_violation(&*db_err) => Err(
-                    AuthError::Conflict("credential_id already registered".into()),
-                ),
-                Err(e) => Err(AuthError::Database(e)),
+                Err(sqlx::Error::Database(db_err)) if is_sqlite_unique_violation(&*db_err) => {
+                    Err(Error::Conflict("credential_id already registered".into()))
+                }
+                Err(e) => Err(Error::Database(e)),
             }
         }
 
         pub async fn get_by_credential_id(
             &self,
             credential_id: &[u8],
-        ) -> Result<Option<PasskeyRecord>, AuthError> {
+        ) -> Result<Option<PasskeyRecord>, Error> {
             let row = sqlx::query(
                 "SELECT id, user_id, credential_id, public_key, counter, transports \
                  FROM passkeys WHERE credential_id = ?",
@@ -110,11 +110,7 @@ pub mod sqlite {
             }))
         }
 
-        pub async fn bump_counter(
-            &self,
-            passkey_id: Uuid,
-            new_counter: u32,
-        ) -> Result<(), AuthError> {
+        pub async fn bump_counter(&self, passkey_id: Uuid, new_counter: u32) -> Result<(), Error> {
             sqlx::query("UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?")
                 .bind(new_counter as i64)
                 .bind(Utc::now().to_rfc3339())
@@ -135,8 +131,8 @@ pub mod postgres {
     use sqlx::{PgPool, Row};
     use uuid::Uuid;
 
-    use crate::auth::error::AuthError;
-    use crate::auth::store::{NewPasskeyRecord, PasskeyRecord};
+    use crate::error::Error;
+    use crate::types::{NewPasskeyRecord, PasskeyRecord};
 
     #[derive(Clone, Debug)]
     pub struct PgPasskeys {
@@ -144,11 +140,11 @@ pub mod postgres {
     }
 
     impl PgPasskeys {
-        pub(crate) fn new(pool: PgPool) -> Self {
+        pub fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 
-        pub async fn insert(&self, record: NewPasskeyRecord) -> Result<Uuid, AuthError> {
+        pub async fn insert(&self, record: NewPasskeyRecord) -> Result<Uuid, Error> {
             let res = sqlx::query(
                 "INSERT INTO passkeys (id, user_id, credential_id, public_key, counter, transports, aaguid, created_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -165,17 +161,17 @@ pub mod postgres {
             .await;
             match res {
                 Ok(_) => Ok(record.id),
-                Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err(
-                    AuthError::Conflict("credential_id already registered".into()),
-                ),
-                Err(e) => Err(AuthError::Database(e)),
+                Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                    Err(Error::Conflict("credential_id already registered".into()))
+                }
+                Err(e) => Err(Error::Database(e)),
             }
         }
 
         pub async fn get_by_credential_id(
             &self,
             credential_id: &[u8],
-        ) -> Result<Option<PasskeyRecord>, AuthError> {
+        ) -> Result<Option<PasskeyRecord>, Error> {
             let row = sqlx::query(
                 "SELECT id::text AS id, user_id::text AS user_id, credential_id, public_key, \
                         counter, transports \
@@ -196,11 +192,7 @@ pub mod postgres {
             }))
         }
 
-        pub async fn bump_counter(
-            &self,
-            passkey_id: Uuid,
-            new_counter: u32,
-        ) -> Result<(), AuthError> {
+        pub async fn bump_counter(&self, passkey_id: Uuid, new_counter: u32) -> Result<(), Error> {
             sqlx::query("UPDATE passkeys SET counter = $1, last_used_at = $2 WHERE id = $3")
                 .bind(new_counter as i64)
                 .bind(Utc::now().to_rfc3339())

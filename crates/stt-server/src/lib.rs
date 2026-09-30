@@ -69,7 +69,6 @@ pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod credentials;
-pub mod db;
 pub mod documents;
 pub mod http;
 pub mod llm;

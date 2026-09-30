@@ -2121,6 +2121,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
+name = "nagent-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "nagent-support",
+ "rand 0.8.8",
+ "serde",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nagent-support"
 version = "0.1.0"
 dependencies = [
@@ -3852,6 +3871,7 @@ dependencies = [
  "ipnet",
  "meval",
  "mime_guess",
+ "nagent-db",
  "nagent-support",
  "openidconnect",
  "pdf-extract",

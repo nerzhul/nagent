@@ -2,8 +2,8 @@
 
 use uuid::Uuid;
 
-use crate::auth::error::AuthError;
-use crate::db::pool::AnyPool;
+use crate::error::Error;
+use crate::pool::AnyPool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChatSessionError {
@@ -13,32 +13,12 @@ pub enum ChatSessionError {
     NotBound(Uuid, Uuid),
 }
 
-impl From<AuthError> for ChatSessionError {
-    fn from(e: AuthError) -> Self {
+impl From<Error> for ChatSessionError {
+    fn from(e: Error) -> Self {
         match e {
-            AuthError::Database(inner) => ChatSessionError::Sqlx(inner),
+            Error::Database(inner) => ChatSessionError::Sqlx(inner),
             other => ChatSessionError::Sqlx(sqlx::Error::Protocol(other.to_string())),
         }
-    }
-}
-
-impl axum::response::IntoResponse for ChatSessionError {
-    fn into_response(self) -> axum::response::Response {
-        use axum::http::StatusCode;
-        let (status, msg) = match &self {
-            ChatSessionError::NotBound(_, _) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chat sessions unavailable".to_string(),
-            ),
-            ChatSessionError::Sqlx(_) => {
-                tracing::error!(error = %self, "chat_sessions DB error");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "chat sessions DB error".to_string(),
-                )
-            }
-        };
-        axum::response::IntoResponse::into_response((status, msg))
     }
 }
 
@@ -79,7 +59,7 @@ pub mod sqlite {
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
-    use crate::db::chat_sessions::ChatSessionError;
+    use crate::chat_sessions::ChatSessionError;
 
     #[derive(Clone, Debug)]
     pub struct SqliteChatSessions {
@@ -87,7 +67,7 @@ pub mod sqlite {
     }
 
     impl SqliteChatSessions {
-        pub(crate) fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -129,7 +109,7 @@ pub mod postgres {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use crate::db::chat_sessions::ChatSessionError;
+    use crate::chat_sessions::ChatSessionError;
 
     #[derive(Clone, Debug)]
     pub struct PgChatSessions {
@@ -137,7 +117,7 @@ pub mod postgres {
     }
 
     impl PgChatSessions {
-        pub(crate) fn new(pool: PgPool) -> Self {
+        pub fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

@@ -1,7 +1,7 @@
 //! Auth events repository — plan 5.D extraction.
 
-use crate::auth::store::NewAuthEvent;
-use crate::db::pool::AnyPool;
+use crate::pool::AnyPool;
+use crate::types::NewAuthEvent;
 
 #[derive(Debug, Clone)]
 pub enum Events {
@@ -32,7 +32,7 @@ pub mod sqlite {
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
-    use crate::auth::store::NewAuthEvent;
+    use crate::types::NewAuthEvent;
 
     #[derive(Clone, Debug)]
     pub struct SqliteEvents {
@@ -40,7 +40,7 @@ pub mod sqlite {
     }
 
     impl SqliteEvents {
-        pub(crate) fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -75,7 +75,7 @@ pub mod postgres {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use crate::auth::store::NewAuthEvent;
+    use crate::types::NewAuthEvent;
 
     #[derive(Clone, Debug)]
     pub struct PgEvents {
@@ -83,7 +83,7 @@ pub mod postgres {
     }
 
     impl PgEvents {
-        pub(crate) fn new(pool: PgPool) -> Self {
+        pub fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 
