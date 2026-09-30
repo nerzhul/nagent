@@ -108,6 +108,91 @@ async fn index_html_references_markdown_vendors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_static_asset_returns_404() {
+    // Firefox (and the browser preload scanner) probes for
+    // `<asset>.map` next to every minified vendor script —
+    // `ort.min.js.map`, `purify.min.js.map`, `marked.min.js.map`,
+    // the KaTeX bundle. We deliberately do NOT ship those `.map`
+    // files in the binary (devtools UX in production is not worth
+    // the extra megabytes), so the server MUST answer with a real
+    // 404, not "200 OK" + an empty body.
+    //
+    // The previous behaviour returned 200 + zero bytes for any
+    // path the embedded `StaticAssets` did not contain. Firefox
+    // treats that as "the source map exists and is broken" and
+    // emits `JSON.parse: unexpected end of data at line 1 column 1`
+    // every time the user opens DevTools — exactly the console
+    // noise reported against `ort.min.js.map` and
+    // `purify.min.js.map`.
+    let base = serve_once().await;
+
+    for path in [
+        "/static/vendor/ort/ort.min.js.map",
+        "/static/vendor/sanitize/purify.min.js.map",
+        "/static/vendor/marked/marked.min.js.map",
+        "/static/vendor/katex/katex.min.js.map",
+        // A path that is also "missing" but exercises a
+        // non-vendor lookup and the empty subdirectory case, just
+        // to confirm the lookup is done by full key.
+        "/static/does-not-exist.js",
+    ] {
+        let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path} returned {} instead of 404; a 200-with-empty-body response \
+             would surface in Firefox as `JSON.parse: unexpected end of data` \
+             every time the user opens DevTools.",
+            resp.status(),
+        );
+        // The body must NOT carry a JS / source-map / JSON MIME
+        // type — that combination is exactly what Firefox tries to
+        // JSON.parse. We assert against the offending types so a
+        // future refactor that changes the 404 MIME trips this
+        // guard.
+        let ctype = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !ctype.starts_with("application/javascript")
+                && !ctype.starts_with("application/json")
+                && !ctype.starts_with("application/octet-stream"),
+            "{path} returned Content-Type `{ctype}` for a missing asset. \
+             Firefox / Chrome would attempt to parse this as a source map and \
+             surface `JSON.parse: unexpected end of data` to the user.",
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn existing_static_assets_still_return_200() {
+    // Regression guard for the previous fix: turning the
+    // missing-asset path into a 404 must not flip existing
+    // assets to 404 too. We probe a known-present vendor file
+    // and assert its body starts with the right banner.
+    let base = serve_once().await;
+    for (path, banner) in [
+        ("/static/vendor/ort/ort.min.js", "ort"),
+        ("/static/vendor/sanitize/purify.min.js", "DOMPurify"),
+    ] {
+        let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "{path} regressed: existing vendor asset no longer served with 200 after the missing-asset 404 fix"
+        );
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains(banner),
+            "{path} body did not contain expected banner `{banner}` — was the asset replaced?"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_vendors_are_served_with_js_mime() {
     let base = serve_once().await;
 

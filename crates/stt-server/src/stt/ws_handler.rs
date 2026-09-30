@@ -372,10 +372,28 @@ pub async fn static_path_handler(
 
 fn serve_static(path: &str) -> axum::response::Response {
     use axum::body::Body;
+    use axum::http::{header, StatusCode};
     use axum::response::Response;
-    let bytes = StaticAssets::get(path)
-        .map(|f| f.data.into_owned())
-        .unwrap_or_default();
+    let Some(file) = StaticAssets::get(path) else {
+        // Return a real 404 (not "200 OK" + an empty body). Firefox's
+        // source-map resolver, the browser's preload scanner, and
+        // service-worker caches all key off the status code: a 200
+        // with zero bytes is treated as "the asset exists and is
+        // broken", which surfaces as a `JSON.parse: unexpected end
+        // of data` console error every time the user opens DevTools.
+        // `.map` files in particular are fetched opportunistically
+        // by Firefox for every minified vendor script — `ort.min.js`,
+        // `purify.min.js`, `marked.min.js`, the KaTeX bundle — and
+        // we deliberately do NOT ship those `.map` files in the
+        // binary (the devtools UX in production is not worth the
+        // extra megabytes).
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(Body::from(format!("not found: {path}")))
+            .expect("static 404 builder is valid");
+    };
+    let bytes = file.data.into_owned();
     let mut response = Response::new(Body::from(bytes));
     let h = response.headers_mut();
     h.insert(
