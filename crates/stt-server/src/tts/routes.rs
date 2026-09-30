@@ -80,7 +80,7 @@ pub async fn audio_speech(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SpeechRequest>,
 ) -> Response {
-    let Some(tts) = state.tts.as_ref() else {
+    let Some(tts) = state.tts.as_ref().map(|t| &t.engine) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(
@@ -180,7 +180,7 @@ pub async fn audio_speech(
 /// UI's voice selectors so they only ever offer voices that actually
 /// exist on disk.
 pub async fn audio_voices(State(state): State<Arc<AppState>>) -> Response {
-    let Some(tts) = state.tts.as_ref() else {
+    let Some(tts) = state.tts.as_ref().map(|t| &t.engine) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(

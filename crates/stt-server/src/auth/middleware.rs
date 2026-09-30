@@ -19,38 +19,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::auth::error::AuthError;
 use crate::auth::session::{self, AuthUser, SessionSource};
-use crate::auth::store::AuthStore;
-
-/// Shared state passed into the middleware closure. Cheap to
-/// clone (Arc-wrapped store + config). Also used by the auth
-/// handlers as their `State<S>` so the auth subtree can be merged
-/// into the application router without a state-type mismatch
-/// (axum 0.7 requires the merged routers to share one `S`).
-#[derive(Clone, Debug)]
-pub struct AuthState {
-    pub store: AuthStore,
-    pub cfg: std::sync::Arc<crate::config::Config>,
-    /// OIDC sub-state — `None` when OIDC is not enabled. Handlers
-    /// unwrap this through the `oidc()` accessor.
-    pub oidc: Option<crate::auth::oidc::OidcState>,
-    /// Passkey sub-state — `None` when passkey is not enabled.
-    pub passkey: Option<crate::auth::passkey::PasskeyState>,
-    /// Login-attempt rate limiter. Shared between the middleware
-    /// (unused) and the password login handler.
-    pub rate_limiter: crate::auth::login_rate_limit::LoginRateLimiter,
-}
-
-impl AuthState {
-    pub fn new(store: AuthStore, cfg: std::sync::Arc<crate::config::Config>) -> Self {
-        Self {
-            store,
-            cfg,
-            oidc: None,
-            passkey: None,
-            rate_limiter: crate::auth::login_rate_limit::LoginRateLimiter::new(),
-        }
-    }
-}
+use crate::state::AuthState;
 
 /// Extract an `AuthUser` from the request headers. Returns
 /// `Ok(Some(user))` when the cookie/bearer resolves to a live

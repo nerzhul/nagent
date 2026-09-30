@@ -76,7 +76,11 @@ pub async fn agent_invoke(
     let user_id = auth_user
         .map(|axum::Extension(u)| u.id)
         .unwrap_or_else(uuid::Uuid::nil);
-    let services = state.services.clone();
+    let services = state
+        .auth
+        .as_ref()
+        .map(|a| a.services.clone())
+        .unwrap_or_else(|| crate::agents::ServiceRegistry::empty().into_arc());
     let ctx = crate::agents::UserContext::for_tests(user_id, services);
 
     match agent.invoke(&ctx, args).await {

@@ -52,7 +52,7 @@ pub async fn ws_upgrade(
     let client_ip = peer_ip.map(|peer_ip| {
         crate::rate_limit::resolve_client_ip(&headers, peer_ip, &state.config.trusted_proxies)
     });
-    let limiter = state.stt_rate_limiter.clone();
+    let limiter = state.stt.rate_limiter.clone();
     let state_for_conn = Arc::clone(&state);
 
     // Decide whether to upgrade before consuming the upgrade itself;
@@ -95,24 +95,24 @@ pub async fn ws_upgrade(
 /// available.
 pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>, peer_ip: Option<IpAddr>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let limiter = app.stt_rate_limiter.clone();
+    let limiter = app.stt.rate_limiter.clone();
 
     // Register BEFORE any send so we know our session ID and the outbound
     // channel is owned exclusively by this task.
-    let (session_id, _state, mut outbound_rx) = register(&app.sessions, 64);
+    let (session_id, _state, mut outbound_rx) = register(&app.stt.sessions, 64);
 
     info!(%session_id, "ws connection opened");
 
     // Send BackendInfo immediately so the client knows which model/GPU is in use.
     let info = BackendInfo {
-        model_id: app.backend.model_id().to_string(),
-        gpu_backend: app.backend.backend_name().to_string(),
+        model_id: app.stt.backend.model_id().to_string(),
+        gpu_backend: app.stt.backend.backend_name().to_string(),
     };
     match encode_frame(&Payload::Backend(info)) {
         Ok(bytes) => {
             if ws_tx.send(Message::Binary(bytes)).await.is_err() {
                 warn!(%session_id, "failed to send BackendInfo, closing");
-                unregister(&app.sessions, session_id);
+                unregister(&app.stt.sessions, session_id);
                 return;
             }
         }
@@ -211,7 +211,7 @@ pub async fn ws_connection(socket: WebSocket, app: Arc<AppState>, peer_ip: Optio
 
     // Connection ended — remove ourselves from the map so subsequent
     // results are dropped instead of being routed into a dead channel.
-    unregister(&app.sessions, session_id);
+    unregister(&app.stt.sessions, session_id);
     info!(%session_id, "ws connection closed");
 }
 
@@ -237,7 +237,7 @@ async fn handle_inbound(
             )
             .map_err(InboundError::Validation)?;
             // Snapshot the Arc out of the DashMap shard before any await.
-            let state_arc = app.sessions.get(&session_id).map(|s| s.value().clone());
+            let state_arc = app.stt.sessions.get(&session_id).map(|s| s.value().clone());
             if let Some(state) = state_arc {
                 state.touch();
                 state.set_language(normalize_lang_hint(start.lang_hint));
@@ -251,7 +251,7 @@ async fn handle_inbound(
             debug!(%session_id, ?cfg, "Config");
             FrameError::validate_config(&app.config.limits, cfg.language.as_deref())
                 .map_err(InboundError::Validation)?;
-            let state_arc = app.sessions.get(&session_id).map(|s| s.value().clone());
+            let state_arc = app.stt.sessions.get(&session_id).map(|s| s.value().clone());
             if let Some(state) = state_arc {
                 state.touch();
                 state.set_language(normalize_lang_hint(cfg.language));
@@ -263,7 +263,7 @@ async fn handle_inbound(
                 .map_err(InboundError::Validation)?;
             // Snapshot config from the session before we send the job;
             // never hold a DashMap shard lock across an .await.
-            let snapshot = app.sessions.get(&session_id).map(|s| s.value().clone());
+            let snapshot = app.stt.sessions.get(&session_id).map(|s| s.value().clone());
             let Some(state) = snapshot else {
                 debug!(%session_id, "session already gone, dropping audio");
                 return Ok(());
@@ -285,14 +285,15 @@ async fn handle_inbound(
             // If the targeted worker's queue is full (or the pool has
             // been shut down) the send fails — surface an error to the
             // client so it knows the request did not reach a worker.
-            app.job_tx
+            app.stt
+                .job_tx
                 .send(job)
                 .await
                 .map_err(|_| InboundError::WorkerUnavailable)?;
 
             // Spawn a small task that awaits the result and pushes it through
             // the result router (which looks up the session by ID).
-            let map = Arc::clone(&app.sessions);
+            let map = Arc::clone(&app.stt.sessions);
             tokio::spawn(async move {
                 match resp_rx.await {
                     Ok(resp) => {
@@ -403,7 +404,7 @@ fn serve_static(path: &str) -> axum::response::Response {
 /// not executed by the browser — only read via
 /// `/healthz` handler.
 pub async fn healthz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if state.ready.load(std::sync::atomic::Ordering::Acquire) {
+    if state.stt.ready.load(std::sync::atomic::Ordering::Acquire) {
         (axum::http::StatusCode::OK, "ok")
     } else {
         (axum::http::StatusCode::SERVICE_UNAVAILABLE, "starting")

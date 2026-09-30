@@ -107,10 +107,14 @@ pub async fn login_handler(
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, AuthError> {
     let ip = addr.ip();
+    let auth = state
+        .auth
+        .as_ref()
+        .expect("auth must be enabled for login_handler");
     if let LoginRateLimitDecision::Deny {
         retry_after_secs,
         kind: _,
-    } = state.auth_rate_limiter.check(&body.email, ip)
+    } = auth.login_rate_limiter.check(&body.email, ip)
     {
         tracing::warn!(
             event = "auth.password.login",
@@ -190,7 +194,12 @@ pub async fn login_handler(
         .take_plaintext_token()
         .ok_or_else(|| AuthError::Internal("create_session did not mint a token".into()))?;
 
-    state.auth_rate_limiter.reset(&body.email, ip);
+    state
+        .auth
+        .as_ref()
+        .expect("auth must be enabled for login_handler")
+        .login_rate_limiter
+        .reset(&body.email, ip);
 
     // The log line includes a 6-byte prefix of the SHA-256 of
     // the token for log correlation without leaking the
@@ -290,10 +299,11 @@ pub async fn register_handler(
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Response, AuthError> {
-    let auth_state = crate::auth::middleware::AuthState::new(
-        require_auth_store(&state)?.clone(),
-        state.config.clone(),
-    );
+    let auth_state = state
+        .auth
+        .as_ref()
+        .expect("auth must be enabled for register_handler")
+        .clone();
     let _existing = crate::auth::middleware::extract_auth_user(&headers, &auth_state)
         .await?
         .ok_or(AuthError::Unauthenticated)?;

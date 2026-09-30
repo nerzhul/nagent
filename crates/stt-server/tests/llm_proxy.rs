@@ -18,14 +18,10 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
-use stt_core::{MockBackend, PoolDispatch, WhisperBackend};
-use stt_server::agents::ServiceRegistry;
-use stt_server::config::{LlmConfig, RateLimitConfig};
+use stt_server::config::LlmConfig;
 use stt_server::http::build_router;
 use stt_server::llm::LlmClient;
-use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-use stt_server::stt::session::SessionMap;
-use stt_server::{AppState, Config as ServerConfig};
+use stt_server::testing::app_state;
 use tokio::net::TcpListener;
 
 /// Spawn a mock upstream that records the incoming request and
@@ -106,72 +102,27 @@ async fn start_test_server_with_llm_and_system_prompt(
     String,
     Arc<tokio::sync::Mutex<Option<axum::http::HeaderMap>>>,
 ) {
-    let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
-
-    let server_cfg = Arc::new(ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
-        max_queue: 32,
-        inference_workers: None,
-        session_idle_timeout: Duration::from_secs(30),
-        infer_timeout: Duration::from_secs(30),
-        limits: stt_server::config::LimitsConfig::default(),
-        rate_limit: RateLimitConfig::default(),
-        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
-        llm: LlmConfig {
-            enabled: true,
-            base_url: upstream_url,
-            default_model: "llama3.1".into(),
-            api_key,
-            inbound_auth_key: None,
-            auth_mode: stt_server::config::LlmAuthMode::Forward,
-            request_timeout: Duration::from_secs(120),
-            cors_allow_origins: vec![],
-            system_prompt,
-            allow_user_location: true,
-            allow_user_timezone: true,
-        },
-        agents: stt_server::config::AgentConfig::default(),
-        tts: stt_server::config::TtsConfig::default(),
-        auth: stt_server::config::AuthConfig::default(),
-        documents: stt_server::config::DocumentsConfig::default(),
-    });
-
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let llm_cfg = Arc::new(server_cfg.llm.clone());
-    let llm_client =
-        LlmClient::new(llm_cfg).expect("LlmClient::new should succeed for test config");
-
-    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
-    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
+    let llm_cfg = LlmConfig {
+        enabled: true,
+        base_url: upstream_url,
+        default_model: "llama3.1".into(),
+        api_key,
+        inbound_auth_key: None,
+        auth_mode: stt_server::config::LlmAuthMode::Forward,
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins: vec![],
+        system_prompt,
+        allow_user_location: true,
+        allow_user_timezone: true,
+    };
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
 
     let on_request = Arc::new(tokio::sync::Mutex::new(None));
 
-    let state = Arc::new(AppState {
-        backend,
-        sessions: Arc::clone(&sessions),
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: server_cfg,
-        llm: Some(llm_client),
-        agents: None,
-        tts: None,
-        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
-            RateLimitConfig::default().stt_per_min,
-        )),
-        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
-            RateLimitConfig::default().llm_per_min,
-        )),
-        auth_store: None,
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    });
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    let state = builder.with_llm(llm_client).build();
 
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -195,65 +146,7 @@ async fn start_test_server_with_llm_and_system_prompt(
 /// Build a stt-server with `LLM_ENABLED=false`. The `/v1/*` routes
 /// are never registered, so the chat view sees a clean 404.
 async fn start_test_server_disabled() -> String {
-    let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
-
-    let server_cfg = Arc::new(ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
-        max_queue: 32,
-        inference_workers: None,
-        session_idle_timeout: Duration::from_secs(30),
-        infer_timeout: Duration::from_secs(30),
-        limits: stt_server::config::LimitsConfig::default(),
-        rate_limit: RateLimitConfig::default(),
-        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
-        llm: LlmConfig {
-            enabled: false,
-            base_url: "http://localhost:11434".into(),
-            default_model: "llama3.1".into(),
-            api_key: None,
-            inbound_auth_key: None,
-            auth_mode: stt_server::config::LlmAuthMode::Forward,
-            request_timeout: Duration::from_secs(120),
-            cors_allow_origins: vec![],
-            system_prompt: None,
-            allow_user_location: true,
-            allow_user_timezone: true,
-        },
-        agents: stt_server::config::AgentConfig::default(),
-        tts: stt_server::config::TtsConfig::default(),
-        auth: stt_server::config::AuthConfig::default(),
-        documents: stt_server::config::DocumentsConfig::default(),
-    });
-
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
-    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
-    let state = Arc::new(AppState {
-        backend,
-        sessions: Arc::clone(&sessions),
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: server_cfg,
-        llm: None,
-        agents: None,
-        tts: None,
-        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
-            RateLimitConfig::default().stt_per_min,
-        )),
-        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
-            RateLimitConfig::default().llm_per_min,
-        )),
-        auth_store: None,
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    });
+    let state = app_state().build();
 
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -603,67 +496,27 @@ async fn start_test_server_with_llm_auth(
     String,
     Arc<tokio::sync::Mutex<Option<axum::http::HeaderMap>>>,
 ) {
-    let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
-    let server_cfg = Arc::new(ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
-        max_queue: 32,
-        inference_workers: None,
-        session_idle_timeout: Duration::from_secs(30),
-        infer_timeout: Duration::from_secs(30),
-        limits: stt_server::config::LimitsConfig::default(),
-        rate_limit: RateLimitConfig::default(),
-        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
-        llm: LlmConfig {
-            enabled: true,
-            base_url: upstream_url,
-            default_model: "llama3.1".into(),
-            api_key: None,
-            inbound_auth_key,
-            auth_mode,
-            request_timeout: Duration::from_secs(120),
-            cors_allow_origins: vec![],
-            system_prompt: None,
-            allow_user_location: true,
-            allow_user_timezone: true,
-        },
-        agents: stt_server::config::AgentConfig::default(),
-        tts: stt_server::config::TtsConfig::default(),
-        auth: stt_server::config::AuthConfig::default(),
-        documents: stt_server::config::DocumentsConfig::default(),
-    });
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let llm_cfg = Arc::new(server_cfg.llm.clone());
-    let llm_client =
-        LlmClient::new(llm_cfg).expect("LlmClient::new should succeed for test config");
-    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
-    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
+    let llm_cfg = LlmConfig {
+        enabled: true,
+        base_url: upstream_url,
+        default_model: "llama3.1".into(),
+        api_key: None,
+        inbound_auth_key,
+        auth_mode,
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins: vec![],
+        system_prompt: None,
+        allow_user_location: true,
+        allow_user_timezone: true,
+    };
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
     let on_request = Arc::new(tokio::sync::Mutex::new(None));
-    let state = Arc::new(AppState {
-        backend,
-        sessions: Arc::clone(&sessions),
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: server_cfg,
-        llm: Some(llm_client),
-        agents: None,
-        tts: None,
-        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
-            RateLimitConfig::default().stt_per_min,
-        )),
-        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
-            RateLimitConfig::default().llm_per_min,
-        )),
-        auth_store: None,
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    });
+
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    let state = builder.with_llm(llm_client).build();
+
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

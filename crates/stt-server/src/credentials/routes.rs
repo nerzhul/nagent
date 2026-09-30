@@ -58,15 +58,20 @@ pub fn build_protected_credentials_router(
     state: Arc<crate::AppState>,
 ) -> axum::Router<Arc<crate::AppState>> {
     let cred_state = state
-        .credential_resolver
+        .auth
         .as_ref()
+        .and_then(|a| a.credential_resolver.as_ref())
         .map(|_resolver| CredentialState {
             // The resolver holds the store; for routes we re-resolve via
             // `AppState` so we can also write rows (the resolver only
             // exposes reads). Pulling it off the resolver is safe — the
             // `AuthStore` is `Clone` and shares the same pool.
             store: auth_store_from_resolver(state.clone()),
-            services: state.services.clone(),
+            services: state
+                .auth
+                .as_ref()
+                .map(|a| a.services.clone())
+                .unwrap_or_else(|| crate::agents::ServiceRegistry::empty().into_arc()),
             // The resolver owns the `CredentialsKey`; reach in via the
             // AppState's separate stash because the routes need to
             // encrypt on PUT (the resolver only decrypts).

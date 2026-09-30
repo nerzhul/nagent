@@ -67,7 +67,11 @@ pub async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, LlmError> {
-    let llm = state.llm.as_ref().ok_or(LlmError::Disabled)?;
+    let llm = state
+        .llm
+        .as_ref()
+        .map(|l| &l.client)
+        .ok_or(LlmError::Disabled)?;
 
     let req: ChatRequest = serde_json::from_slice(&body)
         .map_err(|e| LlmError::BadRequest(format!("invalid json body: {e}")))?;
@@ -274,7 +278,11 @@ pub async fn chat_completions(
 /// `[{ "id": "<OLLAMA_MODEL>" }]` so the UI dropdown always has at
 /// least one entry.
 pub async fn models_list(State(state): State<Arc<AppState>>) -> Result<Response, LlmError> {
-    let llm = state.llm.as_ref().ok_or(LlmError::Disabled)?;
+    let llm = state
+        .llm
+        .as_ref()
+        .map(|l| &l.client)
+        .ok_or(LlmError::Disabled)?;
 
     let url = format!("{}/v1/models", llm.cfg.base_url.trim_end_matches('/'));
     debug!(%url, "fetching upstream models");

@@ -19,17 +19,10 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use stt_server::auth::store::AuthStore;
+use stt_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig};
 use stt_server::http::build_router;
-use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-use stt_server::stt::session::SessionMap;
-use stt_server::{
-    agents::ServiceRegistry,
-    config::{
-        AgentConfig, AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig,
-        RateLimitConfig, TtsConfig,
-    },
-    AppState, Config as ServerConfig,
-};
+use stt_server::testing::app_state;
+use stt_server::AppState;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -39,35 +32,6 @@ use uuid::Uuid;
 /// because the point of the test is the HTTP gating, not the
 /// audio pipeline.
 async fn build_state_with_auth() -> Arc<AppState> {
-    // Use the real Config plumbing so we exercise the same
-    // validation as `main`. `auth.enabled = true` requires
-    // `backends` and `[auth.db]` to be set.
-    let toml_text = r#"
-        [server]
-        whisper_model_path = "/tmp/fake-model.bin"
-        [auth]
-        enabled = true
-        backends = ["local"]
-        public_url = "https://example.com"
-        [auth.db]
-        backend = "sqlite"
-        url = "sqlite://file:gating_test_{}?mode=memory&cache=shared"
-    "#;
-    // The `{0}` placeholder is filled per-test so the unique
-    // memory file guarantees a fresh schema.
-    let toml_text = toml_text.replace(
-        "sqlite://file:gating_test_{}?mode=memory&cache=shared",
-        &format!(
-            "sqlite://file:gating_test_{}?mode=memory&cache=shared",
-            Uuid::new_v4()
-        ),
-    );
-    let toml: stt_server::config_file::TomlConfig =
-        toml::from_str(&toml_text).expect("TOML must parse");
-    let mut cfg = ServerConfig::from_env_with_toml(Some(&toml)).expect("config must load");
-    // Sanity-check the assumptions this test depends on.
-    assert!(cfg.auth.enabled);
-    assert_eq!(cfg.auth.backends, vec![AuthBackendKind::Local]);
     let auth_cfg = AuthConfig {
         enabled: true,
         backends: vec![AuthBackendKind::Local],
@@ -89,44 +53,11 @@ async fn build_state_with_auth() -> Arc<AppState> {
         .await
         .expect("auth store must connect");
     auth_store.migrate().await.expect("migrations must apply");
-    // Force a different DB URL into the config to make sure the
-    // router sees the same handle that we use for user creation.
-    cfg.auth = auth_cfg;
 
-    let server_cfg = Arc::new(cfg);
-    let backend: Arc<dyn stt_core::WhisperBackend> =
-        Arc::new(stt_core::MockBackend::new("test-model"));
-
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
-    let job_tx = stt_core::PoolDispatch::from_single_sender(job_tx_inner);
-    let (_resp_tx, _resp_rx) = tokio::sync::mpsc::channel::<stt_core::InferResponse>(16);
-
-    Arc::new(AppState {
-        backend,
-        sessions,
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: server_cfg,
-        llm: None,
-        agents: None,
-        tts: None,
-        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
-            RateLimitConfig::default().stt_per_min,
-        )),
-        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
-            RateLimitConfig::default().llm_per_min,
-        )),
-        auth_store: Some(auth_store),
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    })
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).auth = auth_cfg;
+    builder = builder.with_auth(auth_store);
+    builder.build()
 }
 
 #[tokio::test]
@@ -282,7 +213,12 @@ async fn api_me_succeeds_with_valid_session_cookie() {
     // Seed a local user + a session so the test can carry a
     // real cookie. The auth router is the only consumer of the
     // user/session rows, so we go through the store directly.
-    let auth_store = state.auth_store.clone().expect("auth_store");
+    let auth_store = state
+        .auth
+        .as_ref()
+        .expect("auth must be wired")
+        .store
+        .clone();
     let user_id = auth_store
         .create_user("alice@example.com", "Alice", "local", Some(b"hash"))
         .await
@@ -341,7 +277,7 @@ async fn logout_requires_auth() {
 /// every helper.
 #[allow(dead_code)]
 fn _suppress_unused_warnings() {
-    let _ = (AgentConfig::default(), TtsConfig::default());
+    let _: () = ();
     let _ = LlmConfig {
         enabled: false,
         base_url: String::new(),

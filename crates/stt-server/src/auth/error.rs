@@ -54,30 +54,38 @@ pub enum AuthError {
 /// `Arc<AppState>`. Refuses with `AuthError::Internal` if the
 /// store is not configured — which would be a bug since the auth
 /// subtree is only mounted when `auth.enabled = true` (which
-/// `auto_bootstrap` enforces by populating `state.auth_store`).
+/// `auto_bootstrap` enforces by populating `state.auth`).
 pub fn require_auth_store(
     state: &std::sync::Arc<crate::AppState>,
 ) -> Result<&crate::auth::AuthStore, AuthError> {
-    state.auth_store.as_ref().ok_or_else(|| {
-        AuthError::Internal(
-            "auth_store is not configured; the auth subtree should not be mounted when auth is disabled".into(),
-        )
-    })
+    state
+        .auth
+        .as_ref()
+        .map(|a| &a.store)
+        .ok_or_else(|| {
+            AuthError::Internal(
+                "auth_store is not configured; the auth subtree should not be mounted when auth is disabled".into(),
+            )
+        })
 }
 
 /// Helper for auth handlers: pull the passkey sub-state off an
 /// `Arc<AppState>`. Returns `AuthError::Internal` when passkey is
 /// not enabled — the passkey routes are only mounted when
-/// `state.auth_passkey.is_some()`, so hitting this in a handler
+/// `state.auth.passkey.is_some()`, so hitting this in a handler
 /// indicates a wiring bug.
 pub fn require_passkey_state(
     state: &std::sync::Arc<crate::AppState>,
 ) -> Result<&crate::auth::passkey::PasskeyState, AuthError> {
-    state.auth_passkey.as_ref().ok_or_else(|| {
-        AuthError::Internal(
-            "passkey backend is not configured; the passkey routes should not be mounted when passkey is disabled".into(),
-        )
-    })
+    state
+        .auth
+        .as_ref()
+        .and_then(|a| a.passkey.as_ref())
+        .ok_or_else(|| {
+            AuthError::Internal(
+                "passkey backend is not configured; the passkey routes should not be mounted when passkey is disabled".into(),
+            )
+        })
 }
 
 /// Helper for auth handlers: pull the OIDC sub-state off an
@@ -86,11 +94,15 @@ pub fn require_passkey_state(
 pub fn require_oidc_state(
     state: &std::sync::Arc<crate::AppState>,
 ) -> Result<&crate::auth::oidc::OidcState, AuthError> {
-    state.auth_oidc.as_ref().ok_or_else(|| {
-        AuthError::Internal(
-            "OIDC backend is not configured; the OIDC routes should not be mounted when OIDC is disabled".into(),
-        )
-    })
+    state
+        .auth
+        .as_ref()
+        .and_then(|a| a.oidc.as_ref())
+        .ok_or_else(|| {
+            AuthError::Internal(
+                "OIDC backend is not configured; the OIDC routes should not be mounted when OIDC is disabled".into(),
+            )
+        })
 }
 
 impl IntoResponse for AuthError {

@@ -115,12 +115,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // When `auth.enabled = false`: nothing is mounted; the server
     // keeps the pre-PR1 single-user trust boundary.
     if state.config.auth.enabled {
-        let auth_store = state
-            .auth_store
+        let auth_state = state
+            .auth
             .clone()
-            .expect("auth_store must be Some when auth is enabled");
+            .expect("auth must be Some when auth is enabled");
         let auth_layer = axum::middleware::from_fn_with_state(
-            crate::auth::middleware::AuthState::new(auth_store, state.config.clone()),
+            auth_state,
             crate::auth::middleware::require_auth_middleware,
         );
         let login = crate::auth::router::build_public_auth_router(state.clone());
@@ -174,10 +174,21 @@ fn v1_envelope(state: &Arc<AppState>, router: Router<Arc<AppState>>) -> Router<A
     let cors_origins = state
         .llm
         .as_ref()
-        .map(|l| l.cfg().cors_allow_origins.clone())
+        .map(|l| l.client.cfg().cors_allow_origins.clone())
         .unwrap_or_default();
     let cors = security_headers::cors_layer(&cors_origins);
-    let llm_limiter = state.llm_rate_limiter.clone();
+    let llm_limiter = state
+        .llm
+        .as_ref()
+        .map(|l| l.rate_limiter.clone())
+        .unwrap_or_else(|| {
+            // No LLM proxy wired — the envelope is unused, so any
+            // limiter would do; build a permissive default so a
+            // future code path that mounts the envelope without an
+            // LLM still works (the auth middleware will gate before
+            // it).
+            crate::rate_limit::RateLimiter::new(crate::rate_limit::RateLimitPolicy::llm(0))
+        });
     // Auth always reads from the global `LlmConfig` so operators can
     // gate `/v1/*` without enabling the LLM proxy — the two
     // subsystems share the `[llm]` table on purpose so there is one

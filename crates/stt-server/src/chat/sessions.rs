@@ -262,11 +262,15 @@ pub async fn mint_handler(
     // persists the returned id in localStorage and reuses it
     // across page reloads until the server rejects it with 403
     // (e.g. logout from another tab).
-    let chat_sessions = state.chat_sessions.as_ref().ok_or_else(|| {
-        ChatSessionError::Sqlx(sqlx::Error::Protocol(
-            "chat_sessions handle is not wired".into(),
-        ))
-    })?;
+    let chat_sessions = state
+        .chat_sessions
+        .as_ref()
+        .map(|c| &c.sessions)
+        .ok_or_else(|| {
+            ChatSessionError::Sqlx(sqlx::Error::Protocol(
+                "chat_sessions handle is not wired".into(),
+            ))
+        })?;
     let id = uuid::Uuid::new_v4();
     chat_sessions.bind(id, user.id).await?;
     Ok(axum::Json(ChatSessionResponse { id }))

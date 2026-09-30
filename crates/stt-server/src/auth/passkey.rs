@@ -37,7 +37,7 @@ use webauthn_rs::prelude::*;
 
 use crate::auth::error::AuthError;
 use crate::auth::error::{require_auth_store, require_passkey_state};
-use crate::auth::middleware::{check_csrf, extract_auth_user, AuthState};
+use crate::auth::middleware::{check_csrf, extract_auth_user};
 use crate::auth::session::{self, AuthUser, SessionSource};
 use crate::auth::store::{AuthStore, NewAuthEvent, NewPasskeyRecord};
 
@@ -157,7 +157,11 @@ pub async fn register_start_handler(
     if !state.config.auth.passkey.self_registration {
         return Err(AuthError::Forbidden);
     }
-    let auth_state = AuthState::new(require_auth_store(&state)?.clone(), state.config.clone());
+    let auth_state = state
+        .auth
+        .as_ref()
+        .expect("auth must be enabled for passkey_register_start")
+        .clone();
     let user = extract_auth_user(&headers, &auth_state)
         .await?
         .ok_or(AuthError::Unauthenticated)?;

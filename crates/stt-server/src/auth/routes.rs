@@ -108,10 +108,10 @@ pub async fn logout_handler(
     // from the per-route test helpers — be defensive.
     let user = crate::auth::middleware::extract_auth_user(
         &headers,
-        &crate::auth::middleware::AuthState::new(
-            require_auth_store(&state)?.clone(),
-            state.config.clone(),
-        ),
+        state
+            .auth
+            .as_ref()
+            .expect("auth must be enabled for logout_handler"),
     )
     .await?
     .ok_or(AuthError::Unauthenticated)?;
@@ -217,7 +217,7 @@ mod tests {
         axum::Json(serde_json::json!({ "email": user.email }))
     }
 
-    fn whoami_router(state: crate::auth::middleware::AuthState) -> Router {
+    fn whoami_router(state: crate::auth::AuthState) -> Router {
         Router::new()
             .route("/api/me", get(me_handler))
             .layer(from_fn_with_state(
@@ -247,7 +247,7 @@ mod tests {
             .plaintext_token
             .clone()
             .expect("create_session must mint a plaintext token");
-        let state = crate::auth::middleware::AuthState::new(store.clone(), cfg.clone());
+        let state = crate::auth::AuthState::new(store.clone(), cfg.clone());
         let app = whoami_router(state.clone());
         let cookie = format!("{}={}", cfg.auth.cookie_name(), session_token);
 
@@ -328,7 +328,7 @@ mod tests {
             .plaintext_token
             .clone()
             .expect("create_session must mint a plaintext token");
-        let state = crate::auth::middleware::AuthState::new(store.clone(), cfg.clone());
+        let state = crate::auth::AuthState::new(store.clone(), cfg.clone());
         let app = whoami_router(state.clone());
 
         // 1. Bearer works before logout.

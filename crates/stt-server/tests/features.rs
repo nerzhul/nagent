@@ -13,20 +13,15 @@
 //! `tower::ServiceExt::oneshot`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use std::time::Duration;
 use stt_server::auth::store::AuthStore;
-use stt_server::config::AuthConfig;
+use stt_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmConfig};
 use stt_server::http::build_router;
-use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-use stt_server::stt::session::SessionMap;
-use stt_server::{
-    agents::ServiceRegistry,
-    config::{AuthBackendKind, AuthDbConfig, LlmConfig, RateLimitConfig},
-    AppState,
-};
+use stt_server::testing::app_state;
+use stt_server::AppState;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -58,40 +53,11 @@ async fn build_state_with_features(
         .expect("auth store must connect");
     auth_store.migrate().await.expect("migrations must apply");
 
-    // Build a Config that enables/disables the optional subsystems.
-    // `Config` has no Default impl — we go through from_env_with_toml
-    // with a TOML overlay that sets the minimum required fields.
-    let toml_text = format!(
-        r#"
-            [server]
-            whisper_model_path = "/tmp/fake-model.bin"
-            [auth]
-            enabled = true
-            backends = ["local"]
-            public_url = "https://example.com"
-            [auth.db]
-            backend = "sqlite"
-            url = "sqlite::memory:"
-            [documents]
-            enabled = {}
-        "#,
-        documents_enabled
-    );
-    let toml: stt_server::config_file::TomlConfig =
-        toml::from_str(&toml_text).expect("TOML must parse");
-    let mut cfg =
-        stt_server::config::Config::from_env_with_toml(Some(&toml)).expect("config from env");
-    cfg.auth.db = auth_cfg.db.clone();
-    cfg.documents.enabled = documents_enabled;
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).auth = auth_cfg.clone();
+    Arc::make_mut(&mut builder.config).documents.enabled = documents_enabled;
+    builder = builder.with_auth(auth_store.clone());
 
-    let backend: Arc<dyn stt_core::WhisperBackend> =
-        Arc::new(stt_core::MockBackend::new("test-model"));
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
-    let job_tx = stt_core::PoolDispatch::from_single_sender(job_tx_inner);
-    let (_resp_tx, _resp_rx) = tokio::sync::mpsc::channel::<stt_core::InferResponse>(16);
-
-    // Build optional subsystems based on flags.
     let documents = if documents_enabled {
         Some(stt_server::documents::DocumentStore::new(
             auth_store.clone(),
@@ -101,39 +67,18 @@ async fn build_state_with_features(
     } else {
         None
     };
-    let chat_sessions = Some(stt_server::chat::sessions::ChatSessions::new(
+    if let Some(store) = documents {
+        builder = builder.with_documents(store);
+    }
+    builder = builder.with_chat_sessions(stt_server::chat::sessions::ChatSessions::new(
         auth_store.clone(),
     ));
-
-    let state = Arc::new(AppState {
-        backend,
-        sessions,
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: Arc::new(cfg),
-        llm: if llm_enabled {
-            Some(stt_server::llm::LlmClient::new(Arc::new(LlmConfig::default())).expect("LLM stub"))
-        } else {
-            None
-        },
-        agents: None,
-        tts: None,
-        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
-            RateLimitConfig::default().stt_per_min,
-        )),
-        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
-            RateLimitConfig::default().llm_per_min,
-        )),
-        auth_store: Some(auth_store.clone()),
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents,
-        chat_sessions,
-    });
+    if llm_enabled {
+        builder = builder.with_llm(
+            stt_server::llm::LlmClient::new(Arc::new(LlmConfig::default())).expect("LLM stub"),
+        );
+    }
+    let state = builder.build();
     (state, auth_store)
 }
 

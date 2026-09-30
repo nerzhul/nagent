@@ -40,7 +40,8 @@ use std::time::Duration;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
-use stt_core::{MockBackend, PoolDispatch, WhisperBackend};
+// stt_core is no longer imported here — the phase-5.B test
+// builder creates the backend + worker pool internally.
 #[cfg(feature = "calculate-agent")]
 use stt_server::agents::calculate_agent::CalculateAgent;
 #[cfg(feature = "datetime-agent")]
@@ -66,7 +67,6 @@ use stt_server::config::{
 };
 use stt_server::http::build_router;
 use stt_server::llm::LlmClient;
-use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
 use stt_server::stt::session::SessionMap;
 use stt_server::{AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
@@ -173,36 +173,22 @@ fn make_app_state(
     server_cfg: Arc<ServerConfig>,
     llm_client: Option<LlmClient>,
     agents: Option<AgentRegistry>,
-    sessions: SessionMap,
+    _sessions: SessionMap,
 ) -> Arc<AppState> {
-    let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
-    let (job_tx_inner, _job_rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
-    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
-    Arc::new(AppState {
-        backend,
-        sessions,
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: server_cfg,
-        llm: llm_client,
-        agents,
-        tts: None,
-        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
-            RateLimitConfig::default().stt_per_min,
-        )),
-        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
-            RateLimitConfig::default().llm_per_min,
-        )),
-        auth_store: None,
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    })
+    // The `sessions` argument is kept for backwards compatibility
+    // with existing test bodies; the phase-5.B builder manages its
+    // own session map. Tests that need to assert on session state
+    // reach into the returned `AppState.stt.sessions` instead.
+    let _ = _sessions;
+    let mut builder = stt_server::testing::app_state();
+    builder.config = server_cfg;
+    if let Some(client) = llm_client {
+        builder = builder.with_llm(client);
+    }
+    if let Some(registry) = agents {
+        builder = builder.with_agents(registry);
+    }
+    builder.build()
 }
 
 async fn start_test_server(state: Arc<AppState>) -> String {

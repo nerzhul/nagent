@@ -79,13 +79,14 @@ pub fn build_documents_router(state: Arc<crate::AppState>) -> axum::Router<Arc<c
     // are set.
     let store = state
         .documents
-        .clone()
+        .as_ref()
+        .map(|d| d.store.clone())
         .expect("documents router requires state.documents");
     let cfg = state.config.documents.clone();
     let cors_origins = state
         .llm
         .as_ref()
-        .map(|l| l.cfg().cors_allow_origins.clone())
+        .map(|l| l.client.cfg().cors_allow_origins.clone())
         .unwrap_or_default();
     let _ = cors_origins; // applied by the caller via `.layer(cors)`
     axum::Router::new()
@@ -224,7 +225,8 @@ async fn verify_session_binding(
         .chat_sessions
         .as_ref()
         .ok_or(DocumentRouteError::Forbidden)?;
-    cs.touch_and_verify(session_id, user_id)
+    cs.sessions
+        .touch_and_verify(session_id, user_id)
         .await
         .map_err(|_| DocumentRouteError::Forbidden)?;
     Ok(())

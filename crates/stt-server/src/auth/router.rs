@@ -30,14 +30,14 @@ use crate::auth::routes::{
 /// arrives without a session cookie because the user just came back
 /// from the IdP, the password form is sent from a logged-out browser.
 ///
-/// The OIDC and passkey sub-states are pre-built in `main.rs` and
-/// stashed on `AppState`; the OIDC `build_state` (which does
-/// discovery) and the passkey builder are sync here so this function
-/// can be called from `lib::build_router` without `await`.
+/// The OIDC and passkey sub-states are pre-built in `app::build_app`
+/// and stashed on `AppState.auth`; the OIDC `build_state` (which
+/// does discovery) and the passkey builder are sync here so this
+/// function can be called from `lib::build_router` without `await`.
 pub fn build_public_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // Fail fast with a clear error if the auth subtree is mounted
     // without an auth store — `auto_bootstrap` ensures
-    // `state.auth_store.is_some()` whenever `auth.enabled = true`.
+    // `state.auth` is `Some` whenever `auth.enabled = true`.
     let _ = crate::auth::error::require_auth_store(&state)
         .ok()
         .cloned()
@@ -47,7 +47,7 @@ pub fn build_public_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/auth/login/passkey/start", post(passkey_login_start))
         .route("/api/auth/login/passkey/finish", post(passkey_login_finish))
         .route("/api/auth/password/register", post(register_handler));
-    if state.auth_oidc.is_some() {
+    if state.auth.as_ref().and_then(|a| a.oidc.as_ref()).is_some() {
         public = public
             .route("/api/auth/login/oidc/start", get(oidc_start))
             .route("/api/auth/login/oidc/callback", get(oidc_callback));
@@ -73,7 +73,12 @@ pub fn build_protected_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>
             get(get_preferences_handler).put(put_preferences_handler),
         )
         .route("/api/auth/logout", post(logout_handler));
-    if state.auth_passkey.is_some() {
+    if state
+        .auth
+        .as_ref()
+        .and_then(|a| a.passkey.as_ref())
+        .is_some()
+    {
         protected = protected
             .route(
                 "/api/auth/login/passkey/register/start",

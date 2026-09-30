@@ -41,7 +41,7 @@
 //! reflects what's *actually* registered at runtime via the
 //! `AgentRegistry` — there's no separate "build features" flag
 //! because a build without the TTS cargo feature simply has no
-//! TTS subsystem in `state.tts`.
+//! TTS subsystem on `state.tts`.
 
 use std::sync::Arc;
 

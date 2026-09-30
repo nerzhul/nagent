@@ -55,6 +55,7 @@ pub mod routes;
 pub mod session;
 pub mod store;
 
+pub use crate::state::AuthState;
 pub use error::AuthError;
 pub use error::{require_auth_store, require_oidc_state, require_passkey_state};
 pub use oidc::OidcState;

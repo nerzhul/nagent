@@ -13,7 +13,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use stt_server::{
-    agents::services::ServiceRegistry,
     auth::store::AuthStore,
     credentials::{
         crypto::{decrypt, encrypt},
@@ -196,24 +195,13 @@ async fn resolver_audit_row_records_target_service() {
 
 #[tokio::test]
 async fn http_list_integrations_empty_registry_returns_empty_data() {
-    use stt_core::MockBackend;
-    use stt_server::config::{AuthBackendKind, AuthDbConfig, RateLimitConfig};
-    use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-    use stt_server::stt::session::SessionMap;
-    use stt_server::AppState;
-
     let auth_store = temp_store().await;
-    let toml_text = r#"
-        [server]
-        whisper_model_path = "/tmp/fake-model.bin"
-    "#;
-    let toml: stt_server::config_file::TomlConfig =
-        toml::from_str(toml_text).expect("TOML must parse");
-    let mut cfg = stt_server::Config::from_env_with_toml(Some(&toml)).expect("config");
-    cfg.auth.enabled = true;
-    cfg.auth.backends = vec![AuthBackendKind::Local];
-    cfg.auth.public_url = "https://example.com".into();
-    cfg.auth.db = AuthDbConfig {
+    let mut builder = stt_server::testing::app_state();
+    Arc::make_mut(&mut builder.config).auth.enabled = true;
+    Arc::make_mut(&mut builder.config).auth.backends =
+        vec![stt_server::config::AuthBackendKind::Local];
+    Arc::make_mut(&mut builder.config).auth.public_url = "https://example.com".into();
+    Arc::make_mut(&mut builder.config).auth.db = stt_server::config::AuthDbConfig {
         backend: "sqlite".into(),
         url: format!(
             "sqlite://file:cred_http_{}?mode=memory&cache=shared",
@@ -222,40 +210,11 @@ async fn http_list_integrations_empty_registry_returns_empty_data() {
         max_connections: 1,
         auto_migrate: true,
     };
-    let cfg = Arc::new(cfg);
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let backend: Arc<dyn stt_core::WhisperBackend> = Arc::new(MockBackend::new("test"));
-    let (tx, _rx) = tokio::sync::mpsc::channel::<stt_core::InferenceJob>(16);
-    let job_tx = stt_core::PoolDispatch::from_single_sender(tx);
-    let stt_rate_limiter =
-        RateLimiter::new(RateLimitPolicy::stt(RateLimitConfig::default().stt_per_min));
-    let llm_rate_limiter =
-        RateLimiter::new(RateLimitPolicy::llm(RateLimitConfig::default().llm_per_min));
-    let services = ServiceRegistry::empty().into_arc();
-    let state = Arc::new(AppState {
-        backend,
-        sessions,
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: cfg.clone(),
-        llm: None,
-        agents: None,
-        tts: None,
-        stt_rate_limiter,
-        llm_rate_limiter,
-        auth_store: Some(auth_store.clone()),
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services,
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    });
+    let state = builder.with_auth(auth_store).build();
     // Build the router the same way `build_router` does in lib.rs.
+    let auth_state = state.auth.as_ref().expect("auth must be wired").clone();
     let auth_layer = axum::middleware::from_fn_with_state(
-        stt_server::auth::middleware::AuthState::new(auth_store, cfg.clone()),
+        auth_state,
         stt_server::auth::middleware::require_auth_middleware,
     );
     let identity = stt_server::auth::router::build_protected_auth_router(state.clone());

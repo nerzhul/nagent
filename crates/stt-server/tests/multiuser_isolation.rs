@@ -15,99 +15,28 @@
 //! the server's internal state.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
-use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, WhisperBackend};
 use stt_proto::{
     decode_frame, encode, AudioFrame, Config, FinalTranscript, Payload, StartSession, Tag,
 };
-use stt_server::agents::ServiceRegistry;
-use stt_server::config::{LlmAuthMode, RateLimitConfig};
 use stt_server::http::build_router;
-use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-use stt_server::stt::result_router::ResultRouter;
 use stt_server::stt::session::SessionMap;
-use stt_server::{AppState, Config as ServerConfig};
+use stt_server::testing::app_state;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
-/// Build a complete in-process pipeline (worker + router + axum app) and
-/// return the bound address so the test can dial it.
+/// Build a complete in-process pipeline (worker + router + axum app)
+/// and return the bound address so the test can dial it. Uses the
+/// phase-5.B test builder; the test grabs the `SessionMap` out of
+/// the constructed `AppState` so it can still assert on session
+/// isolation invariants.
 async fn start_test_server() -> (String, SessionMap) {
-    let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
-
-    // Dummy config; tests don't bind to a real port via Config.
-    let server_cfg = Arc::new(ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
-        max_queue: 32,
-        inference_workers: None,
-        session_idle_timeout: Duration::from_secs(30),
-        infer_timeout: Duration::from_secs(30),
-        limits: stt_server::config::LimitsConfig::default(),
-        rate_limit: RateLimitConfig::default(),
-        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
-        // LLM is opt-in; the STT-focused multiuser test keeps it off
-        // so the /v1/* routes are not registered and there is no
-        // accidental dependency on a local Ollama install.
-        llm: stt_server::config::LlmConfig {
-            enabled: false,
-            base_url: "http://localhost:11434".into(),
-            default_model: "llama3.1".into(),
-            api_key: None,
-            inbound_auth_key: None,
-            auth_mode: LlmAuthMode::default(),
-            request_timeout: Duration::from_secs(120),
-            cors_allow_origins: vec![],
-            system_prompt: None,
-            allow_user_location: true,
-            allow_user_timezone: true,
-        },
-        agents: stt_server::config::AgentConfig::default(),
-        tts: stt_server::config::TtsConfig::default(),
-        auth: stt_server::config::AuthConfig::default(),
-        documents: stt_server::config::DocumentsConfig::default(),
-    });
-
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-
-    let (job_tx_inner, job_rx) = mpsc::channel::<InferenceJob>(16);
-    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
-    let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(16);
-
-    // Worker + result router.
-    let _worker = InferenceWorker::spawn(Arc::clone(&backend), job_rx);
-    let _shutdown = ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
-
-    let state = Arc::new(AppState {
-        backend,
-        sessions: Arc::clone(&sessions),
-        job_tx: job_tx.clone(),
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: server_cfg,
-        llm: None,
-        agents: None,
-        tts: None,
-        stt_rate_limiter: RateLimiter::new(RateLimitPolicy::stt(
-            RateLimitConfig::default().stt_per_min,
-        )),
-        llm_rate_limiter: RateLimiter::new(RateLimitPolicy::llm(
-            RateLimitConfig::default().llm_per_min,
-        )),
-        auth_store: None,
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    });
+    let state = app_state().build();
+    let sessions: SessionMap = Arc::clone(&state.stt.sessions);
 
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

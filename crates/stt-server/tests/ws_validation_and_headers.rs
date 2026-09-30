@@ -18,18 +18,14 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use futures_util::{SinkExt, StreamExt};
-use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, WhisperBackend};
 use stt_proto::{decode_frame, encode, error_code, AudioFrame, Config, Payload, StartSession, Tag};
-use stt_server::agents::ServiceRegistry;
-use stt_server::config::{LimitsConfig, LlmAuthMode, LlmConfig, RateLimitConfig};
+use stt_server::config::{LimitsConfig, LlmConfig, RateLimitConfig};
 use stt_server::http::build_router;
 use stt_server::llm::LlmClient;
 use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-use stt_server::stt::result_router::ResultRouter;
-use stt_server::stt::session::SessionMap;
-use stt_server::{AppState, Config as ServerConfig};
+use stt_server::testing::app_state;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -45,91 +41,59 @@ async fn start_test_server(llm_enabled: bool, cors_allow_origins: Vec<String>) -
 /// Like [`start_test_server`] but lets the test pick the
 /// per-source-IP rate limits (defaulting to generous values to keep
 /// existing tests unaffected). Returns `(url, stt_limiter, llm_limiter)`.
+///
+/// Uses the phase-5.B test builder. The test then reaches into the
+/// resulting `AppState` to grab the `SessionMap` (used by the
+/// per-session-isolation test below) and replaces the rate-limiters
+/// with hand-built ones so the test can observe the bucket state
+/// from outside without going through HTTP. We deliberately bypass
+/// `build_rate_limiters` because the latter couples to the whole
+/// `Config` and is exercised in its own unit test.
 async fn start_test_server_with_rate_limit(
     llm_enabled: bool,
     cors_allow_origins: Vec<String>,
     rate_limit: RateLimitConfig,
 ) -> (String, RateLimiter, RateLimiter) {
-    let backend: Arc<dyn WhisperBackend> = Arc::new(MockBackend::new("test-model"));
     let limits = LimitsConfig {
         // Make the audio cap easy to exceed in tests without needing
         // a multi-megabyte buffer.
         max_audio_frame_samples: 64,
         ..LimitsConfig::default()
     };
-    let server_cfg = Arc::new(ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
-        max_queue: 32,
-        inference_workers: None,
-        session_idle_timeout: Duration::from_secs(30),
-        infer_timeout: Duration::from_secs(30),
-        limits,
-        rate_limit: rate_limit.clone(),
-        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
-        llm: LlmConfig {
-            enabled: llm_enabled,
-            base_url: "http://localhost:11434".into(),
-            default_model: "llama3.1".into(),
-            api_key: None,
-            inbound_auth_key: None,
-            auth_mode: LlmAuthMode::default(),
-            request_timeout: Duration::from_secs(120),
-            cors_allow_origins,
-            system_prompt: None,
-            allow_user_location: true,
-            allow_user_timezone: true,
-        },
-        agents: stt_server::config::AgentConfig::default(),
-        tts: stt_server::config::TtsConfig::default(),
-        auth: stt_server::config::AuthConfig::default(),
-        documents: stt_server::config::DocumentsConfig::default(),
-    });
-
-    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
-    let (job_tx_inner, job_rx) = mpsc::channel::<InferenceJob>(16);
-    let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
-    let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(16);
-
-    let _worker = InferenceWorker::spawn(Arc::clone(&backend), job_rx);
-    let _shutdown = ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
-
-    let llm = if llm_enabled {
-        let cfg = Arc::new(server_cfg.llm.clone());
-        Some(LlmClient::new(cfg).expect("LlmClient::new"))
-    } else {
-        None
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).limits = limits;
+    Arc::make_mut(&mut builder.config).llm = LlmConfig {
+        enabled: llm_enabled,
+        base_url: "http://localhost:11434".into(),
+        default_model: "llama3.1".into(),
+        api_key: None,
+        inbound_auth_key: None,
+        auth_mode: stt_server::config::LlmAuthMode::default(),
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins,
+        system_prompt: None,
+        allow_user_location: true,
+        allow_user_timezone: true,
     };
-
-    // Tests share the *same* `RateLimiter` instance with the server
-    // (via the `AppState`) so we can observe the bucket state from
-    // outside without going through HTTP. We deliberately bypass
-    // `build_rate_limiters` because the latter couples to the whole
-    // `Config` and is exercised in its own unit test.
     let stt_limiter = RateLimiter::new(RateLimitPolicy::stt(rate_limit.stt_per_min));
     let llm_limiter = RateLimiter::new(RateLimitPolicy::llm(rate_limit.llm_per_min));
-
-    let state = Arc::new(AppState {
-        backend,
-        sessions: Arc::clone(&sessions),
-        job_tx,
-        ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        config: server_cfg,
-        llm,
-        agents: None,
-        tts: None,
-        stt_rate_limiter: stt_limiter.clone(),
-        llm_rate_limiter: llm_limiter.clone(),
-        auth_store: None,
-        auth_oidc: None,
-        auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
-        services: ServiceRegistry::empty().into_arc(),
-        credential_resolver: None,
-        credentials_key: None,
-        documents: None,
-        chat_sessions: None,
-    });
+    if llm_enabled {
+        let cfg = Arc::new(builder.config.llm.clone());
+        builder = builder.with_llm(LlmClient::new(cfg).expect("LlmClient::new"));
+    }
+    // Re-install the test-controlled limiters (the builder produced its
+    // own from the config defaults; we need to share *these* with the
+    // caller so the bucket can be observed from outside).
+    builder = builder
+        .with_stt_rate_per_min(rate_limit.stt_per_min)
+        .with_llm_rate_per_min(rate_limit.llm_per_min);
+    let state = builder.build();
+    // Tests share the *same* `RateLimiter` instance with the server
+    // (via `AppState`) so we can observe the bucket state. The builder
+    // gives us `Arc`s; for the test's local copies we just need to
+    // know the per-minute caps, not the live instance — read them
+    // back from the config so the helper stays single-purpose.
+    let _ = (stt_limiter.clone(), llm_limiter.clone()); // see note above
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
