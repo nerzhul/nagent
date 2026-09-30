@@ -25,9 +25,14 @@
 //! - [`mod@passkey`] — WebAuthn backend (`/api/auth/login/passkey/{start,finish}`).
 //! - [`mod@routes`] — `/api/me`, `/api/auth/logout`, plus the
 //!   registration endpoints guarded by `RequireAuth`.
-//! - [`mod@rate_limit`] — login-attempt rate-limit
-//!   (DashMap, `(email, ip)` key).
-//! - [`mod@cli`] — `stt-server auth {create-admin,list-users,delete-user}`.
+//! - [`mod@login_rate_limit`] — login-attempt rate-limit
+//!   (DashMap, `(email, ip)` key). Re-exported as `rate_limit` for
+//!   backward-compat with callers predating the rename.
+//!
+//! The `stt-server auth {create-admin,list-users,delete-user}` CLI
+//! subcommand has moved to [`crate::cli::auth`] (phase 1 of the
+//! architecture refactor); the old `crate::auth::cli` path is kept as
+//! a re-export so existing references in `main.rs` keep compiling.
 //!
 //! ## Topology
 //!
@@ -40,19 +45,27 @@
 //! ```
 
 pub mod boot;
-pub mod cli;
 pub mod db_postgres;
 pub mod db_sqlite;
 pub mod error;
+pub mod login_rate_limit;
 pub mod middleware;
 pub mod oidc;
 pub mod passkey;
 pub mod password;
-pub mod rate_limit;
 pub mod router;
 pub mod routes;
 pub mod session;
 pub mod store;
+
+// Back-compat shims (phase 1 of the architecture refactor):
+// `auth::rate_limit` was renamed to `auth::login_rate_limit`,
+// `auth::cli` was moved to `cli::auth`. The old paths still
+// resolve so call sites in `main.rs`, the auth handlers, and
+// integration tests keep compiling until a follow-up commit
+// rewrites them in place.
+pub use crate::cli::auth as cli;
+pub use login_rate_limit as rate_limit;
 
 pub use error::AuthError;
 pub use error::{require_auth_store, require_oidc_state, require_passkey_state};

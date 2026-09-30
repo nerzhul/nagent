@@ -1,49 +1,93 @@
-//! `stt-server` — axum HTTP/WebSocket server for the STT pipeline.
+//! `stt-server` — axum HTTP/WebSocket server for the `nagent`
+//! chat-with-agents stack (STT + LLM proxy + chat agents + TTS +
+//! per-user documents + auth).
 //!
-//! The server is split into:
-//! - [`config`] — env-var parsing.
-//! - [`session`] — `SessionState` and the shared `SessionMap`.
-//! - [`validation`] — input checks applied to inbound WebSocket frames.
-//! - [`rate_limit`] — per-source-IP token bucket for STT and LLM traffic.
-//! - [`middleware`] — always-on security headers and LLM CORS layer.
-//! - [`ws_handler`] — per-connection upgrade + dispatch loop.
-//! - [`router`] — `ResultRouter` that forwards worker output to the right session.
-//! - [`watchdog`] — periodic sweep that drops idle sessions.
-//! - [`static_assets`] — embedded frontend assets served at `/` and `/static/*`.
-//! - [`llm`] — optional OpenAI-compatible proxy to a local LLM (Ollama).
-//! - [`agents`] — server-side chat agents (e.g. `web_fetch`) callable
-//!   from the LLM proxy through OpenAI-style tool/function calling.
+//! Subsystems, after phase 1 of the architecture refactor:
+//!
+//! - [`config`], [`config_file`] — env-var + TOML parsing, layering.
+//! - [`agents`] — server-side chat agents (e.g. `web_fetch`,
+//!   `read_document`) callable from the LLM proxy through OpenAI-style
+//!   tool/function calling. Direct agent HTTP routes live in
+//!   [`crate::agents::routes`].
+//! - [`auth`] — multi-user authentication (password / OIDC / passkey)
+//!   plus the cookie + bearer session machinery. Login-attempt
+//!   rate-limit moved to [`crate::auth::login_rate_limit`].
+//! - [`chat`] — server-bound chat-session bookkeeping
+//!   (`(user, session)` SEV 2 binding used by `read_document`).
+//! - [`cli`] — operator subcommands (`stt-server {auth,migrate,documents}`).
 //! - [`credentials`] — per-user credentials vault (AES-256-GCM at rest,
 //!   decrypted on demand through a per-request `UserContext`).
 //! - [`documents`] — Discussion-mode document uploads + the
-//!   `read_document` LLM tool. Available only when the `documents`
-//!   cargo feature is on (gates the `pdf-extract` dependency).
+//!   `read_document` LLM tool.
+//! - [`http`] — HTTP transport plumbing: security headers, the static
+//!   frontend embedding, the `/api/features` discovery endpoint, the
+//!   LLM-proxy shared envelope middleware, and the `build_router`
+//!   composition root that wires every `/v1/*` and `/api/*` route into
+//!   a single axum `Router`.
+//! - [`llm`], [`llm_prompt`] — optional OpenAI-compatible proxy to a
+//!   local LLM (Ollama). Split into
+//!   [`llm::client`](crate::llm::client) /
+//!   [`llm::proxy`](crate::llm::proxy) /
+//!   [`llm::tool_loop`](crate::llm::tool_loop) /
+//!   [`llm::sse`](crate::llm::sse) /
+//!   [`llm::privacy`](crate::llm::privacy) submodules.
+//! - [`rate_limit`] — per-source-IP token bucket for STT and LLM
+//!   traffic (the login-attempt limiter lives at
+//!   [`crate::auth::login_rate_limit`]).
+//! - [`stt`] — WebSocket STT pipeline (per-connection upgrade,
+//!   session map, the `ResultRouter`, the watchdog that drops idle
+//!   sessions).
+//! - [`tts`] — local Piper text-to-speech engine (split into
+//!   [`tts::engine`](crate::tts::engine) + [`tts::routes`](crate::tts::routes)).
+//!
+//! Temporary `pub use` re-exports at the bottom of this file keep the
+//! pre-phase-1 module paths (`session`, `router`, `middleware`, …)
+//! reachable for the integration tests and `main.rs`; they will be
+//! dropped in a follow-up commit.
 
 #![warn(missing_debug_implementations)]
 
 pub mod agents;
 pub mod auth;
-pub mod chat_sessions;
+pub mod chat;
+pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod credentials;
-pub mod documents_cli;
-pub mod features;
+pub mod http;
 pub mod llm;
 pub mod llm_prompt;
-pub mod middleware;
-pub mod migrate_cli;
 pub mod rate_limit;
-pub mod router;
-pub mod session;
-pub mod static_assets;
+pub mod stt;
 pub mod tts;
-pub mod validation;
 pub mod version;
-pub mod watchdog;
-pub mod ws_handler;
 
 pub mod documents;
+
+// ---- Back-compat shims (phase 1 of the architecture refactor) -------------
+//
+// Several top-level modules moved into `stt/`, `http/`, `chat/`, and
+// `cli/`. The re-exports below keep the old `crate::<name>::...` paths
+// reachable so `main.rs`, the integration tests, and the few inline
+// `use crate::...` references inside the crate itself keep compiling
+// until a follow-up commit rewrites them in place.
+pub use chat::sessions as chat_sessions;
+pub use cli::documents as documents_cli;
+pub use cli::migrate as migrate_cli;
+pub use http::features;
+pub use http::security_headers as middleware;
+pub use http::static_assets;
+pub use stt::result_router as router;
+pub use stt::session;
+pub use stt::validation;
+pub use stt::watchdog;
+pub use stt::ws_handler;
+
+// Same treatment for the helpers that moved from `lib.rs` into
+// `http::llm_guards`: `build_rate_limiters`, `llm_auth_middleware`,
+// `llm_rate_limit_middleware`. `main.rs` imports them by name.
+pub use http::build_router;
+pub use http::{build_rate_limiters, llm_auth_middleware, llm_rate_limit_middleware};
 
 use config::LlmConfig;
 pub use config::{CliArgs, Config};
@@ -54,13 +98,7 @@ pub use version::VersionInfo;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::extract::ConnectInfo;
-use axum::http::{HeaderValue, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::Router;
-use std::net::SocketAddr;
+use axum::routing::Router;
 
 use stt_core::{PoolDispatch, WhisperBackend};
 
@@ -182,377 +220,8 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-/// Build the axum router around [`AppState`]. Exposed for tests.
-///
-/// When `auth.enabled = true` the router applies the [`RequireAuth`]
-/// middleware (PR1) to every endpoint **except** a small set of
-/// public carve-outs: the index page, `/static/*`, `/healthz`,
-/// `/api/version`, and the auth login routes. The carve-out exists
-/// so the browser can fetch the login page and submit credentials
-/// without already being authenticated. Everything else — STT
-/// WebSocket upgrade, `/v1/chat/completions`, agents, TTS,
-/// `/api/me`, `/api/auth/logout` — requires a valid session cookie
-/// (or `Authorization: Bearer <session-id>`).
-///
-/// When `auth.enabled = false` the router is unchanged: no
-/// `RequireAuth` layer is installed anywhere and the pre-PR1
-/// single-user trust boundary holds.
-///
-/// [`RequireAuth`]: crate::auth::middleware::require_auth_middleware
-pub fn build_router(state: Arc<AppState>) -> Router {
-    // Always-on security headers applied to *every* response (static
-    // frontend, health checks, version probe, WS upgrade, LLM proxy,
-    // auth subtree). Applied as the outermost layer on the merged
-    // router so a single header copy runs regardless of which
-    // subtree handled the request.
-    let security_layers = (
-        middleware::security_headers_layer(),
-        middleware::referrer_policy_layer(),
-        middleware::nosniff_layer(),
-    );
-
-    // ----- Public subtree (no auth required) -----------------------------
-    // These endpoints stay reachable even when `auth.enabled = true`
-    // so the browser can load the login page, fetch its assets,
-    // submit credentials, and have ops tooling (health probes,
-    // version probes) keep working. The auth login routes are
-    // merged into `public` further down.
-    let public = Router::new()
-        .route("/", get(ws_handler::index_handler))
-        .route("/healthz", get(ws_handler::healthz))
-        .route("/api/version", get(ws_handler::version_handler))
-        .route("/static/*path", get(ws_handler::static_path_handler));
-
-    // ----- Protected subtree (auth required when enabled) ----------------
-    // The STT WebSocket upgrade, LLM proxy, agents, TTS, and the
-    // auth-protected identity routes (`/api/me`, `/api/auth/logout`,
-    // passkey register). Each optional subtree keeps its own
-    // rate-limit + CORS envelope; the global `RequireAuth` layer is
-    // applied below, after we know whether auth is enabled.
-    let mut protected: Router<Arc<AppState>> = Router::new()
-        .route("/ws", get(ws_handler::ws_upgrade))
-        // `GET /api/features` — feature discovery for the
-        // frontend. Mounted at the protected subtree level so it
-        // benefits from `RequireAuth` when auth is enabled.
-        // The handler is cheap and stateless, so it does not
-        // need its own rate limit / CORS envelope.
-        .merge(crate::features::build_features_router(state.clone()));
-
-    // The agents routes are gated independently from the LLM proxy so
-    // direct curl invocation (`POST /v1/agents/web_fetch/invoke`) keeps
-    // working when only the proxy is off, and so disabling the LLM
-    // proxy leaves no trace of the agent HTTP routes when both are
-    // off. They share the CORS / rate-limit envelope of the LLM
-    // proxy: same allow-list (`LLM_CORS_ALLOW_ORIGINS`), same per-IP
-    // bucket (`LLM_RATE_PER_MIN`). When the LLM proxy is off we fall
-    // back to the empty allow-list (same-origin only) so a
-    // misconfigured server does not silently expose the agents
-    // endpoints cross-origin.
-    if state.agents.is_some() {
-        let cors_origins = state
-            .llm
-            .as_ref()
-            .map(|l| l.cfg().cors_allow_origins.clone())
-            .unwrap_or_default();
-        let cors = middleware::cors_layer(&cors_origins);
-        let llm_limiter = state.llm_rate_limiter.clone();
-        // Auth always reads from the global `LlmConfig` so operators
-        // can gate `/v1/agents*` without enabling the LLM proxy —
-        // the two subsystems share the `[llm]` table on purpose so
-        // there is one source of truth for "is this server public?".
-        let llm_cfg = Arc::new(state.config.llm.clone());
-        let agents_app = Router::new()
-            .route("/v1/agents", get(llm::agents_list))
-            .route("/v1/agents/:name/invoke", post(llm::agent_invoke))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let cfg = llm_cfg.clone();
-                async move { llm_auth_middleware(Some(cfg), req, next).await }
-            }))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let limiter = llm_limiter.clone();
-                async move { llm_rate_limit_middleware(limiter, req, next).await }
-            }))
-            .layer(cors);
-        protected = protected.merge(agents_app);
-    }
-
-    if let Some(llm) = &state.llm {
-        // The LLM proxy gets its own CORS layer driven by
-        // `LLM_CORS_ALLOW_ORIGINS`, a per-IP rate limiter, the
-        // bearer-auth gate driven by `LLM_AUTH_MODE` / `LLM_API_KEY`.
-        let cors = middleware::cors_layer(&llm.cfg().cors_allow_origins);
-        let llm_limiter = state.llm_rate_limiter.clone();
-        let llm_cfg = Arc::new(llm.cfg().clone());
-        let llm_app = Router::new()
-            .route("/v1/chat/completions", post(llm::chat_completions))
-            .route("/v1/models", get(llm::models_list))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let cfg = llm_cfg.clone();
-                async move { llm_auth_middleware(Some(cfg), req, next).await }
-            }))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let limiter = llm_limiter.clone();
-                async move { llm_rate_limit_middleware(limiter, req, next).await }
-            }))
-            .layer(cors);
-        protected = protected.merge(llm_app);
-    }
-
-    // Document uploads + downloads share the LLM proxy's CORS /
-    // rate-limit envelope. Mounted only when the `documents`
-    // cargo feature is on AND the runtime flag is on AND the
-    // auth DB is reachable (so the table exists). The
-    // `state.documents` field is `Some` iff all three are true.
-    if state.documents.is_some() {
-        let cors_origins = state
-            .llm
-            .as_ref()
-            .map(|l| l.cfg().cors_allow_origins.clone())
-            .unwrap_or_default();
-        let cors = middleware::cors_layer(&cors_origins);
-        let llm_limiter = state.llm_rate_limiter.clone();
-        let llm_cfg = Arc::new(state.config.llm.clone());
-        let documents_app = crate::documents::routes::build_documents_router(state.clone())
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let cfg = llm_cfg.clone();
-                async move { llm_auth_middleware(Some(cfg), req, next).await }
-            }))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let limiter = llm_limiter.clone();
-                async move { llm_rate_limit_middleware(limiter, req, next).await }
-            }))
-            .layer(cors);
-        protected = protected.merge(documents_app);
-    }
-
-    // `POST /v1/chat/session` is mounted independently of
-    // `[documents].enabled` — the SEV 2 server-bound chat
-    // session id binding is a general-purpose feature (chat
-    // history scoping may use it in a follow-up). On a build with
-    // `documents.enabled = false` the browser still calls the
-    // endpoint on every page load; mounting it here prevents the
-    // 404 the user was seeing before this split.
-    //
-    // The router is mounted only when `state.chat_sessions.is_some()`,
-    // which is true iff auth is enabled (the chat_sessions table
-    // lives in the auth DB). Without auth, the browser doesn't
-    // call this endpoint anyway, so 404'ing is fine.
-    if state.chat_sessions.is_some() {
-        let cors_origins = state
-            .llm
-            .as_ref()
-            .map(|l| l.cfg().cors_allow_origins.clone())
-            .unwrap_or_default();
-        let cors = middleware::cors_layer(&cors_origins);
-        let llm_limiter = state.llm_rate_limiter.clone();
-        let llm_cfg = Arc::new(state.config.llm.clone());
-        let chat_session_app = crate::documents::routes::build_chat_session_router(state.clone())
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let cfg = llm_cfg.clone();
-                async move { llm_auth_middleware(Some(cfg), req, next).await }
-            }))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let limiter = llm_limiter.clone();
-                async move { llm_rate_limit_middleware(limiter, req, next).await }
-            }))
-            .layer(cors);
-        protected = protected.merge(chat_session_app);
-    }
-
-    // TTS routes share the LLM proxy's CORS / rate-limit envelope
-    // (same origin allow-list, same per-IP bucket). When the LLM proxy
-    // is off we fall back to the empty allow-list so a misconfigured
-    // server does not silently expose TTS cross-origin.
-    if let Some(_tts) = &state.tts {
-        let cors_origins = state
-            .llm
-            .as_ref()
-            .map(|l| l.cfg().cors_allow_origins.clone())
-            .unwrap_or_default();
-        let cors = middleware::cors_layer(&cors_origins);
-        let llm_limiter = state.llm_rate_limiter.clone();
-        let llm_cfg = Arc::new(state.config.llm.clone());
-        let tts_app = Router::new()
-            .route("/v1/audio/speech", post(tts::audio_speech))
-            .route("/v1/audio/voices", get(tts::audio_voices))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let cfg = llm_cfg.clone();
-                async move { llm_auth_middleware(Some(cfg), req, next).await }
-            }))
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let limiter = llm_limiter.clone();
-                async move { llm_rate_limit_middleware(limiter, req, next).await }
-            }))
-            .layer(cors);
-        protected = protected.merge(tts_app);
-    }
-
-    // ----- Auth subtree (PR1) --------------------------------------------
-    // When `auth.enabled = true`:
-    //   - login routes (`/api/auth/login/*`) live in `public` so they
-    //     are reachable without a session;
-    //   - protected identity routes (`/api/me`, `/api/auth/logout`,
-    //     passkey register start/finish) live in `protected`;
-    //   - `protected` is wrapped with `RequireAuth` so anonymous
-    //     requests get `401 authentication required`.
-    // When `auth.enabled = false`: nothing is mounted; the server
-    // keeps the pre-PR1 single-user trust boundary.
-    if state.config.auth.enabled {
-        let auth_store = state
-            .auth_store
-            .clone()
-            .expect("auth_store must be Some when auth is enabled");
-        let auth_layer = axum::middleware::from_fn_with_state(
-            crate::auth::middleware::AuthState::new(auth_store, state.config.clone()),
-            crate::auth::middleware::require_auth_middleware,
-        );
-        let login = crate::auth::router::build_public_auth_router(state.clone());
-        let identity = crate::auth::router::build_protected_auth_router(state.clone());
-        let credentials_routes =
-            crate::credentials::routes::build_protected_credentials_router(state.clone());
-        let protected_with_auth = protected
-            .merge(identity)
-            .merge(credentials_routes)
-            .layer(auth_layer);
-        // Layer order is applied bottom-up; the LAST `.layer()`
-        // becomes the OUTERMOST. The access log is the outermost
-        // so it sees the final response status (after `RequireAuth`
-        // and the security-header layers have run) and the
-        // `ConnectInfo` IP from the axum server. Security headers
-        // are second-outermost so they can mutate the response
-        // before the access log snapshots the status.
-        public
-            .merge(login)
-            .merge(protected_with_auth)
-            .layer(security_layers)
-            .layer(axum::middleware::from_fn(middleware::access_log_middleware))
-            .with_state(state)
-    } else {
-        public
-            .merge(protected)
-            .layer(security_layers)
-            .layer(axum::middleware::from_fn(middleware::access_log_middleware))
-            .with_state(state)
-    }
-}
-
-/// axum middleware that consumes one token from the supplied LLM
-/// limiter per request, identified by the peer address attached by
-/// [`axum::serve`] (i.e. `ConnectInfo<SocketAddr>`).
-///
-/// On rejection we return `429 Too Many Requests` with a
-/// `Retry-After` header computed from the bucket's refill rate so
-/// well-behaved clients can back off. The `loopback` carve-out lives
-/// inside the limiter itself.
-async fn llm_rate_limit_middleware(
-    limiter: RateLimiter,
-    req: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let peer: Option<ConnectInfo<SocketAddr>> = req.extensions().get().cloned();
-    let Some(ConnectInfo(addr)) = peer else {
-        // Without `ConnectInfo` (test harness, in-process calls) we
-        // cannot key the bucket; let the request through so unit
-        // tests don't all need a real TCP listener.
-        return next.run(req).await;
-    };
-    match limiter.check(addr.ip()) {
-        Ok(()) => next.run(req).await,
-        Err(rate_limit::RateLimitError::Limited { retry_after_ms, .. }) => {
-            let retry_secs = retry_after_ms.div_ceil(1000).max(1);
-            let mut resp = (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response();
-            resp.headers_mut().insert(
-                axum::http::header::RETRY_AFTER,
-                HeaderValue::from_str(&retry_secs.to_string())
-                    .unwrap_or(HeaderValue::from_static("1")),
-            );
-            resp.headers_mut().insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain"),
-            );
-            resp
-        }
-    }
-}
-
-/// Build the per-IP rate limiters from the active configuration. Kept
-/// here (rather than next to `Config`) so the wiring stays in one
-/// place — the limiter is built once per process and shared via
-/// [`AppState`].
-pub fn build_rate_limiters(cfg: &Config) -> (RateLimiter, RateLimiter) {
-    (
-        RateLimiter::new(RateLimitPolicy::stt(cfg.rate_limit.stt_per_min)),
-        RateLimiter::new(RateLimitPolicy::llm(cfg.rate_limit.llm_per_min)),
-    )
-}
-
-/// axum middleware that gates `/v1/*` requests behind the
-/// `LLM_AUTH_MODE` policy.
-///
-/// Behaviour per [`config::LlmAuthMode`]:
-/// - [`LlmAuthMode::Bearer`] (with `inbound_auth_key` set): reject
-///   requests missing `Authorization: Bearer <key>` or carrying a
-///   different key with `401 Unauthorized` and a `WWW-Authenticate`
-///   hint so curl and SDKs surface a useful error.
-/// - [`LlmAuthMode::Bearer`] (no key set): the auth gate is a no-op
-///   and a warning is logged at boot — the operator enabled the
-///   `bearer` mode without providing a key, so the proxy is effectively
-///   public until they fix the config.
-/// - [`LlmAuthMode::Forward`] / [`LlmAuthMode::Disabled`]: no inbound
-///   inspection. `Disabled` is a deliberate opt-out and only affects
-///   the startup warning emitted by `main`.
-async fn llm_auth_middleware(
-    cfg: Option<Arc<LlmConfig>>,
-    req: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let Some(cfg) = cfg else {
-        return next.run(req).await;
-    };
-    if !matches!(cfg.auth_mode, config::LlmAuthMode::Bearer) {
-        return next.run(req).await;
-    }
-    let Some(expected) = cfg.inbound_auth_key.as_deref() else {
-        // `bearer` mode without a key — log once at startup via
-        // `main`, and let the request through here so a misconfigured
-        // server still functions.
-        return next.run(req).await;
-    };
-    let header_value = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    let presented = header_value.and_then(|h| {
-        h.strip_prefix("Bearer ")
-            .or_else(|| h.strip_prefix("bearer "))
-    });
-    match presented {
-        Some(key) if constant_time_eq(key.as_bytes(), expected.as_bytes()) => next.run(req).await,
-        _ => {
-            let mut resp = (
-                StatusCode::UNAUTHORIZED,
-                "missing or invalid Authorization header",
-            )
-                .into_response();
-            resp.headers_mut().insert(
-                axum::http::header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Bearer realm=\"nagent-llm-proxy\""),
-            );
-            resp
-        }
-    }
-}
-
-/// Constant-time byte slice comparison. Avoids leaking the key length
-/// via the early-exit path of `==`. Safe for ASCII bearer tokens which
-/// never contain non-ASCII bytes.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
-}
+// `LlmConfig`, `RateLimitPolicy`, and `Router` are pulled in by the
+// shim re-exports above; keep the imports so future in-file additions
+// do not lose the symbol.
+#[allow(dead_code)]
+fn _phantom(_: &LlmConfig, _: &RateLimitPolicy, _: &Router) {}

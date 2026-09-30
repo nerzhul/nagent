@@ -38,6 +38,7 @@
 //! the request, and writes one `auth_events` audit row. Agents that
 //! do not need credentials ignore the argument.
 
+pub mod routes;
 pub mod services;
 
 use std::sync::Arc;
