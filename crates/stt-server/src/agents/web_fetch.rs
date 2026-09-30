@@ -41,15 +41,12 @@
 //! release can swap in `html5ever` + a real readability pass without
 //! changing the wire format or the agent's public API.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 
+use crate::agents::egress::{EgressClient, EgressConfig, EgressError};
 use crate::agents::{Agent, AgentError};
 use crate::config::WebFetchConfig;
 
@@ -64,36 +61,35 @@ const MAX_TEXT_CHARS: usize = 100 * 1024;
 #[derive(Clone)]
 pub struct WebFetchAgent {
     cfg: WebFetchConfig,
-    http: reqwest::Client,
+    egress: EgressClient,
 }
 
 impl std::fmt::Debug for WebFetchAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebFetchAgent")
             .field("cfg", &self.cfg)
-            .field("http", &"<reqwest::Client>")
+            .field("egress", &"<EgressClient>")
             .finish()
     }
 }
 
 impl WebFetchAgent {
     /// Construct the agent from the active [`WebFetchConfig`]. The
-    /// HTTP client is built once with the configured read timeout;
-    /// the `reqwest::Client` is internally `Arc`-shared so cloning
-    /// the agent for `AppState` keeps the connection pool warm.
+    /// hardened [`EgressClient`] is built once with the configured
+    /// timeouts and SSRF policy; the inner `reqwest::Client` is
+    /// `Arc`-shared so cloning the agent for `AppState` keeps the
+    /// connection pool warm.
     pub fn new(cfg: WebFetchConfig) -> Self {
-        let timeout = Duration::from_millis(cfg.timeout_ms.max(1_000));
-        let http = reqwest::Client::builder()
-            // Long safety net: the per-chunk read timeout below is the
-            // primary defence against a stalled server.
-            .timeout(Duration::from_secs(300))
-            .connect_timeout(timeout)
-            .redirect(reqwest::redirect::Policy::limited(5))
-            // Pool is shared across calls; the loopback bypass happens
-            // at the policy layer (see `is_addr_allowed`), not here.
-            .build()
-            .expect("reqwest client build");
-        Self { cfg, http }
+        let egress = EgressClient::new(EgressConfig {
+            timeout_ms: cfg.timeout_ms,
+            allow_public: cfg.allow_public,
+            allowlist: cfg.allowlist.clone(),
+            max_bytes: cfg.max_bytes,
+            // Match the historical User-Agent string so HTTP server
+            // logs / access policies keep recognising the agent.
+            user_agent: "nagent-web-fetch/0.1 (+https://github.com/nagent/nagent)".into(),
+        });
+        Self { cfg, egress }
     }
 }
 
@@ -133,6 +129,10 @@ impl Agent for WebFetchAgent {
 
     async fn invoke(&self, _ctx: &super::UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
+        // The egress layer handles URL parsing, the scheme allow-list,
+        // the hostname allow-list override, and the IP policy
+        // (pre-resolution). Re-use it instead of duplicating the
+        // rules in this file.
         let parsed = url::Url::parse(&req.url)
             .map_err(|e| AgentError::InvalidArguments(format!("url parse: {e}")))?;
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -145,52 +145,30 @@ impl Agent for WebFetchAgent {
             .host_str()
             .ok_or_else(|| AgentError::InvalidArguments("url has no host".into()))?
             .to_string();
-
-        // Hostname allow-list takes precedence over the IP-based
-        // sandbox: an operator who explicitly whitelists `*.example.com`
-        // has authorised that host regardless of where its DNS points.
-        // The IP policy below still runs as a sanity check when the
-        // allow-list is empty; otherwise we skip it (the allow-list is
-        // the explicit override).
-        let host_allowlisted = if !self.cfg.allowlist.is_empty() {
-            host_matches_allowlist(&host, &self.cfg.allowlist)
-        } else {
-            false
-        };
-        if !self.cfg.allowlist.is_empty() && !host_allowlisted {
-            return Err(AgentError::SandboxDenied(format!(
-                "host `{host}` is not in WEB_FETCH_ALLOWLIST"
-            )));
-        }
-
-        // Resolve the hostname and validate the resolved IPs against
-        // the network policy (unless the host was explicitly
-        // allow-listed). We deliberately do NOT pin reqwest to the
-        // resolved IP — rewriting the URL host to an IP literal
-        // breaks TLS SNI (reqwest uses the URL host for SNI, so an
-        // IP-literal URL gets `SNI=<ip>` and the server's cert — for
-        // the hostname — does not match). The DNS check is therefore
-        // advisory: it confirms the hostname currently points to an
-        // allowed IP, but a small rebinding window between this
-        // resolve and reqwest's own resolve exists. The mitigation
-        // is best-effort for v1; a future release can add a custom
-        // `reqwest::dns::Resolve` to fully close the window.
-        let port = parsed.port_or_known_default().unwrap_or(443);
-        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
-            .await
-            .map_err(|e| AgentError::AgentFailed(format!("dns resolve: {e}")))?
-            .collect();
-        if addrs.is_empty() {
-            return Err(AgentError::AgentFailed("dns returned no addresses".into()));
-        }
-        if !host_allowlisted {
-            for addr in &addrs {
-                if !is_addr_allowed(addr.ip(), self.cfg.allow_public) {
-                    return Err(AgentError::SandboxDenied(format!(
-                        "host `{host}` resolves to a disallowed address ({addr})"
-                    )));
-                }
+        match self.egress.validate(&req.url).await {
+            Ok(_) => {}
+            Err(EgressError::Scheme(s)) => {
+                return Err(AgentError::InvalidArguments(format!(
+                    "unsupported scheme `{s}` (only http and https are accepted)"
+                )))
             }
+            Err(EgressError::NoHost) => {
+                return Err(AgentError::InvalidArguments("url has no host".into()))
+            }
+            Err(EgressError::NotInAllowlist { host: h }) => {
+                return Err(AgentError::SandboxDenied(format!(
+                    "host `{h}` is not in WEB_FETCH_ALLOWLIST"
+                )))
+            }
+            Err(EgressError::DisallowedAddress { host: h, addr }) => {
+                return Err(AgentError::SandboxDenied(format!(
+                    "host `{h}` resolves to a disallowed address ({addr})"
+                )))
+            }
+            Err(EgressError::Dns(msg)) => {
+                return Err(AgentError::AgentFailed(format!("dns resolve: {msg}")))
+            }
+            Err(other) => return Err(AgentError::AgentFailed(other.to_string())),
         }
 
         // Resolve the budget the LLM asked for (or fall back to the
@@ -219,11 +197,12 @@ impl Agent for WebFetchAgent {
         // many rounds we run).
         let (status, final_url, content_type, bytes) = loop {
             match self
-                .fetch_once(parsed.as_str(), &host, budget, timeout)
+                .egress
+                .get_stream(parsed.as_str(), Some(budget), Some(timeout))
                 .await
             {
                 Ok(fetched) => break fetched,
-                Err(AgentError::ResponseExceeded { budget: used }) => {
+                Err(EgressError::ResponseExceeded { budget: used }) => {
                     let next = budget.saturating_mul(2).min(self.cfg.max_bytes);
                     if next <= budget {
                         // Already at the server cap. Surface as a
@@ -241,7 +220,15 @@ impl Agent for WebFetchAgent {
                     );
                     budget = next;
                 }
-                Err(other) => return Err(other),
+                Err(EgressError::Upstream { status, body }) => {
+                    return Err(AgentError::Upstream { status, body })
+                }
+                Err(EgressError::Transport(msg)) => {
+                    return Err(AgentError::AgentFailed(format!(
+                        "connect/read failed: {msg}"
+                    )))
+                }
+                Err(other) => return Err(AgentError::AgentFailed(other.to_string())),
             }
         };
 
@@ -278,73 +265,33 @@ impl Agent for WebFetchAgent {
 impl WebFetchAgent {
     /// Issue one streaming HTTP GET capped at `budget` bytes.
     ///
-    /// Returns `(status, final_url, content_type, bytes)` on success
-    /// (the body fits within `budget`). Returns
-    /// [`AgentError::ResponseExceeded`] when the upstream body would
-    /// exceed the budget — this is a *non-fatal* signal that the
-    /// caller's retry loop handles by doubling the budget. Any other
-    /// failure (network, TLS, non-2xx, sandbox violation) is bubbled
-    /// up as the appropriate [`AgentError`] variant.
+    /// Thin wrapper around [`EgressClient::get_stream`] kept for the
+    /// tests that exercise the retry loop directly.
+    #[allow(dead_code)]
     async fn fetch_once(
         &self,
         url: &str,
         _host_fallback: &str,
         budget: usize,
         timeout: Duration,
-    ) -> Result<(u16, String, String, Bytes), AgentError> {
-        // Issue the request against the *original* URL so reqwest's
-        // TLS layer uses the hostname for SNI and certificate
-        // verification. The IP we resolved earlier is no longer
-        // pinned to the request (reqwest 0.12 has no per-request
-        // DNS override), so a small DNS-rebinding window exists
-        // between our pre-check and reqwest's own resolve. The
-        // sandbox check above catches the practical SSRF cases
-        // (loopback / private / ULA) where a rebind would matter;
-        // closing the residual window is future work.
-        let resp = self
-            .http
-            .get(url)
-            .header(
-                reqwest::header::USER_AGENT,
-                "nagent-web-fetch/0.1 (+https://github.com/nagent/nagent)",
-            )
-            .timeout(timeout)
-            .send()
+    ) -> Result<(u16, String, String, bytes::Bytes), AgentError> {
+        match self
+            .egress
+            .get_stream(url, Some(budget), Some(timeout))
             .await
-            .map_err(|e| AgentError::AgentFailed(format!("connect/read failed: {e}")))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AgentError::Upstream {
-                status: status.as_u16(),
-                body: truncate(&body, 2048),
-            });
-        }
-        let final_url = resp.url().to_string();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-
-        // Stream the body in chunks. As soon as we would exceed
-        // `budget`, stop and signal `ResponseExceeded` so the caller
-        // can retry with a larger budget — without ever buffering
-        // the whole page into memory. The +1 boundary lets us
-        // detect overflow on the chunk that crosses the line without
-        // pulling an extra byte we would just discard.
-        let mut stream = resp.bytes_stream();
-        let mut buf = BytesMut::new();
-        while let Some(chunk_res) = stream.next().await {
-            let chunk: Bytes =
-                chunk_res.map_err(|e| AgentError::AgentFailed(format!("read body: {e}")))?;
-            if buf.len() + chunk.len() > budget {
-                return Err(AgentError::ResponseExceeded { budget });
+        {
+            Ok(fetched) => Ok(fetched),
+            Err(EgressError::ResponseExceeded { budget }) => {
+                Err(AgentError::ResponseExceeded { budget })
             }
-            buf.extend_from_slice(&chunk);
+            Err(EgressError::Upstream { status, body }) => {
+                Err(AgentError::Upstream { status, body })
+            }
+            Err(EgressError::Transport(msg)) => Err(AgentError::AgentFailed(format!(
+                "connect/read failed: {msg}"
+            ))),
+            Err(other) => Err(AgentError::AgentFailed(other.to_string())),
         }
-        Ok((status.as_u16(), final_url, content_type, buf.freeze()))
     }
 }
 
@@ -379,99 +326,14 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 }
 
 // ---- Network policy ------------------------------------------------------
+//
+// `is_addr_allowed` and `host_matches_allowlist` now live in
+// `crate::agents::egress` (plan 5.F) so every network agent shares
+// the same SSRF policy. Re-imported here for the unit tests that
+// exercise the predicates directly.
 
-fn is_addr_allowed(ip: IpAddr, allow_public: bool) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_v4_allowed(v4, allow_public),
-        IpAddr::V6(v6) => is_v6_allowed(v6, allow_public),
-    }
-}
-
-fn is_v4_allowed(v4: Ipv4Addr, allow_public: bool) -> bool {
-    // Loopback and link-local are always blocked (SSRF protection).
-    if v4.is_loopback() || v4.is_link_local() {
-        return false;
-    }
-    // 169.254.0.0/16 is technically `is_link_local`, but be explicit
-    // so a future upstream API change does not silently re-open it.
-    let octets = v4.octets();
-    if octets[0] == 169 && octets[1] == 254 {
-        return false;
-    }
-    // 0.0.0.0/8 — non-routable.
-    if octets[0] == 0 {
-        return false;
-    }
-    // 100.64.0.0/10 — carrier-grade NAT. Treat as private: most LLM
-    // tools do not have legitimate reasons to reach into an ISP's
-    // shared address pool.
-    if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) {
-        return false;
-    }
-    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 — RFC1918 private.
-    if v4.is_private() {
-        return false;
-    }
-    // Multicast / broadcast / reserved are also non-routable for HTTP.
-    if v4.is_multicast() || v4.is_broadcast() || v4.is_unspecified() {
-        return false;
-    }
-    // Everything else is "public" and subject to the `allow_public`
-    // gate.
-    allow_public
-}
-
-fn is_v6_allowed(v6: Ipv6Addr, allow_public: bool) -> bool {
-    if v6.is_loopback() || v6.is_unspecified() {
-        return false;
-    }
-    let segments = v6.segments();
-    // fe80::/10 — link-local.
-    if segments[0] == 0xfe80 {
-        return false;
-    }
-    // fc00::/7 — unique local addresses (ULA).
-    if (segments[0] & 0xfe00) == 0xfc00 {
-        return false;
-    }
-    // ff00::/8 — multicast.
-    if (segments[0] & 0xff00) == 0xff00 {
-        return false;
-    }
-    // ::ffff:0:0/96 — IPv4-mapped. Apply the IPv4 policy to the
-    // embedded address so an IPv6 literal cannot bypass it.
-    if let Some(v4) = v6.to_ipv4_mapped() {
-        return is_v4_allowed(v4, allow_public);
-    }
-    allow_public
-}
-
-fn host_matches_allowlist(host: &str, allowlist: &[String]) -> bool {
-    let host_lc = host.to_ascii_lowercase();
-    for entry in allowlist {
-        let entry = entry.to_ascii_lowercase();
-        // Bare `*` matches every host. Useful for local development
-        // and integration tests against a loopback fixture; in
-        // production operators should narrow the list to specific
-        // suffixes.
-        if entry == "*" {
-            return true;
-        }
-        if let Some(suffix) = entry.strip_prefix("*.") {
-            if host_lc == suffix || host_lc.ends_with(&format!(".{suffix}")) {
-                return true;
-            }
-        } else if host_lc == entry {
-            return true;
-        }
-    }
-    false
-}
-
-#[allow(dead_code)]
-fn arc_clone<T>(t: &Arc<T>) -> Arc<T> {
-    Arc::clone(t)
-}
+#[cfg(test)]
+use crate::agents::egress::{host_matches_allowlist, is_addr_allowed};
 
 // ---- HTML / text handling ------------------------------------------------
 
@@ -747,6 +609,7 @@ mod tests {
     use super::*;
     use crate::agents::UserContext;
     use serde_json::json;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn host_matches_allowlist_exact() {

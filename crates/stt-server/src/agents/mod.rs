@@ -38,8 +38,14 @@
 //! the request, and writes one `auth_events` audit row. Agents that
 //! do not need credentials ignore the argument.
 
+pub mod egress;
 pub mod routes;
 pub mod services;
+
+pub use egress::{
+    EgressClient, EgressConfig, EgressError, ValidateOk, DEFAULT_MAX_BODY_BYTES, MAX_REDIRECTS,
+    MIN_TIMEOUT_MS,
+};
 
 use std::sync::Arc;
 
