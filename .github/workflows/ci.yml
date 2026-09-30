@@ -48,3 +48,14 @@ jobs:
 
       - name: cargo test (cpu features)
         run: cargo test --workspace
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        # Fails the build on any known vulnerability or unmaintained warning
+        # affecting the dependency tree pinned by Cargo.lock. Uses the RustSec
+        # advisory database, refreshed on each run.
+        run: cargo audit

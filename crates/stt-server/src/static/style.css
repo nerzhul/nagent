@@ -1039,6 +1039,72 @@ select, input[type="checkbox"] {
   background: rgba(248, 81, 73, 0.08);
 }
 
+/* ---- Model-not-found picker -------------------------------------------
+ * Bubble shown when the upstream rejects the chat request because
+ * the requested model id is unknown (Ollama `model 'X' not found`,
+ * OpenAI `model_not_found`). The proxy reshapes the upstream 404
+ * into `{ error: { type: "model_not_found", param, available } }`;
+ * chat.js parses that envelope and renders this picker so the user
+ * can swap to a model the upstream actually serves with a single
+ * click. */
+.chat-model-not-found {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+}
+.chat-model-not-found-heading {
+  margin: 0;
+  font-weight: 600;
+  color: var(--text);
+}
+.chat-model-not-found-detail {
+  margin: 0;
+  font-size: 0.85em;
+  color: var(--muted);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+.chat-model-not-found-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.2rem;
+}
+.chat-model-not-found-pick {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text);
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+.chat-model-not-found-pick:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+.chat-model-not-found-pick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.chat-model-not-found-pick:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.chat-model-not-found-pick--loading::after {
+  content: " ⟳";
+}
+.chat-model-not-found-hint {
+  margin: 0;
+  font-size: 0.8em;
+  color: var(--muted);
+}
+
 /* ---- Tool bubbles ------------------------------------------------------
  * Each `event: tool_call` / `event: tool_result` pair from the LLM
  * proxy renders as one of these under the in-flight assistant

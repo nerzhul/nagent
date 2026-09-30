@@ -192,10 +192,47 @@ pub async fn chat_completions(
         .await
         .map_err(|e| LlmError::BadRequest(format!("upstream connect failed: {e}")))?;
     if !first_upstream.status().is_success() {
-        let status = StatusCode::from_u16(first_upstream.status().as_u16())
-            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let upstream_status = first_upstream.status();
+        let status =
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let body = first_upstream.text().await.unwrap_or_default();
         warn!(%status, "upstream chat completion failed");
+
+        // Upstream rejected the request because the requested model
+        // is unknown to it. Surface a structured, friendly error with
+        // the upstream's model list so the chat UI can render a
+        // picker instead of a wall of JSON. We also fan out a
+        // follow-up `/v1/models` so the response includes the
+        // available alternatives even when the upstream hides them
+        // behind a 404. If that follow-up also fails (degraded
+        // upstream), the response is still actionable — `available`
+        // is `None` and the UI falls back to the raw message.
+        if let Some((name, upstream_message)) =
+            crate::llm::client::detect_model_not_found(status, &body)
+        {
+            let models_url = format!("{}/v1/models", llm.cfg.base_url.trim_end_matches('/'));
+            let available = match llm.http.get(&models_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(v) => v.get("data").and_then(|d| d.as_array()).map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| {
+                                    m.get("id").and_then(|id| id.as_str()).map(str::to_string)
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+            return Err(LlmError::ModelNotFound {
+                name,
+                upstream_message,
+                available,
+            });
+        }
+
         return Err(LlmError::Upstream { status, body });
     }
 

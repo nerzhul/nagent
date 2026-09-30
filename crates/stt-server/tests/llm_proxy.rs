@@ -265,7 +265,10 @@ async fn forwards_bearer_when_key_set() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upstream_non_2xx_is_surfaced_verbatim() {
-    // Mock upstream that always 404s with a JSON error body.
+    // Mock upstream that always 404s with a JSON error body. The
+    // shape is intentionally NOT the Ollama / OpenAI
+    // model-not-found envelope, so the detector should leave it
+    // alone and the proxy passes the body through verbatim.
     let app = Router::new().route(
         "/v1/chat/completions",
         post(
@@ -302,6 +305,80 @@ async fn upstream_non_2xx_is_surfaced_verbatim() {
         body.contains("model not found"),
         "upstream error body must be forwarded, got: {body}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_not_found_response_includes_available_models() {
+    // Mock upstream that:
+    //  - 404s /v1/chat/completions with the Ollama-style
+    //    model-not-found envelope
+    //  - 200s /v1/models with a list of available model ids
+    // The proxy should reshape the 404 into the friendly form with
+    // `error.type == "model_not_found"`, `error.param == <name>` and
+    // `error.available == [...]`.
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                |_headers: axum::http::HeaderMap, _body: axum::body::Bytes| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        )],
+                        r#"{"error":{"message":"model 'llama3.1' not found","type":"not_found_error","param":null,"code":null}}"#,
+                    )
+                },
+            ),
+        )
+        .route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    r#"{"object":"list","data":[{"id":"qwen2.5:14b"},{"id":"deepseek-r1:14b"}]}"#,
+                )
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let upstream_url = format!("http://{addr}");
+    let (url, _) = start_test_server_with_llm(upstream_url, None).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[],"stream":true,"model":"llama3.1"}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body: Value = resp.json().await.expect("json body");
+    let err = body.get("error").expect("error envelope");
+    assert_eq!(
+        err.get("type").and_then(|v| v.as_str()),
+        Some("model_not_found"),
+        "friendly type missing, got: {err}"
+    );
+    assert_eq!(
+        err.get("param").and_then(|v| v.as_str()),
+        Some("llama3.1"),
+        "offending model name must round-trip"
+    );
+    let available = err
+        .get("available")
+        .and_then(|v| v.as_array())
+        .expect("available array");
+    let ids: Vec<&str> = available.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(ids, vec!["qwen2.5:14b", "deepseek-r1:14b"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -788,6 +788,7 @@ let currentSessionId = "";
 // lifetime (boot, visibility refresh, retry after a transient
 // error), so the listener attachment must happen exactly once.
 let _modelChangeWired = false;
+let modelsLoaded = false;
 function activeSessionId() {
   const sessions = loadSessions();
   if (sessions.some((s) => s.id === currentSessionId)) return currentSessionId;
@@ -1043,6 +1044,7 @@ function appendBubble(role, text, {
   // literally instead of as a heading.
   if (markdown) classes.push("chat-message--markdown");
   div.className = classes.join(" ");
+  if (sid) div.dataset.sessionId = sid;
   if (model && role === "assistant") div.dataset.model = model;
   if (markdown) {
     // Sanitized HTML render of the assistant reply. The text source is
@@ -1117,6 +1119,169 @@ function appendError(text) {
   // Re-pin the inline voice-graph to the end (see `appendBubble`).
   ensureInlineVoiceGraphAtEnd();
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+/// Try to parse `err` as the proxy's `model_not_found` envelope and,
+/// on success, render a clickable picker over `assistantEl` that
+/// swaps the model and re-runs the user's last turn. Returns `true`
+/// when the picker was rendered so the caller's catch block can skip
+/// its plain-text fallback.
+///
+/// Recognised shape:
+/// ```json
+/// {"error":{"type":"model_not_found","message":"...","param":"<name>","available":["a","b","c"]}}
+/// ```
+/// `err` is whatever the catch block in `streamReply` saw — usually
+/// `Error("HTTP 404: {...body...}")` produced upstream, so we have
+/// to mine the JSON out of the message.
+async function renderModelNotFoundIfApplicable(assistantEl, err) {
+  const body = extractErrorBodyJson(err);
+  if (!body) return false;
+  const errorObj = body.error;
+  if (!errorObj || errorObj.type !== "model_not_found") return false;
+  const requested = errorObj.param || "";
+  const upstreamMessage = errorObj.message || "model not found";
+  const available = Array.isArray(errorObj.available) ? errorObj.available : [];
+  const sessionId = assistantEl?.dataset?.sessionId || activeSessionId();
+
+  // Wipe the loader / partial reply / replay button so the picker
+  // sits on a clean bubble. The loader was the only thing in the
+  // bubble when this fires (LLM returned before any token streamed),
+  // so the cost is one DOM mutation.
+  assistantEl.classList.remove("chat-message--streaming");
+  assistantEl.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.className = "chat-model-not-found";
+  const heading = document.createElement("p");
+  heading.className = "chat-model-not-found-heading";
+  heading.textContent = requested
+    ? `Model “${requested}” is not available on the upstream.`
+    : `Model not available on the upstream.`;
+  wrap.appendChild(heading);
+  const detail = document.createElement("p");
+  detail.className = "chat-model-not-found-detail";
+  detail.textContent = upstreamMessage;
+  wrap.appendChild(detail);
+
+  if (available.length > 0) {
+    const list = document.createElement("div");
+    list.className = "chat-model-not-found-list";
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", "Available models");
+    for (const id of available) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chat-model-not-found-pick";
+      btn.textContent = id;
+      btn.dataset.modelId = id;
+      btn.addEventListener("click", () =>
+        pickModelAndRetry(btn, sessionId, requested),
+      );
+      list.appendChild(btn);
+    }
+    wrap.appendChild(list);
+    const hint = document.createElement("p");
+    hint.className = "chat-model-not-found-hint";
+    hint.textContent =
+      "Pick a model to swap the dropdown and re-send the last turn.";
+    wrap.appendChild(hint);
+  } else {
+    // Upstream `/v1/models` also failed — point the user at the
+    // operator docs so they can fix the upstream or set
+    // `[llm].default_model` to something the backend serves.
+    const hint = document.createElement("p");
+    hint.className = "chat-model-not-found-hint";
+    hint.textContent =
+      "Run `ollama pull <name>` on the upstream, then re-send. " +
+      "Or set `OLLAMA_MODEL` / `[llm].default_model` on this server.";
+    wrap.appendChild(hint);
+  }
+
+  assistantEl.appendChild(wrap);
+  // `finalSource` is read by the `streamReply` caller (and by the
+  // replay button) to decide what to persist into history. The
+  // picker is transient UI, not part of the conversation, so we
+  // blank it out — the user's last turn is preserved as the most
+  // recent entry and a fresh assistant bubble will replace this
+  // one when they pick a model.
+  return true;
+}
+
+/// Walk the `Error.message` we built upstream
+/// (``HTTP 404: {"error":...}``) and pull out the JSON object. Some
+/// upstream bodies are plain text (e.g. ``llm disabled``); those
+/// return `null`.
+function extractErrorBodyJson(err) {
+  const msg = err && err.message ? String(err.message) : String(err || "");
+  const idx = msg.indexOf("{");
+  if (idx < 0) return null;
+  // Try to parse from the first `{` to the matching `}`. We can't
+  // do real bracket matching in linear time without a stack, so
+  // attempt progressively-longer tails until one parses.
+  for (let end = msg.length; end > idx; end--) {
+    if (msg[end - 1] !== "}") continue;
+    try {
+      const v = JSON.parse(msg.slice(idx, end));
+      if (v && typeof v === "object") return v;
+    } catch (_e) {
+      // keep trying
+    }
+  }
+  return null;
+}
+
+/// Apply a model pick from the picker: update the dropdown, persist
+/// the choice, and re-run the user's last user turn against the new
+/// model. The previous assistant bubble (the picker) is removed
+/// because it has no conversation value.
+async function pickModelAndRetry(buttonEl, sessionId, requestedModelId) {
+  const newId = buttonEl.dataset.modelId;
+  if (!newId) return;
+  // Reflect the choice in the dropdown + persisted prefs before
+  // re-sending so the next reload lands on the same model.
+  if (Array.from(modelEl.options).some((o) => o.value === newId)) {
+    modelEl.value = newId;
+  } else {
+    // Upstream model list might have grown between the failed
+    // request and the click; inject the option so the dropdown
+    // stays in sync.
+    const opt = document.createElement("option");
+    opt.value = newId;
+    opt.textContent = newId;
+    modelEl.appendChild(opt);
+    modelEl.value = newId;
+  }
+  saveSelectedModel(modelEl.value);
+  // Disable the picker while the retry runs so a second click does
+  // not fire two parallel requests.
+  const picker = buttonEl.closest(".chat-model-not-found");
+  if (picker) {
+    picker
+      .querySelectorAll("button.chat-model-not-found-pick")
+      .forEach((b) => {
+        b.disabled = true;
+      });
+    buttonEl.classList.add("chat-model-not-found-pick--loading");
+    buttonEl.textContent = `${newId}…`;
+  }
+  // Find the last user turn we need to re-send.
+  const history = loadHistory(sessionId);
+  const lastUserIdx = (() => {
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i]?.role === "user") return i;
+    }
+    return -1;
+  })();
+  if (lastUserIdx < 0) return;
+  const userText = history[lastUserIdx].content || "";
+  // Drop the picker bubble — its content was diagnostic only.
+  const bubble = buttonEl.closest(".chat-message");
+  if (bubble && bubble.parentElement === messagesEl) {
+    bubble.remove();
+  }
+  // Re-issue the same user text against the freshly-picked model.
+  await streamReply(sessionId, userText);
 }
 
 // The Discussion-mode voice oscilloscope (§4.10) lives as a direct
@@ -1832,24 +1997,41 @@ async function loadAgentsBanner() {
 async function loadModels() {
   try {
     const r = await fetch("/v1/models", { cache: "no-store" });
+    // `chat-header` / `chat-audio` / `voice-graph` / `chat-advanced`
+    // only exist inside `#view-discussion`. On a transcript-mode boot
+    // they're not in the DOM, so any visibility mutation would throw
+    // `null.hidden`. The element handles (`disabledNoticeEl`, `formEl`,
+    // `statusEl`) are `lazyEl` proxies that no-op pre-mount, but raw
+    // `document.querySelector` calls don't, so we resolve them once
+    // and bail on null.
+    const chatHeaderEl = document.querySelector(".chat-header");
+    const chatAudioEl = document.querySelector(".chat-audio");
+    const voiceGraphEl = document.querySelector(".voice-graph");
+    const chatAdvancedEl = document.querySelector(".chat-advanced");
+    const inDiscussionView = chatHeaderEl !== null;
     if (r.status === 404) {
       disabledNoticeEl.hidden = false;
       formEl.hidden = true;
-      document.querySelector(".chat-header").hidden = true;
-      document.querySelector(".chat-audio").hidden = true;
-      document.querySelector(".voice-graph").hidden = true;
-      document.querySelector(".chat-advanced").hidden = true;
+      if (inDiscussionView) {
+        chatHeaderEl.hidden = true;
+        chatAudioEl.hidden = true;
+        voiceGraphEl.hidden = true;
+        chatAdvancedEl.hidden = true;
+      }
       statusEl.textContent = "disabled";
       statusEl.className = "status idle";
+      modelsLoaded = true;
       return;
     }
     if (!r.ok) throw new Error(`status ${r.status}`);
     disabledNoticeEl.hidden = true;
     formEl.hidden = false;
-    document.querySelector(".chat-header").hidden = false;
-    document.querySelector(".chat-audio").hidden = false;
-    document.querySelector(".voice-graph").hidden = false;
-    document.querySelector(".chat-advanced").hidden = false;
+    if (inDiscussionView) {
+      chatHeaderEl.hidden = false;
+      chatAudioEl.hidden = false;
+      voiceGraphEl.hidden = false;
+      chatAdvancedEl.hidden = false;
+    }
     // Refresh the pill so a previous "disabled" state disappears.
     renderStatus();
     const data = await r.json();
@@ -1860,6 +2042,7 @@ async function loadModels() {
       opt.value = "";
       opt.textContent = "(no models)";
       modelEl.appendChild(opt);
+      modelsLoaded = true;
       return;
     }
     for (const item of items) {
@@ -1889,6 +2072,7 @@ async function loadModels() {
         saveSelectedModel(modelEl.value);
       });
     }
+    modelsLoaded = true;
   } catch (e) {
     // Surface failures in the status pill so an empty dropdown is
     // not silently confusing — the user can see *why* nothing loaded.
@@ -2532,12 +2716,18 @@ async function streamReply(sessionId, userText) {
       // case is handled at the top of streamReply.
       if (tts) tts.stopAll();
     } else {
-      // Error markers stay plain text — they are developer-facing
-      // diagnostics, not part of the LLM's markdown output.
-      const errText = `[error] ${e?.message || e}`;
-      assistantEl.textContent = errText;
-      finalSource = errText;
-      appendError(e?.message || String(e));
+      // Surface the upstream's model-not-found envelope as a
+      // picker so the user can swap to a model their Ollama
+      // actually serves with one click. Anything else stays a
+      // plain `[error] ...` marker — error paths stay
+      // developer-facing diagnostics unless we can recover.
+      const handled = await renderModelNotFoundIfApplicable(assistantEl, e);
+      if (!handled) {
+        const errText = `[error] ${e?.message || e}`;
+        assistantEl.textContent = errText;
+        finalSource = errText;
+        appendError(e?.message || String(e));
+      }
       // On a hard error the audio would keep talking about a stale
       // half-answer. Stop it.
       if (tts) tts.stopAll();
@@ -3602,7 +3792,9 @@ activeSessionId(); // validates / falls back / creates, updates sidebar
 // saw an empty dropdown until they clicked away and back. Loading at
 // boot keeps the dropdown warm regardless of the persisted mode, and
 // the disabled-server notice still renders correctly on 404.
-loadModels();
+if (globalThis.__nagentMode?.current() === "discussion") {
+  loadModels();
+}
 // Same for the agents banner: one fetch on boot. A reload on
 // /v1/agents that came back empty just hides the banner.
 loadAgentsBanner();
@@ -3645,7 +3837,15 @@ document.addEventListener("visibilitychange", () => {
 // is a no-op — we already cancelled the in-flight reply on the way
 // out, and there is no new work to interrupt.
 document.addEventListener("modechange", (e) => {
-  if (e?.detail?.mode === "discussion") return;
+  // Switching INTO Discussion: warm the model dropdown if it has not
+  // been populated yet (a transcript-mode boot never calls
+  // `loadModels`, see the boot path above). The `modelsLoaded`
+  // guard makes this idempotent across multiple `modechange`
+  // fires and across a visibility-change re-fetch.
+  if (e?.detail?.mode === "discussion") {
+    if (!modelsLoaded) loadModels();
+    return;
+  }
   if (inflight) inflight.controller.abort();
   resetTurnQueue();
 });
