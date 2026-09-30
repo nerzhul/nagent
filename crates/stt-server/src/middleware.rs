@@ -224,8 +224,19 @@ pub async fn access_log_middleware(req: Request, next: Next) -> Response {
     // response extensions. Anonymous requests and 401/403 responses
     // have no such extension and the line is logged with the user
     // fields empty — exactly the right shape for a log aggregator.
+    //
+    // We pre-render `user_id` to a `String` (empty when anonymous)
+    // rather than logging the raw `Option<Uuid>`. The Debug
+    // repr of `Option` is `Some(uuid)` / `None`, which would
+    // either render the literal `Some(...)` (the bug that
+    // surfaced here) or a bare `None` that a log aggregator
+    // cannot distinguish from a real value. An empty string is
+    // what `email` already does on line 229 — matching that
+    // shape keeps every log filter ("`user_id != ""`" to count
+    // authenticated requests, "`email ~= @`" for per-domain
+    // cuts, …) consistent across the two fields.
     let user = response.extensions().get::<crate::auth::AuthUser>();
-    let user_id = user.map(|u| u.id);
+    let user_id = user.map(|u| u.id.to_string()).unwrap_or_default();
     let email = user.map(|u| u.email.as_str()).unwrap_or("");
 
     let level = if status.is_server_error() {
@@ -250,7 +261,7 @@ pub async fn access_log_middleware(req: Request, next: Next) -> Response {
                 path = %path,
                 status = status.as_u16(),
                 duration_ms = elapsed_ms,
-                user_id = ?user_id,
+                user_id = %user_id,
                 email = %email,
                 ip = %ip,
                 user_agent = %user_agent,
@@ -264,7 +275,7 @@ pub async fn access_log_middleware(req: Request, next: Next) -> Response {
                 path = %path,
                 status = status.as_u16(),
                 duration_ms = elapsed_ms,
-                user_id = ?user_id,
+                user_id = %user_id,
                 email = %email,
                 ip = %ip,
                 user_agent = %user_agent,
@@ -278,7 +289,7 @@ pub async fn access_log_middleware(req: Request, next: Next) -> Response {
                 path = %path,
                 status = status.as_u16(),
                 duration_ms = elapsed_ms,
-                user_id = ?user_id,
+                user_id = %user_id,
                 email = %email,
                 ip = %ip,
                 user_agent = %user_agent,
