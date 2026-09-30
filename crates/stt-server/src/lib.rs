@@ -70,6 +70,7 @@ pub mod credentials;
 pub mod documents;
 pub mod http;
 pub mod llm;
+pub mod oauth;
 pub mod rate_limit;
 pub mod state;
 pub mod stt;
