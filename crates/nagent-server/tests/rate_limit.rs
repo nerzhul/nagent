@@ -24,11 +24,11 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use futures_util::StreamExt;
+use nagent_server::config::{LlmAuthMode, LlmConfig, RateLimitConfig};
+use nagent_server::http::build_router;
+use nagent_server::rate_limit::RateLimiter;
+use nagent_server::testing::app_state;
 use stt_proto::{decode_frame, Tag};
-use stt_server::config::{LlmAuthMode, LlmConfig, RateLimitConfig};
-use stt_server::http::build_router;
-use stt_server::rate_limit::RateLimiter;
-use stt_server::testing::app_state;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
@@ -62,16 +62,17 @@ async fn start_test_server_with(
         .with_llm_rate_per_min(rate_limit.llm_per_min);
     if llm_enabled {
         let llm_cfg = builder.config.llm.clone();
-        builder = builder
-            .with_llm(stt_server::llm::LlmClient::new(Arc::new(llm_cfg)).expect("LlmClient::new"));
+        builder = builder.with_llm(
+            nagent_server::llm::LlmClient::new(Arc::new(llm_cfg)).expect("LlmClient::new"),
+        );
     }
     // Build the local copies of the limiters so the test can
     // observe the bucket state from outside (the builder's copies
     // are inside `Arc`s shared with `state`).
-    let stt_limiter = RateLimiter::new(stt_server::rate_limit::RateLimitPolicy::stt(
+    let stt_limiter = RateLimiter::new(nagent_server::rate_limit::RateLimitPolicy::stt(
         rate_limit.stt_per_min,
     ));
-    let llm_limiter = RateLimiter::new(stt_server::rate_limit::RateLimitPolicy::llm(
+    let llm_limiter = RateLimiter::new(nagent_server::rate_limit::RateLimitPolicy::llm(
         rate_limit.llm_per_min,
     ));
     let state = builder.build();
@@ -166,7 +167,7 @@ async fn llm_rate_limit_middleware_is_wired_in() {
     assert!(llm.check(remote).is_ok());
     let err = llm.check(remote).unwrap_err();
     let retry = match err {
-        stt_server::rate_limit::RateLimitError::Limited { retry_after_ms, .. } => retry_after_ms,
+        nagent_server::rate_limit::RateLimitError::Limited { retry_after_ms, .. } => retry_after_ms,
     };
     assert!(
         (500..=70_000).contains(&retry),
@@ -207,14 +208,14 @@ async fn stt_per_frame_check_drops_bucket_after_two_frames() {
     // the carve-out, so we craft an `IpAddr` and verify that two
     // `check_opt` calls drain a 2-token bucket and the third is
     // rejected.
-    let stt = RateLimiter::new(stt_server::rate_limit::RateLimitPolicy::stt(2));
+    let stt = RateLimiter::new(nagent_server::rate_limit::RateLimitPolicy::stt(2));
     let remote: std::net::IpAddr = "198.51.100.42".parse().unwrap();
     assert!(stt.check_opt(Some(remote)).is_ok());
     assert!(stt.check_opt(Some(remote)).is_ok());
     let err = stt.check_opt(Some(remote)).unwrap_err();
     assert!(matches!(
         err,
-        stt_server::rate_limit::RateLimitError::Limited { .. }
+        nagent_server::rate_limit::RateLimitError::Limited { .. }
     ));
     // Without a peer IP (test harness without ConnectInfo), the
     // check is a no-op success.

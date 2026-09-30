@@ -5,11 +5,11 @@ It is meant as a single reference for engineers and reviewers to know what
 the frontend currently offers, where each feature lives in the code, and
 how features relate to one another. It is descriptive, not a tutorial.
 
-The UI is served as static assets from `crates/stt-server/src/static/` and
+The UI is served as static assets from `crates/nagent-server/src/static/` and
 loaded by a single `index.html` page. There is no build step, no bundler,
 and no npm install at runtime: every JS module, CSS file, and third-party
 library is shipped as a plain file and served by the Rust static handler
-(`crates/stt-server/src/static_assets.rs`). The page bootstraps two
+(`crates/nagent-server/src/static_assets.rs`). The page bootstraps two
 top-level modes — **Transcript** and **Discussion** — only one of which is
 visible at a time. When the operator enables `auth.enabled = true` on the
 server, the UI is also gated by a **global portal** so anonymous
@@ -22,7 +22,7 @@ visitors never see the chat/voice controls at all — see §8.
 - A `role="tablist"` toggle in the header switches between the two views
   (`#mode-transcript-btn`, `#mode-discussion-btn`).
 - The active mode is persisted in `localStorage` under `nagent.mode`
-  (`crates/stt-server/src/static/mode.js`); the toggle is rehydrated before
+  (`crates/nagent-server/src/static/mode.js`); the toggle is rehydrated before
   listeners are wired so the first paint already reflects the saved mode.
 - A `modechange` `CustomEvent` is dispatched on `document` whenever the
   mode flips; `chat.js` listens for it to lazily hydrate the model list
@@ -32,7 +32,7 @@ visitors never see the chat/voice controls at all — see §8.
 
 ### 1.2 Header and version display
 
-- The header (`crates/stt-server/src/static/index.html`) shows the app
+- The header (`crates/nagent-server/src/static/index.html`) shows the app
   title, a subtitle, and two version pills:
   - `backend <code id="backend-version">` populated from `GET /api/version`.
   - `frontend <code id="frontend-version-self">` populated from
@@ -48,7 +48,7 @@ visitors never see the chat/voice controls at all — see §8.
 The voice oscilloscope — a waveform canvas + a speech-probability
 level bar — is a **reusable widget, not a single shared DOM node**.
 Its drawing, frame buffering, and level-meter logic live in
-`createScope` in `crates/stt-server/src/static/audio.js`, and both
+`createScope` in `crates/nagent-server/src/static/audio.js`, and both
 modes drive it through their own `AudioCapture` instance. What
 changes between modes is *where the widget is mounted in the DOM*:
 
@@ -69,7 +69,7 @@ or `AudioCapture` — only the DOM anchor changes.
 ## 2. Audio capture pipeline (shared)
 
 The audio stack is identical in both modes. It is implemented in
-`crates/stt-server/src/static/audio.js` and exposed as the `AudioCapture`
+`crates/nagent-server/src/static/audio.js` and exposed as the `AudioCapture`
 class. `app.js` (Transcript) and `chat.js` (Discussion) each instantiate
 their own `AudioCapture` against their own DOM, sharing only the
 underlying Silero VAD.
@@ -116,7 +116,7 @@ Concrete behaviour:
 
 ## 3. Transcript mode
 
-Implemented by `crates/stt-server/src/static/app.js`. The DOM lives under
+Implemented by `crates/nagent-server/src/static/app.js`. The DOM lives under
 `<main id="view-transcript">` in `index.html`.
 
 ### 3.1 Toolbar controls
@@ -154,7 +154,7 @@ Implemented by `crates/stt-server/src/static/app.js`. The DOM lives under
 
 ## 4. Discussion mode (chat)
 
-Implemented by `crates/stt-server/src/static/chat.js` (~2,800 lines).
+Implemented by `crates/nagent-server/src/static/chat.js` (~2,800 lines).
 The DOM lives under `<main id="view-discussion">`. The mode is
 fronted by a chat sidebar and a chat-main area.
 
@@ -180,8 +180,8 @@ fronted by a chat sidebar and a chat-main area.
 
 - `#chat-model` populated from `feature("llm_models")`, which is
   populated server-side from the upstream `/v1/models` query inside
-  the `GET /api/features` response (see `crates/stt-server/src/http/features.rs`
-  and `crates/stt-server/src/llm/proxy.rs::fetch_upstream_model_list`).
+  the `GET /api/features` response (see `crates/nagent-server/src/http/features.rs`
+  and `crates/nagent-server/src/llm/proxy.rs::fetch_upstream_model_list`).
   The frontend never calls `/v1/models` directly — that route is
   kept for direct callers (`curl`, SDKs) but the chat UI uses the
   feature-flag payload exclusively. The server bounds the upstream
@@ -491,7 +491,7 @@ layout itself does not need to change.
 
 ### 4.9 TTS playback
 
-Implemented primarily by `crates/stt-server/src/static/tts.js` with
+Implemented primarily by `crates/nagent-server/src/static/tts.js` with
 controls in `chat.js`:
 
 - Settings helpers: `getTtsSettings`, `resolveTtsVoice`,
@@ -546,7 +546,7 @@ context as the user / assistant turns.
 
 ## 5. Geolocation (Discussion)
 
-Implemented by `crates/stt-server/src/static/geolocation.js` and
+Implemented by `crates/nagent-server/src/static/geolocation.js` and
 consumed by `chat.js` / `index.html`. Storage layout:
 
 - `nagent.chat.location` → JSON `{ lat, lon, accuracy, timestamp }`
@@ -573,7 +573,7 @@ Behaviour:
 ## 6. Vendored assets
 
 All third-party assets are vendored under
-`crates/stt-server/src/static/vendor/` so the server can serve them
+`crates/nagent-server/src/static/vendor/` so the server can serve them
 with no network round-trip and no build step:
 
 - `vad/` — `@ricky0123/vad-web@0.0.31` UMD bundle (depends on
@@ -593,7 +593,7 @@ worker URL need a same-origin path).
 
 ### 7.1 Locale-aware preselection
 
-`crates/stt-server/src/static/lang-preselect.js` exports
+`crates/nagent-server/src/static/lang-preselect.js` exports
 `preselectFromBrowser(selectEl)`. It walks `navigator.languages`,
 falls back to `navigator.language`, reduces each BCP-47 tag to its
 primary language subtag (`fr-FR` → `fr`, `zh-Hans-CN` → `zh`), and
@@ -633,7 +633,7 @@ from `chat.js` on boot.
 
 - Dark theme by default (`:root` defines `--bg`, `--fg`, `--accent`,
   `--accent-2`, `--error`, `--ok`, `--border`, plus mono and sans
-  font stacks) in `crates/stt-server/src/static/style.css`.
+  font stacks) in `crates/nagent-server/src/static/style.css`.
 - No light-theme toggle in the current UI; the colour scheme is
   fixed.
 
@@ -645,11 +645,11 @@ that an anonymous visitor never sees — and cannot inspect in
 DevTools — the chat/voice controls. The portal is implemented as
 a coordination between three files:
 
-- `crates/stt-server/src/static/index.html` — the HTML shell.
-- `crates/stt-server/src/static/auth.js` — the only script
+- `crates/nagent-server/src/static/index.html` — the HTML shell.
+- `crates/nagent-server/src/static/auth.js` — the only script
   loaded directly in the body, owns the probe + login form +
   template mount/unmount lifecycle.
-- `crates/stt-server/src/static/app.js` — runs *inside* the
+- `crates/nagent-server/src/static/app.js` — runs *inside* the
   cloned template, renders the auth pill, dispatches the
   `nagent:logout` event.
 

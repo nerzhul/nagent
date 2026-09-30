@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use stt_server::{
+use nagent_server::{
     auth::store::AuthStore,
     credentials::{
         crypto::{decrypt, encrypt},
@@ -24,13 +24,13 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 async fn temp_store() -> AuthStore {
-    let cfg = stt_server::config::AuthConfig {
+    let cfg = nagent_server::config::AuthConfig {
         enabled: true,
-        backends: vec![stt_server::config::AuthBackendKind::Local],
+        backends: vec![nagent_server::config::AuthBackendKind::Local],
         public_url: "https://example.com".into(),
         session_ttl_days: 7,
         csrf_header: "x-csrf-token".into(),
-        db: stt_server::config::AuthDbConfig {
+        db: nagent_server::config::AuthDbConfig {
             backend: "sqlite".into(),
             url: format!(
                 "sqlite://file:cred_e2e_{}?mode=memory&cache=shared",
@@ -108,7 +108,7 @@ async fn upsert_delete_round_trip() {
         .expect("row exists");
     let secret = decrypt(
         &key,
-        &stt_server::credentials::EncryptedSecret {
+        &nagent_server::credentials::EncryptedSecret {
             nonce: row.nonce,
             ciphertext: row.ciphertext,
         },
@@ -170,12 +170,12 @@ async fn resolver_audit_row_records_target_service() {
         .expect("user");
     let key = Arc::new(CredentialsKey::from_bytes([9u8; 32]));
     let resolver = CredentialResolver::new(store.clone(), key, None, None);
-    let cache = stt_server::credentials::SecretCache::new();
+    let cache = nagent_server::credentials::SecretCache::new();
     let err = resolver.get(user_id, "test_svc", "host", &cache).await;
     // Missing is expected; the audit row is the assertion.
     assert!(matches!(
         err,
-        Err(stt_server::credentials::CredentialError::Missing { .. })
+        Err(nagent_server::credentials::CredentialError::Missing { .. })
     ));
     // Fire-and-forget audit: give the spawned task time to land.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -196,12 +196,12 @@ async fn resolver_audit_row_records_target_service() {
 #[tokio::test]
 async fn http_list_integrations_empty_registry_returns_empty_data() {
     let auth_store = temp_store().await;
-    let mut builder = stt_server::testing::app_state();
+    let mut builder = nagent_server::testing::app_state();
     Arc::make_mut(&mut builder.config).auth.enabled = true;
     Arc::make_mut(&mut builder.config).auth.backends =
-        vec![stt_server::config::AuthBackendKind::Local];
+        vec![nagent_server::config::AuthBackendKind::Local];
     Arc::make_mut(&mut builder.config).auth.public_url = "https://example.com".into();
-    Arc::make_mut(&mut builder.config).auth.db = stt_server::config::AuthDbConfig {
+    Arc::make_mut(&mut builder.config).auth.db = nagent_server::config::AuthDbConfig {
         backend: "sqlite".into(),
         url: format!(
             "sqlite://file:cred_http_{}?mode=memory&cache=shared",
@@ -215,11 +215,11 @@ async fn http_list_integrations_empty_registry_returns_empty_data() {
     let auth_state = state.auth.as_ref().expect("auth must be wired").clone();
     let auth_layer = axum::middleware::from_fn_with_state(
         auth_state,
-        stt_server::auth::middleware::require_auth_middleware,
+        nagent_server::auth::middleware::require_auth_middleware,
     );
-    let identity = stt_server::auth::router::build_protected_auth_router(state.clone());
+    let identity = nagent_server::auth::router::build_protected_auth_router(state.clone());
     let cred_routes =
-        stt_server::credentials::routes::build_protected_credentials_router(state.clone());
+        nagent_server::credentials::routes::build_protected_credentials_router(state.clone());
     let app = identity
         .merge(cred_routes)
         .layer(auth_layer)

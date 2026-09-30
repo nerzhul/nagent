@@ -15,9 +15,9 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use axum::http::{header, StatusCode};
-use stt_server::http::build_router;
-use stt_server::testing::app_state;
-use stt_server::{tts, AppState};
+use nagent_server::http::build_router;
+use nagent_server::testing::app_state;
+use nagent_server::{tts, AppState};
 use tokio::net::TcpListener;
 
 fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {

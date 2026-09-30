@@ -15,7 +15,7 @@ no audio or transcript can ever leak across sessions.
 - `crates/stt-proto` — wire types and `postcard` codec for the WS protocol.
 - `crates/stt-core` — `WhisperBackend` trait, `whisper-rs` implementation,
   inference worker and queue.
-- `crates/stt-server` — `axum` server, WebSocket handler, session map,
+- `crates/nagent-server` — `axum` server, WebSocket handler, session map,
   embedded static frontend.
 
 ## Prerequisites
@@ -62,20 +62,20 @@ and `.env` files still override any TOML values.
 
 ### Cargo features
 
-`stt-server` exposes several features; `stt-core` exposes four. They are combined
+`nagent-server` exposes several features; `stt-core` exposes four. They are combined
 through the `make` targets and the Dockerfile `BACKEND` arg.
 
 | Feature                         | Effect                                                                                   |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
-| `stt-server/real-backend`       | Use the `whisper-rs` backend. Without it the server falls back to the in-process mock.   |
-| `stt-server/web-agent`          | Register the server-side `web_fetch` chat agent.                                         |
-| `stt-server/datetime-agent`     | Register the `get_datetime` chat agent (pulls `chrono` + `chrono-tz`).                   |
-| `stt-server/weather-agent`      | Register the `get_weather` chat agent (WeatherAPI.com, free API key required).            |
-| `stt-server/stock-agent`        | Register the `get_stock_quote` chat agent (Stooq CSV, no API key).                       |
-| `stt-server/calculate-agent`    | Register the `calculate` chat agent (local `meval`-backed expression evaluator).         |
-| `stt-server/unit-convert-agent` | Register the `unit_convert` chat agent (pure-local conversion tables).                  |
-| `stt-server/wikipedia-agent`    | Register the `wikipedia` chat agent (REST `wikipedia.org`, no API key, `User-Agent` set).|
-| `stt-server/dictionary-agent`   | Register the `dictionary` chat agent (Free Dictionary REST API, no API key).             |
+| `nagent-server/real-backend`       | Use the `whisper-rs` backend. Without it the server falls back to the in-process mock.   |
+| `nagent-server/web-agent`          | Register the server-side `web_fetch` chat agent.                                         |
+| `nagent-server/datetime-agent`     | Register the `get_datetime` chat agent (pulls `chrono` + `chrono-tz`).                   |
+| `nagent-server/weather-agent`      | Register the `get_weather` chat agent (WeatherAPI.com, free API key required).            |
+| `nagent-server/stock-agent`        | Register the `get_stock_quote` chat agent (Stooq CSV, no API key).                       |
+| `nagent-server/calculate-agent`    | Register the `calculate` chat agent (local `meval`-backed expression evaluator).         |
+| `nagent-server/unit-convert-agent` | Register the `unit_convert` chat agent (pure-local conversion tables).                  |
+| `nagent-server/wikipedia-agent`    | Register the `wikipedia` chat agent (REST `wikipedia.org`, no API key, `User-Agent` set).|
+| `nagent-server/dictionary-agent`   | Register the `dictionary` chat agent (Free Dictionary REST API, no API key).             |
 | `stt-core/whisper-rs-backend`   | Pulls in `whisper-rs` (CPU). Always required, even when a GPU backend is also selected.  |
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
@@ -103,7 +103,7 @@ runtime stage when `BACKEND=vulkan`.
 ### Environment variables
 
 All variables are read by `Config::from_env()` in
-`crates/stt-server/src/config.rs`. `WHISPER_MODEL_PATH` is the only one
+`crates/nagent-server/src/config.rs`. `WHISPER_MODEL_PATH` is the only one
 without a default and is required.
 
 | Variable                     | Default                                       | Section        | Meaning                                                                                                       |
@@ -167,7 +167,7 @@ without a default and is required.
 | `NAGENT_AUTH_PASSKEY_RP_ID`  | _(empty)_                                     | Auth / passkey | WebAuthn relying party id (no scheme, no port — e.g. `nagent.example.com`). MUST match the browser's effective domain. |
 | `NAGENT_AUTH_PASSKEY_RP_NAME` | `nagent`                                    | Auth / passkey | Human-readable RP name shown by the authenticator.                                                              |
 | `NAGENT_AUTH_PASSKEY_ORIGINS` | _(empty)_                                   | Auth / passkey | Comma-separated allowed origins — each entry MUST include scheme + port (e.g. `https://nagent.example.com`). |
-| `RUST_LOG`                   | `info,stt_server=debug,stt_core=debug` (local); `info,stt_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
+| `RUST_LOG`                   | `info,nagent_server=debug,stt_core=debug` (local); `info,nagent_server=info,stt_core=info` (Docker) | Logging | Standard `tracing-subscriber` `EnvFilter` directive. |
 
 Per-source-IP rate limiting applies at both layers: HTTP for the LLM proxy
 (`/v1/chat/completions`, `/v1/models`) and at the WebSocket upgrade +
@@ -195,7 +195,7 @@ A commented-out starter file lives at
 edit the values you want, and point the binary at it:
 
 ```
-stt-server --config /etc/nagent/config.toml
+nagent-server --config /etc/nagent/config.toml
 ```
 
 Server knobs live under `[server]`; the two grouped sub-tables are
@@ -340,7 +340,7 @@ exposes its own login route; the operator enables a subset via
 The OIDC handlers accept the `state` and `nonce` standard claims and
 verify them, but the JWT signature is not checked against the IdP's
 JWKS yet — the verification path is logged as a TODO in
-`crates/stt-server/src/auth/oidc.rs`. HTTPS deployments where the
+`crates/nagent-server/src/auth/oidc.rs`. HTTPS deployments where the
 transport already authenticates the IdP are unaffected; operators
 sensitive to network-level attacks should keep OIDC disabled until
 the JWKS check lands.
@@ -354,7 +354,7 @@ in with a passkey later (and vice versa) — the `provider` column on
 
 `auth.db.backend` chooses the storage engine **at runtime** — the
 same binary compiles both, the operator picks at boot. The
-`sqlx::migrate!` macro applies the embedded `crates/stt-server/src/db/migrations/0001_init.sql`
+`sqlx::migrate!` macro applies the embedded `crates/nagent-server/src/db/migrations/0001_init.sql`
 on first start (idempotent; sqlx tracks applied versions in its
 own `_sqlx_migrations` table). The migration files were relocated
 under `src/db/migrations/` as part of plan 5.D so every domain
@@ -422,7 +422,7 @@ To create additional admins after the bootstrap, run the CLI:
 # The CLI opens the pool, runs the migration, and inserts the row
 # — the server does NOT need to be running. It refuses (without
 # --force) when data/server.pid points at a live process.
-stt-server auth create-admin \
+nagent-server auth create-admin \
   --email admin@example.com \
   --from-stdin           # password read from stdin to avoid argv / shell history
 ```
@@ -431,14 +431,14 @@ The CLI returns the new `user_id` on stdout and exits 0. Two
 additional CLI subcommands round out the operator surface:
 
 ```bash
-stt-server auth list-users [--provider local|oidc|passkey]   # tab-separated
-stt-server auth delete-user --email <email> [--yes]          # refuses to remove the last local user when auth is enabled
+nagent-server auth list-users [--provider local|oidc|passkey]   # tab-separated
+nagent-server auth delete-user --email <email> [--yes]          # refuses to remove the last local user when auth is enabled
 ```
 
 The CLI reads the same `[auth.db]` configuration + env vars the
 server uses, so there is no second source of truth. Boot the server
 once to apply the schema; the CLI can run before or after.
-note lives in `crates/stt-server/src/auth/oidc.rs`.
+note lives in `crates/nagent-server/src/auth/oidc.rs`.
 
 ### Per-user credentials (framework)
 
@@ -579,7 +579,7 @@ The `0002_credentials.sql` migration adds:
   their global config (`[agents.get_weather].api_key`).
 - **Concrete integrations** (IMAP, CalDAV, GitHub, Home Assistant,
   …) land in their own follow-up PRs. Adding one is a single
-  `ServiceDef` to `crates/stt-server/src/agents/services.rs` plus
+  `ServiceDef` to `crates/nagent-server/src/agents/services.rs` plus
   an agent that reads creds via `ctx.secret(...)`.
 
 ### Kubernetes overlays
@@ -617,7 +617,7 @@ make test
 ```
 
 The multiuser isolation test (Phase 6) lives in
-`crates/stt-server/tests/multiuser_isolation.rs` and uses a mock backend so
+`crates/nagent-server/tests/multiuser_isolation.rs` and uses a mock backend so
 it runs without any GPU.
 
 ## Chat (Ollama)
@@ -641,12 +641,12 @@ server" notice.
    ollama pull llama3.1
    ```
 
-2. Start `stt-server` with the proxy enabled:
+2. Start `nagent-server` with the proxy enabled:
 
    ```
    make run-llm
-   # equivalent to: LLM_ENABLED=true cargo run -p stt-server --release \
-   #     --features stt-server/real-backend,stt-server/web-agent,stt-core/whisper-rs-backend
+   # equivalent to: LLM_ENABLED=true cargo run -p nagent-server --release \
+   #     --features nagent-server/real-backend,nagent-server/web-agent,stt-core/whisper-rs-backend
    ```
 
 3. Open <http://localhost:8080>, click **Discussion**, type a message.
@@ -1132,7 +1132,7 @@ sudo dnf install espeak-ng libsonic libpcaudio
 > libpcaudio for audio output. `piper-rs` 0.2's build script bundles
 > espeak-ng + libsonic via CMake but has packaging bugs where it
 > forgets to relay the `-lsonic` and `-lpcaudio` link directives
-> to Cargo. `stt-server`'s own build script (`build.rs`)
+> to Cargo. `nagent-server`'s own build script (`build.rs`)
 > re-injects both directives whenever the `tts` cargo feature is
 > enabled, so the link step resolves against the system
 > `libsonic.so` / `libpcaudio.so` you just installed. If you want
@@ -1221,19 +1221,19 @@ commercial product without picking a voice with a permissive
 license.** The Chromium `Orca` offline voices bundled with modern Linux
 desktops are MIT-licensed and a drop-in alternative if you need a
 permissive-license TTS path; the engine abstraction in
-`crates/stt-server/src/tts.rs` (`Synthesizer` trait) is the seam where
+`crates/nagent-server/src/tts.rs` (`Synthesizer` trait) is the seam where
 such a backend would slot in.
 
 ### Build & runtime impact
 
-`piper-rs` is gated behind the `stt-server/tts` cargo feature. Every
+`piper-rs` is gated behind the `nagent-server/tts` cargo feature. Every
 `make run*` target enables it (`run`, `run-vulkan`, `run-hipblas`,
 `run-cuda`, `run-mock`, `run-llm`, `run-tts`) so operators never have
 to think about the feature flag — TTS is part of the standard
-delivery. Without `--features stt-server/tts` the binary compiles
+delivery. Without `--features nagent-server/tts` the binary compiles
 without `piper-rs`, `ort`, or the espeak-ng FFI crate, so a
 downstream consumer who wants to slim their binary can opt out
-manually with `cargo build -p stt-server`.
+manually with `cargo build -p nagent-server`.
 
 The runtime surface follows `TTS_ENABLED`: when `false`, the
 `/v1/audio/*` routes are not registered and the discussion UI hides

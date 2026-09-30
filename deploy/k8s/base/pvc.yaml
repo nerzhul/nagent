@@ -15,7 +15,7 @@ spec:
 ---
 # Persistent volume for Discussion-mode document uploads. The server
 # writes uploaded `.txt` / `.pdf` files here under a UUID-sharded
-# layout (see `crates/stt-server/src/documents/storage.rs`). A
+# layout (see `crates/nagent-server/src/documents/storage.rs`). A
 # periodic purge task (`[documents].purge_interval_hours`) reclaims
 # old rows + files; a PVC gives the operator a single quota knob
 # instead of an unbounded `/tmp`.
@@ -23,7 +23,7 @@ spec:
 # Only mounted by the Deployment when `documents.enabled = true`
 # in the configmap; the server refuses to boot if the feature is
 # on but the dir is not writable (see
-# `crates/stt-server/src/documents/storage.rs::check_writable`).
+# `crates/nagent-server/src/documents/storage.rs::check_writable`).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -28,7 +28,10 @@ jobs:
             .
             crates/stt-proto
             crates/stt-core
-            crates/stt-server
+            crates/nagent-support
+            crates/nagent-db
+            crates/nagent-agents
+            crates/nagent-server
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -40,7 +43,7 @@ jobs:
         run: |
           cargo check --workspace \
             -p stt-proto \
-            -p stt-server
+            -p nagent-server
 
       - name: cargo clippy (cpu features)
         run: |

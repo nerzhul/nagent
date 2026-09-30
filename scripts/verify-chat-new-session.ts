@@ -36,7 +36,7 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 
 Deno.test("chat.js source: broken newSessionBtnEl pattern is removed", async () => {
   const chatSrc = await Deno.readTextFile(
-    new URL("../crates/stt-server/src/static/chat.js", import.meta.url),
+    new URL("../crates/nagent-server/src/static/chat.js", import.meta.url),
   );
   assertEquals(
     /newSessionBtnEl\s*=/.test(chatSrc),
@@ -79,7 +79,7 @@ Deno.test("chat.js source: loadModels() is not called at module top level", asyn
   // subscriber wiring shows up as a function reference, not a
   // call). The pre-mount top-level pattern must be gone.
   const chatSrc = await Deno.readTextFile(
-    new URL("../crates/stt-server/src/static/chat.js", import.meta.url),
+    new URL("../crates/nagent-server/src/static/chat.js", import.meta.url),
   );
 
   const callMatches = chatSrc.match(

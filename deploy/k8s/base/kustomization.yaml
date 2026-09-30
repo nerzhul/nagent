@@ -15,11 +15,11 @@ resources:
 labels:
   - includeSelectors: true
     pairs:
-      app.kubernetes.io/name: stt-server
+      app.kubernetes.io/name: nagent-server
       app.kubernetes.io/part-of: stt
       app.kubernetes.io/managed-by: kustomize
 
 images:
-  - name: nagent/stt-server
-    newName: nagent/stt-server
+  - name: nagent/nagent-server
+    newName: nagent/nagent-server
     newTag: latest

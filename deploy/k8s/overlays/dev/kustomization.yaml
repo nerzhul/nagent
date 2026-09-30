@@ -12,16 +12,16 @@ patches:
   - path: service-patch.yaml
     target:
       kind: Service
-      name: stt-server
+      name: nagent-server
 
 # One replica is plenty for local dev.
 replicas:
-  - name: stt-server
+  - name: nagent-server
     count: 1
 
 # Verbose logs in dev.
 configMapGenerator:
-  - name: stt-server-config
+  - name: nagent-server-config
     behavior: merge
     literals:
-      - RUST_LOG=debug,stt_server=trace,stt_core=trace
+      - RUST_LOG=debug,nagent_server=trace,stt_core=trace

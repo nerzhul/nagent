@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use stt_server::auth::store::AuthStore;
-use stt_server::chat::sessions::{ChatSessionError, ChatSessions};
-use stt_server::config::{AuthConfig, AuthDbConfig};
+use nagent_server::auth::store::AuthStore;
+use nagent_server::chat::sessions::{ChatSessionError, ChatSessions};
+use nagent_server::config::{AuthConfig, AuthDbConfig};
 use uuid::Uuid;
 
 async fn fresh_store() -> AuthStore {
@@ -66,7 +66,7 @@ async fn insert_user_for_test(store: &AuthStore, user_id: Uuid) {
     // UUID) by writing through `AuthStore::pool()`. The pool is
     // typed `AnyPool`; we unwrap to sqlite for the test harness.
     let pool = store.pool();
-    if let stt_server::auth::store::AnyPool::Sqlite(sqlite_pool) = pool {
+    if let nagent_server::auth::store::AnyPool::Sqlite(sqlite_pool) = pool {
         sqlx::query::<sqlx::Sqlite>(
             "INSERT INTO users (id, email, display_name, provider, password_hash, created_at) \
              VALUES (?1, ?2, ?3, 'local', ?4, ?5)",

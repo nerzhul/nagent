@@ -41,7 +41,7 @@ import {
   setActiveId,
   sortedSessions,
   touchSession,
-} from "../crates/stt-server/src/static/chat-sessions.js";
+} from "../crates/nagent-server/src/static/chat-sessions.js";
 
 // Minimal `Storage`-shaped object that satisfies the methods
 // `chat-sessions.js` actually calls. We cast to `Storage` on install

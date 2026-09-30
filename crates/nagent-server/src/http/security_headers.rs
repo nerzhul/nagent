@@ -183,7 +183,7 @@ pub fn cors_layer(allow_origins: &[String]) -> CorsLayer {
 /// `ERROR` for 5xx. A noisy CI test can down-grade to `INFO`
 /// for everything with `RUST_LOG=info` (the access log line
 /// is tagged `event = "http.access"` so it is easy to filter
-/// out with `RUST_LOG=info,stt_server::http::middleware::access=off`).
+/// out with `RUST_LOG=info,nagent_server::http::middleware::access=off`).
 ///
 /// The peer IP comes from `ConnectInfo<SocketAddr>` — the same
 /// extension that the LLM rate limiter reads. We pull it

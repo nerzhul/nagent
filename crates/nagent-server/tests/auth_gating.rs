@@ -18,11 +18,11 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use stt_server::auth::store::AuthStore;
-use stt_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig};
-use stt_server::http::build_router;
-use stt_server::testing::app_state;
-use stt_server::AppState;
+use nagent_server::auth::store::AuthStore;
+use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig};
+use nagent_server::http::build_router;
+use nagent_server::testing::app_state;
+use nagent_server::AppState;
 use tower::ServiceExt;
 use uuid::Uuid;
 

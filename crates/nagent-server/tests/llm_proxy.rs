@@ -17,11 +17,11 @@ use std::time::Duration;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
+use nagent_server::config::LlmConfig;
+use nagent_server::http::build_router;
+use nagent_server::llm::LlmClient;
+use nagent_server::testing::app_state;
 use serde_json::Value;
-use stt_server::config::LlmConfig;
-use stt_server::http::build_router;
-use stt_server::llm::LlmClient;
-use stt_server::testing::app_state;
 use tokio::net::TcpListener;
 
 /// Spawn a mock upstream that records the incoming request and
@@ -108,7 +108,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         default_model: "llama3.1".into(),
         api_key,
         inbound_auth_key: None,
-        auth_mode: stt_server::config::LlmAuthMode::Forward,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
         request_timeout: Duration::from_secs(120),
         cors_allow_origins: vec![],
         system_prompt,
@@ -547,7 +547,7 @@ async fn proxy_is_passthrough_when_system_prompt_unset() {
 /// to keep the helper close to the existing one.
 async fn start_test_server_with_llm_auth(
     upstream_url: String,
-    auth_mode: stt_server::config::LlmAuthMode,
+    auth_mode: nagent_server::config::LlmAuthMode,
     inbound_auth_key: Option<String>,
 ) -> (
     String,
@@ -601,7 +601,7 @@ async fn bearer_mode_rejects_request_without_auth_header() {
     let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
     let (url, _) = start_test_server_with_llm_auth(
         upstream_url,
-        stt_server::config::LlmAuthMode::Bearer,
+        nagent_server::config::LlmAuthMode::Bearer,
         Some("swordfish".into()),
     )
     .await;
@@ -652,7 +652,7 @@ async fn bearer_mode_rejects_wrong_key() {
     let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
     let (url, _) = start_test_server_with_llm_auth(
         upstream_url,
-        stt_server::config::LlmAuthMode::Bearer,
+        nagent_server::config::LlmAuthMode::Bearer,
         Some("swordfish".into()),
     )
     .await;
@@ -684,7 +684,7 @@ async fn bearer_mode_accepts_matching_key() {
     let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
     let (url, _) = start_test_server_with_llm_auth(
         upstream_url,
-        stt_server::config::LlmAuthMode::Bearer,
+        nagent_server::config::LlmAuthMode::Bearer,
         Some("swordfish".into()),
     )
     .await;
@@ -719,7 +719,7 @@ async fn forward_mode_ignores_inbound_auth_header() {
     let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
     let (url, _) = start_test_server_with_llm_auth(
         upstream_url,
-        stt_server::config::LlmAuthMode::Forward,
+        nagent_server::config::LlmAuthMode::Forward,
         // Set the key too so we know the gate is the mode, not the
         // absence of the key.
         Some("swordfish".into()),
@@ -755,7 +755,7 @@ async fn bearer_mode_is_noop_without_key() {
     let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
     let (url, _) = start_test_server_with_llm_auth(
         upstream_url,
-        stt_server::config::LlmAuthMode::Bearer,
+        nagent_server::config::LlmAuthMode::Bearer,
         None,
     )
     .await;
@@ -783,7 +783,7 @@ async fn bearer_mode_accepts_lowercase_scheme() {
     let upstream_url = spawn_mock_upstream(sse_body(&["ok"]), Arc::clone(&captured)).await;
     let (url, _) = start_test_server_with_llm_auth(
         upstream_url,
-        stt_server::config::LlmAuthMode::Bearer,
+        nagent_server::config::LlmAuthMode::Bearer,
         Some("swordfish".into()),
     )
     .await;

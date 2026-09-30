@@ -10,8 +10,8 @@
 //! the right bytes are reachable at the right paths with the right
 //! MIME types.
 
-use stt_server::http::build_router;
-use stt_server::testing::app_state;
+use nagent_server::http::build_router;
+use nagent_server::testing::app_state;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 

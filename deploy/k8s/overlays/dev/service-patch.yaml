@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: stt-server
+  name: nagent-server
 spec:
   type: NodePort
   ports:

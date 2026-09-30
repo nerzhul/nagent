@@ -1,7 +1,7 @@
-# Example configuration file for `stt-server`.
+# Example configuration file for `nagent-server`.
 #
 # Load with:
-#     stt-server --config /path/to/this.toml
+#     nagent-server --config /path/to/this.toml
 #
 # When no `--config` is given, the server layers two files (the
 # XDG-user one wins over the system one):

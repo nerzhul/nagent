@@ -1,9 +1,9 @@
 [package]
-name = "stt-server"
+name = "nagent-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "axum HTTP/WebSocket server for the STT pipeline."
+description = "axum HTTP/WebSocket server for the nagent pipeline."
 build = "build.rs"
 
 [features]

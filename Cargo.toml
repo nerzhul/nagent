@@ -6,7 +6,7 @@ members = [
     "crates/nagent-support",
     "crates/nagent-db",
     "crates/nagent-agents",
-    "crates/stt-server",
+    "crates/nagent-server",
 ]
 
 [workspace.package]

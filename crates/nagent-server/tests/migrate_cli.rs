@@ -15,8 +15,8 @@
 //! indexes to be gone.
 
 mod tests {
-    use stt_server::auth::store::AuthStore;
-    use stt_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
+    use nagent_server::auth::store::AuthStore;
+    use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
 
     fn test_config(label: &str) -> AuthConfig {
         AuthConfig {
@@ -34,10 +34,10 @@ mod tests {
                 max_connections: 1,
                 auto_migrate: true,
             },
-            password: stt_server::config::AuthPasswordConfig::default(),
-            oidc: stt_server::config::AuthOidcConfig::default(),
-            passkey: stt_server::config::AuthPasskeyConfig::default(),
-            credentials: stt_server::config::AuthCredentialsConfig::default(),
+            password: nagent_server::config::AuthPasswordConfig::default(),
+            oidc: nagent_server::config::AuthOidcConfig::default(),
+            passkey: nagent_server::config::AuthPasskeyConfig::default(),
+            credentials: nagent_server::config::AuthCredentialsConfig::default(),
         }
     }
 

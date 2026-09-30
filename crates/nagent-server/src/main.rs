@@ -6,10 +6,10 @@
 
 use std::net::SocketAddr;
 
-use stt_server::app::build_app;
-use stt_server::cli::{auth as auth_cli, documents as documents_cli, migrate as migrate_cli};
-use stt_server::http::build_router;
-use stt_server::{CliArgs, Config};
+use nagent_server::app::build_app;
+use nagent_server::cli::{auth as auth_cli, documents as documents_cli, migrate as migrate_cli};
+use nagent_server::http::build_router;
+use nagent_server::{CliArgs, Config};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -94,7 +94,7 @@ fn init_tracing() {
     // out everything else during a long session.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
-            "info,stt_server=debug,stt_core=debug,ort=debug,ort::logging=debug,whisper_rs=debug",
+            "info,nagent_server=debug,stt_core=debug,ort=debug,ort::logging=debug,whisper_rs=debug",
         )
     });
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();

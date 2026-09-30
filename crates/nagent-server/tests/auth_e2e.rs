@@ -18,11 +18,11 @@
 mod tests {
     use std::time::Duration;
 
-    use stt_server::auth::store::{
+    use nagent_server::auth::store::{
         AnyPool, AuthStore, AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord,
     };
-    use stt_server::auth::AuthError;
-    use stt_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
+    use nagent_server::auth::AuthError;
+    use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
 
     fn test_config() -> AuthConfig {
         AuthConfig {
@@ -44,10 +44,10 @@ mod tests {
                 max_connections: 1,
                 auto_migrate: true,
             },
-            password: stt_server::config::AuthPasswordConfig::default(),
-            oidc: stt_server::config::AuthOidcConfig::default(),
-            passkey: stt_server::config::AuthPasskeyConfig::default(),
-            credentials: stt_server::config::AuthCredentialsConfig::default(),
+            password: nagent_server::config::AuthPasswordConfig::default(),
+            oidc: nagent_server::config::AuthOidcConfig::default(),
+            passkey: nagent_server::config::AuthPasskeyConfig::default(),
+            credentials: nagent_server::config::AuthCredentialsConfig::default(),
         }
     }
 

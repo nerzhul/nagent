@@ -1,4 +1,4 @@
-# Local docker-compose for stt-server.
+# Local docker-compose for nagent-server.
 #
 # Profiles:
 #   - cpu          : no GPU, CPU-only real backend. The image is built with
@@ -15,22 +15,22 @@
 # For mock-backend iteration without a model, use `make run-mock` instead.
 
 services:
-  stt-server:
+  nagent-server:
     profiles: ["cpu"]
-    image: nagent/stt-server:dev
+    image: nagent/nagent-server:dev
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BACKEND: cpu
-    container_name: stt-server
+    container_name: nagent-server
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       BIND_ADDR: 0.0.0.0:8080
       WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/models/ggml-base.bin}
-      RUST_LOG: ${RUST_LOG:-info,stt_server=debug,stt_core=debug}
+      RUST_LOG: ${RUST_LOG:-info,nagent_server=debug,stt_core=debug}
     volumes:
       - ${HOST_MODEL_PATH:-./models}:/models:ro
     healthcheck:
@@ -40,22 +40,22 @@ services:
       retries: 3
       start_period: 20s
 
-  stt-server-vulkan:
+  nagent-server-vulkan:
     profiles: ["gpu-vulkan"]
-    image: nagent/stt-server:dev
+    image: nagent/nagent-server:dev
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BACKEND: vulkan
-    container_name: stt-server-vulkan
+    container_name: nagent-server-vulkan
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       BIND_ADDR: 0.0.0.0:8080
       WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/models/ggml-base.bin}
-      RUST_LOG: ${RUST_LOG:-info,stt_server=debug,stt_core=debug}
+      RUST_LOG: ${RUST_LOG:-info,nagent_server=debug,stt_core=debug}
     volumes:
       - ${HOST_MODEL_PATH:-./models}:/models:ro
     devices:
@@ -64,15 +64,15 @@ services:
       - video
       - render
 
-  stt-server-nvidia:
+  nagent-server-nvidia:
     profiles: ["gpu-nvidia"]
-    image: nagent/stt-server:dev
+    image: nagent/nagent-server:dev
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BACKEND: cuda
-    container_name: stt-server-nvidia
+    container_name: nagent-server-nvidia
     restart: unless-stopped
     runtime: nvidia
     ports:
@@ -80,28 +80,28 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8080
       WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/models/ggml-base.bin}
-      RUST_LOG: ${RUST_LOG:-info,stt_server=debug,stt_core=debug}
+      RUST_LOG: ${RUST_LOG:-info,nagent_server=debug,stt_core=debug}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
       - ${HOST_MODEL_PATH:-./models}:/models:ro
 
-  stt-server-amd:
+  nagent-server-amd:
     profiles: ["gpu-amd"]
-    image: nagent/stt-server:dev
+    image: nagent/nagent-server:dev
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BACKEND: hipblas
-    container_name: stt-server-amd
+    container_name: nagent-server-amd
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       BIND_ADDR: 0.0.0.0:8080
       WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/models/ggml-base.bin}
-      RUST_LOG: ${RUST_LOG:-info,stt_server=debug,stt_core=debug}
+      RUST_LOG: ${RUST_LOG:-info,nagent_server=debug,stt_core=debug}
     volumes:
       - ${HOST_MODEL_PATH:-./models}:/models:ro
     devices:

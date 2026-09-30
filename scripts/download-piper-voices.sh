@@ -24,7 +24,7 @@
 set -euo pipefail
 
 # Default voices match `TtsConfig::default` in
-# `crates/stt-server/src/config.rs`.
+# `crates/nagent-server/src/config.rs`.
 DEFAULT_VOICES=(en_US-lessac-medium fr_FR-upmc-medium)
 
 REPO="rhasspy/piper"

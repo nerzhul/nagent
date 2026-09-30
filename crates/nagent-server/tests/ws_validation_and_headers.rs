@@ -18,12 +18,12 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use futures_util::{SinkExt, StreamExt};
+use nagent_server::config::{LimitsConfig, LlmConfig, RateLimitConfig};
+use nagent_server::http::build_router;
+use nagent_server::llm::LlmClient;
+use nagent_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use nagent_server::testing::app_state;
 use stt_proto::{decode_frame, encode, error_code, AudioFrame, Config, Payload, StartSession, Tag};
-use stt_server::config::{LimitsConfig, LlmConfig, RateLimitConfig};
-use stt_server::http::build_router;
-use stt_server::llm::LlmClient;
-use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-use stt_server::testing::app_state;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
@@ -68,7 +68,7 @@ async fn start_test_server_with_rate_limit(
         default_model: "llama3.1".into(),
         api_key: None,
         inbound_auth_key: None,
-        auth_mode: stt_server::config::LlmAuthMode::default(),
+        auth_mode: nagent_server::config::LlmAuthMode::default(),
         request_timeout: Duration::from_secs(120),
         cors_allow_origins,
         system_prompt: None,

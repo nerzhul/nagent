@@ -8,7 +8,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use stt_server::testing::app_state;
+//! use nagent_server::testing::app_state;
 //!
 //! let state = app_state().build();
 //! let state = app_state().with_llm(LlmClient::new(...)?).build();

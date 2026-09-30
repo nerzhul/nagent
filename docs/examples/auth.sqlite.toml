@@ -1,4 +1,4 @@
-# SQLite auth store config — drop-in for `stt-server --config
+# SQLite auth store config — drop-in for `nagent-server --config
 # docs/examples/auth.sqlite.toml`. Mirrors the [auth] block in
 # `config.toml.example` but with a fully-populated sqlite backend
 # so a fresh install can run the server out of the box.

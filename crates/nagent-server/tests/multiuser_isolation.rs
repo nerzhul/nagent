@@ -18,12 +18,12 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
+use nagent_server::http::build_router;
+use nagent_server::stt::session::SessionMap;
+use nagent_server::testing::app_state;
 use stt_proto::{
     decode_frame, encode, AudioFrame, Config, FinalTranscript, Payload, StartSession, Tag,
 };
-use stt_server::http::build_router;
-use stt_server::stt::session::SessionMap;
-use stt_server::testing::app_state;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
@@ -264,7 +264,7 @@ async fn api_version_returns_expected_shape() {
         "expected no-store / no-cache, got {cache_control:?}"
     );
 
-    let info: stt_server::VersionInfo = resp.json().await.expect("VersionInfo json");
+    let info: nagent_server::VersionInfo = resp.json().await.expect("VersionInfo json");
     // backend version comes from CARGO_PKG_VERSION; assert non-empty and
     // semver-shaped rather than hard-coding "0.1.0" so the test survives
     // a future version bump.

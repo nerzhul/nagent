@@ -11,4 +11,4 @@ patches:
   - path: gpu-patch.yaml
     target:
       kind: Deployment
-      name: stt-server
+      name: nagent-server

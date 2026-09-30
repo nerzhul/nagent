@@ -43,32 +43,32 @@ use axum::Router;
 // stt_core is no longer imported here — the phase-5.B test
 // builder creates the backend + worker pool internally.
 #[cfg(feature = "calculate-agent")]
-use stt_server::agents::calculate_agent::CalculateAgent;
+use nagent_server::agents::calculate_agent::CalculateAgent;
 #[cfg(feature = "datetime-agent")]
-use stt_server::agents::datetime_agent::DateTimeAgent;
+use nagent_server::agents::datetime_agent::DateTimeAgent;
 #[cfg(feature = "dictionary-agent")]
-use stt_server::agents::dictionary_agent::DictionaryAgent;
+use nagent_server::agents::dictionary_agent::DictionaryAgent;
 #[cfg(feature = "stock-agent")]
-use stt_server::agents::stock_agent::StockAgent;
+use nagent_server::agents::stock_agent::StockAgent;
 #[cfg(feature = "unit-convert-agent")]
-use stt_server::agents::unit_convert_agent::UnitConvertAgent;
+use nagent_server::agents::unit_convert_agent::UnitConvertAgent;
 #[cfg(feature = "weather-agent")]
-use stt_server::agents::weather_agent::WeatherAgent;
+use nagent_server::agents::weather_agent::WeatherAgent;
 #[cfg(feature = "web-agent")]
-use stt_server::agents::web_fetch::WebFetchAgent;
+use nagent_server::agents::web_fetch::WebFetchAgent;
 #[cfg(feature = "wikipedia-agent")]
-use stt_server::agents::wikipedia_agent::WikipediaAgent;
-use stt_server::agents::ServiceRegistry;
-use stt_server::agents::UserContext;
-use stt_server::agents::{Agent, AgentRegistry};
-use stt_server::config::{
+use nagent_server::agents::wikipedia_agent::WikipediaAgent;
+use nagent_server::agents::ServiceRegistry;
+use nagent_server::agents::UserContext;
+use nagent_server::agents::{Agent, AgentRegistry};
+use nagent_server::config::{
     AgentConfig, DictionaryConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig,
     WikipediaConfig,
 };
-use stt_server::http::build_router;
-use stt_server::llm::LlmClient;
-use stt_server::stt::session::SessionMap;
-use stt_server::{AppState, Config as ServerConfig};
+use nagent_server::http::build_router;
+use nagent_server::llm::LlmClient;
+use nagent_server::stt::session::SessionMap;
+use nagent_server::{AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
 
 /// Build a fresh `UserContext` for tests that exercise agents which
@@ -180,7 +180,7 @@ fn make_app_state(
     // own session map. Tests that need to assert on session state
     // reach into the returned `AppState.stt.sessions` instead.
     let _ = _sessions;
-    let mut builder = stt_server::testing::app_state();
+    let mut builder = nagent_server::testing::app_state();
     builder.config = server_cfg;
     if let Some(client) = llm_client {
         builder = builder.with_llm(client);
@@ -215,16 +215,16 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
         inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
         infer_timeout: Duration::from_secs(30),
-        limits: stt_server::config::LimitsConfig::default(),
+        limits: nagent_server::config::LimitsConfig::default(),
         rate_limit: RateLimitConfig::default(),
-        trusted_proxies: stt_server::config::TrustedProxiesConfig::default(),
+        trusted_proxies: nagent_server::config::TrustedProxiesConfig::default(),
         llm: LlmConfig {
             enabled: true,
             base_url: upstream_url,
             default_model: "llama3.1".into(),
             api_key: None,
             inbound_auth_key: None,
-            auth_mode: stt_server::config::LlmAuthMode::Forward,
+            auth_mode: nagent_server::config::LlmAuthMode::Forward,
             request_timeout: Duration::from_secs(120),
             cors_allow_origins: vec![],
             system_prompt: None,
@@ -232,9 +232,9 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             allow_user_timezone: true,
         },
         agents: AgentConfig::default(),
-        tts: stt_server::config::TtsConfig::default(),
-        auth: stt_server::config::AuthConfig::default(),
-        documents: stt_server::config::DocumentsConfig::default(),
+        tts: nagent_server::config::TtsConfig::default(),
+        auth: nagent_server::config::AuthConfig::default(),
+        documents: nagent_server::config::DocumentsConfig::default(),
     }
 }
 
@@ -709,7 +709,7 @@ async fn datetime_agent_rejects_unknown_timezone() {
         .await
         .expect_err("should reject");
     match err {
-        stt_server::agents::AgentError::InvalidArguments(msg) => {
+        nagent_server::agents::AgentError::InvalidArguments(msg) => {
             assert!(msg.contains("unknown IANA timezone"));
         }
         other => panic!("expected InvalidArguments, got {other:?}"),
@@ -810,7 +810,7 @@ async fn weather_agent_surfaces_upstream_error_message() {
         .await
         .expect_err("upstream error should surface");
     match err {
-        stt_server::agents::AgentError::Upstream { status, body } => {
+        nagent_server::agents::AgentError::Upstream { status, body } => {
             assert_eq!(status, 400);
             assert!(
                 body.contains("No matching location found"),
@@ -848,7 +848,7 @@ async fn weather_agent_missing_api_key_is_a_clear_error() {
         .await
         .expect_err("missing key should fail");
     match err {
-        stt_server::agents::AgentError::AgentFailed(msg) => {
+        nagent_server::agents::AgentError::AgentFailed(msg) => {
             assert!(msg.contains("WEATHER_API_KEY"));
             assert!(msg.contains("weatherapi.com"));
         }
@@ -895,7 +895,7 @@ async fn stock_agent_rejects_invalid_ticker() {
         .await
         .expect_err("semicolons are not allowed");
     match err {
-        stt_server::agents::AgentError::InvalidArguments(_) => {}
+        nagent_server::agents::AgentError::InvalidArguments(_) => {}
         other => panic!("expected InvalidArguments, got {other:?}"),
     }
     // Length check: anything over 40 chars is rejected up-front.
@@ -905,7 +905,7 @@ async fn stock_agent_rejects_invalid_ticker() {
         .expect_err("too long");
     assert!(matches!(
         err,
-        stt_server::agents::AgentError::InvalidArguments(_)
+        nagent_server::agents::AgentError::InvalidArguments(_)
     ));
 }
 
@@ -976,7 +976,7 @@ async fn calculate_agent_invoke_endpoint_returns_400_for_invalid_chars() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unit_convert_agent_converts_miles_to_km() {
     // The canonical chat-user case. 12 mi × 1.609344 = 19.312128 km.
-    let agent = UnitConvertAgent::new(stt_server::config::UnitConvertConfig::default());
+    let agent = UnitConvertAgent::new(nagent_server::config::UnitConvertConfig::default());
     let result = agent
         .invoke(
             &test_ctx(),

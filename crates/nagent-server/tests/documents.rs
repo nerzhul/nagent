@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
+use nagent_server::agents::{Agent, ServiceRegistry, UserContext};
+use nagent_server::auth::store::AuthStore;
+use nagent_server::config::AuthConfig;
+use nagent_server::documents::{DocumentStore, ReadDocumentAgent};
 use serde_json::json;
-use stt_server::agents::{Agent, ServiceRegistry, UserContext};
-use stt_server::auth::store::AuthStore;
-use stt_server::config::AuthConfig;
-use stt_server::documents::{DocumentStore, ReadDocumentAgent};
 
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ async fn fresh_store() -> (DocumentStore, AuthStore) {
         public_url: "http://127.0.0.1:0".into(),
         session_ttl_days: 7,
         csrf_header: "x-csrf-token".into(),
-        db: stt_server::config::AuthDbConfig {
+        db: nagent_server::config::AuthDbConfig {
             backend: "sqlite".into(),
             // `:memory:` per-connection pool — each test gets its
             // own fresh DB.
@@ -109,7 +109,7 @@ async fn read_document_unknown_id_returns_invalid_arguments() {
     let session_id = Uuid::new_v4();
     let agent = ReadDocumentAgent::new(doc_store, None);
     let ctx = ctx_with_session(session_id);
-    let err: stt_server::agents::AgentError = agent
+    let err: nagent_server::agents::AgentError = agent
         .invoke(&ctx, json!({ "name": Uuid::new_v4().to_string() }))
         .await
         .expect_err("unknown id must surface an error");
@@ -117,7 +117,7 @@ async fn read_document_unknown_id_returns_invalid_arguments() {
     // document" so the LLM can recover on the next round.
     assert!(matches!(
         err,
-        stt_server::agents::AgentError::InvalidArguments(_)
+        nagent_server::agents::AgentError::InvalidArguments(_)
     ));
 }
 
@@ -165,7 +165,7 @@ async fn read_document_other_session_scope_is_unknown() {
         .expect_err("cross-session read must be denied");
     assert!(matches!(
         err,
-        stt_server::agents::AgentError::InvalidArguments(_)
+        nagent_server::agents::AgentError::InvalidArguments(_)
     ));
     // Session A CAN see it.
     let ok = agent
@@ -227,7 +227,7 @@ async fn read_document_file_missing_on_disk_returns_agent_failed() {
         .await
         .expect_err("missing file must surface AgentFailed");
     match err {
-        stt_server::agents::AgentError::AgentFailed(msg) => {
+        nagent_server::agents::AgentError::AgentFailed(msg) => {
             assert!(
                 msg.contains("no longer available"),
                 "error message must hint at re-upload: {msg}"
@@ -249,7 +249,7 @@ async fn read_document_without_session_id_returns_invalid_arguments() {
         .expect_err("missing session id must surface a clear error");
     assert!(matches!(
         err,
-        stt_server::agents::AgentError::InvalidArguments(_)
+        nagent_server::agents::AgentError::InvalidArguments(_)
     ));
 }
 
@@ -274,7 +274,7 @@ async fn read_document_truncates_long_text() {
                 public_url: "http://127.0.0.1:0".into(),
                 session_ttl_days: 7,
                 csrf_header: "x-csrf-token".into(),
-                db: stt_server::config::AuthDbConfig {
+                db: nagent_server::config::AuthDbConfig {
                     backend: "sqlite".into(),
                     url: "sqlite::memory:".into(),
                     max_connections: 1,
@@ -375,7 +375,7 @@ async fn read_document_rejects_malformed_uuid() {
         .expect_err("malformed id must fail");
     assert!(matches!(
         err,
-        stt_server::agents::AgentError::AgentFailed(_)
+        nagent_server::agents::AgentError::AgentFailed(_)
     ));
 }
 
@@ -430,7 +430,7 @@ async fn read_document_blocks_cross_user_reads() {
         .expect_err("cross-user read must be rejected");
     assert!(matches!(
         err,
-        stt_server::agents::AgentError::InvalidArguments(_)
+        nagent_server::agents::AgentError::InvalidArguments(_)
     ));
     // user A CAN read its own doc.
     let ctx_a = UserContext::for_chat_session(
@@ -520,7 +520,7 @@ async fn read_document_blocks_disk_path_escape() {
         .await
         .expect_err("escape must be rejected");
     match err {
-        stt_server::agents::AgentError::AgentFailed(msg) => {
+        nagent_server::agents::AgentError::AgentFailed(msg) => {
             assert!(
                 msg.contains("no longer available"),
                 "error must hint at re-upload: {msg}"
