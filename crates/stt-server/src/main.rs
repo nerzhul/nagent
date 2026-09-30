@@ -346,6 +346,23 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // ---- HTTP router -----------------------------------------------------
     let ready = Arc::new(AtomicBool::new(true));
+    // Security plan #5: emit a startup warning when the server is
+    // bound to a non-loopback address without any trusted-proxy
+    // CIDR configured. Without trusted proxies the
+    // `X-Forwarded-For` header is ignored (the safe default), so a
+    // public deployment behind ingress-nginx / Caddy / an AWS ALB
+    // will share one rate-limit bucket across every client —
+    // almost always a misconfiguration. The warning nudges the
+    // operator toward `[server].trusted_proxies.cidr`.
+    if !cfg.bind_addr.ip().is_loopback() && cfg.trusted_proxies.cidrs.is_empty() {
+        tracing::warn!(
+            bind_addr = %cfg.bind_addr,
+            "server is bound to a non-loopback address with no `trusted_proxies.cidr` \
+             configured — X-Forwarded-For is ignored, so every client behind a reverse \
+             proxy shares one rate-limit bucket. Set NAGENT_TRUSTED_PROXIES (or \
+             [server].trusted_proxies.cidr) to the proxy's IP range."
+        );
+    }
     // Surface a startup warning when the operator is exposing the
     // proxy on a non-loopback bind with auth explicitly disabled —
     // the worst-case deployment we are trying to prevent (P0 of the

@@ -38,7 +38,7 @@ use webauthn_rs::prelude::*;
 use crate::auth::error::AuthError;
 use crate::auth::error::{require_auth_store, require_passkey_state};
 use crate::auth::middleware::{check_csrf, extract_auth_user, AuthState};
-use crate::auth::session::{self, AuthUser};
+use crate::auth::session::{self, AuthUser, SessionSource};
 use crate::auth::store::{AuthStore, NewAuthEvent, NewPasskeyRecord};
 
 const CEREMONY_TTL_SECS: i64 = 5 * 60;
@@ -433,16 +433,31 @@ pub async fn login_finish_handler(
 
     let ttl =
         std::time::Duration::from_secs((state.config.auth.session_ttl_days as u64) * 24 * 60 * 60);
-    let session = require_auth_store(&state)?
+    let mut session = require_auth_store(&state)?
         .create_session(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
+    // Security plan #7: pull the plaintext token out of the
+    // SessionRecord exactly once. After this line the token is
+    // either in the cookie, in the JSON body, or in the local
+    // `session_token` binding; the DB only sees the hash.
+    let session_token = session
+        .take_plaintext_token()
+        .ok_or_else(|| AuthError::Internal("create_session did not mint a token".into()))?;
+    let token_hash_for_log = crate::auth::session::sha256_of(
+        &crate::auth::session::decode_session_token(&session_token)
+            .expect("token from create_session must round-trip"),
+    );
+    let token_prefix = token_hash_for_log[..3]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     tracing::info!(
         event = "auth.passkey.login",
         outcome = "ok",
         email = %user.email,
         user_id = %user.id,
         ip = %ip,
-        session_id = %session.id,
+        session_hash_prefix = %token_prefix,
         "passkey login ok"
     );
     require_auth_store(&state)?.record_event(NewAuthEvent::auth(
@@ -460,10 +475,20 @@ pub async fn login_finish_handler(
         created_at: user.created_at,
         csrf_token: session.csrf_token.clone(),
         session_expires_at: session.expires_at,
+        // Security plan #7: mirror the password login path —
+        // `session_token_hash` carries the SHA-256 for the
+        // logout round-trip, the JSON body carries the
+        // plaintext token for the API client.
+        session_token_hash: session.token_hash,
+        // The login response carries the token in both a cookie
+        // and the JSON body (mirrors the password path); a
+        // browser session is a cookie source from the CSRF
+        // point of view.
+        session_source: SessionSource::Cookie,
     };
     let cookie = session::build_set_cookie(
         state.config.auth.cookie_name(),
-        session.id,
+        &session_token,
         state.config.auth.cookie_secure(),
         ttl.as_secs() as i64,
     );
@@ -471,7 +496,7 @@ pub async fn login_finish_handler(
         StatusCode::OK,
         Json(serde_json::json!({
             "user": auth_user,
-            "session_id": session.id,
+            "session_token": session_token,
         })),
     )
         .into_response();

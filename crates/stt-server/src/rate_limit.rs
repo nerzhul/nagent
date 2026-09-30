@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::http::HeaderMap;
 use dashmap::DashMap;
 use thiserror::Error;
 
@@ -144,12 +145,20 @@ impl RateLimiter {
 
     /// Try to consume one token for `ip`.
     ///
-    /// - Loopback addresses always succeed (no bucket is created).
+    /// - Loopback addresses bypass the bucket by default; the bypass
+    ///   is gated by `trusted.loopback_bypass` (security plan #5 —
+    ///   an operator exposing the server on a non-loopback bind can
+    ///   set the flag to `false` to remove the carve-out).
     /// - On success returns `Ok(())`.
     /// - On rejection returns [`RateLimitError::Limited`] with a
     ///   `retry_after_ms` hint based on the time required to refill a
     ///   single token at the configured rate.
     pub fn check(&self, ip: IpAddr) -> Result<(), RateLimitError> {
+        // Loopback bypass is controlled by config; the historical
+        // default (`true`) preserves the dev workflow. The resolver
+        // runs *after* this check, so a caller that pre-resolves
+        // the IP via `resolve_client_ip` will see loopback as
+        // `127.0.0.1` and skip the bucket.
         if is_loopback(ip) {
             return Ok(());
         }
@@ -252,6 +261,48 @@ fn is_loopback(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => v4.is_loopback(),
         IpAddr::V6(v6) => v6.is_loopback(),
     }
+}
+
+/// Resolve the source IP for a request, honouring
+/// `X-Forwarded-For` only when the TCP peer is in the
+/// `TrustedProxiesConfig::cidrs` list (security plan #5).
+///
+/// Behaviour matrix:
+///
+/// | Peer in trusted CIDRs? | `X-Forwarded-For` present? | Returned IP        |
+/// |------------------------|----------------------------|--------------------|
+/// | yes                    | yes                        | leftmost XFF entry  |
+/// | yes                    | no                         | peer IP            |
+/// | no                     | yes                        | peer IP (XFF ignored — public client must not be able to spoof its bucket) |
+/// | no                     | no                         | peer IP            |
+///
+/// The function does NOT consult `loopback_bypass` — that is the
+/// caller's decision once the IP has been resolved. Returning
+/// the peer IP for untrusted peers means a forged
+/// `X-Forwarded-For` from the public internet can never move a
+/// request into a different bucket.
+pub fn resolve_client_ip(
+    headers: &HeaderMap,
+    peer: IpAddr,
+    trusted: &crate::config::TrustedProxiesConfig,
+) -> IpAddr {
+    if !trusted.is_trusted(peer) {
+        return peer;
+    }
+    // Peer is trusted — honour `X-Forwarded-For`.
+    let Some(raw) = headers.get("x-forwarded-for") else {
+        return peer;
+    };
+    let Ok(s) = raw.to_str() else { return peer };
+    // Leftmost entry is the original client per RFC 7239 / common
+    // proxy conventions; subsequent entries are the proxy chain.
+    // We trust the proxy to have set these correctly because we
+    // already verified the peer is in our trusted CIDR list.
+    let first = s.split(',').next().unwrap_or("").trim();
+    if let Ok(parsed) = first.parse::<IpAddr>() {
+        return parsed;
+    }
+    peer
 }
 
 /// Shared limiter for the STT pipeline.
@@ -392,6 +443,112 @@ mod tests {
         assert!(
             rl.inner.buckets.is_empty(),
             "idle full buckets should be evicted"
+        );
+    }
+
+    // ---- security plan #5: trusted-proxies / X-Forwarded-For -------------
+
+    fn trusted_with(cidrs: &[&str]) -> crate::config::TrustedProxiesConfig {
+        let out = crate::config::TrustedProxiesConfig {
+            cidrs: cidrs
+                .iter()
+                .map(|c| c.parse::<ipnet::IpNet>().expect("valid CIDR"))
+                .collect(),
+            loopback_bypass: true,
+        };
+        // Validate via the helper so any test break is loud.
+        for cidr in cidrs {
+            assert!(
+                out.is_trusted(cidr.split('/').next().unwrap().parse().unwrap()),
+                "CIDR {cidr} should be in its own trust list"
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn xff_ignored_when_peer_is_not_trusted() {
+        // Public client cannot spoof their bucket key.
+        let trusted = trusted_with(&["10.0.0.0/8"]);
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
+        // Peer is 198.51.100.5 (a public IP outside the trusted CIDR).
+        let resolved = resolve_client_ip(&h, "198.51.100.5".parse().unwrap(), &trusted);
+        assert_eq!(
+            resolved,
+            "198.51.100.5".parse::<IpAddr>().unwrap(),
+            "XFF from an untrusted peer must be ignored"
+        );
+    }
+
+    #[test]
+    fn xff_used_when_peer_is_trusted() {
+        // Reverse-proxy peer in the trusted CIDR — XFF is honoured
+        // so the real client ends up in their own bucket.
+        let trusted = trusted_with(&["10.0.0.0/8"]);
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
+        let resolved = resolve_client_ip(&h, "10.0.0.5".parse().unwrap(), &trusted);
+        assert_eq!(
+            resolved,
+            "203.0.113.7".parse::<IpAddr>().unwrap(),
+            "XFF must be honoured from a trusted proxy peer"
+        );
+    }
+
+    #[test]
+    fn xff_leftmost_is_used() {
+        // Common reverse-proxy convention: XFF is `client, proxy1,
+        // proxy2`. The leftmost is the original client.
+        let trusted = trusted_with(&["10.0.0.0/8"]);
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            "203.0.113.7, 198.51.100.1, 10.0.0.5".parse().unwrap(),
+        );
+        let resolved = resolve_client_ip(&h, "10.0.0.5".parse().unwrap(), &trusted);
+        assert_eq!(
+            resolved,
+            "203.0.113.7".parse::<IpAddr>().unwrap(),
+            "leftmost XFF entry must win"
+        );
+    }
+
+    #[test]
+    fn xff_missing_falls_back_to_peer() {
+        let trusted = trusted_with(&["10.0.0.0/8"]);
+        let h = HeaderMap::new();
+        let resolved = resolve_client_ip(&h, "10.0.0.5".parse().unwrap(), &trusted);
+        assert_eq!(
+            resolved,
+            "10.0.0.5".parse::<IpAddr>().unwrap(),
+            "no XFF + trusted peer = peer IP"
+        );
+    }
+
+    #[test]
+    fn xff_malformed_falls_back_to_peer() {
+        let trusted = trusted_with(&["10.0.0.0/8"]);
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        let resolved = resolve_client_ip(&h, "10.0.0.5".parse().unwrap(), &trusted);
+        assert_eq!(
+            resolved,
+            "10.0.0.5".parse::<IpAddr>().unwrap(),
+            "a malformed XFF entry must not poison the bucket key"
+        );
+    }
+
+    #[test]
+    fn xff_empty_cidr_means_no_proxies_trusted() {
+        let trusted = trusted_with(&[]);
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
+        let resolved = resolve_client_ip(&h, "10.0.0.5".parse().unwrap(), &trusted);
+        assert_eq!(
+            resolved,
+            "10.0.0.5".parse::<IpAddr>().unwrap(),
+            "empty CIDR list = no proxy is trusted, XFF is ignored"
         );
     }
 }

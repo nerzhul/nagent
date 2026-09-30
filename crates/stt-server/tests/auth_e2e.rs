@@ -123,7 +123,7 @@ mod tests {
             .await
             .expect("create_session");
         let lookup = store
-            .lookup_session(session.id)
+            .lookup_session_by_token_hash(&session.token_hash)
             .await
             .expect("lookup_session");
         assert!(lookup.is_none(), "disabled user must not resolve a session");
@@ -138,7 +138,7 @@ mod tests {
         .await
         .expect("re-enable update");
         let lookup = store
-            .lookup_session(session.id)
+            .lookup_session_by_token_hash(&session.token_hash)
             .await
             .expect("lookup_session")
             .expect("session now resolves");
@@ -196,12 +196,12 @@ mod tests {
         );
 
         store
-            .delete_session(session.id)
+            .delete_session(&session.token_hash)
             .await
             .expect("delete_session");
         assert!(
             store
-                .lookup_session(session.id)
+                .lookup_session_by_token_hash(&session.token_hash)
                 .await
                 .expect("lookup_session after delete")
                 .is_none(),

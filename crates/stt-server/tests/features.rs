@@ -152,7 +152,13 @@ async fn login_cookie(store: &AuthStore, email: &str) -> String {
     // we hard-code it for the test to avoid plumbing the config
     // back through here. The auth router reads
     // `COOKIE_NAME = "nagent_session"`.
-    format!("nagent_session={}", session.id)
+    format!(
+        "nagent_session={}",
+        session
+            .plaintext_token
+            .as_deref()
+            .unwrap_or("missing-token")
+    )
 }
 
 /// `GET /api/features` returns the right shape with most

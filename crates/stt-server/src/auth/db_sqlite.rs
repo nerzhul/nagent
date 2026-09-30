@@ -289,15 +289,22 @@ impl SqliteStore {
         ip: Option<&str>,
         user_agent: Option<&str>,
     ) -> Result<SessionRecord, AuthError> {
-        let id = crate::auth::session::new_session_id();
+        // Security plan #7: mint an opaque token (32 bytes of OS
+        // RNG, base64url-encoded for the wire) plus its SHA-256
+        // hash (the DB primary key). The plaintext token never
+        // leaves this stack frame — the caller receives only the
+        // `SessionRecord` (with the hash) and must ask for the
+        // plaintext via the new `take_plaintext_token` helper if
+        // they need to set the cookie / response body.
+        let (token, token_hash) = crate::auth::session::new_session_token();
         let csrf = crate::auth::session::new_csrf_token();
         let now = Utc::now();
         let expires_at = now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(7));
         sqlx::query(
-            "INSERT INTO sessions (id, user_id, csrf_token, created_at, expires_at, last_seen_at, ip, user_agent) \
+            "INSERT INTO sessions (token_hash, user_id, csrf_token, created_at, expires_at, last_seen_at, ip, user_agent) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(id.to_string())
+        .bind(&token_hash[..])
         .bind(user_id.to_string())
         .bind(&csrf)
         .bind(now.to_rfc3339())
@@ -307,30 +314,36 @@ impl SqliteStore {
         .bind(user_agent)
         .execute(self.pool())
         .await?;
+        // The plaintext token lives only inside this stack frame
+        // for the duration of the login response. The caller is
+        // expected to read it via the one-shot helper below before
+        // any await boundary — otherwise it is dropped and never
+        // hits the wire or the DB.
         Ok(SessionRecord {
-            id,
+            token_hash,
             user_id,
             csrf_token: csrf,
             expires_at,
             ip: ip.map(|s| s.to_string()),
             user_agent: user_agent.map(|s| s.to_string()),
+            plaintext_token: Some(token),
         })
     }
 
-    pub(crate) async fn lookup_session(
+    pub(crate) async fn lookup_session_by_token_hash(
         &self,
-        session_id: Uuid,
+        token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<Option<(SessionRecord, AuthUserRecord)>, AuthError> {
         let row = sqlx::query(
-            "SELECT s.id AS s_id, s.user_id AS s_user_id, s.csrf_token, \
+            "SELECT s.token_hash AS s_token_hash, s.user_id AS s_user_id, s.csrf_token, \
                     s.expires_at AS s_expires_at, s.ip AS s_ip, s.user_agent AS s_user_agent, \
                     u.email AS u_email, u.display_name AS u_display_name, \
                     u.provider AS u_provider, u.created_at AS u_created_at, \
                     u.password_hash AS u_password_hash, u.id AS id \
              FROM sessions s JOIN users u ON u.id = s.user_id \
-             WHERE s.id = ? AND u.disabled_at IS NULL",
+             WHERE s.token_hash = ? AND u.disabled_at IS NULL",
         )
-        .bind(session_id.to_string())
+        .bind(&token_hash[..])
         .fetch_optional(self.pool())
         .await?;
         let Some(r) = row else { return Ok(None) };
@@ -339,14 +352,23 @@ impl SqliteStore {
         if expires_at <= Utc::now() {
             return Ok(None);
         }
+        let mut token_hash_row = [0u8; crate::auth::session::SESSION_HASH_BYTES];
+        {
+            let bytes: Vec<u8> = r.try_get("s_token_hash")?;
+            if bytes.len() != token_hash_row.len() {
+                return Ok(None);
+            }
+            token_hash_row.copy_from_slice(&bytes);
+        }
         let session = SessionRecord {
-            id: Uuid::parse_str(&r.try_get::<String, _>("s_id")?).expect("DB UUID must parse"),
+            token_hash: token_hash_row,
             user_id: Uuid::parse_str(&r.try_get::<String, _>("s_user_id")?)
                 .expect("DB UUID must parse"),
             csrf_token: r.try_get("csrf_token")?,
             expires_at,
             ip: r.try_get("s_ip")?,
             user_agent: r.try_get("s_user_agent")?,
+            plaintext_token: None,
         };
         // Inlined instead of `row_to_user(r)` because the join
         // SELECT aliases every user-side column (`u_email`,
@@ -363,18 +385,24 @@ impl SqliteStore {
         Ok(Some((session, user)))
     }
 
-    pub(crate) async fn touch_session(&self, session_id: Uuid) -> Result<(), AuthError> {
-        sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
+    pub(crate) async fn touch_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<(), AuthError> {
+        sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?")
             .bind(Utc::now().to_rfc3339())
-            .bind(session_id.to_string())
+            .bind(&token_hash[..])
             .execute(self.pool())
             .await?;
         Ok(())
     }
 
-    pub(crate) async fn delete_session(&self, session_id: Uuid) -> Result<u64, AuthError> {
-        let res = sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(session_id.to_string())
+    pub(crate) async fn delete_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<u64, AuthError> {
+        let res = sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(&token_hash[..])
             .execute(self.pool())
             .await?;
         Ok(res.rows_affected())

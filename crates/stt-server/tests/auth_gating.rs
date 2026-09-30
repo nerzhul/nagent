@@ -291,9 +291,13 @@ async fn api_me_succeeds_with_valid_session_cookie() {
         .create_session(user_id, std::time::Duration::from_secs(60), None, None)
         .await
         .expect("create_session");
+    let session_token = session
+        .plaintext_token
+        .clone()
+        .expect("create_session must mint a plaintext token");
 
     let app = build_router(state.clone());
-    let cookie = format!("{}={}", state.config.auth.cookie_name(), session.id);
+    let cookie = format!("{}={}", state.config.auth.cookie_name(), session_token);
     let resp = app
         .oneshot(
             HttpRequest::builder()

@@ -255,15 +255,17 @@ impl PgStore {
         ip: Option<&str>,
         user_agent: Option<&str>,
     ) -> Result<SessionRecord, AuthError> {
-        let id = crate::auth::session::new_session_id();
+        // Security plan #7 — see `db_sqlite.rs::create_session`
+        // for the full rationale.
+        let (token, token_hash) = crate::auth::session::new_session_token();
         let csrf = crate::auth::session::new_csrf_token();
         let now = Utc::now();
         let expires_at = now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(7));
         sqlx::query(
-            "INSERT INTO sessions (id, user_id, csrf_token, created_at, expires_at, last_seen_at, ip, user_agent) \
+            "INSERT INTO sessions (token_hash, user_id, csrf_token, created_at, expires_at, last_seen_at, ip, user_agent) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
-        .bind(id)
+        .bind(&token_hash[..])
         .bind(user_id)
         .bind(&csrf)
         .bind(now.to_rfc3339())
@@ -274,29 +276,30 @@ impl PgStore {
         .execute(self.pool())
         .await?;
         Ok(SessionRecord {
-            id,
+            token_hash,
             user_id,
             csrf_token: csrf,
             expires_at,
             ip: ip.map(|s| s.to_string()),
             user_agent: user_agent.map(|s| s.to_string()),
+            plaintext_token: Some(token),
         })
     }
 
-    pub(crate) async fn lookup_session(
+    pub(crate) async fn lookup_session_by_token_hash(
         &self,
-        session_id: Uuid,
+        token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<Option<(SessionRecord, AuthUserRecord)>, AuthError> {
         let row = sqlx::query(
-            "SELECT s.id::text AS s_id, s.user_id::text AS s_user_id, s.csrf_token, \
+            "SELECT s.token_hash AS s_token_hash, s.user_id::text AS s_user_id, s.csrf_token, \
                     s.expires_at::text AS s_expires_at, s.ip AS s_ip, s.user_agent AS s_user_agent, \
-                    u.id::text AS id, u.email AS u_email, u.display_name AS u_display_name, \
+                    u.id::text AS u_id, u.email AS u_email, u.display_name AS u_display_name, \
                     u.provider AS u_provider, u.created_at::text AS u_created_at, \
                     u.password_hash AS u_password_hash \
              FROM sessions s JOIN users u ON u.id = s.user_id \
-             WHERE s.id = $1 AND u.disabled_at IS NULL",
+             WHERE s.token_hash = $1 AND u.disabled_at IS NULL",
         )
-        .bind(session_id)
+        .bind(&token_hash[..])
         .fetch_optional(self.pool())
         .await?;
         let Some(r) = row else { return Ok(None) };
@@ -304,17 +307,27 @@ impl PgStore {
         if expires_at <= Utc::now() {
             return Ok(None);
         }
+        let mut token_hash_row = [0u8; crate::auth::session::SESSION_HASH_BYTES];
+        {
+            let bytes: Vec<u8> = r.try_get("s_token_hash")?;
+            if bytes.len() != token_hash_row.len() {
+                return Ok(None);
+            }
+            token_hash_row.copy_from_slice(&bytes);
+        }
+        let user_id =
+            Uuid::parse_str(&r.try_get::<String, _>("s_user_id")?).expect("DB UUID must parse");
         let session = SessionRecord {
-            id: Uuid::parse_str(&r.try_get::<String, _>("s_id")?).expect("DB UUID must parse"),
-            user_id: Uuid::parse_str(&r.try_get::<String, _>("s_user_id")?)
-                .expect("DB UUID must parse"),
+            token_hash: token_hash_row,
+            user_id,
             csrf_token: r.try_get("csrf_token")?,
             expires_at,
             ip: r.try_get("s_ip")?,
             user_agent: r.try_get("s_user_agent")?,
+            plaintext_token: None,
         };
         let user = AuthUserRecord {
-            id: Uuid::parse_str(&r.try_get::<String, _>("u_id")?).expect("DB UUID must parse"),
+            id: user_id,
             email: r.try_get("u_email")?,
             display_name: r.try_get("u_display_name")?,
             provider: r.try_get("u_provider")?,
@@ -324,18 +337,24 @@ impl PgStore {
         Ok(Some((session, user)))
     }
 
-    pub(crate) async fn touch_session(&self, session_id: Uuid) -> Result<(), AuthError> {
-        sqlx::query("UPDATE sessions SET last_seen_at = $1 WHERE id = $2")
+    pub(crate) async fn touch_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<(), AuthError> {
+        sqlx::query("UPDATE sessions SET last_seen_at = $1 WHERE token_hash = $2")
             .bind(Utc::now().to_rfc3339())
-            .bind(session_id)
+            .bind(&token_hash[..])
             .execute(self.pool())
             .await?;
         Ok(())
     }
 
-    pub(crate) async fn delete_session(&self, session_id: Uuid) -> Result<u64, AuthError> {
-        let res = sqlx::query("DELETE FROM sessions WHERE id = $1")
-            .bind(session_id)
+    pub(crate) async fn delete_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<u64, AuthError> {
+        let res = sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
+            .bind(&token_hash[..])
             .execute(self.pool())
             .await?;
         Ok(res.rows_affected())

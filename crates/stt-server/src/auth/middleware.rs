@@ -18,7 +18,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use crate::auth::error::AuthError;
-use crate::auth::session::{self, AuthUser};
+use crate::auth::session::{self, AuthUser, SessionSource};
 use crate::auth::store::AuthStore;
 
 /// Shared state passed into the middleware closure. Cheap to
@@ -65,11 +65,22 @@ pub async fn extract_auth_user(
     headers: &axum::http::HeaderMap,
     state: &AuthState,
 ) -> Result<Option<AuthUser>, AuthError> {
-    let Some(session_id) = session::extract_session_id(headers, state.cfg.auth.cookie_name())
+    let Some(extracted) = session::extract_session_token(headers, state.cfg.auth.cookie_name())
     else {
         return Ok(None);
     };
-    let lookup = state.store.lookup_session(session_id).await?;
+    // Security plan #7: hash the plaintext token here and never
+    // let it cross this function boundary. The DB only ever sees
+    // the SHA-256.
+    let raw_token = match session::decode_session_token(&extracted.token) {
+        Some(raw) => raw,
+        None => return Ok(None),
+    };
+    let token_hash = session::sha256_of(&raw_token);
+    let lookup = state
+        .store
+        .lookup_session_by_token_hash(&token_hash)
+        .await?;
     let Some((session, user)) = lookup else {
         return Ok(None);
     };
@@ -82,13 +93,27 @@ pub async fn extract_auth_user(
         created_at: user.created_at,
         csrf_token: session.csrf_token,
         session_expires_at: session.expires_at,
+        // Security plan #7: `AuthUser` no longer carries the
+        // plaintext token. `logout_handler` deletes by the
+        // SHA-256 of the token (security plan #1 used the UUID
+        // session id, which was plaintext in the DB — see
+        // security plan #7 for the rationale).
+        session_token_hash: session.token_hash,
+        // Drive the CSRF check. `extracted.source` is the
+        // credential that *resolved* the session — a junk
+        // `Authorization: Bearer not-a-token` header on a
+        // cookie-authenticated request resolves as `Cookie`
+        // because the bearer lookup returns `None` and the cookie
+        // path was the one that actually matched (security plan
+        // #17 fix).
+        session_source: extracted.source,
     };
     // Fire-and-forget touch; we do not block the request on the
     // round-trip because last_seen_at is debug-only.
     let store = state.store.clone();
-    let session_id_for_touch = session_id;
+    let token_hash_for_touch = token_hash;
     tokio::spawn(async move {
-        let _ = store.touch_session(session_id_for_touch).await;
+        let _ = store.touch_session(&token_hash_for_touch).await;
     });
     Ok(Some(auth_user))
 }
@@ -97,19 +122,25 @@ pub async fn extract_auth_user(
 ///
 /// Returns `Ok(())` when the request carries a valid CSRF token
 /// (matching the session row's csrf_token, constant-time compared)
-/// OR when the request comes from a bearer client (bearer clients
-/// cannot be tricked into cross-site submissions, so the check is
-/// skipped for them). Returns `Err(AuthError::Forbidden)` on a
-/// mismatch.
+/// OR when the request was authenticated by a bearer token (bearer
+/// clients cannot be tricked into cross-site submissions, so the
+/// check is skipped for them).
+///
+/// **Security plan #17 fix.** The pre-fix implementation skipped
+/// CSRF whenever *any* `Authorization: Bearer …` header was
+/// present, even when authentication came from the cookie. An
+/// attacker who could set any header on a cross-origin request
+/// could therefore bypass CSRF for a logged-in victim. The check
+/// now consults `user.session_source` — the credential that
+/// *resolved* the session — so a junk Bearer header on a
+/// cookie-authenticated request does NOT silence CSRF.
 pub fn check_csrf(headers: &axum::http::HeaderMap, user: &AuthUser) -> Result<(), AuthError> {
-    // Skip for bearer requests — the Authorization header proves
-    // the caller is the API client itself, not a victim of a CSRF
-    // attack.
-    if headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| s.to_ascii_lowercase().starts_with("bearer "))
-    {
+    // Skip only when the session was actually authenticated by the
+    // bearer header. `user.session_source` was populated by
+    // `extract_auth_user` from the same lookup that resolved the
+    // session id, so it can never be `Bearer` for a request that
+    // was authenticated by the cookie.
+    if user.session_source == SessionSource::Bearer {
         return Ok(());
     }
     let presented = headers
@@ -255,9 +286,13 @@ mod tests {
             )
             .await
             .unwrap();
+        let session_token = session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
 
         // Cookie path.
-        let cookie = format!("{}={}", cfg.auth.cookie_name(), session.id);
+        let cookie = format!("{}={}", cfg.auth.cookie_name(), session_token);
         let app = make_router(state.clone());
         let resp = app
             .oneshot(
@@ -280,7 +315,7 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .uri("/whoami")
-                    .header(header::AUTHORIZATION, format!("Bearer {}", session.id))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", session_token))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -350,11 +385,15 @@ mod tests {
             .create_session(user_id, std::time::Duration::from_secs(1), None, None)
             .await
             .unwrap();
+        let session_token = session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
         std::thread::sleep(std::time::Duration::from_millis(1100));
 
         let state = AuthState::new(store.clone(), cfg.clone());
         let app = make_router(state);
-        let cookie = format!("{}={}", cfg.auth.cookie_name(), session.id);
+        let cookie = format!("{}={}", cfg.auth.cookie_name(), session_token);
         let resp = app
             .oneshot(
                 HttpRequest::builder()
@@ -383,6 +422,10 @@ mod tests {
             .create_session(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
+        let session_token = session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
         let state = AuthState::new(store.clone(), cfg.clone());
         let router = Router::new()
             .route(
@@ -397,7 +440,7 @@ mod tests {
             .layer(from_fn_with_state(state.clone(), require_auth_middleware))
             .with_state(state);
         // POST without CSRF → 403.
-        let cookie = format!("{}={}", cfg.auth.cookie_name(), session.id);
+        let cookie = format!("{}={}", cfg.auth.cookie_name(), session_token);
         let resp = router
             .clone()
             .oneshot(
@@ -450,7 +493,7 @@ mod tests {
                     .uri("/change")
                     .header(
                         header::COOKIE,
-                        format!("{}={}", cfg.auth.cookie_name(), session.id),
+                        format!("{}={}", cfg.auth.cookie_name(), session_token),
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -464,12 +507,201 @@ mod tests {
                 HttpRequest::builder()
                     .method("POST")
                     .uri("/change")
-                    .header(header::AUTHORIZATION, format!("Bearer {}", session.id))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", session_token))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "bearer must skip CSRF");
+    }
+
+    /// Regression for security plan #17. Before the fix,
+    /// `check_csrf` looked at the raw `Authorization` header — any
+    /// `Bearer …` value (even `"Bearer junk"`) silenced CSRF for a
+    /// cookie-authenticated request, letting a cross-origin
+    /// attacker bypass the check by adding a junk header. The
+    /// fix: `check_csrf` consults `user.session_source` (set by
+    /// `extract_auth_user` from the credential that *resolved*
+    /// the session), so a junk Bearer on a cookie session stays
+    /// `Cookie` and CSRF is enforced.
+    #[tokio::test]
+    async fn csrf_bogus_bearer_header_does_not_bypass_cookie_csrf() {
+        let (store, cfg) = temp_store().await;
+        let user_id = store
+            .create_user("frank@example.com", "Frank", "local", Some(b"dummy"))
+            .await
+            .unwrap();
+        let session = store
+            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .await
+            .unwrap();
+        let session_token = session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
+        let state = AuthState::new(store.clone(), cfg.clone());
+        let router = Router::new()
+            .route(
+                "/change",
+                axum::routing::post(|axum::Extension(_u): axum::Extension<AuthUser>| async {
+                    (StatusCode::OK, "ok")
+                }),
+            )
+            .layer(from_fn_with_state(state.clone(), require_auth_middleware))
+            .with_state(state);
+
+        // 1. Cookie + bogus "Bearer junk" header, NO CSRF → must 403.
+        //    Pre-fix this returned 200 because the bogus header
+        //    tripped the "any bearer present" branch.
+        let cookie = format!("{}={}", cfg.auth.cookie_name(), session_token);
+        let resp = router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/change")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::AUTHORIZATION, "Bearer junk")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cookie auth + bogus Bearer header must NOT bypass CSRF (security plan #17)"
+        );
+
+        // 2. Cookie + correct Bearer header (different session), NO CSRF.
+        //    The cookie wins (still authenticated as a cookie
+        //    session), so CSRF is still enforced.
+        let other_session = store
+            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .await
+            .unwrap();
+        let other_session_token = other_session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
+        let resp = router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/change")
+                    .header(header::COOKIE, cookie.clone())
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", other_session_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cookie auth must take precedence and CSRF must still be enforced"
+        );
+
+        // 3. Cookie + bogus Bearer header + CORRECT CSRF → 200.
+        let resp = router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/change")
+                    .header(header::COOKIE, cookie)
+                    .header(header::AUTHORIZATION, "Bearer junk")
+                    .header("x-csrf-token", session.csrf_token.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cookie + CSRF (with a bogus Bearer header alongside) must pass"
+        );
+
+        // 4. Bare Bearer (no cookie at all) + NO CSRF → 200. This
+        //    is the genuine API client path that the Bearer branch
+        //    is meant to protect.
+        let resp = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/change")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", session_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "bare Bearer auth must skip CSRF"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_auth_user_records_session_source() {
+        // Direct assertion that `extract_auth_user` writes the
+        // right `SessionSource` for each credential path. The
+        // middleware-level behaviour is covered above; this is the
+        // unit-level guard so a future refactor of the helper
+        // cannot silently swap sources.
+        let (store, cfg) = temp_store().await;
+        let user_id = store
+            .create_user("greta@example.com", "Greta", "local", Some(b"dummy"))
+            .await
+            .unwrap();
+        let session = store
+            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .await
+            .unwrap();
+        let session_token = session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
+        let state = AuthState::new(store.clone(), cfg.clone());
+        let mut cookie_only = axum::http::HeaderMap::new();
+        cookie_only.insert(
+            header::COOKIE,
+            format!("{}={}", cfg.auth.cookie_name(), session_token)
+                .parse()
+                .unwrap(),
+        );
+        let u = extract_auth_user(&cookie_only, &state)
+            .await
+            .unwrap()
+            .expect("cookie must authenticate");
+        assert_eq!(u.session_source, SessionSource::Cookie);
+
+        let mut bearer_only = axum::http::HeaderMap::new();
+        bearer_only.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", session_token).parse().unwrap(),
+        );
+        let u = extract_auth_user(&bearer_only, &state)
+            .await
+            .unwrap()
+            .expect("bearer must authenticate");
+        assert_eq!(u.session_source, SessionSource::Bearer);
+
+        // Cookie + bogus bearer: source must be Cookie (the bogus
+        // bearer does not resolve a session).
+        let mut both = cookie_only.clone();
+        both.insert(header::AUTHORIZATION, "Bearer junk".parse().unwrap());
+        let u = extract_auth_user(&both, &state)
+            .await
+            .unwrap()
+            .expect("cookie+bogus-bearer must authenticate as cookie");
+        assert_eq!(u.session_source, SessionSource::Cookie);
     }
 }

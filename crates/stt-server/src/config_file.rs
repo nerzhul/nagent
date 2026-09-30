@@ -184,6 +184,8 @@ pub struct TomlServerConfig {
     pub limits: Option<TomlLimitsConfig>,
     #[serde(default)]
     pub rate_limits: Option<TomlRateLimitConfig>,
+    #[serde(default)]
+    pub trusted_proxies: Option<TomlTrustedProxiesConfig>,
 }
 
 /// LLM proxy knobs. Mirrors [`crate::config::LlmConfig`].
@@ -305,6 +307,40 @@ pub struct TomlLimitsConfig {
 pub struct TomlRateLimitConfig {
     pub stt_per_min: Option<u32>,
     pub llm_per_min: Option<u32>,
+}
+
+/// Trusted-proxy knobs (security plan #5).
+///
+/// When the server sits behind a reverse proxy (ingress-nginx,
+/// Caddy, an AWS ALB, …) every TCP connection peers from the
+/// proxy's IP — putting every client in the same rate-limit
+/// bucket. Setting `cidr` to the proxy's IP range lets the
+/// resolver honour the `X-Forwarded-For` header for those peers,
+/// while leaving it untouched (and unspoofable) for direct
+/// connections.
+///
+/// Mirrors [`crate::config::TrustedProxiesConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlTrustedProxiesConfig {
+    /// Comma-separated list of CIDR ranges the server treats as
+    /// trusted proxies. Empty (the default) means the server
+    /// never trusts `X-Forwarded-For`, which is the safe
+    /// choice for a directly-exposed deployment.
+    ///
+    /// Examples:
+    /// - `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` (RFC1918 — typical k8s pod CIDR)
+    /// - `127.0.0.1/32` (local sidecar)
+    pub cidr: Option<String>,
+    /// When `true`, requests from loopback addresses bypass the
+    /// rate-limit buckets entirely (the historical dev default).
+    /// Set `false` in production to remove the bypass — the
+    /// per-IP keying is then applied even for local callers.
+    /// Defaults to `true` so the existing dev workflow does not
+    /// change; boot emits a `WARN` when `loopback_bypass = true`
+    /// and the bind address is non-loopback, because that
+    /// combination is almost always a misconfiguration.
+    pub loopback_bypass: Option<bool>,
 }
 
 /// Piper TTS engine knobs. Mirrors [`crate::config::TtsConfig`].
@@ -551,6 +587,25 @@ fn merge_toml_server(
             infer_timeout_ms: l.infer_timeout_ms.or(e.infer_timeout_ms),
             limits: merge_toml_limits(e.limits.as_ref(), l.limits.as_ref()),
             rate_limits: merge_toml_rate_limits(e.rate_limits.as_ref(), l.rate_limits.as_ref()),
+            trusted_proxies: merge_toml_trusted_proxies(
+                e.trusted_proxies.as_ref(),
+                l.trusted_proxies.as_ref(),
+            ),
+        }),
+    }
+}
+
+fn merge_toml_trusted_proxies(
+    earlier: Option<&TomlTrustedProxiesConfig>,
+    later: Option<&TomlTrustedProxiesConfig>,
+) -> Option<TomlTrustedProxiesConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlTrustedProxiesConfig {
+            cidr: l.cidr.clone().or_else(|| e.cidr.clone()),
+            loopback_bypass: l.loopback_bypass.or(e.loopback_bypass),
         }),
     }
 }

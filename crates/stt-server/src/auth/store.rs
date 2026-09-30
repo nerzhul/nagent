@@ -222,8 +222,15 @@ impl AuthStore {
 
     // ---- Sessions ----------------------------------------------------
 
-    /// Create a fresh session row. Returns the new `SessionRecord`
-    /// (with `id` and `csrf_token` minted by the store).
+    /// Create a fresh session row. Mints the opaque session token
+    /// AND the CSRF token internally and returns the new
+    /// `SessionRecord` (with `token_hash` for subsequent lookups
+    /// AND `csrf_token`).
+    /// Security plan #7: the **plaintext token is returned by the
+    /// call site** (see [`crate::auth::password::login_handler`]
+    /// AND [`crate::auth::passkey::finish_ceremony_handler`]) so
+    /// the caller can set the cookie AND the JSON body. The store
+    /// itself never holds the plaintext.
     pub async fn create_session(
         &self,
         user_id: Uuid,
@@ -237,17 +244,24 @@ impl AuthStore {
         }
     }
 
-    /// Look up a session by id and join the user row in a single
-    /// round-trip. Returns `Ok(None)` if the session does not exist
-    /// or has expired (`expires_at <= now`). Returns
-    /// `Ok(Some((session, user)))` on a hit.
-    pub async fn lookup_session(
+    /// Look up a session by the SHA-256 hash of its opaque token
+    /// and join the user row in a single round-trip. Returns
+    /// `Ok(None)` if the session does not exist or has expired
+    /// (`expires_at <= now`). Returns `Ok(Some((session, user)))`
+    /// on a hit.
+    ///
+    /// Security plan #7: the plaintext token is never reflected
+    /// back from the database — callers hand in the SHA-256 hash
+    /// (which they computed from the cookie / bearer header) and
+    /// get the matching row back. A DB leak no longer yields
+    /// usable session ids.
+    pub async fn lookup_session_by_token_hash(
         &self,
-        session_id: Uuid,
+        token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<Option<(SessionRecord, AuthUserRecord)>, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.lookup_session(session_id).await,
-            AuthStore::Postgres(s) => s.lookup_session(session_id).await,
+            AuthStore::Sqlite(s) => s.lookup_session_by_token_hash(token_hash).await,
+            AuthStore::Postgres(s) => s.lookup_session_by_token_hash(token_hash).await,
         }
     }
 
@@ -256,18 +270,25 @@ impl AuthStore {
     /// Returns `Ok(())` if the session no longer exists (silently
     /// skipped so a slow background task cannot resurrect a session
     /// that was just deleted).
-    pub async fn touch_session(&self, session_id: Uuid) -> Result<(), AuthError> {
+    pub async fn touch_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<(), AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.touch_session(session_id).await,
-            AuthStore::Postgres(s) => s.touch_session(session_id).await,
+            AuthStore::Sqlite(s) => s.touch_session(token_hash).await,
+            AuthStore::Postgres(s) => s.touch_session(token_hash).await,
         }
     }
 
-    /// Delete a session by id. Returns the deleted row count.
-    pub async fn delete_session(&self, session_id: Uuid) -> Result<u64, AuthError> {
+    /// Delete a session by its token hash. Returns the deleted row
+    /// count (0 means the session was already gone).
+    pub async fn delete_session(
+        &self,
+        token_hash: &crate::auth::session::SessionTokenHash,
+    ) -> Result<u64, AuthError> {
         match self {
-            AuthStore::Sqlite(s) => s.delete_session(session_id).await,
-            AuthStore::Postgres(s) => s.delete_session(session_id).await,
+            AuthStore::Sqlite(s) => s.delete_session(token_hash).await,
+            AuthStore::Postgres(s) => s.delete_session(token_hash).await,
         }
     }
 

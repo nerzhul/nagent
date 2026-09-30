@@ -16,12 +16,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use uuid::Uuid;
 
 use crate::auth::error::require_auth_store;
 use crate::auth::error::AuthError;
 use crate::auth::rate_limit::LoginRateLimitDecision;
 use crate::auth::session;
+use crate::auth::session::SessionSource;
 use crate::auth::AuthUser;
 
 /// Hash a password with argon2id. Returns the encoded `phc-string`
@@ -85,8 +85,14 @@ pub struct LoginRequest {
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
     pub user: AuthUser,
-    /// Echoed so API clients (no cookie jar) can store it.
-    pub session_id: Uuid,
+    /// Opaque session token, base64url-encoded (43 chars of a
+    /// 32-byte OS-RNG value). API clients (no cookie jar) carry
+    /// this in the `Authorization: Bearer …` header; browser
+    /// clients get the same value via the `Set-Cookie` header.
+    /// Security plan #7: the server only persists the SHA-256 of
+    /// this token; a DB leak / log reader no longer yields a
+    /// usable session id.
+    pub session_token: String,
 }
 
 /// (Reserved) — the password handlers now take
@@ -101,8 +107,10 @@ pub async fn login_handler(
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, AuthError> {
     let ip = addr.ip();
-    if let LoginRateLimitDecision::Deny { retry_after_secs } =
-        state.auth_rate_limiter.check(&body.email, ip)
+    if let LoginRateLimitDecision::Deny {
+        retry_after_secs,
+        kind: _,
+    } = state.auth_rate_limiter.check(&body.email, ip)
     {
         tracing::warn!(
             event = "auth.password.login",
@@ -169,19 +177,40 @@ pub async fn login_handler(
 
     let ttl =
         std::time::Duration::from_secs((state.config.auth.session_ttl_days as u64) * 24 * 60 * 60);
-    let session = require_auth_store(&state)?
+    let mut session = require_auth_store(&state)?
         .create_session(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
+    // Security plan #7: pull the plaintext token out of the
+    // SessionRecord exactly once — it is the only moment the
+    // token is held in this scope. After this line the token
+    // either lives in the cookie, the JSON body, or has been
+    // moved into the local `session_token` binding; the DB only
+    // ever sees the hash (`session.token_hash`).
+    let session_token = session
+        .take_plaintext_token()
+        .ok_or_else(|| AuthError::Internal("create_session did not mint a token".into()))?;
 
     state.auth_rate_limiter.reset(&body.email, ip);
 
+    // The log line includes a 6-byte prefix of the SHA-256 of
+    // the token for log correlation without leaking the
+    // plaintext. Security plan #7 explicitly forbids the
+    // plaintext token in logs.
+    let token_hash_for_log = crate::auth::session::sha256_of(
+        &crate::auth::session::decode_session_token(&session_token)
+            .expect("token from create_session must round-trip"),
+    );
+    let token_prefix = &token_hash_for_log[..3]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     tracing::info!(
         event = "auth.password.login",
         outcome = "ok",
         email = %user.email,
         user_id = %user.id,
         ip = %ip,
-        session_id = %session.id,
+        session_hash_prefix = %token_prefix,
         "password login ok"
     );
     require_auth_store(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
@@ -199,14 +228,28 @@ pub async fn login_handler(
         created_at: user.created_at,
         csrf_token: session.csrf_token.clone(),
         session_expires_at: session.expires_at,
+        // Security plan #7: the JSON body's `session_token`
+        // carries the plaintext (the only thing the client sees);
+        // `AuthUser.session_token_hash` carries the SHA-256 (the
+        // only thing the server holds) so handlers like
+        // `logout_handler` can call
+        // `delete_session(&user.session_token_hash)` without an
+        // extra round-trip.
+        session_token_hash: session.token_hash,
+        // The login response carries the token in both a cookie
+        // and the JSON body — a browser session is a cookie
+        // source from the CSRF point of view. The body is
+        // informational for API clients (so they can pick up the
+        // bearer alternative later).
+        session_source: SessionSource::Cookie,
     };
     let resp = LoginResponse {
         user: auth_user,
-        session_id: session.id,
+        session_token: session_token.clone(),
     };
     let cookie = session::build_set_cookie(
         state.config.auth.cookie_name(),
-        session.id,
+        &session_token,
         state.config.auth.cookie_secure(),
         ttl.as_secs() as i64,
     );
@@ -331,6 +374,18 @@ pub async fn register_handler(
             created_at: user.created_at,
             csrf_token: String::new(),
             session_expires_at: chrono::Utc::now(),
+            // Register does not mint a session for the new user
+            // (they keep using their own existing cookie) — the
+            // placeholder hash is all-zero so an accidental
+            // `delete_session` from this path is a no-op rather
+            // than a stray row hit.
+            session_token_hash: [0u8; 32],
+            // No fresh session created; mark as `Cookie` since the
+            // request was authenticated by the caller's existing
+            // cookie. This shape is never used by `logout_handler`
+            // (no `session_id`), but the field is required for the
+            // struct to compile.
+            session_source: SessionSource::Cookie,
         },
     };
     Ok((StatusCode::CREATED, Json(resp)).into_response())

@@ -160,10 +160,14 @@ rand = { version = "0.8", default-features = false, features = ["std", "getrando
 # without the `Expires` attribute (the session DB row is the source
 # of truth for expiry — see plan D6/D6a).
 cookie = { version = "0.18", features = ["percent-encode"] }
-# `hex` / `base64` are used to encode session ids and passkey
-# challenge payloads for the JSON wire format.
+# `hex` / `base64` are used to encode session tokens and passkey
+# challenge payloads for the JSON wire format. Security plan #7
+# swaps the session primary key to the SHA-256 of a 32-byte OS-RNG
+# token (`sha2 = "0.10"`); the plaintext token is base64url-encoded
+# before it leaves the server (cookie + JSON body).
 hex = "0.4"
 base64 = "0.22"
+sha2 = "0.10"
 # `hound` writes the WAV bytes served by `POST /v1/audio/speech`.
 # We emit PCM 16-bit mono at the model's declared rate (typically
 # 22 050 Hz) and let the browser resample on playback. Lightweight,
@@ -193,6 +197,11 @@ pdf-extract = "0.7"
 # `mime_guess` sniffs a content-type from the file extension at upload
 # time. Tiny (~10 KB), pure Rust; required by the documents routes.
 mime_guess = "2"
+# `ipnet` parses the `cidr` list in `[server.trusted_proxies]`
+# (security plan #5). Pure Rust, ~30 KB, no system deps; lets the
+# rate-limit resolver honour `X-Forwarded-For` only when the
+# connection peer is in a trusted CIDR range.
+ipnet = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

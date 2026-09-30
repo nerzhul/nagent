@@ -46,8 +46,11 @@ pub async fn logout_handler(
     .await?
     .ok_or(AuthError::Unauthenticated)?;
     check_csrf(&headers, &user)?;
+    // Security plans #1 + #7: `delete_session` expects the
+    // SHA-256 of the opaque session token (the
+    // `sessions.token_hash` primary key), NOT the user id.
     require_auth_store(&state)?
-        .delete_session(user.session_id)
+        .delete_session(&user.session_token_hash)
         .await?;
     let cookie = session::build_clear_cookie(
         state.config.auth.cookie_name(),
@@ -83,14 +86,14 @@ mod tests {
     //! Regression tests for security plan #1 ("logout does not revoke
     //! the session"). The pre-fix bug: `logout_handler` called
     //! `delete_session(user.id)` instead of
-    //! `delete_session(user.session_id)`, so the SQL `DELETE FROM
+    //! `delete_session(user.session_token_hash)`, so the SQL `DELETE FROM
     //! sessions WHERE id = ?` matched zero rows and the stolen
     //! session stayed valid until expiry.
     //!
     //! The test exercises the full path:
     //!   1. `extract_auth_user` populates `AuthUser.session_id`
     //!      from the same row it authenticates against.
-    //!   2. `delete_session(user.session_id)` removes exactly that
+    //!   2. `delete_session(user.session_token_hash)` removes exactly that
     //!      row.
     //!   3. Reusing the same cookie on `/api/me` returns `401`.
     //!   4. Reusing the same bearer on `/api/me` returns `401`.
@@ -170,9 +173,13 @@ mod tests {
             )
             .await
             .unwrap();
+        let session_token = session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
         let state = crate::auth::middleware::AuthState::new(store.clone(), cfg.clone());
         let app = whoami_router(state.clone());
-        let cookie = format!("{}={}", cfg.auth.cookie_name(), session.id);
+        let cookie = format!("{}={}", cfg.auth.cookie_name(), session_token);
 
         // 1. Cookie authenticates BEFORE logout.
         let resp = app
@@ -193,7 +200,7 @@ mod tests {
         );
 
         // 2. Re-resolve via the middleware path and call
-        //    `delete_session(user.session_id)` exactly like
+        //    `delete_session(user.session_token_hash)` exactly like
         //    `logout_handler` does (this is the regression for the
         //    pre-fix `delete_session(user.id)` bug).
         let headers = {
@@ -206,13 +213,16 @@ mod tests {
             .unwrap()
             .expect("user must be present");
         assert_eq!(
-            user.session_id, session.id,
-            "extract_auth_user must populate user.session_id from the row"
+            user.session_token_hash, session.token_hash,
+            "extract_auth_user must populate user.session_token_hash from the row"
         );
-        let deleted = store.delete_session(user.session_id).await.unwrap();
+        let deleted = store
+            .delete_session(&user.session_token_hash)
+            .await
+            .unwrap();
         assert_eq!(
             deleted, 1,
-            "delete_session(user.session_id) must remove exactly 1 row (the bug pre-fix deleted 0 because user.id was passed)"
+            "delete_session(user.session_token_hash) must remove exactly 1 row (the bug pre-fix deleted 0 because user.id was passed)"
         );
 
         // 3. Same cookie on /api/me must now return 401.
@@ -244,6 +254,10 @@ mod tests {
             .create_session(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
+        let session_token = session
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
         let state = crate::auth::middleware::AuthState::new(store.clone(), cfg.clone());
         let app = whoami_router(state.clone());
 
@@ -255,7 +269,7 @@ mod tests {
                     .uri("/api/me")
                     .header(
                         axum::http::header::AUTHORIZATION,
-                        format!("Bearer {}", session.id),
+                        format!("Bearer {}", session_token),
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -268,8 +282,8 @@ mod tests {
             "bearer must auth before logout"
         );
 
-        // 2. Delete via session_id (the regression).
-        let deleted = store.delete_session(session.id).await.unwrap();
+        // 2. Delete via session token hash (the regression).
+        let deleted = store.delete_session(&session.token_hash).await.unwrap();
         assert_eq!(deleted, 1);
 
         // 3. Bearer now 401.
@@ -279,7 +293,7 @@ mod tests {
                     .uri("/api/me")
                     .header(
                         axum::http::header::AUTHORIZATION,
-                        format!("Bearer {}", session.id),
+                        format!("Bearer {}", session_token),
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -299,7 +313,7 @@ mod tests {
         // it had been rewritten to filter by `user_id`, it would
         // have nuked every active session for that user — bad UX
         // and a data-loss vector if `user_id` had been a magic
-        // value. The fix calls `delete_session(session.id)` so
+        // value. The fix calls `delete_session(session_token)` so
         // only the current session is revoked. This test pins that
         // contract.
         let (store, _cfg) = temp_store().await;
@@ -311,18 +325,29 @@ mod tests {
             .create_session(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
+        let s1_token = s1
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
         let s2 = store
             .create_session(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
-        assert_ne!(s1.id, s2.id);
+        let s2_token = s2
+            .plaintext_token
+            .clone()
+            .expect("create_session must mint a plaintext token");
+        assert_ne!(s1_token, s2_token);
 
-        let deleted = store.delete_session(s1.id).await.unwrap();
+        let deleted = store.delete_session(&s1.token_hash).await.unwrap();
         assert_eq!(deleted, 1, "only the targeted session is removed");
 
         // s2 must still resolve (i.e. it was NOT deleted by s1's
         // logout).
-        let s2_lookup = store.lookup_session(s2.id).await.unwrap();
+        let s2_lookup = store
+            .lookup_session_by_token_hash(&s2.token_hash)
+            .await
+            .unwrap();
         assert!(
             s2_lookup.is_some(),
             "the other session must survive — confirms delete_session targets the session id, not the user id"

@@ -9,7 +9,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+# SPDX-License-Identifier: LicenseRef-OpenCore-Source-Available-1.0
+# See the LICENSE file at the root of the repository for the full terms.
+license = "LicenseRef-OpenCore-Source-Available-1.0"
 rust-version = "1.75"
 authors = ["nagent contributors"]
 

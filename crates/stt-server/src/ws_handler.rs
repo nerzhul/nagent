@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use std::net::{IpAddr, SocketAddr};
@@ -40,15 +40,24 @@ use crate::AppState;
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     peer: Option<ConnectInfo<SocketAddr>>,
 ) -> impl IntoResponse {
     let peer_ip = peer.map(|ConnectInfo(addr)| addr.ip());
+    // Security plan #5: resolve the source IP through
+    // `X-Forwarded-For` when the TCP peer is a trusted proxy.
+    // This means ingress-nginx (or any other reverse proxy
+    // added to `trusted_proxies.cidr`) ends up bucketing real
+    // client IPs, not the ingress pod IP.
+    let client_ip = peer_ip.map(|peer_ip| {
+        crate::rate_limit::resolve_client_ip(&headers, peer_ip, &state.config.trusted_proxies)
+    });
     let limiter = state.stt_rate_limiter.clone();
     let state_for_conn = Arc::clone(&state);
 
     // Decide whether to upgrade before consuming the upgrade itself;
     // this way a rejection is a plain 429 (no WS handshake started).
-    match peer_ip {
+    match client_ip {
         Some(ip) => match limiter.check(ip) {
             Ok(()) => ws
                 .on_upgrade(move |socket| ws_connection(socket, state_for_conn, Some(ip)))

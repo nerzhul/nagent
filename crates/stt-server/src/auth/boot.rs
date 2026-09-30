@@ -328,6 +328,7 @@ mod tests {
             infer_timeout: std::time::Duration::from_secs(1),
             limits: Default::default(),
             rate_limit: Default::default(),
+            trusted_proxies: Default::default(),
             llm: Default::default(),
             agents: Default::default(),
             tts: Default::default(),
