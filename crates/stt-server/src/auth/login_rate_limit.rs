@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::support::ratelimit::{SweepClock, DEFAULT_SWEEP_EVERY};
+use nagent_support::ratelimit::{SweepClock, DEFAULT_SWEEP_EVERY};
 
 /// Default per-(email, ip) cap: 5 attempts / 15 min.
 pub const DEFAULT_LOGIN_MAX_ATTEMPTS: u32 = 5;

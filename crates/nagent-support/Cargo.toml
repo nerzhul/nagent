@@ -1,0 +1,11 @@
+[package]
+name = "nagent-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared building blocks (sweep clock, TTL map, bounded blocking helper)."
+
+[dependencies]
+tokio = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }

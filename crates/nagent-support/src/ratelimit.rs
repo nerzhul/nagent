@@ -2,9 +2,9 @@
 //!
 //! Two limiters live in this crate today:
 //!
-//! - [`crate::rate_limit::RateLimiter`] — per-source-IP token bucket
-//!   for STT and LLM traffic.
-//! - [`crate::auth::login_rate_limit::LoginRateLimiter`] — three
+//! - `nagent_server::rate_limit::RateLimiter` — per-source-IP token
+//!   bucket for STT and LLM traffic.
+//! - `nagent_server::auth::login_rate_limit::LoginRateLimiter` — three
 //!   bucket families for login attempts (`(email, ip)`, per-email,
 //!   per-IP) with fixed-window counters and exponential backoff.
 //!
@@ -27,9 +27,9 @@ use std::time::Instant;
 
 /// Default interval between eviction sweeps, expressed as a count
 /// of `check`-class operations. Both existing limiters use this
-/// value; it is exposed as a `pub(crate)` constant so a future
-/// operator knob can override it without churning the call sites.
-pub(crate) const DEFAULT_SWEEP_EVERY: u64 = 1024;
+/// value; it is exposed as a `pub` constant so the per-crate
+/// callers can reference it.
+pub const DEFAULT_SWEEP_EVERY: u64 = 1024;
 
 /// Atomic counter that gates a periodic sweep.
 ///
@@ -38,12 +38,12 @@ pub(crate) const DEFAULT_SWEEP_EVERY: u64 = 1024;
 /// caller can run a sweep. Cheap to clone (`Arc`-backed via the
 /// owning limiter).
 #[derive(Debug, Default)]
-pub(crate) struct SweepClock {
+pub struct SweepClock {
     ops_since_sweep: AtomicU64,
 }
 
 impl SweepClock {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             ops_since_sweep: AtomicU64::new(0),
         }
@@ -51,7 +51,7 @@ impl SweepClock {
 
     /// Increment the counter; return `true` when the caller should
     /// run a sweep (every `sweep_every` calls).
-    pub(crate) fn tick(&self, sweep_every: u64) -> bool {
+    pub fn tick(&self, sweep_every: u64) -> bool {
         if sweep_every == 0 {
             // Defensive: a 0 sweep_every would cause a divide-by-zero
             // and trigger a sweep on every call. We treat it as "no
@@ -67,7 +67,7 @@ impl SweepClock {
     /// the cycle. Test-only hook; production code drives the
     /// counter from the hot path.
     #[cfg(test)]
-    pub(crate) fn reset(&self) {
+    pub fn reset(&self) {
         self.ops_since_sweep.store(0, Ordering::Relaxed);
     }
 }
@@ -79,7 +79,7 @@ impl SweepClock {
 /// `now` is sampled once by the caller; `last_update` is the bucket
 /// metadata; `idle_for` is the idle threshold.
 #[inline]
-pub(crate) fn should_keep_during_idle_eviction(
+pub fn should_keep_during_idle_eviction(
     now: Instant,
     last_update: Instant,
     idle_for: std::time::Duration,

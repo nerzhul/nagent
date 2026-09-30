@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/stt-proto",
     "crates/stt-core",
+    "crates/nagent-support",
     "crates/stt-server",
 ]
 

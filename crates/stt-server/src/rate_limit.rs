@@ -37,9 +37,8 @@ use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use dashmap::DashMap;
+use nagent_support::ratelimit::SweepClock;
 use thiserror::Error;
-
-use crate::support::ratelimit::SweepClock;
 
 /// Outcome of a single rate-limit check.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -133,7 +132,7 @@ impl RateLimiter {
                 policy,
                 buckets: DashMap::new(),
                 sweep: SweepClock::new(),
-                sweep_every: crate::support::ratelimit::DEFAULT_SWEEP_EVERY,
+                sweep_every: nagent_support::ratelimit::DEFAULT_SWEEP_EVERY,
             }),
         }
     }
@@ -235,7 +234,7 @@ impl RateLimiter {
             // Keep the bucket if it has been touched recently *or* if
             // it is not yet back to full capacity (an idle bucket
             // that is still refilling is one that was just used).
-            crate::support::ratelimit::should_keep_during_idle_eviction(
+            nagent_support::ratelimit::should_keep_during_idle_eviction(
                 now,
                 bucket.last_update,
                 idle_for,
