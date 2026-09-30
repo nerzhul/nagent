@@ -354,9 +354,12 @@ in with a passkey later (and vice versa) — the `provider` column on
 
 `auth.db.backend` chooses the storage engine **at runtime** — the
 same binary compiles both, the operator picks at boot. The
-`sqlx::migrate!` macro applies the embedded `migrations/0001_init.sql`
+`sqlx::migrate!` macro applies the embedded `crates/stt-server/src/db/migrations/0001_init.sql`
 on first start (idempotent; sqlx tracks applied versions in its
-own `_sqlx_migrations` table).
+own `_sqlx_migrations` table). The migration files were relocated
+under `src/db/migrations/` as part of plan 5.D so every domain
+table is owned by exactly one migration, indexed next to the
+per-domain repository it belongs to.
 
 | Backend    | Connection URL example                                            | Notes |
 | ---------- | ----------------------------------------------------------------- | ----- |

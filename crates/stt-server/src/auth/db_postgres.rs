@@ -19,7 +19,7 @@ use crate::auth::store::{
 };
 use crate::config::AuthConfig;
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./src/db/migrations");
 
 #[derive(Clone, Debug)]
 pub struct PgStore {
