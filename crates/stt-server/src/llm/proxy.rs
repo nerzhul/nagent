@@ -27,8 +27,8 @@ use crate::agents::AgentRegistry;
 use crate::config::LlmConfig;
 use crate::llm::client::{parse_chat_session_header, LlmError};
 use crate::llm::privacy::{strip_user_location_if_disabled, strip_user_timezone_if_disabled};
+use crate::llm::prompt::inject_default_system_prompt;
 use crate::llm::tool_loop::run_tool_loop;
-use crate::llm_prompt::inject_default_system_prompt;
 use crate::AppState;
 
 /// Subset of the OpenAI chat request we care about.

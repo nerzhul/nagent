@@ -19,15 +19,13 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
 use stt_core::{MockBackend, PoolDispatch, WhisperBackend};
-use stt_server::{
-    agents::ServiceRegistry,
-    build_router,
-    config::{LlmConfig, RateLimitConfig},
-    llm::LlmClient,
-    rate_limit::{RateLimitPolicy, RateLimiter},
-    session::SessionMap,
-    AppState, Config as ServerConfig,
-};
+use stt_server::agents::ServiceRegistry;
+use stt_server::config::{LlmConfig, RateLimitConfig};
+use stt_server::http::build_router;
+use stt_server::llm::LlmClient;
+use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use stt_server::stt::session::SessionMap;
+use stt_server::{AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
 
 /// Spawn a mock upstream that records the incoming request and
@@ -167,7 +165,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
@@ -249,7 +247,7 @@ async fn start_test_server_disabled() -> String {
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,
@@ -659,7 +657,7 @@ async fn start_test_server_with_llm_auth(
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

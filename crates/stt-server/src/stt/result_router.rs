@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use stt_core::InferResponse;
 
-use crate::session::{outbound_for, OutboundMessage, SessionMap};
+use crate::stt::session::{outbound_for, OutboundMessage, SessionMap};
 use stt_proto::{FinalTranscript, Segment};
 
 /// Result router task.

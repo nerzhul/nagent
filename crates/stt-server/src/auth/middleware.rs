@@ -2,7 +2,7 @@
 //! a request's session cookie (or `Authorization: Bearer`) into an
 //! [`AuthUser`] extension.
 //!
-//! Mirrors the structure of [`crate::llm_auth_middleware`] (the
+//! Mirrors the structure of [`crate::http::llm_guards::llm_auth_middleware`] (the
 //! `LLM_API_KEY` bearer gate that protects `/v1/*`): a
 //! `from_fn`-friendly `Request → Response` future that short-
 //! circuits with `401` on miss / expiry and otherwise injects the
@@ -37,7 +37,7 @@ pub struct AuthState {
     pub passkey: Option<crate::auth::passkey::PasskeyState>,
     /// Login-attempt rate limiter. Shared between the middleware
     /// (unused) and the password login handler.
-    pub rate_limiter: crate::auth::rate_limit::LoginRateLimiter,
+    pub rate_limiter: crate::auth::login_rate_limit::LoginRateLimiter,
 }
 
 impl AuthState {
@@ -47,7 +47,7 @@ impl AuthState {
             cfg,
             oidc: None,
             passkey: None,
-            rate_limiter: crate::auth::rate_limit::LoginRateLimiter::new(),
+            rate_limiter: crate::auth::login_rate_limit::LoginRateLimiter::new(),
         }
     }
 }

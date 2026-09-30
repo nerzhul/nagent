@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 
 use crate::auth::error::require_auth_store;
 use crate::auth::error::AuthError;
-use crate::auth::rate_limit::LoginRateLimitDecision;
+use crate::auth::login_rate_limit::LoginRateLimitDecision;
 use crate::auth::session;
 use crate::auth::session::SessionSource;
 use crate::auth::AuthUser;

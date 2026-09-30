@@ -430,7 +430,7 @@ impl AgentRegistry {
         cfg: &super::config::AgentConfig,
         documents: &crate::config::DocumentsConfig,
         document_store: Option<crate::documents::DocumentStore>,
-        chat_sessions: Option<crate::chat_sessions::ChatSessions>,
+        chat_sessions: Option<crate::chat::sessions::ChatSessions>,
     ) -> Self {
         let mut registry = Self::from_config(cfg);
         if !cfg.enabled {

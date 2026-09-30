@@ -7,7 +7,7 @@
 //!
 //! - the `GET /api/integrations` HTTP handler;
 //! - the LLM system prompt (configured-only slice, see
-//!   `llm_prompt::configured_integrations_block`).
+//!   `llm::prompt::configured_integrations_block`).
 //!
 //! v1 ships with an empty registry (`&[]`). Future verticals
 //! (productivity, dev-tools, home automation) append their

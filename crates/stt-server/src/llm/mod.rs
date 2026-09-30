@@ -18,6 +18,8 @@
 //!   chat-session header parser.
 //! - [`privacy`] — admin kill-switches for the browser-injected
 //!   location and timezone blocks.
+//! - [`prompt`] — server-default system prompt and the
+//!   user-integration block injected into every chat completion.
 //! - [`sse`] — SSE frame parser + tool-loop event builders.
 //! - [`tool_loop`] — the per-chat-completion tool loop, including
 //!   the security-plan-#10 "read_document → web_fetch" rule.
@@ -26,6 +28,7 @@
 
 pub mod client;
 pub mod privacy;
+pub mod prompt;
 pub mod proxy;
 pub mod sse;
 pub mod tool_loop;

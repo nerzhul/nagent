@@ -77,7 +77,7 @@ pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<AuthStore>, anyh
     // init containers in Kubernetes or pre-deploy hooks in CI. The
     // CLI subcommands (`auth create-admin`, etc.) do NOT honour this
     // gate: they always connect + migrate via
-    // `auth::cli::open_store` so a one-shot admin creation never
+    // `crate::cli::auth::open_store` so a one-shot admin creation never
     // fails on an unmigrated DB.
     if cfg.auth.db.auto_migrate {
         store

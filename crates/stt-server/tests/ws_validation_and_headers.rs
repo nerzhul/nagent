@@ -20,16 +20,14 @@ use axum::http::{header, StatusCode};
 use futures_util::{SinkExt, StreamExt};
 use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, WhisperBackend};
 use stt_proto::{decode_frame, encode, error_code, AudioFrame, Config, Payload, StartSession, Tag};
-use stt_server::{
-    agents::ServiceRegistry,
-    build_router,
-    config::{LimitsConfig, LlmAuthMode, LlmConfig, RateLimitConfig},
-    llm::LlmClient,
-    rate_limit::{RateLimitPolicy, RateLimiter},
-    router::ResultRouter,
-    session::SessionMap,
-    AppState, Config as ServerConfig,
-};
+use stt_server::agents::ServiceRegistry;
+use stt_server::config::{LimitsConfig, LlmAuthMode, LlmConfig, RateLimitConfig};
+use stt_server::http::build_router;
+use stt_server::llm::LlmClient;
+use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use stt_server::stt::result_router::ResultRouter;
+use stt_server::stt::session::SessionMap;
+use stt_server::{AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
@@ -125,7 +123,7 @@ async fn start_test_server_with_rate_limit(
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

@@ -10,7 +10,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::session::{unregister, SessionMap};
+use crate::stt::session::{unregister, SessionMap};
 
 /// Run the watchdog loop forever.
 ///

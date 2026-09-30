@@ -18,14 +18,12 @@ use std::time::Duration;
 use axum::http::{header, StatusCode};
 use dashmap::DashMap;
 use stt_core::{InferenceJob, MockBackend, PoolDispatch, WhisperBackend};
-use stt_server::{
-    agents::ServiceRegistry,
-    build_router,
-    config::{LlmAuthMode, LlmConfig, RateLimitConfig},
-    rate_limit::{RateLimitPolicy, RateLimiter},
-    session::SessionMap,
-    tts, AppState, Config as ServerConfig,
-};
+use stt_server::agents::ServiceRegistry;
+use stt_server::config::{LlmAuthMode, LlmConfig, RateLimitConfig};
+use stt_server::http::build_router;
+use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use stt_server::stt::session::SessionMap;
+use stt_server::{tts, AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
 
 fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
@@ -79,7 +77,7 @@ fn make_state(tts_engine: Option<Arc<tts::TtsEngine>>) -> Arc<AppState> {
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

@@ -27,7 +27,7 @@ import {
 
 // Marker prefix for the ephemeral system message that `chat.js`
 // prepends to the LLM request body. Mirrored on the Rust side as
-// `crate::llm_prompt::USER_LOCATION_MARKER` so the admin kill-switch
+// `crate::llm::prompt::USER_LOCATION_MARKER` so the admin kill-switch
 // (`LLM_ALLOW_USER_LOCATION=false`) can strip the block before it
 // reaches the upstream model. Keep the two strings in sync.
 export const LOCATION_MESSAGE_MARKER = "User's approximate location:";

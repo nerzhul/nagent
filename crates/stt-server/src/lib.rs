@@ -2,16 +2,16 @@
 //! chat-with-agents stack (STT + LLM proxy + chat agents + TTS +
 //! per-user documents + auth).
 //!
-//! Subsystems, after phase 1 of the architecture refactor:
+//! ## Subsystems
 //!
 //! - [`config`], [`config_file`] — env-var + TOML parsing, layering.
 //! - [`agents`] — server-side chat agents (e.g. `web_fetch`,
 //!   `read_document`) callable from the LLM proxy through OpenAI-style
 //!   tool/function calling. Direct agent HTTP routes live in
-//!   [`crate::agents::routes`].
+//!   [`crate::llm::proxy`].
 //! - [`auth`] — multi-user authentication (password / OIDC / passkey)
 //!   plus the cookie + bearer session machinery. Login-attempt
-//!   rate-limit moved to [`crate::auth::login_rate_limit`].
+//!   rate-limit lives at [`crate::auth::login_rate_limit`].
 //! - [`chat`] — server-bound chat-session bookkeeping
 //!   (`(user, session)` SEV 2 binding used by `read_document`).
 //! - [`cli`] — operator subcommands (`stt-server {auth,migrate,documents}`).
@@ -24,13 +24,14 @@
 //!   LLM-proxy shared envelope middleware, and the `build_router`
 //!   composition root that wires every `/v1/*` and `/api/*` route into
 //!   a single axum `Router`.
-//! - [`llm`], [`llm_prompt`] — optional OpenAI-compatible proxy to a
-//!   local LLM (Ollama). Split into
+//! - [`llm`] — optional OpenAI-compatible proxy to a local LLM
+//!   (Ollama). Split into
 //!   [`llm::client`](crate::llm::client) /
 //!   [`llm::proxy`](crate::llm::proxy) /
 //!   [`llm::tool_loop`](crate::llm::tool_loop) /
 //!   [`llm::sse`](crate::llm::sse) /
-//!   [`llm::privacy`](crate::llm::privacy) submodules.
+//!   [`llm::privacy`](crate::llm::privacy) /
+//!   [`llm::prompt`](crate::llm::prompt) submodules.
 //! - [`rate_limit`] — per-source-IP token bucket for STT and LLM
 //!   traffic (the login-attempt limiter lives at
 //!   [`crate::auth::login_rate_limit`]).
@@ -39,11 +40,6 @@
 //!   sessions).
 //! - [`tts`] — local Piper text-to-speech engine (split into
 //!   [`tts::engine`](crate::tts::engine) + [`tts::routes`](crate::tts::routes)).
-//!
-//! Temporary `pub use` re-exports at the bottom of this file keep the
-//! pre-phase-1 module paths (`session`, `router`, `middleware`, …)
-//! reachable for the integration tests and `main.rs`; they will be
-//! dropped in a follow-up commit.
 
 #![warn(missing_debug_implementations)]
 
@@ -54,53 +50,23 @@ pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod credentials;
+pub mod documents;
 pub mod http;
 pub mod llm;
-pub mod llm_prompt;
 pub mod rate_limit;
 pub mod stt;
 pub mod tts;
 pub mod version;
 
-pub mod documents;
-
-// ---- Back-compat shims (phase 1 of the architecture refactor) -------------
-//
-// Several top-level modules moved into `stt/`, `http/`, `chat/`, and
-// `cli/`. The re-exports below keep the old `crate::<name>::...` paths
-// reachable so `main.rs`, the integration tests, and the few inline
-// `use crate::...` references inside the crate itself keep compiling
-// until a follow-up commit rewrites them in place.
-pub use chat::sessions as chat_sessions;
-pub use cli::documents as documents_cli;
-pub use cli::migrate as migrate_cli;
-pub use http::features;
-pub use http::security_headers as middleware;
-pub use http::static_assets;
-pub use stt::result_router as router;
-pub use stt::session;
-pub use stt::validation;
-pub use stt::watchdog;
-pub use stt::ws_handler;
-
-// Same treatment for the helpers that moved from `lib.rs` into
-// `http::llm_guards`: `build_rate_limiters`, `llm_auth_middleware`,
-// `llm_rate_limit_middleware`. `main.rs` imports them by name.
-pub use http::build_router;
-pub use http::{build_rate_limiters, llm_auth_middleware, llm_rate_limit_middleware};
-
-use config::LlmConfig;
 pub use config::{CliArgs, Config};
-use rate_limit::{RateLimitPolicy, RateLimiter};
-use session::SessionMap;
 pub use version::VersionInfo;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::routing::Router;
-
 use stt_core::{PoolDispatch, WhisperBackend};
+
+use crate::stt::session::SessionMap;
 
 /// Shared application state injected into every axum handler.
 #[derive(Clone)]
@@ -133,9 +99,9 @@ pub struct AppState {
     pub tts: Option<Arc<tts::TtsEngine>>,
     /// Per-source-IP token bucket for the STT pipeline (consumed at
     /// WS upgrade and per inbound WS frame).
-    pub stt_rate_limiter: RateLimiter,
+    pub stt_rate_limiter: rate_limit::RateLimiter,
     /// Per-source-IP token bucket for the `/v1/*` LLM proxy.
-    pub llm_rate_limiter: RateLimiter,
+    pub llm_rate_limiter: rate_limit::RateLimiter,
     /// Auth DB handle (PR1). `Some(_)` when `auth.enabled = true`,
     /// `None` otherwise so existing tests that do not care about
     /// auth keep building unmodified. Populated by `auth::boot::
@@ -148,7 +114,7 @@ pub struct AppState {
     pub auth_passkey: Option<auth::passkey::PasskeyState>,
     /// Login-attempt rate limiter. Shared between the `RequireAuth`
     /// middleware (unused) and the password login handler.
-    pub auth_rate_limiter: auth::rate_limit::LoginRateLimiter,
+    pub auth_rate_limiter: auth::login_rate_limit::LoginRateLimiter,
     /// Catalogue of per-user integrations. `Arc`-wrapped because
     /// every per-request `UserContext` clones it; the inner slice is
     /// `&'static` so the registry can be built once at boot.
@@ -177,7 +143,7 @@ pub struct AppState {
     /// concept is broader than documents — a future plan may
     /// scope agent conversations or chat-history entries to a
     /// chat session too.
-    pub chat_sessions: Option<crate::chat_sessions::ChatSessions>,
+    pub chat_sessions: Option<crate::chat::sessions::ChatSessions>,
 }
 
 impl AppState {
@@ -219,9 +185,3 @@ impl std::fmt::Debug for AppState {
             .finish()
     }
 }
-
-// `LlmConfig`, `RateLimitPolicy`, and `Router` are pulled in by the
-// shim re-exports above; keep the imports so future in-file additions
-// do not lose the symbol.
-#[allow(dead_code)]
-fn _phantom(_: &LlmConfig, _: &RateLimitPolicy, _: &Router) {}

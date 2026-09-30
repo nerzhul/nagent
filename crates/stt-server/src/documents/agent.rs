@@ -52,7 +52,7 @@ use crate::documents::DocumentStore;
 #[derive(Clone)]
 pub struct ReadDocumentAgent {
     store: DocumentStore,
-    chat_sessions: Option<crate::chat_sessions::ChatSessions>,
+    chat_sessions: Option<crate::chat::sessions::ChatSessions>,
 }
 
 impl std::fmt::Debug for ReadDocumentAgent {
@@ -70,7 +70,7 @@ impl std::fmt::Debug for ReadDocumentAgent {
 impl ReadDocumentAgent {
     pub fn new(
         store: DocumentStore,
-        chat_sessions: Option<crate::chat_sessions::ChatSessions>,
+        chat_sessions: Option<crate::chat::sessions::ChatSessions>,
     ) -> Self {
         Self {
             store,

@@ -19,11 +19,11 @@ use axum::http::{Request as HttpRequest, StatusCode};
 use std::time::Duration;
 use stt_server::auth::store::AuthStore;
 use stt_server::config::AuthConfig;
+use stt_server::http::build_router;
 use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-use stt_server::session::SessionMap;
+use stt_server::stt::session::SessionMap;
 use stt_server::{
     agents::ServiceRegistry,
-    build_router,
     config::{AuthBackendKind, AuthDbConfig, LlmConfig, RateLimitConfig},
     AppState,
 };
@@ -101,7 +101,7 @@ async fn build_state_with_features(
     } else {
         None
     };
-    let chat_sessions = Some(stt_server::chat_sessions::ChatSessions::new(
+    let chat_sessions = Some(stt_server::chat::sessions::ChatSessions::new(
         auth_store.clone(),
     ));
 
@@ -127,7 +127,7 @@ async fn build_state_with_features(
         auth_store: Some(auth_store.clone()),
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

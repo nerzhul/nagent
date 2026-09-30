@@ -192,7 +192,7 @@ async fn connect_store(
              documents require the auth DB to be reachable"
         ));
     }
-    crate::auth::cli::ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
+    crate::cli::auth::ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
     let store = crate::auth::store::AuthStore::connect(&cfg.auth)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))?;
@@ -238,8 +238,8 @@ async fn purge(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Err
 
 /// Refuse to run if the server PID file exists AND points at a
 /// live process AND `--force` was not supplied. Mirrors
-/// [`crate::migrate_cli::check_running_server`] and
-/// [`crate::auth::cli::check_running_server`]; duplicated to
+/// [`crate::cli::migrate::check_running_server`] and
+/// [`crate::cli::auth::check_running_server`]; duplicated to
 /// keep the three namespaces independent.
 fn check_running_server(force: bool) -> Result<(), anyhow::Error> {
     let pid_path = PathBuf::from("data").join("server.pid");

@@ -59,18 +59,16 @@ use stt_server::agents::web_fetch::WebFetchAgent;
 use stt_server::agents::wikipedia_agent::WikipediaAgent;
 use stt_server::agents::ServiceRegistry;
 use stt_server::agents::UserContext;
-use stt_server::{
-    agents::{Agent, AgentRegistry},
-    build_router,
-    config::{
-        AgentConfig, DictionaryConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig,
-        WikipediaConfig,
-    },
-    llm::LlmClient,
-    rate_limit::{RateLimitPolicy, RateLimiter},
-    session::SessionMap,
-    AppState, Config as ServerConfig,
+use stt_server::agents::{Agent, AgentRegistry};
+use stt_server::config::{
+    AgentConfig, DictionaryConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig,
+    WikipediaConfig,
 };
+use stt_server::http::build_router;
+use stt_server::llm::LlmClient;
+use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use stt_server::stt::session::SessionMap;
+use stt_server::{AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
 
 /// Build a fresh `UserContext` for tests that exercise agents which
@@ -198,7 +196,7 @@ fn make_app_state(
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

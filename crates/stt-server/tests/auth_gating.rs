@@ -19,15 +19,15 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use stt_server::auth::store::AuthStore;
+use stt_server::http::build_router;
+use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use stt_server::stt::session::SessionMap;
 use stt_server::{
     agents::ServiceRegistry,
-    build_router,
     config::{
         AgentConfig, AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig,
         RateLimitConfig, TtsConfig,
     },
-    rate_limit::{RateLimitPolicy, RateLimiter},
-    session::SessionMap,
     AppState, Config as ServerConfig,
 };
 use tower::ServiceExt;
@@ -120,7 +120,7 @@ async fn build_state_with_auth() -> Arc<AppState> {
         auth_store: Some(auth_store),
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

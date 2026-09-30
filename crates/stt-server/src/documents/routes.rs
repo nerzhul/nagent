@@ -64,7 +64,7 @@ pub fn build_chat_session_router(
     axum::Router::new()
         .route(
             "/v1/chat/session",
-            axum::routing::post(crate::chat_sessions::mint_handler),
+            axum::routing::post(crate::chat::sessions::mint_handler),
         )
         .with_state(state)
 }

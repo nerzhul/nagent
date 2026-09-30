@@ -4,7 +4,7 @@
 //! config sets `auth.enabled = false` the server keeps the pre-PR1
 //! single-user trust boundary; the modules in this tree still exist
 //! but the `auth::boot::auto_bootstrap` function short-circuits and
-//! the HTTP routes (registered in `lib::build_router`) are guarded
+//! the HTTP routes (registered in `http::build_router`) are guarded
 //! by the runtime flag.
 //!
 //! ## Sub-modules
@@ -26,13 +26,10 @@
 //! - [`mod@routes`] — `/api/me`, `/api/auth/logout`, plus the
 //!   registration endpoints guarded by `RequireAuth`.
 //! - [`mod@login_rate_limit`] — login-attempt rate-limit
-//!   (DashMap, `(email, ip)` key). Re-exported as `rate_limit` for
-//!   backward-compat with callers predating the rename.
+//!   (DashMap, `(email, ip)` key).
 //!
 //! The `stt-server auth {create-admin,list-users,delete-user}` CLI
-//! subcommand has moved to [`crate::cli::auth`] (phase 1 of the
-//! architecture refactor); the old `crate::auth::cli` path is kept as
-//! a re-export so existing references in `main.rs` keep compiling.
+//! subcommand lives in [`crate::cli::auth`].
 //!
 //! ## Topology
 //!
@@ -57,15 +54,6 @@ pub mod router;
 pub mod routes;
 pub mod session;
 pub mod store;
-
-// Back-compat shims (phase 1 of the architecture refactor):
-// `auth::rate_limit` was renamed to `auth::login_rate_limit`,
-// `auth::cli` was moved to `cli::auth`. The old paths still
-// resolve so call sites in `main.rs`, the auth handlers, and
-// integration tests keep compiling until a follow-up commit
-// rewrites them in place.
-pub use crate::cli::auth as cli;
-pub use login_rate_limit as rate_limit;
 
 pub use error::AuthError;
 pub use error::{require_auth_store, require_oidc_state, require_passkey_state};

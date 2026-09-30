@@ -18,7 +18,7 @@
 
 use serde_json::Value;
 
-use crate::llm_prompt::{USER_LOCATION_MARKER, USER_TIMEZONE_MARKER};
+use crate::llm::prompt::{USER_LOCATION_MARKER, USER_TIMEZONE_MARKER};
 
 /// Drop the ephemeral `User's approximate location:` system message
 /// the browser prepends when the admin has switched the feature off.
@@ -28,7 +28,7 @@ use crate::llm_prompt::{USER_LOCATION_MARKER, USER_TIMEZONE_MARKER};
 /// from ever seeing it (compliance, sensitive deployment, …). The flag
 /// defaults to `true` so the UI is the primary gate; this helper is a
 /// defence-in-depth filter that runs after
-/// [`crate::llm_prompt::inject_default_system_prompt`] so the admin's
+/// [`crate::llm::prompt::inject_default_system_prompt`] so the admin's
 /// prompt block always survives.
 ///
 /// Matching is strict on the marker prefix to avoid clobbering an
@@ -68,7 +68,7 @@ pub fn strip_user_location_if_disabled(forward_body: &mut Value, allow: bool) {
 /// the browser prepends when the admin has switched the feature off.
 ///
 /// Behaviour mirrors [`strip_user_location_if_disabled`]: defaults to
-/// `true`, runs after [`crate::llm_prompt::inject_default_system_prompt`],
+/// `true`, runs after [`crate::llm::prompt::inject_default_system_prompt`],
 /// strict prefix match, and only inspects string-typed `content` so a
 /// future multimodal prompt isn't accidentally dropped. Splitting the
 /// two strip helpers keeps the kill-switches independent — an admin

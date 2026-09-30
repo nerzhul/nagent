@@ -22,11 +22,11 @@ use uuid::Uuid;
 use stt_core::{InferRequest, InferenceJob};
 use stt_proto::{decode_frame, encode_frame, BackendInfo, ErrorMessage, Payload};
 
+use crate::http::static_assets::{mime_for, StaticAssets};
 use crate::rate_limit::RateLimitError;
-use crate::router::send_to_session;
-use crate::session::{register, unregister, OutboundMessage};
-use crate::static_assets::{mime_for, StaticAssets};
-use crate::validation::FrameError;
+use crate::stt::result_router::send_to_session;
+use crate::stt::session::{register, unregister, OutboundMessage};
+use crate::stt::validation::FrameError;
 use crate::version::VersionInfo;
 use crate::AppState;
 

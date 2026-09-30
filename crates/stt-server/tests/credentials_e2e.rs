@@ -199,7 +199,7 @@ async fn http_list_integrations_empty_registry_returns_empty_data() {
     use stt_core::MockBackend;
     use stt_server::config::{AuthBackendKind, AuthDbConfig, RateLimitConfig};
     use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
-    use stt_server::session::SessionMap;
+    use stt_server::stt::session::SessionMap;
     use stt_server::AppState;
 
     let auth_store = temp_store().await;
@@ -246,7 +246,7 @@ async fn http_list_integrations_empty_registry_returns_empty_data() {
         auth_store: Some(auth_store.clone()),
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services,
         credential_resolver: None,
         credentials_key: None,

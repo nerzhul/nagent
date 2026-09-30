@@ -27,13 +27,12 @@ use futures_util::StreamExt;
 use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, WhisperBackend};
 use stt_proto::{decode_frame, Tag};
 use stt_server::config::RateLimitConfig;
+use stt_server::http::build_router;
+use stt_server::rate_limit::RateLimiter;
+use stt_server::stt::session::SessionMap;
 use stt_server::{
-    agents::ServiceRegistry,
-    build_router,
-    config::{LlmAuthMode, LlmConfig},
-    rate_limit::RateLimiter,
-    session::SessionMap,
-    AppState, Config as ServerConfig,
+    agents::ServiceRegistry, config::LlmAuthMode, config::LlmConfig, AppState,
+    Config as ServerConfig,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -82,7 +81,8 @@ async fn start_test_server_with(
     let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(16);
     let _worker = InferenceWorker::spawn(Arc::clone(&backend), job_rx);
-    let _shutdown = stt_server::router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
+    let _shutdown =
+        stt_server::stt::result_router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
     let llm = if llm_enabled {
         let cfg = Arc::new(server_cfg.llm.clone());
         Some(stt_server::llm::LlmClient::new(cfg).expect("LlmClient::new"))
@@ -109,7 +109,7 @@ async fn start_test_server_with(
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

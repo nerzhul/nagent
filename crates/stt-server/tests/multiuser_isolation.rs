@@ -23,15 +23,13 @@ use stt_core::{InferenceJob, InferenceWorker, MockBackend, PoolDispatch, Whisper
 use stt_proto::{
     decode_frame, encode, AudioFrame, Config, FinalTranscript, Payload, StartSession, Tag,
 };
-use stt_server::{
-    agents::ServiceRegistry,
-    build_router,
-    config::{LlmAuthMode, RateLimitConfig},
-    rate_limit::{RateLimitPolicy, RateLimiter},
-    router::ResultRouter,
-    session::SessionMap,
-    AppState, Config as ServerConfig,
-};
+use stt_server::agents::ServiceRegistry;
+use stt_server::config::{LlmAuthMode, RateLimitConfig};
+use stt_server::http::build_router;
+use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use stt_server::stt::result_router::ResultRouter;
+use stt_server::stt::session::SessionMap;
+use stt_server::{AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
@@ -103,7 +101,7 @@ async fn start_test_server() -> (String, SessionMap) {
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

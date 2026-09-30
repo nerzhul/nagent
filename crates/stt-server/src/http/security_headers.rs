@@ -8,7 +8,7 @@
 //!   Content-Security-Policy, a `Referrer-Policy: no-referrer`, and an
 //!   `X-Content-Type-Options: nosniff` marker so the browser applies
 //!   the MIME types we sent (in particular `font/woff2` for KaTeX
-//!   fonts — see [`crate::static_assets::mime_for`]).
+//!   fonts — see [`crate::http::static_assets::mime_for`]).
 //!
 //! - [`cors_layer`]: applied **only** to the `/v1/*` routes. The
 //!   default `LLM_CORS_ALLOW_ORIGINS=""` produces an "allow no
@@ -169,7 +169,7 @@ pub fn cors_layer(allow_origins: &[String]) -> CorsLayer {
 /// request with method, path, status, duration, peer IP, and
 /// (when authenticated) the resolved `user_id` / `email`.
 ///
-/// Wired as the outermost layer in [`crate::build_router`] so it
+/// Wired as the outermost layer in [`crate::http::build_router`] so it
 /// sees every request, including the 401s returned by
 /// `RequireAuth` for missing/expired sessions. The user info
 /// flows in via the response extensions: `RequireAuth` injects
@@ -183,7 +183,7 @@ pub fn cors_layer(allow_origins: &[String]) -> CorsLayer {
 /// `ERROR` for 5xx. A noisy CI test can down-grade to `INFO`
 /// for everything with `RUST_LOG=info` (the access log line
 /// is tagged `event = "http.access"` so it is easy to filter
-/// out with `RUST_LOG=info,stt_server::middleware::access=off`).
+/// out with `RUST_LOG=info,stt_server::http::middleware::access=off`).
 ///
 /// The peer IP comes from `ConnectInfo<SocketAddr>` — the same
 /// extension that the LLM rate limiter reads. We pull it

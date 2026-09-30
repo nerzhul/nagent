@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use stt_server::auth::store::AuthStore;
-use stt_server::chat_sessions::{ChatSessionError, ChatSessions};
+use stt_server::chat::sessions::{ChatSessionError, ChatSessions};
 use stt_server::config::{AuthConfig, AuthDbConfig};
 use uuid::Uuid;
 

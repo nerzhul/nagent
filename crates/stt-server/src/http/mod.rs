@@ -2,14 +2,15 @@
 //!
 //! Pure plumbing: security headers, the static frontend embedding, the
 //! `/api/features` discovery endpoint, the axum middleware shared by
-//! every `/v1/*` route, and the `build_router` composition root that
+//! every `/v1/*` route, and the [`build_router`] composition root that
 //! stitches every per-subsystem subtree into a single `axum::Router`.
 //!
-//! Phase 1 of the architecture refactor split the original flat
-//! `lib.rs::build_router` (240 lines of inline
-//! `protected.merge(...).layer(...)` blocks) into per-subsystem
-//! `mount_*` helpers; `build_router` is now a thin composition root
-//! that reads top-to-bottom.
+//! Subsystems (STT, LLM proxy, agents, documents, chat-sessions,
+//! TTS, auth, credentials, `/api/features`) each contribute a
+//! `mount_*` helper. [`build_router`] reads top-to-bottom: public
+//! subtree → optional protected subtrees → auth subtree (when
+//! `auth.enabled = true`) → outermost security-header + access-log
+//! layers.
 
 use std::sync::Arc;
 
@@ -23,9 +24,11 @@ pub mod llm_guards;
 pub mod security_headers;
 pub mod static_assets;
 
-// Back-compat re-export so the pre-phase-1 callers (e.g. `main.rs`
-// used to import `crate::middleware::security_headers_layer`) keep
-// working through the same name.
+// The `build_rate_limiters` / `llm_auth_middleware` /
+// `llm_rate_limit_middleware` helpers live in [`llm_guards`] (the
+// shared envelope around the `/v1/*` subtree) but are re-exported at
+// the `http::` level so `main.rs` does not need to know about the
+// internal split.
 pub use llm_guards::{build_rate_limiters, llm_auth_middleware, llm_rate_limit_middleware};
 
 /// Build the axum router around [`AppState`]. Exposed for tests.
@@ -64,10 +67,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // version probes) keep working. The auth login routes are
     // merged into `public` further down.
     let public = Router::new()
-        .route("/", get(crate::ws_handler::index_handler))
-        .route("/healthz", get(crate::ws_handler::healthz))
-        .route("/api/version", get(crate::ws_handler::version_handler))
-        .route("/static/*path", get(crate::ws_handler::static_path_handler));
+        .route("/", get(crate::stt::ws_handler::index_handler))
+        .route("/healthz", get(crate::stt::ws_handler::healthz))
+        .route("/api/version", get(crate::stt::ws_handler::version_handler))
+        .route(
+            "/static/*path",
+            get(crate::stt::ws_handler::static_path_handler),
+        );
 
     // ----- Protected subtree (auth required when enabled) ----------------
     // Each subsystem contributes its own `mount_*` helper that returns
@@ -75,7 +81,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // envelope (when applicable). The global `RequireAuth` layer is
     // applied below, after we know whether auth is enabled.
     let mut protected: Router<Arc<AppState>> = Router::new()
-        .route("/ws", get(crate::ws_handler::ws_upgrade))
+        .route("/ws", get(crate::stt::ws_handler::ws_upgrade))
         .merge(mount_features(state.clone()));
 
     if state.agents.is_some() {

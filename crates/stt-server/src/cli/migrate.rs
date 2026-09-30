@@ -1,7 +1,7 @@
 //! `stt-server migrate …` — operator CLI for the auth DB migration
 //! state.
 //!
-//! Mirrors [`crate::auth::cli`] style: hand-rolled flag parsing
+//! Mirrors [`crate::cli::auth`] style: hand-rolled flag parsing
 //! (no `clap` dep), `--config FOO` global flag, `--force` PID-file
 //! override, `--help` / `-h` per subcommand. Runs against the same
 //! `[auth.db]` configuration the server uses, without needing the
@@ -20,7 +20,7 @@
 //! plan check. `up` is idempotent (sqlx is the source of truth) so
 //! it never asks for confirmation.
 //!
-//! Unlike `auth::cli::open_store()`, this module does NOT call
+//! Unlike `crate::cli::auth::open_store()`, this module does NOT call
 //! `migrate_up` after connect — every subcommand uses the migration
 //! primitives directly so an operator can inspect `status` against
 //! a freshly-created DB without immediately applying the schema.
@@ -72,7 +72,7 @@ pub async fn run_migrate_cli(args: Vec<String>) -> Result<ExitCode, anyhow::Erro
 /// CLI argv. Returns the parsed [`CliArgs`] plus the remainder
 /// without the global flags — the subcommand-specific parsers then
 /// operate on a clean slice. Same shape as
-/// [`crate::auth::cli::split_global_flags`]; duplicated rather than
+/// [`crate::cli::auth::split_global_flags`]; duplicated rather than
 /// shared because the `auth` module's helper is private and there
 /// are only two namespaces today.
 fn split_global_flags(args: Vec<String>) -> (CliArgs, Vec<String>) {
@@ -101,14 +101,14 @@ fn split_global_flags(args: Vec<String>) -> (CliArgs, Vec<String>) {
 /// `status` view reflects what is on disk, not what would have been
 /// applied by `connect()`.
 async fn connect_store(cfg: &Config) -> Result<AuthStore, anyhow::Error> {
-    crate::auth::cli::ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
+    crate::cli::auth::ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
     AuthStore::connect(&cfg.auth)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))
 }
 
 /// PID-file + `--force` guard shared by every subcommand. Mirrors the
-/// [`crate::auth::cli::check_running_server`] helper but is wired up
+/// [`crate::cli::auth::check_running_server`] helper but is wired up
 /// here independently (the `auth` CLI's check is private and the two
 /// namespaces have no reason to share this code path).
 fn check_running_server(force: bool) -> Result<(), anyhow::Error> {

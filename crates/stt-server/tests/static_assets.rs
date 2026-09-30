@@ -14,13 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use stt_core::{MockBackend, PoolDispatch};
-use stt_server::{
-    agents::ServiceRegistry,
-    build_router,
-    config::{LlmAuthMode, RateLimitConfig},
-    rate_limit::{RateLimitPolicy, RateLimiter},
-    AppState, Config as ServerConfig,
-};
+use stt_server::agents::ServiceRegistry;
+use stt_server::config::{LlmAuthMode, RateLimitConfig};
+use stt_server::http::build_router;
+use stt_server::rate_limit::{RateLimitPolicy, RateLimiter};
+use stt_server::{AppState, Config as ServerConfig};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
@@ -62,7 +60,8 @@ async fn serve_once() -> String {
     let job_tx = PoolDispatch::from_single_sender(job_tx_inner);
     let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(16);
     let _worker = stt_core::InferenceWorker::spawn(Arc::clone(&backend), job_rx);
-    let _shutdown = stt_server::router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
+    let _shutdown =
+        stt_server::stt::result_router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
     let state = Arc::new(AppState {
         backend,
         sessions: Arc::clone(&sessions),
@@ -81,7 +80,7 @@ async fn serve_once() -> String {
         auth_store: None,
         auth_oidc: None,
         auth_passkey: None,
-        auth_rate_limiter: stt_server::auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: stt_server::auth::login_rate_limit::LoginRateLimiter::new(),
         services: ServiceRegistry::empty().into_arc(),
         credential_resolver: None,
         credentials_key: None,

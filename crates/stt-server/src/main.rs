@@ -7,12 +7,11 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use stt_server::agents::ServiceRegistry;
+use stt_server::cli::{auth as auth_cli, documents as documents_cli, migrate as migrate_cli};
 use stt_server::config::AuthBackendKind;
-use stt_server::documents_cli;
-use stt_server::{
-    agents, auth, build_rate_limiters, build_router, credentials, llm, migrate_cli, router,
-    session, tts, watchdog, AppState, CliArgs, Config,
-};
+use stt_server::http::{build_rate_limiters, build_router};
+use stt_server::stt::{result_router, session, watchdog};
+use stt_server::{agents, auth, credentials, llm, tts, AppState, CliArgs, Config};
 
 /// Locate the directory containing the bundled `espeak-ng-data/`
 /// phoneme + voice tables and expose it via the
@@ -122,7 +121,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let trailing = argv.split_off(idx + 1);
         let mut combined = argv;
         combined.extend(trailing);
-        return auth::cli::run_auth_cli(combined).await;
+        return auth_cli::run_auth_cli(combined).await;
     }
     if let Some(idx) = argv.iter().position(|a| a == "migrate") {
         // Same dispatcher trick as the `auth` branch above. Order
@@ -252,7 +251,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // the router is kept around as the integration point for the P1
     // "Streaming partial transcripts" feature.
     let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(cfg.max_queue);
-    let _router_shutdown = router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
+    let _router_shutdown = result_router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
 
     // ---- Watchdog --------------------------------------------------------
     let watchdog_sessions = Arc::clone(&sessions);
@@ -277,9 +276,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // (when auth is enabled). The documents routes + the
     // `read_document` agent also read this handle to verify
     // `(user, session)` bindings on every request.
-    let chat_sessions_state: Option<stt_server::chat_sessions::ChatSessions> = auth_store
+    let chat_sessions_state: Option<stt_server::chat::sessions::ChatSessions> = auth_store
         .clone()
-        .map(stt_server::chat_sessions::ChatSessions::new);
+        .map(stt_server::chat::sessions::ChatSessions::new);
     let documents_state: Option<stt_server::documents::DocumentStore> = if cfg.documents.enabled {
         let store = match auth_store.clone() {
             Some(s) => s,
@@ -480,7 +479,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         auth_store: auth_store.clone(),
         auth_oidc: auth_oidc.clone(),
         auth_passkey: auth_passkey.clone(),
-        auth_rate_limiter: auth::rate_limit::LoginRateLimiter::new(),
+        auth_rate_limiter: auth::login_rate_limit::LoginRateLimiter::new(),
         services,
         credential_resolver,
         credentials_key,

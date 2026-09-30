@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn embedded_version_txt_matches_runtime_hash() {
         let runtime = frontend_version();
-        let on_disk = crate::static_assets::StaticAssets::get("version.txt")
+        let on_disk = crate::http::static_assets::StaticAssets::get("version.txt")
             .expect("version.txt must be embedded by rust-embed")
             .data;
         let on_disk_str = std::str::from_utf8(on_disk.as_ref())

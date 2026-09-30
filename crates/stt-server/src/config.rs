@@ -170,7 +170,7 @@ impl TrustedProxiesConfig {
 
 /// Limits applied to inbound WebSocket frames.
 ///
-/// See [`crate::ws_handler::handle_inbound`] for the validation
+/// See [`crate::stt::ws_handler::handle_inbound`] for the validation
 /// that consumes these knobs.
 #[derive(Debug, Clone)]
 pub struct LimitsConfig {
