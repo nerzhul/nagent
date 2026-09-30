@@ -639,7 +639,6 @@ function lazyEl(id) {
   // markers (`Symbol.iterator`, `Symbol.toPrimitive`, …) point at
   // the proxy itself, not at a shared frozen object that some
   // other pre-mount code might mutate.
-  let preMountWarnings = 0;
   const iterator = function* () {};
   // Single canonical "pre-mount DOM stub" used as the value for
   // every property access. The same stub object backs:
@@ -702,15 +701,17 @@ function lazyEl(id) {
         if (prop === "_id") return id;
         const el = document.getElementById(id);
         if (el == null) {
-          if (preMountWarnings === 0) {
-            console.debug(
-              "lazyEl(`" + id + "`): element not in DOM yet; pre-mount calls are no-ops until app-shell-mounted",
-            );
-          }
-          preMountWarnings++;
+          // Pre-mount access (e.g. an event fires while the chat UI
+          // is still inside `<template id="app-shell-template">`).
+          // Returns a safe stub so chained property reads terminate
+          // without throwing; the real render runs after
+          // `app-shell-mounted`. Callers that need guaranteed
+          // mount-time wiring should attach their listeners inside
+          // an `app-shell-mounted` handler — see
+          // `wireFormOnce` / `wireLocationControlsOnce` /
+          // `wireChatSidebarOnce`.
           return makeStub();
         }
-        preMountWarnings = 0;
         const v = el[prop];
         return typeof v === "function" ? v.bind(el) : v;
       },
@@ -744,7 +745,6 @@ const tempEl       = lazyEl("chat-temperature");
 const statusEl     = lazyEl("chat-status");
 const disabledNoticeEl = lazyEl("chat-disabled-notice");
 const sessionsListEl = lazyEl("chat-sessions");
-const newSessionBtnEl = $("chat-new-session");
 const agentsBannerEl = $("chat-agents-banner");
 const agentsBannerNamesEl = $("chat-agents-banner-names");
 // Geolocation UI handles. The initial opt-in lives in the form footer;
@@ -3466,7 +3466,27 @@ function renderSessionList() {
 
 // ---- Wire up the sidebar --------------------------------------------------
 
-newSessionBtnEl?.addEventListener("click", newSession);
+// `#chat-new-session` lives inside `<template id="app-shell-template">`,
+// so a module-top-level `document.getElementById` returns `null` and
+// a `.addEventListener` would silently no-op — that's the bug behind
+// the inert "New chat" button. Same pattern as `wireFormOnce` /
+// `wireLocationControlsOnce`: wire inside an `app-shell-mounted`
+// handler, with an idempotency guard so a duplicate dispatch from
+// `auth.js` does not stack two click handlers on the same button.
+
+let _chatSidebarWired = false;
+function wireChatSidebarOnce() {
+  if (_chatSidebarWired) return;
+  const btn = document.getElementById("chat-new-session");
+  if (!btn) return;
+  _chatSidebarWired = true;
+  btn.addEventListener("click", newSession);
+}
+window.addEventListener("app-shell-mounted", wireChatSidebarOnce);
+// Cached page reload with the shell already in the DOM: wire up
+// immediately (the module-top-level code runs before `auth.js` has a
+// chance to dispatch the event in that case).
+wireChatSidebarOnce();
 
 // ---- Wire up the geolocation / timezone controls --------------------------
 //
@@ -3537,15 +3557,16 @@ wireLocationControlsOnce();
 migrateLegacy();
 currentSessionId = getActiveId();
 activeSessionId(); // validates / falls back / creates, updates sidebar
-renderSessionList();
-renderHistory(currentSessionId);
-// Geolocation / timezone boot paint + wiring live inside
-// `wireLocationControlsOnce`, which fires on the `app-shell-mounted`
-// event. The chat UI lives inside a `<template>` and is only cloned
-// into the DOM by `auth.js` AFTER this module's top-level code has
-// executed, so calling these now would render against `null`
-// elements — which was the bug behind the inert "Refresh my
-// location" button.
+// `renderSessionList` / `renderHistory` (sidebar + chat bubbles) and
+// the geolocation / timezone UI paints all touch DOM elements that
+// live inside `<template id="app-shell-template">` and only enter
+// `#app-root` once `auth.js` clones the template. Running them here
+// would be a pre-mount no-op (and previously triggered a noisy
+// `lazyEl` debug). The post-mount paint is owned by
+// `rehydrateAfterMount` / `wireLocationControlsOnce`, both wired on
+// the `app-shell-mounted` event below. Calling these at top level
+// would render against `null` elements — that's the bug behind the
+// inert "Refresh my location" / "New chat" buttons.
 
 // Load the model list once on page boot. The previous version only
 // fired on `modechange`, which meant a Discussion-mode-persisted user
