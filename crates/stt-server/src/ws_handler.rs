@@ -332,11 +332,17 @@ enum InboundError {
 /// Static handler for `/` and `/index.html`. Injects a
 /// `window.nagentConfig` block so the JS can hide UI panels for
 /// server-side features that are runtime-disabled (currently just
-/// `[documents].enabled`; expand as needed).
-pub async fn index_handler(
-    axum::extract::State(state): axum::extract::State<Arc<crate::AppState>>,
-) -> impl IntoResponse {
-    serve_index_with_config(&state.config.documents.enabled)
+/// Static handler for `/` and `/index.html`. Feature flags
+/// (e.g. documents enabled) are now served via `GET /api/features`
+/// instead of being inlined into the HTML — the browser fetches
+/// the endpoint once after `/api/me` succeeds and uses the JSON
+/// to drive UI visibility (see `static/documents.js`). Inlining
+/// was CSP-hostile (every inline `<script>` needed a nonce) and
+/// required a per-request string copy of the index HTML; the
+/// endpoint approach is cleaner and survives the same cached
+/// `index.html` for every state.
+pub async fn index_handler() -> impl IntoResponse {
+    serve_static("index.html")
 }
 
 /// Static handler for `/static/*`. Path is the remainder after `/static/`.
@@ -386,57 +392,6 @@ fn serve_static(path: &str) -> axum::response::Response {
 /// `Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'`
 /// does not block the injection. A JSON-typed `<script>` block is
 /// not executed by the browser — only read via
-/// `document.getElementById(...)` — and is explicitly allowed by
-/// CSP. The id `nagent-config` is hard-coded; the JS reads it on
-/// boot.
-fn serve_index_with_config(documents_enabled: &bool) -> axum::response::Response {
-    use axum::body::Body;
-    use axum::response::Response;
-    let mut bytes = StaticAssets::get("index.html")
-        .map(|f| f.data.into_owned())
-        .unwrap_or_default();
-    // Defensive: only inject when the marker is present. A
-    // regression in `index.html` (someone renames the closing
-    // tag) MUST NOT serve a broken page — we fall back to the
-    // static asset verbatim so the JS error log gets the real
-    // diagnostic.
-    let marker = b"</head>";
-    if let Some(pos) = bytes.windows(marker.len()).position(|w| w == marker) {
-        let mut injected = Vec::with_capacity(bytes.len() + 256);
-        injected.extend_from_slice(&bytes[..pos]);
-        // The `type="application/json"` marker tells the
-        // browser NOT to execute this block — CSP allows it
-        // through unconditionally, and JS reads it via
-        // `document.getElementById('nagent-config').textContent`.
-        let payload = serde_json::json!({ "documentsEnabled": documents_enabled });
-        injected.extend_from_slice(
-            format!(
-                r#"<script type="application/json" id="nagent-config">{}</script>"#,
-                payload,
-            )
-            .as_bytes(),
-        );
-        injected.extend_from_slice(&bytes[pos..]);
-        bytes = injected;
-    } else {
-        tracing::warn!(
-            "index.html: missing </head> marker; serving the page verbatim \
-             without the runtime-config injection"
-        );
-    }
-    let mut response = Response::new(Body::from(bytes));
-    let h = response.headers_mut();
-    h.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static(mime_for("index.html")),
-    );
-    h.insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
-    response
-}
-
 /// `/healthz` handler.
 pub async fn healthz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if state.ready.load(std::sync::atomic::Ordering::Acquire) {

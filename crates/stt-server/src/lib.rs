@@ -28,6 +28,7 @@ pub mod config;
 pub mod config_file;
 pub mod credentials;
 pub mod documents_cli;
+pub mod features;
 pub mod llm;
 pub mod llm_prompt;
 pub mod middleware;
@@ -228,8 +229,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // passkey register). Each optional subtree keeps its own
     // rate-limit + CORS envelope; the global `RequireAuth` layer is
     // applied below, after we know whether auth is enabled.
-    let mut protected: Router<Arc<AppState>> =
-        Router::new().route("/ws", get(ws_handler::ws_upgrade));
+    let mut protected: Router<Arc<AppState>> = Router::new()
+        .route("/ws", get(ws_handler::ws_upgrade))
+        // `GET /api/features` — feature discovery for the
+        // frontend. Mounted at the protected subtree level so it
+        // benefits from `RequireAuth` when auth is enabled.
+        // The handler is cheap and stateless, so it does not
+        // need its own rate limit / CORS envelope.
+        .merge(crate::features::build_features_router(state.clone()));
 
     // The agents routes are gated independently from the LLM proxy so
     // direct curl invocation (`POST /v1/agents/web_fetch/invoke`) keeps

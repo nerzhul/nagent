@@ -1035,11 +1035,30 @@ is not writable without the PVC bound).
 
 ### Hiding the panel when disabled
 
-When `[documents].enabled = false`, the server injects
-`window.nagentConfig = { documentsEnabled: false }` into the
-served `index.html` and the JS removes the panel from the DOM.
-Users on a build where the operator has not enabled the feature
-do not see an upload UI that 404s on every request.
+The frontend decides whether to render the panel by hitting
+`GET /api/features` after `/api/me` succeeds. The endpoint is
+authenticated (under `RequireAuth` when `auth.enabled = true`);
+
+```http
+GET /api/features
+Cookie: nagent_session=<id>
+
+{
+  "documents": true,
+  "llm": true,
+  "tts": false,
+  "agents": false,
+  "agent_names": [],
+  "chat_sessions": true,
+  "tools": []
+}
+```
+
+The same endpoint also drives the Discussion-mode tab
+(`features.llm` — hidden when the LLM proxy is off), the TTS
+settings drawer (`features.tts`, future), and any other gated
+control. Operators flip a flag, rebuild the server, refresh the
+browser; the UI hides the section that no longer has a backend.
 
 ## Text-to-Speech (Piper, local)
 

@@ -49,76 +49,90 @@ const ACCEPTED_EXTENSIONS = ["txt", "pdf", "md", "log"];
 // after a logout → login cycle is found without any extra
 // wiring).
 
-// Read the runtime config block injected by `serve_index_with_config`.
-// We use a `<script type="application/json" id="nagent-config">`
-// block (not an inline `<script>`) so the page's
-// Content-Security-Policy (`script-src 'self' 'wasm-unsafe-eval'`)
-// does not block the injection. JSON-typed `<script>` blocks are
-// not executed by the browser — they're read via the DOM.
-// `window.nagentConfig` is still read as a fallback so a build
-// that ships without the config block (e.g. a third-party
-// embedding) keeps working.
+// Read the documents-enabled flag from the page-level feature
+// registry (populated by `chat.js` after fetching `/api/features`).
+// We keep the legacy `<script type="application/json"
+// id="nagent-config">` block as a fallback for builds that ship
+// without the endpoint (e.g. a third-party embedding that
+// injects its own HTML); the JS still falls back to that block
+// when `window.__nagentFeatures` is undefined.
 function readNagentConfig() {
-  const el =
-    typeof document !== "undefined"
-      ? document.getElementById("nagent-config")
-      : null;
-  if (el) {
-    try {
-      const parsed = JSON.parse(el.textContent || "{}");
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch (e) {
-      // Malformed payload — fall through to the window fallback.
+  // Prefer the live feature registry when present. We don't
+  // import the helper from chat.js (the cyclic import is
+  // already ugly enough) — chat.js exports `feature` /
+  // `subscribeFeatures` via `window.__nagentFeatures` so the
+  // documents module just reads it.
+  if (typeof window !== "undefined") {
+    const live = window.__nagentFeatures;
+    if (live && typeof live === "object") {
+      return { documentsEnabled: Boolean(live.documents) };
     }
   }
-  return typeof window !== "undefined" ? window.nagentConfig : undefined;
+  // Legacy fallback: a `<script type="application/json"
+  // id="nagent-config">` block injected by older server
+  // builds. We do NOT actively request this — the JSON block
+  // is only there for back-compat with builds that pre-date
+  // the `/api/features` endpoint.
+  if (typeof document !== "undefined") {
+    const el = document.getElementById("nagent-config");
+    if (el) {
+      try {
+        const parsed = JSON.parse(el.textContent || "{}");
+        if (parsed && typeof parsed === "object") return parsed;
+      } catch (e) {
+        // Malformed payload — fall through.
+      }
+    }
+  }
+  return { documentsEnabled: false };
 }
 
 export function initDocumentsPanel() {
-  // SEV: respect the server's runtime flag. The server injects
-  // a `<script type="application/json" id="nagent-config">`
-  // block on every `/` request, so a build that ships with the
-  // documents routes NOT mounted (because `cfg.documents.enabled
-  // = false`) does not show a panel that would fail every upload.
-  // The block is missing on very old cached HTML; treat absence
-  // as "enabled" so we don't regress a build whose server was
-  // already upgraded. The server is the source of truth and will
-  // 404 any unhandled request anyway.
-  const cfg = readNagentConfig();
-  const documentsEnabled = cfg ? cfg.documentsEnabled !== false : true;
   // The `<details id="documents-panel">` lives inside
   // `<main id="view-discussion">` which itself is inside
   // `<template id="app-shell-template">` — auth.js clones the
   // template into `#app-root` after the `/api/me` probe and
   // dispatches an `app-shell-mounted` event. Bail out if the
-  // panel is not yet in the DOM; `app.js` will retry via the
-  // event listener below.
+  // panel is not yet in the DOM; the listener below retries on
+  // mount.
   const panel = document.getElementById("documents-panel");
   if (!panel) {
     // Panel not in the template — silently bail.
     return;
   }
-  if (!documentsEnabled) {
-    // Remove the panel AND its list/empty children so drag-over
-    // and paste handlers cannot find the element via a stale
-    // reference.
-    panel.remove();
+  // Respect the server's runtime flag (`/api/features`
+  // returns `documents: true` when `[documents].enabled = true`
+  // AND the auth DB is reachable). When the flag flips false, we
+  // hide the panel via CSS rather than removing it from the
+  // DOM — keeping the element in the tree lets the panel be
+  // re-shown without a DOM rebuild if the flag ever flips back
+  // to true (the panel already has all its descendants wired).
+  if (!isDocumentsEnabled()) {
+    panel.hidden = true;
     return;
   }
-  const list = document.getElementById("documents-list");
-  const empty = document.getElementById("documents-empty");
+  panel.hidden = false;
+  wireDocumentsPanelEvents();
+}
+
+// One-time wiring of the panel's listeners. Called every time
+// the panel transitions from hidden to visible. The duplicate-
+// listener guard ensures we never attach the same `click` /
+// `drop` handler twice if `initDocumentsPanel` runs again.
+let _panelWired = false;
+function wireDocumentsPanelEvents() {
+  if (_panelWired) return;
+  const panel = document.getElementById("documents-panel");
   const input = document.getElementById("documents-upload-input");
   const btn = document.getElementById("documents-upload-btn");
-
-  btn?.addEventListener("click", () => {
-    input?.click();
-  });
-  input?.addEventListener("change", () => {
+  if (!panel || !input || !btn) return;
+  _panelWired = true;
+  btn.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => {
     const files = Array.from(input.files || []);
     files.forEach((f) => uploadFile(f));
     input.value = "";
   });
-
   // Drag-and-drop on the panel itself. The sidebar is the
   // natural drop target — uploading by clicking the button is
   // the secondary path.
@@ -152,6 +166,52 @@ export function initDocumentsPanel() {
   });
 }
 
+/// Read the documents-enabled flag from the page-level feature
+/// registry. Returns false when the registry is unreachable
+/// (the endpoint 401'd, 404'd, or timed out) so the panel is
+/// hidden by default — a safer default than "show" because
+/// uploads against a 404'd endpoint would surface a confusing
+/// toast.
+function isDocumentsEnabled() {
+  if (typeof window === "undefined") return false;
+  const live = window.__nagentFeatures;
+  if (live && typeof live === "object") {
+    return Boolean(live.documents);
+  }
+  // Legacy fallback for builds that pre-date `/api/features`:
+  // a `<script type="application/json" id="nagent-config">`
+  // block injected by older server versions. We do NOT actively
+  // request it — the JSON block is only there for back-compat.
+  const cfg = readNagentConfig();
+  return cfg ? cfg.documentsEnabled !== false : false;
+}
+
+// The first `initDocumentsPanel()` call (from chat.js's boot
+// sequence) runs BEFORE `auth.js` has mounted the app shell —
+// the `#documents-panel` element lives inside the shell
+// template and is therefore null. Retry once the shell mounts
+// (and after each subsequent mount, e.g. after a logout →
+// login cycle).
+//
+// We also listen for feature-flag changes: when chat.js
+// completes the `/api/features` fetch and the `documents` flag
+// flips from `false` to `true`, we unhide the panel and (re)-
+// wire the listeners. The `hidden` attribute is toggled by
+// `initDocumentsPanel` so we never duplicate work.
+window.addEventListener("app-shell-mounted", () => {
+  initDocumentsPanel();
+});
+if (typeof window !== "undefined" && window.__nagentSubscribeFeatures) {
+  window.__nagentSubscribeFeatures((features) => {
+    // After the feature flag flip, re-evaluate the panel state.
+    // The listener fires both for the initial fetch result and
+    // for any future mutation; `initDocumentsPanel` is
+    // idempotent (the `_panelWired` guard ensures we don't
+    // double-bind listeners).
+    initDocumentsPanel();
+  });
+}
+
 // The first `initDocumentsPanel()` call (from chat.js's boot
 // sequence) runs BEFORE `auth.js` has mounted the app shell —
 // the `#documents-panel` element lives inside the shell
@@ -164,11 +224,10 @@ export function initDocumentsPanel() {
 // `rehydrateAfterMount` fires before documents.js's
 // module-level `let`s would have been initialised under
 // cyclic-import ordering. See `refresh()` for details.
-window.addEventListener("app-shell-mounted", () => {
-  if (!document.getElementById("documents-panel")) {
-    initDocumentsPanel();
-  }
-});
+//
+// (The mount listener above also handles this case — when the
+// shell template is cloned and `documents-panel` appears, the
+// listener fires `initDocumentsPanel()` which wires the panel.)
 
 // `id` is the chat-tab id (used by the UI sidebar). We don't
 // need it directly any more — the server-bound session id is
@@ -192,6 +251,14 @@ export function setSessionId(_id) {
 // under cyclic imports). Re-querying the DOM is cheap, removes
 // the TDZ hazard, and naturally handles post-mount re-mounts.
 export async function refresh() {
+  // Gate on the feature flag FIRST. The panel element may be
+  // hidden in the DOM but still present (we keep it in the
+  // tree so a flag flip from false→true unhides without a DOM
+  // rebuild), so checking `panel` alone is not enough — we
+  // must check the server-side flag too. Skipping the fetch
+  // here is what avoids the spurious `/v1/documents` round-trip
+  // when `[documents].enabled = false`.
+  if (!isDocumentsEnabled()) return;
   const panel = document.getElementById("documents-panel");
   if (!panel) return;
   const sid = await getServerSessionId();
@@ -226,6 +293,13 @@ export async function refresh() {
 // else is rejected client-side so a wrong type never wastes a
 // round trip.
 async function uploadFile(file) {
+  // Mirror the gate on `refresh()`: when the server has the
+  // documents feature disabled, reject the upload silently
+  // rather than POSTing to a 404'd endpoint.
+  if (!isDocumentsEnabled()) {
+    showToast("Documents feature is disabled on this server.", "error");
+    return;
+  }
   const ext = (file.name.split(".").pop() || "").toLowerCase();
   if (!ACCEPTED_EXTENSIONS.includes(ext)) {
     showToast(`Unsupported file type: .${ext}`, "error");
@@ -266,6 +340,11 @@ async function uploadFile(file) {
 }
 
 async function deleteDoc(id) {
+  // Same gate as `refresh()` / `uploadFile()`. A user could in
+  // theory hold a stale row in the panel from a previous
+  // session where `documents` was enabled; reject silently
+  // rather than hitting the 404.
+  if (!isDocumentsEnabled()) return;
   const sid = await getServerSessionId();
   if (!sid) return;
   try {

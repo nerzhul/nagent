@@ -2661,17 +2661,130 @@ wireFormOnce();
 // session in localStorage or mints a fresh one). Re-rendering
 // here means the user immediately sees the session sidebar +
 // chat history on first load, without waiting for a tab click.
+// Server-side feature flags. The endpoint is fetched once per
+// page load (after `/api/me` succeeds) and the result lives on
+// `window.__nagentFeatures`. UI modules read `feature(name)`
+// before rendering — every feature defaults to `false` so a
+// missing endpoint / a 401 / a network failure hides the
+// corresponding UI rather than failing open. The cache is
+// rebuilt on every page load (no `localStorage`) so an operator
+// who flips a config flag and rebuilds the server sees the new
+// state on the next refresh.
+const DEFAULT_FEATURES = Object.freeze({
+  documents: false,
+  llm: false,
+  tts: false,
+  agents: false,
+  agent_names: Object.freeze([]),
+  chat_sessions: false,
+  tools: Object.freeze([]),
+});
+let nagentFeatures = { ...DEFAULT_FEATURES };
+const featureListeners = new Set();
+function feature(name) {
+  return Boolean(nagentFeatures[name]);
+}
+function subscribeFeatures(listener) {
+  featureListeners.add(listener);
+  return () => featureListeners.delete(listener);
+}
+function emitFeatures() {
+  for (const l of featureListeners) {
+    try { l(nagentFeatures); } catch (e) { console.warn("feature listener threw", e); }
+  }
+}
+async function refreshFeatures() {
+  try {
+    const resp = await fetch("/api/features", {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    if (!resp.ok) {
+      // 401 (anonymous), 404 (auth disabled), or 5xx — keep
+      // defaults (every UI section hidden). The user sees a
+      // minimal but functional shell.
+      nagentFeatures = { ...DEFAULT_FEATURES };
+      emitFeatures();
+      return;
+    }
+    const body = await resp.json();
+    // Merge defensively: server may be ahead of client (new
+    // field added) — fall back to the default for missing keys.
+    nagentFeatures = { ...DEFAULT_FEATURES, ...body };
+    emitFeatures();
+  } catch (e) {
+    // Network failure: keep defaults. The UI is degraded
+    // (panels hidden) but the page still loads.
+    console.warn("features: /api/features fetch failed", e);
+    nagentFeatures = { ...DEFAULT_FEATURES };
+    emitFeatures();
+  }
+}
+// Back-compat alias for `readNagentConfig()` — the documents
+// module used to read `#nagent-config` from the HTML; that
+// block is gone now and the panel reads `feature("documents")`.
+export function readNagentConfig() {
+  return { documentsEnabled: feature("documents") };
+}
+
+// Expose the feature registry on `window.__nagentFeatures` so
+// the `documents.js` module (which lives in a separate file
+// and avoids the chat.js ↔ documents.js cyclic import) can read
+// it without going through `import`. Every reader also subscribes
+// via `subscribeFeatures` so a future feature toggle (e.g.
+// after a settings panel mutation) propagates without a page
+// reload.
+window.__nagentFeatures = nagentFeatures;
+window.__nagentFeature = feature;
+window.__nagentSubscribeFeatures = subscribeFeatures;
+
 function rehydrateAfterMount() {
   // Make sure `currentSessionId` is bound before we render —
   // `activeSessionId()` is idempotent (no-op when the persisted
-  // id is already current).
+  // id is current).
   const sid = activeSessionId();
   renderSessionList();
   renderHistory(sid);
   // Documents panel: `initDocumentsPanel` already wired the
   // listeners; refresh now that the shell is mounted.
   Documents.setSessionId(sid);
+  // Refresh feature flags once the shell is mounted so the
+  // UI can hide disabled sections. The fetch is async; the
+  // renderers that gated themselves on `feature(name)` will
+  // re-render via the subscriber callback.
+  refreshFeatures();
+  // Hide UI controls that are not applicable to the current
+  // server build. We subscribe to feature changes so a future
+  // toggle re-evaluates without a page reload.
+  applyFeatureGates();
 }
+
+function applyFeatureGates() {
+  // Hide the Discussion-mode tab when the LLM proxy is not
+  // wired. The mode toggle then collapses to a single Transcript
+  // button; the `modechange` listener (registered below) never
+  // sees a `discussion` switch in that case, so the rest of
+  // the chat code doesn't need a parallel check.
+  const discussionBtn = document.getElementById("mode-discussion-btn");
+  if (discussionBtn) {
+    discussionBtn.hidden = !feature("llm");
+  }
+  // Future: gate the TTS settings drawer on `feature("tts")`,
+  // etc. Each addition is one branch — the loop over a small
+  // map keeps the boot tidy.
+}
+
+// Subscribe ONCE at module load so every `emitFeatures` triggers
+// exactly one re-apply. Subscribing inside `applyFeatureGates`
+// (the earlier iteration) caused an exponential listener
+// explosion: each emit fired the listener, which subscribed a
+// new listener, which fired on the next emit, doubling the
+// count — the page froze within seconds of `/api/features`
+// returning. The one-shot `subscribeFeatures` call below
+// matches the pattern used by `documents.js` and keeps the
+// listener set bounded at one entry per consumer.
+subscribeFeatures(applyFeatureGates);
 window.addEventListener("app-shell-mounted", rehydrateAfterMount);
 // Eager rehydrate when the shell is already mounted (a cached
 // page reload).
