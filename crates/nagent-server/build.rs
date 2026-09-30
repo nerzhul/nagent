@@ -1,4 +1,4 @@
-//! Build script for `stt-server`.
+//! Build script for `nagent-server`.
 //!
 //! Two responsibilities:
 //!
@@ -94,7 +94,7 @@ fn main() {
         write_version(&static_dir.join(BROWSER_FILE), &hash);
     }
 
-    println!("cargo:warning=stt-server frontend hash: {hash}");
+    println!("cargo:warning=nagent-server frontend hash: {hash}");
 }
 
 /// SHA-256 of the concatenation of `<relpath>\0<bytes>` over every file

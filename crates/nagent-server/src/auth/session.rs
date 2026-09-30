@@ -22,15 +22,12 @@
 //! by activity. Sliding / idle timeouts can be layered later if a
 //! threat model requires them.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use uuid::Uuid;
-
 // Re-export the session primitives from `nagent_db::types` so
 // legacy callers (`crate::auth::session::SessionRecord`) keep
-// resolving. The DB layer now owns the canonical definitions.
+// resolving. The DB layer now owns the canonical definitions
+// (session row type, token mint/hash, AuthUser identity, …);
+// this module only hosts the HTTP-layer helpers (cookie / bearer
+// parsing, CSRF check, Set-Cookie builder).
 pub use nagent_db::types::{decode_session_token, new_csrf_token, new_session_token, sha256_of};
 pub use nagent_db::AuthUser;
 pub use nagent_db::{

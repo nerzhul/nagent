@@ -20,7 +20,7 @@ impl From<&AuthConfig> for nagent_db::DbOptions {
         let backend = match cfg.db.backend.as_str() {
             "sqlite" => DbEngine::Sqlite,
             "postgres" => DbEngine::Postgres,
-            other => DbEngine::Sqlite, // unreachable: connect() rejects unknown engines
+            _other => DbEngine::Sqlite, // unreachable: connect() rejects unknown engines
         };
         Self {
             backend,
