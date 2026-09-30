@@ -311,7 +311,7 @@ impl EgressClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(EgressError::Upstream {
                 status: status.as_u16(),
-                body: crate::agents::egress::truncate_body(&body, EgressError::UPSTREAM_BODY_CAP),
+                body: truncate_body(&body, EgressError::UPSTREAM_BODY_CAP),
             });
         }
         let mut stream = resp.bytes_stream();

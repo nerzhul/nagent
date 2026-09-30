@@ -46,8 +46,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::agents::egress::{EgressClient, EgressConfig, EgressError};
 use crate::agents::{Agent, AgentError};
+use crate::agents::{EgressClient, EgressConfig, EgressError};
 use crate::config::WebFetchConfig;
 
 /// Maximum length of the cleaned text returned to the LLM, in
@@ -333,7 +333,7 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 // exercise the predicates directly.
 
 #[cfg(test)]
-use crate::agents::egress::{host_matches_allowlist, is_addr_allowed};
+use crate::agents::{host_matches_allowlist, is_addr_allowed};
 
 // ---- HTML / text handling ------------------------------------------------
 

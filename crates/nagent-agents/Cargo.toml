@@ -1,0 +1,23 @@
+[package]
+name = "nagent-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Server-invoked chat agents (trait, registry, service catalogue)."
+
+[dependencies]
+nagent-support = { path = "../nagent-support" }
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+secrecy = "0.10"
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+url = "2"
+bytes = "1"
+futures-util = "0.3"
+ipnet = "2"
+tracing = { workspace = true }

@@ -38,11 +38,9 @@
 //! the request, and writes one `auth_events` audit row. Agents that
 //! do not need credentials ignore the argument.
 
-pub mod egress;
 pub mod routes;
-pub mod services;
 
-pub use egress::{
+pub use nagent_agents::egress::{
     EgressClient, EgressConfig, EgressError, ValidateOk, DEFAULT_MAX_BODY_BYTES, MAX_REDIRECTS,
     MIN_TIMEOUT_MS,
 };
@@ -57,7 +55,7 @@ use uuid::Uuid;
 use crate::credentials::cache::SecretCache;
 use crate::credentials::resolver::{CredentialError, CredentialResolver};
 
-pub use services::{
+pub use nagent_agents::services::{
     FieldDef, FieldKind, FieldSummary, ServiceDef, ServiceRegistry, ServiceSummary,
 };
 

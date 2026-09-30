@@ -25,7 +25,7 @@ use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::agents::services::ServiceRegistry;
+use crate::agents::ServiceRegistry;
 use crate::auth::error::{require_auth_store, AuthError};
 use crate::auth::middleware::check_csrf;
 use crate::auth::store::AuthStore;

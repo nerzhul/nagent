@@ -5,6 +5,7 @@ members = [
     "crates/stt-core",
     "crates/nagent-support",
     "crates/nagent-db",
+    "crates/nagent-agents",
     "crates/stt-server",
 ]
 
