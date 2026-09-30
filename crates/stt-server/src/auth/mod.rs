@@ -60,6 +60,7 @@ pub use oidc::OidcState;
 pub use passkey::PasskeyState;
 pub use session::{AuthUser, SessionRecord};
 pub use store::AuthStore;
+pub use store::UserPreferences;
 
 /// Names of the auth backends an operator can enable.
 ///

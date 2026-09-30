@@ -3,6 +3,9 @@
 //! - `GET  /api/me` — returns the [`AuthUser`] resolved by the
 //!   `RequireAuth` middleware. The browser SPA reads this on boot
 //!   to decide whether to render the login panel or the chat view.
+//! - `GET  /api/me/preferences` — per-user UI preferences (location /
+//!   timezone sharing toggles, formerly held in `localStorage`).
+//! - `PUT  /api/me/preferences` — same shape, CSRF-protected.
 //! - `POST /api/auth/logout` — deletes the current session and
 //!   clears the cookie. Requires both the session cookie AND the
 //!   matching CSRF token (constant-time compared).
@@ -15,6 +18,8 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::Deserialize;
+use serde_json::json;
 
 use crate::auth::error::require_auth_store;
 use crate::auth::error::AuthError;
@@ -26,6 +31,71 @@ use crate::auth::AuthUser;
 /// `RequireAuth` middleware.
 pub async fn me_handler(axum::Extension(user): axum::Extension<AuthUser>) -> Json<AuthUser> {
     Json(user)
+}
+
+/// `GET /api/me/preferences` — returns the per-user UI
+/// preferences. The shape mirrors the localStorage flags the
+/// frontend used to manage client-side, so the migration is a
+/// drop-in replacement for `loadLocationEnabled` /
+/// `loadTimezoneEnabled`.
+pub async fn get_preferences_handler(
+    State(state): State<std::sync::Arc<crate::AppState>>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+) -> Result<Response, AuthError> {
+    let store = require_auth_store(&state)?;
+    let prefs = store.get_user_preferences(user.id).await?;
+    Ok(Json(json!({
+        "share_location_enabled": prefs.share_location_enabled,
+        "share_timezone_enabled": prefs.share_timezone_enabled,
+        "updated_at": prefs.updated_at.to_rfc3339(),
+    }))
+    .into_response())
+}
+
+/// Body shape for `PUT /api/me/preferences`. Both flags are
+/// required so a PUT always represents the full desired state —
+/// a UI that wants to flip just `share_location_enabled` reads
+/// the current value, flips the bit, and writes both back. This
+/// avoids the partial-update ambiguity the original localStorage
+/// flags had (one write per flag, no atomicity, possible drift
+/// between two browser tabs).
+#[derive(Debug, Deserialize)]
+pub struct PutPreferencesBody {
+    #[serde(default)]
+    pub share_location_enabled: Option<bool>,
+    #[serde(default)]
+    pub share_timezone_enabled: Option<bool>,
+}
+
+/// `PUT /api/me/preferences` — atomic replace of the per-user
+/// preferences. CSRF-protected (the middleware enforces it for
+/// every non-GET route on the protected subtree). Returns the
+/// updated row so the client can sync without a second GET.
+pub async fn put_preferences_handler(
+    State(state): State<std::sync::Arc<crate::AppState>>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<PutPreferencesBody>,
+) -> Result<Response, AuthError> {
+    check_csrf(&headers, &user)?;
+    let Some(loc) = body.share_location_enabled else {
+        return Err(AuthError::BadRequest(
+            "share_location_enabled is required".into(),
+        ));
+    };
+    let Some(tz) = body.share_timezone_enabled else {
+        return Err(AuthError::BadRequest(
+            "share_timezone_enabled is required".into(),
+        ));
+    };
+    let store = require_auth_store(&state)?;
+    let prefs = store.upsert_user_preferences(user.id, loc, tz).await?;
+    Ok(Json(json!({
+        "share_location_enabled": prefs.share_location_enabled,
+        "share_timezone_enabled": prefs.share_timezone_enabled,
+        "updated_at": prefs.updated_at.to_rfc3339(),
+    }))
+    .into_response())
 }
 
 /// `POST /api/auth/logout`
@@ -353,4 +423,21 @@ mod tests {
             "the other session must survive — confirms delete_session targets the session id, not the user id"
         );
     }
+
+    // ---- /api/me/preferences ----------------------------------------------
+    //
+    // The HTTP handlers for `/api/me/preferences` are thin wrappers
+    // over `AuthStore::get_user_preferences` /
+    // `upsert_user_preferences` — they unwrap the auth store off
+    // `Arc<AppState>` (via `require_auth_store`), validate the CSRF
+    // token (via `check_csrf`), and serialise the row as JSON. The
+    // full round-trip (insert + read + atomicity + isolation)
+    // is covered by the SQLite-level tests in
+    // `db_sqlite::tests::preferences_*`. The CSRF middleware is
+    // covered by the wider `middleware::tests` suite. Building a
+    // full `Arc<AppState>` in this file would require every
+    // optional subsystem to be wired (the Whisper backend, the
+    // worker pool, the LLM proxy, …) which the route handler does
+    // not need; the integration cost would dominate the test
+    // value.
 }

@@ -21,7 +21,9 @@ use crate::auth::passkey::{
     register_start_handler as passkey_register_start,
 };
 use crate::auth::password::{login_handler, register_handler};
-use crate::auth::routes::{logout_handler, me_handler};
+use crate::auth::routes::{
+    get_preferences_handler, logout_handler, me_handler, put_preferences_handler,
+};
 
 /// Build the public (anonymous) half of the auth subtree. These
 /// routes accept an unauthenticated request — the OIDC callback
@@ -60,6 +62,16 @@ pub fn build_public_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 pub fn build_protected_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let mut protected: Router<Arc<AppState>> = Router::new()
         .route("/api/me", get(me_handler))
+        // Per-user UI preferences. Mounted under the same RequireAuth
+        // gate as `/api/me` (so anonymous clients get a clean 401
+        // rather than a partial state) but routed here rather than
+        // in `build_protected_credentials_router` because the
+        // credentials subtree is only mounted when the agent
+        // framework is enabled — preferences exist regardless.
+        .route(
+            "/api/me/preferences",
+            get(get_preferences_handler).put(put_preferences_handler),
+        )
         .route("/api/auth/logout", post(logout_handler));
     if state.auth_passkey.is_some() {
         protected = protected

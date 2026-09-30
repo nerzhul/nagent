@@ -15,7 +15,7 @@ use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
 use crate::auth::store::{
     AuthUserRecord, MigrationRow, MigrationStatus, NewAuthEvent, NewPasskeyRecord, PasskeyRecord,
-    UserCredentialRow,
+    UserCredentialRow, UserPreferences,
 };
 use crate::config::AuthConfig;
 
@@ -555,6 +555,57 @@ impl PgStore {
             ciphertext: r.try_get("ciphertext")?,
         }))
     }
+
+    pub(crate) async fn get_user_preferences(
+        &self,
+        user_id: Uuid,
+    ) -> Result<UserPreferences, AuthError> {
+        let row = sqlx::query(
+            "SELECT share_location_enabled, share_timezone_enabled, updated_at \
+             FROM user_preferences WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(r) = row else {
+            return Ok(UserPreferences {
+                share_location_enabled: false,
+                share_timezone_enabled: false,
+                updated_at: Utc::now(),
+            });
+        };
+        Ok(UserPreferences {
+            share_location_enabled: pg_row_to_bool(&r, "share_location_enabled")?,
+            share_timezone_enabled: pg_row_to_bool(&r, "share_timezone_enabled")?,
+            updated_at: parse_rfc3339(&r.try_get::<String, _>("updated_at")?),
+        })
+    }
+
+    pub(crate) async fn upsert_user_preferences(
+        &self,
+        user_id: Uuid,
+        share_location_enabled: bool,
+        share_timezone_enabled: bool,
+    ) -> Result<UserPreferences, AuthError> {
+        sqlx::query(
+            "INSERT INTO user_preferences \
+                (user_id, share_location_enabled, share_timezone_enabled, updated_at) \
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP) \
+             ON CONFLICT (user_id) DO UPDATE SET \
+                share_location_enabled = EXCLUDED.share_location_enabled, \
+                share_timezone_enabled = EXCLUDED.share_timezone_enabled, \
+                updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(user_id)
+        .bind(if share_location_enabled { 1_i64 } else { 0_i64 })
+        .bind(if share_timezone_enabled { 1_i64 } else { 0_i64 })
+        .execute(self.pool())
+        .await?;
+        // Re-read so the returned `updated_at` is exactly what the
+        // DB stamped (avoids a "client clock vs server clock"
+        // mismatch in the response payload).
+        self.get_user_preferences(user_id).await
+    }
 }
 
 fn row_to_user(row: sqlx::postgres::PgRow) -> AuthUserRecord {
@@ -572,4 +623,15 @@ fn parse_rfc3339(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+/// Read a `SMALLINT NOT NULL` 0/1 column and convert it to a
+/// `bool`. Postgres returns `i64` for both `SMALLINT` and the
+/// literal `0`/`1` defaults, and `i64 != 0` matches the canonical
+/// truthy semantics used everywhere else in the auth crate. The
+/// shape mirrors `db_sqlite::row_to_bool` so the two paths stay
+/// symmetric.
+fn pg_row_to_bool(row: &sqlx::postgres::PgRow, col: &str) -> Result<bool, AuthError> {
+    let n: i64 = row.try_get(col)?;
+    Ok(n != 0)
 }

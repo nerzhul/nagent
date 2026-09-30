@@ -430,6 +430,41 @@ impl AuthStore {
             }
         }
     }
+
+    /// Read the per-user UI preferences for one user. Returns a
+    /// default-shaped [`UserPreferences`] (everything off, `updated_at`
+    /// = the current epoch second) when no row exists yet, so the
+    /// GET handler can serialise a stable response without
+    /// special-casing "first request".
+    pub async fn get_user_preferences(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => s.get_user_preferences(user_id).await,
+            AuthStore::Postgres(s) => s.get_user_preferences(user_id).await,
+        }
+    }
+
+    /// Insert-or-update the per-user UI preferences. The row is
+    /// keyed by `user_id`, so calling the method on a user that
+    /// has no row yet creates one (matching the on-write semantics
+    /// of the legacy localStorage flags — a toggle ON is its own
+    /// record).
+    pub async fn upsert_user_preferences(
+        &self,
+        user_id: Uuid,
+        share_location_enabled: bool,
+        share_timezone_enabled: bool,
+    ) -> Result<UserPreferences, AuthError> {
+        match self {
+            AuthStore::Sqlite(s) => {
+                s.upsert_user_preferences(user_id, share_location_enabled, share_timezone_enabled)
+                    .await
+            }
+            AuthStore::Postgres(s) => {
+                s.upsert_user_preferences(user_id, share_location_enabled, share_timezone_enabled)
+                    .await
+            }
+        }
+    }
 }
 
 /// Public-facing user record. Mirrors the row in the `users` table
@@ -487,6 +522,29 @@ pub struct NewAuthEvent {
     /// `credential_decrypt_failed`; `None` for the auth subtree).
     /// Added by the `0002_credentials.sql` migration.
     pub target_service: Option<String>,
+}
+
+/// Per-user UI preferences fetched via `GET /api/me/preferences`
+/// and updated via `PUT /api/me/preferences`. Backed by the
+/// `user_preferences` table added in `0006_user_preferences.up.sql`.
+///
+/// The booleans are persisted as `INTEGER NOT NULL DEFAULT 0` so the
+/// schema works on both sqlite and postgres without a sqlx type
+/// adapter — the Rust side reads/writes them via `i64 != 0`.
+#[derive(Debug, Clone)]
+pub struct UserPreferences {
+    /// Mirror of the previous `nagent.chat.locationEnabled`
+    /// localStorage flag — when `true`, every chat request gets an
+    /// ephemeral "user's approximate location: …" system block.
+    pub share_location_enabled: bool,
+    /// Mirror of the previous `nagent.chat.timezoneEnabled`
+    /// localStorage flag — when `true`, every chat request gets an
+    /// ephemeral "user's local timezone is …" system block.
+    pub share_timezone_enabled: bool,
+    /// Timestamp the row was last written. Surfaced by the GET
+    /// handler so the UI can show "last changed at …" without a
+    /// second round-trip.
+    pub updated_at: DateTime<Utc>,
 }
 
 impl NewAuthEvent {

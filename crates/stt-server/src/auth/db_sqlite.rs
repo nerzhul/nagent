@@ -29,7 +29,7 @@ use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
 use crate::auth::store::{
     AuthUserRecord, MigrationRow, MigrationStatus, NewAuthEvent, NewPasskeyRecord, PasskeyRecord,
-    UserCredentialRow,
+    UserCredentialRow, UserPreferences,
 };
 use crate::config::AuthConfig;
 
@@ -602,6 +602,64 @@ impl SqliteStore {
             ciphertext: r.try_get("ciphertext")?,
         }))
     }
+
+    pub(crate) async fn get_user_preferences(
+        &self,
+        user_id: Uuid,
+    ) -> Result<UserPreferences, AuthError> {
+        let row = sqlx::query(
+            "SELECT share_location_enabled, share_timezone_enabled, updated_at \
+             FROM user_preferences WHERE user_id = ?",
+        )
+        .bind(user_id.to_string())
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(r) = row else {
+            // No row yet — return a defaults-shaped record so the
+            // GET handler can serialise a stable response. The
+            // `updated_at` value of `now()` is misleading (the row
+            // does not exist) but the client treats any
+            // `updated_at` from a brand-new user as "nothing has
+            // ever been saved", which is the correct semantic.
+            return Ok(UserPreferences {
+                share_location_enabled: false,
+                share_timezone_enabled: false,
+                updated_at: Utc::now(),
+            });
+        };
+        Ok(UserPreferences {
+            share_location_enabled: row_to_bool(&r, "share_location_enabled")?,
+            share_timezone_enabled: row_to_bool(&r, "share_timezone_enabled")?,
+            updated_at: parse_rfc3339(&r.try_get::<String, _>("updated_at")?),
+        })
+    }
+
+    pub(crate) async fn upsert_user_preferences(
+        &self,
+        user_id: Uuid,
+        share_location_enabled: bool,
+        share_timezone_enabled: bool,
+    ) -> Result<UserPreferences, AuthError> {
+        let user_id_str = user_id.to_string();
+        sqlx::query(
+            "INSERT INTO user_preferences \
+                (user_id, share_location_enabled, share_timezone_enabled, updated_at) \
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP) \
+             ON CONFLICT(user_id) DO UPDATE SET \
+                share_location_enabled = excluded.share_location_enabled, \
+                share_timezone_enabled = excluded.share_timezone_enabled, \
+                updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(&user_id_str)
+        .bind(if share_location_enabled { 1_i64 } else { 0_i64 })
+        .bind(if share_timezone_enabled { 1_i64 } else { 0_i64 })
+        .execute(self.pool())
+        .await?;
+        // Re-read so the returned `updated_at` is exactly what the
+        // DB stamped (avoids a "client clock vs server clock"
+        // mismatch in the response payload).
+        self.get_user_preferences(user_id).await
+    }
 }
 
 fn row_to_user(row: sqlx::sqlite::SqliteRow) -> AuthUserRecord {
@@ -621,6 +679,15 @@ fn parse_rfc3339(s: &str) -> DateTime<Utc> {
         .unwrap_or_else(|_| Utc::now())
 }
 
+/// Read an `INTEGER NOT NULL` 0/1 column and convert it to a `bool`.
+/// Both sqlite (INTEGER) and postgres (SMALLINT) return an `i64` for
+/// the type, and `i64 != 0` matches the canonical truthy semantics
+/// used everywhere else in the auth crate.
+fn row_to_bool(row: &sqlx::sqlite::SqliteRow, col: &str) -> Result<bool, AuthError> {
+    let n: i64 = row.try_get(col)?;
+    Ok(n != 0)
+}
+
 fn is_sqlite_unique_violation(db_err: &dyn sqlx::error::DatabaseError) -> bool {
     // SQLite uses `SQLITE_CONSTRAINT_UNIQUE` (code 2067) and
     // `SQLITE_CONSTRAINT_PRIMARYKEY` (code 1555). Both translate
@@ -636,4 +703,120 @@ fn is_sqlite_unique_violation(db_err: &dyn sqlx::error::DatabaseError) -> bool {
 fn is_table_missing(db_err: &dyn sqlx::error::DatabaseError) -> bool {
     let msg = db_err.message();
     msg.contains("no such table") || msg.contains("no such view")
+}
+
+#[cfg(test)]
+mod tests {
+    //! SQLite-level tests for the per-user preferences path
+    //! (added by migration 0006). The HTTP route tests in
+    //! `crate::auth::routes::tests` exercise the full round-trip;
+    //! these tests pin the SQL semantics directly so a regression
+    //! in the `INSERT … ON CONFLICT … DO UPDATE` is caught
+    //! independently of the routing layer.
+    use super::*;
+    use crate::auth::store::AuthStore;
+    use crate::config::{AuthBackendKind, AuthConfig};
+
+    async fn temp_store() -> SqliteStore {
+        let cfg = AuthConfig {
+            enabled: true,
+            backends: vec![AuthBackendKind::Local],
+            public_url: "https://example.com".into(),
+            db: crate::config::AuthDbConfig {
+                backend: "sqlite".into(),
+                url: format!(
+                    "sqlite://file:test_{}?mode=memory&cache=shared",
+                    uuid::Uuid::new_v4()
+                ),
+                max_connections: 1,
+                auto_migrate: false,
+            },
+            ..AuthConfig::default()
+        };
+        let store = AuthStore::connect(&cfg).await.expect("connect");
+        store.migrate().await.expect("migrate");
+        match store {
+            AuthStore::Sqlite(s) => s,
+            // Defensive: the AuthConfig defaults always pick
+            // sqlite in this test (we never flip `cfg.db.backend`),
+            // so this branch should be unreachable.
+            _ => panic!("expected sqlite store"),
+        }
+    }
+
+    async fn make_user(store: &SqliteStore) -> Uuid {
+        store
+            .create_user("alice@example.com", "Alice", "local", Some(b"hash"))
+            .await
+            .expect("create_user")
+    }
+
+    #[tokio::test]
+    async fn preferences_defaults_for_new_user() {
+        let store = temp_store().await;
+        let user_id = make_user(&store).await;
+        let prefs = store.get_user_preferences(user_id).await.expect("get");
+        // No row yet → both flags off (the GET contract — see the
+        // `else` branch in `get_user_preferences`).
+        assert!(!prefs.share_location_enabled);
+        assert!(!prefs.share_timezone_enabled);
+    }
+
+    #[tokio::test]
+    async fn preferences_upsert_creates_then_updates() {
+        let store = temp_store().await;
+        let user_id = make_user(&store).await;
+
+        // First upsert creates the row.
+        let p1 = store
+            .upsert_user_preferences(user_id, true, false)
+            .await
+            .expect("upsert 1");
+        assert!(p1.share_location_enabled);
+        assert!(!p1.share_timezone_enabled);
+
+        // Re-read (independent of the upsert return value) — proves
+        // the row is persisted.
+        let p1r = store.get_user_preferences(user_id).await.expect("get");
+        assert!(p1r.share_location_enabled);
+        assert!(!p1r.share_timezone_enabled);
+
+        // Second upsert updates both flags atomically.
+        let p2 = store
+            .upsert_user_preferences(user_id, false, true)
+            .await
+            .expect("upsert 2");
+        assert!(!p2.share_location_enabled);
+        assert!(p2.share_timezone_enabled);
+
+        let p2r = store.get_user_preferences(user_id).await.expect("get");
+        assert!(!p2r.share_location_enabled);
+        assert!(p2r.share_timezone_enabled);
+    }
+
+    #[tokio::test]
+    async fn preferences_isolated_per_user() {
+        // Two users share the same `user_preferences` table; a
+        // upsert for user A must NOT bleed into user B's row.
+        let store = temp_store().await;
+        let alice = make_user(&store).await;
+        let bob = store
+            .create_user("bob@example.com", "Bob", "local", Some(b"hash"))
+            .await
+            .expect("create bob");
+
+        store
+            .upsert_user_preferences(alice, true, true)
+            .await
+            .expect("alice");
+        store
+            .upsert_user_preferences(bob, false, false)
+            .await
+            .expect("bob");
+
+        let a = store.get_user_preferences(alice).await.expect("alice get");
+        let b = store.get_user_preferences(bob).await.expect("bob get");
+        assert!(a.share_location_enabled && a.share_timezone_enabled);
+        assert!(!b.share_location_enabled && !b.share_timezone_enabled);
+    }
 }
