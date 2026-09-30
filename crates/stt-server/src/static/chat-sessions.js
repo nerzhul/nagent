@@ -37,6 +37,19 @@ export const LOCATION_ENABLED_KEY = "nagent.chat.locationEnabled";
 // zone across an evening flight.
 export const TIMEZONE_ENABLED_KEY = "nagent.chat.timezoneEnabled";
 
+// Last model the user picked from the Discussion-mode `<select>`.
+// Persisted locally so a fresh page load (or a session switch)
+// pre-selects the same model instead of jumping back to the first
+// entry of the model list. We deliberately keep this *local* (not in
+// `user_preferences` on the server) because it is a UI state
+// preference, not a privacy / behaviour toggle: an Ollama install
+// reachable from a laptop is typically a different inventory than
+// the one reachable from a phone, so cross-device sync would pick a
+// model the user's current backend doesn't serve. The model list is
+// fetched fresh on every boot and the UI falls back to the first
+// option whenever the saved id is missing from that list.
+export const CHAT_MODEL_KEY = "nagent.chat.model";
+
 export function historyKey(id) {
   return HISTORY_PREFIX + id;
 }
@@ -93,6 +106,34 @@ export function setActiveId(id) {
   try {
     if (id) globalThis.localStorage.setItem(ACTIVE_KEY, id);
     else globalThis.localStorage.removeItem(ACTIVE_KEY);
+  } catch (_e) {}
+}
+
+// Read the last model the user picked from the `<select id="chat-model">`
+// dropdown. Returns the empty string when no preference is stored yet
+// (first boot) or when localStorage is unavailable (private mode).
+// The caller is responsible for verifying the saved id still matches
+// an entry of the freshly-fetched model list before assigning it to
+// `select.value` — the dropdown silently ignores unknown values, but
+// a stale id would quietly stick around in storage and be re-applied
+// on every reload.
+export function loadSelectedModel() {
+  try {
+    return globalThis.localStorage.getItem(CHAT_MODEL_KEY) || "";
+  } catch (_e) {
+    return "";
+  }
+}
+
+// Persist the currently-selected model. Stores under `CHAT_MODEL_KEY`
+// so the next `loadModels()` pass can restore it. Mirrors the
+// `setActiveId` shape (single key, empty value removes) and uses the
+// same try/catch so a quota / disabled-storage environment never
+// throws into the UI event loop.
+export function saveSelectedModel(id) {
+  try {
+    if (id) globalThis.localStorage.setItem(CHAT_MODEL_KEY, id);
+    else globalThis.localStorage.removeItem(CHAT_MODEL_KEY);
   } catch (_e) {}
 }
 

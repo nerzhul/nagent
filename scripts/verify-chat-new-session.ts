@@ -187,3 +187,68 @@ Deno.test("chat sidebar wire: pre-mount + post-mount + idempotency", () => {
     "newSession clears + appends one <li>; idempotent wire guarantees exactly one render",
   );
 });
+
+// ---- Model dropdown selection contract -----------------------------------
+//
+// `loadModels()` in chat.js appends one `<option>` per model the
+// backend reports, then restores the user's last selection so a
+// fresh page load lands on the same model they were already using.
+// The contract we test here (mirrored in a tiny harness so we don't
+// have to stub out the whole module dependency tree):
+//
+//   1. Saved id present in the option list  → `select.value === saved`
+//   2. Saved id missing (stale, or new backend) → falls back to the
+//      first appended option (the browser default; we do NOT assign)
+//   3. No saved id at all → first option stays selected
+//
+// The real implementation in chat.js delegates the same lookup
+// (`Array.from(modelEl.options).some((o) => o.value === saved)`) so
+// the contract holds end-to-end.
+
+function makeSelect(values: string[]) {
+  const options = values.map((v) => ({ value: v }));
+  // `<select>` defaults `value` to the first option's value when no
+  // option is marked `selected`. Mirror that by exposing a getter
+  // that returns `options[first-selected?.index ?? 0].value`.
+  let selected = options[0]?.value ?? "";
+  return {
+    options,
+    innerHTML: "",
+    get value() { return selected; },
+    set value(v: string) {
+      if (options.some((o) => o.value === v)) selected = v;
+    },
+  };
+}
+
+function restoreSavedSelection(select: ReturnType<typeof makeSelect>, saved: string) {
+  // Verbatim copy of the selection logic in chat.js loadModels().
+  if (saved && Array.from(select.options).some((o) => o.value === saved)) {
+    select.value = saved;
+  }
+}
+
+Deno.test("model dropdown: saved id present is restored", () => {
+  const sel = makeSelect(["qwen2.5:14b", "llama3.1", "mistral:7b"]);
+  restoreSavedSelection(sel, "llama3.1");
+  assertEquals(sel.value, "llama3.1");
+});
+
+Deno.test("model dropdown: stale saved id falls back to first option", () => {
+  // The saved id no longer exists in the dropdown (e.g. the user
+  // pulled that Ollama model after a session). The browser default
+  // (first appended option) must stand; we must NOT assign an
+  // unknown value, which would leave the dropdown visibly empty.
+  const sel = makeSelect(["qwen2.5:14b", "llama3.1"]);
+  restoreSavedSelection(sel, "gpt-4-turbo");
+  assertEquals(sel.value, "qwen2.5:14b");
+});
+
+Deno.test("model dropdown: empty saved id falls back to first option", () => {
+  // First boot: nothing in storage. `loadSelectedModel()` returns
+  // "" which short-circuits the lookup, leaving the first option
+  // selected (browser default).
+  const sel = makeSelect(["qwen2.5:14b", "llama3.1"]);
+  restoreSavedSelection(sel, "");
+  assertEquals(sel.value, "qwen2.5:14b");
+});

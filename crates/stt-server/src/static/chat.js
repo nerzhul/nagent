@@ -52,11 +52,13 @@ import {
   getActiveId,
   historyKey,
   loadHistory,
+  loadSelectedModel,
   loadSessions,
   migrateLegacy,
   persistNewSession,
   renameSession,
   saveHistory,
+  saveSelectedModel,
   setActiveId,
   sortedSessions,
   touchSession,
@@ -780,6 +782,12 @@ const timezoneStatusEl  = lazyEl("chat-timezone-status");
 // create a fresh one. This keeps the invariant "there is always
 // exactly one active session" without any explicit init step.
 let currentSessionId = "";
+
+// Idempotency guard for the `<select id="chat-model">` change
+// listener. `loadModels()` runs more than once across the page
+// lifetime (boot, visibility refresh, retry after a transient
+// error), so the listener attachment must happen exactly once.
+let _modelChangeWired = false;
 function activeSessionId() {
   const sessions = loadSessions();
   if (sessions.some((s) => s.id === currentSessionId)) return currentSessionId;
@@ -1859,6 +1867,27 @@ async function loadModels() {
       opt.value = item.id || item.name || "";
       opt.textContent = item.id || item.name || "(unnamed)";
       modelEl.appendChild(opt);
+    }
+    // Restore the user's last selection so a fresh page load lands
+    // on the model they were already using, instead of jumping back
+    // to the first entry of the list. A stale id (saved model no
+    // longer served by the backend) is silently ignored — the
+    // browser falls back to the first appended <option>, and the
+    // next `change` event will overwrite the stale entry with
+    // whatever the user picks.
+    const saved = loadSelectedModel();
+    if (saved && Array.from(modelEl.options).some((o) => o.value === saved)) {
+      modelEl.value = saved;
+    }
+    // First successful load wires the change listener so every
+    // future pick is persisted. The `_wired` guard makes the wire
+    // idempotent across `loadModels` re-runs (visibility refresh,
+    // error retry, etc.).
+    if (!_modelChangeWired && modelEl.addEventListener) {
+      _modelChangeWired = true;
+      modelEl.addEventListener("change", () => {
+        saveSelectedModel(modelEl.value);
+      });
     }
   } catch (e) {
     // Surface failures in the status pill so an empty dropdown is

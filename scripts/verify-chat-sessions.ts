@@ -16,6 +16,7 @@
 
 import {
   ACTIVE_KEY,
+  CHAT_MODEL_KEY,
   DEFAULT_TITLE,
   HISTORY_CAP,
   HISTORY_PREFIX,
@@ -29,11 +30,13 @@ import {
   historyKey,
   isValidSession,
   loadHistory,
+  loadSelectedModel,
   loadSessions,
   migrateLegacy,
   persistNewSession,
   renameSession,
   saveHistory,
+  saveSelectedModel,
   saveSessions,
   setActiveId,
   sortedSessions,
@@ -320,4 +323,70 @@ Deno.test("clear flow: deleting the active session leaves siblings intact", () =
   // responsible for clearing it. sortedSessions still returns B, so
   // the wrapper can pick it as the fallback active session.
   assertDeepEq(sortedSessions(loadSessions()).map((s) => s.id), ["B"]);
+});
+
+Deno.test("CHAT_MODEL_KEY lives under the nagent.chat namespace", () => {
+  // Hard-coded contract: the key is read by `chat.js` directly (e.g.
+  // `localStorage.removeItem` migrations in the future) so its name
+  // must not drift silently. Bumping it would orphan existing
+  // preferences and force every user to re-pick.
+  assertEq(CHAT_MODEL_KEY, "nagent.chat.model");
+});
+
+Deno.test("loadSelectedModel returns '' when nothing is stored", () => {
+  installStorage();
+  assertEq(loadSelectedModel(), "");
+});
+
+Deno.test("saveSelectedModel / loadSelectedModel round-trip", () => {
+  installStorage();
+  saveSelectedModel("qwen2.5:14b");
+  assertEq(globalThis.localStorage.getItem(CHAT_MODEL_KEY), "qwen2.5:14b");
+  assertEq(loadSelectedModel(), "qwen2.5:14b");
+});
+
+Deno.test("saveSelectedModel overwrites the previous value", () => {
+  installStorage();
+  saveSelectedModel("llama3.1");
+  saveSelectedModel("qwen2.5:14b");
+  assertEq(loadSelectedModel(), "qwen2.5:14b");
+});
+
+Deno.test("saveSelectedModel with empty string clears the entry", () => {
+  installStorage();
+  saveSelectedModel("llama3.1");
+  saveSelectedModel("");
+  assertEq(globalThis.localStorage.getItem(CHAT_MODEL_KEY), null);
+  assertEq(loadSelectedModel(), "");
+});
+
+Deno.test("saveSelectedModel does not throw when storage is missing", () => {
+  // Simulate private mode / quota by replacing localStorage with a
+  // stub that throws on every method. The store must swallow the
+  // error so a save click never breaks the UI event loop.
+  installStorage();
+  const map = (globalThis.localStorage as unknown as { _map: Map<string, string> })._map;
+  Object.defineProperty(globalThis, "localStorage", {
+    value: {
+      getItem: () => { throw new Error("disabled"); },
+      setItem: () => { throw new Error("disabled"); },
+      removeItem: () => { throw new Error("disabled"); },
+      clear: () => { throw new Error("disabled"); },
+    },
+    writable: true,
+    configurable: true,
+  });
+  // None of these should throw; the round-trip degenerates to "".
+  saveSelectedModel("llama3.1");
+  assertEq(loadSelectedModel(), "");
+  // Restore the original storage stub so subsequent tests in the
+  // same isolate still see a writable map.
+  Object.defineProperty(globalThis, "localStorage", {
+    value: { _map: map, getItem: (k: string) => map.get(k) ?? null,
+             setItem: (k: string, v: string) => map.set(k, v),
+             removeItem: (k: string) => map.delete(k),
+             clear: () => map.clear() } as unknown as Storage,
+    writable: true,
+    configurable: true,
+  });
 });
