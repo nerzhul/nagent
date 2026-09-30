@@ -35,6 +35,10 @@
 //! - [`rate_limit`] — per-source-IP token bucket for STT and LLM
 //!   traffic (the login-attempt limiter lives at
 //!   [`crate::auth::login_rate_limit`]).
+//! - [`support`] — shared building blocks (sweep clock, bounded TTL
+//!   map, bounded blocking-work helper) reused by [`rate_limit`],
+//!   [`crate::auth::login_rate_limit`] and the in-memory caches
+//!   the plan tracks under R1/R2.
 //! - [`state`] — the per-subsystem sub-state groups (`SttState`,
 //!   `LlmState`, `AuthState`, `DocumentsState`, `ChatSessionsState`,
 //!   `TtsState`) and the top-level [`state::AppState`] that composes
@@ -75,6 +79,7 @@ pub mod oauth;
 pub mod rate_limit;
 pub mod state;
 pub mod stt;
+pub mod support;
 #[cfg(feature = "test-util")]
 pub mod testing;
 pub mod tts;

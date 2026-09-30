@@ -32,13 +32,14 @@
 //! touches at most a handful of buckets at a time.
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use dashmap::DashMap;
 use thiserror::Error;
+
+use crate::support::ratelimit::SweepClock;
 
 /// Outcome of a single rate-limit check.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -89,12 +90,6 @@ struct Bucket {
     last_update: Instant,
 }
 
-/// Cheap atomic counter used to throttle the eviction sweep.
-#[derive(Debug, Default)]
-struct SweepClock {
-    ops_since_sweep: AtomicU64,
-}
-
 /// A per-IP token-bucket rate limiter.
 ///
 /// Cheap to clone: the inner map and the sweep clock are wrapped in
@@ -137,8 +132,8 @@ impl RateLimiter {
             inner: Arc::new(RateLimiterInner {
                 policy,
                 buckets: DashMap::new(),
-                sweep: SweepClock::default(),
-                sweep_every: 1024,
+                sweep: SweepClock::new(),
+                sweep_every: crate::support::ratelimit::DEFAULT_SWEEP_EVERY,
             }),
         }
     }
@@ -228,12 +223,7 @@ impl RateLimiter {
     }
 
     fn maybe_sweep(&self) {
-        let n = self
-            .inner
-            .sweep
-            .ops_since_sweep
-            .fetch_add(1, Ordering::Relaxed);
-        if n % self.inner.sweep_every == self.inner.sweep_every - 1 {
+        if self.inner.sweep.tick(self.inner.sweep_every) {
             self.sweep_idle_buckets_inner(Duration::from_secs(60));
         }
     }
@@ -245,8 +235,11 @@ impl RateLimiter {
             // Keep the bucket if it has been touched recently *or* if
             // it is not yet back to full capacity (an idle bucket
             // that is still refilling is one that was just used).
-            let elapsed = now.saturating_duration_since(bucket.last_update);
-            elapsed < idle_for || bucket.tokens < cap
+            crate::support::ratelimit::should_keep_during_idle_eviction(
+                now,
+                bucket.last_update,
+                idle_for,
+            ) || bucket.tokens < cap
         });
     }
 }

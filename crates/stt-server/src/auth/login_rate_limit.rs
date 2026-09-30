@@ -32,10 +32,11 @@
 //! [`crate::auth`] state.
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+
+use crate::support::ratelimit::{SweepClock, DEFAULT_SWEEP_EVERY};
 
 /// Default per-(email, ip) cap: 5 attempts / 15 min.
 pub const DEFAULT_LOGIN_MAX_ATTEMPTS: u32 = 5;
@@ -157,7 +158,7 @@ struct LoginRateLimiterInner {
     max_entries: usize,
     /// Monotonic counter used to throttle eviction sweeps (the
     /// existing `rate_limit.rs` does the same trick).
-    ops_since_sweep: AtomicU64,
+    sweep: SweepClock,
     sweep_every: u64,
 }
 
@@ -228,8 +229,8 @@ impl LoginRateLimiter {
                 ip_window: policy.ip_window,
                 ip_backoff_after: policy.ip_backoff_after,
                 max_entries: policy.max_entries,
-                ops_since_sweep: AtomicU64::new(0),
-                sweep_every: 1024,
+                sweep: SweepClock::new(),
+                sweep_every: DEFAULT_SWEEP_EVERY,
             }),
         }
     }
@@ -515,8 +516,7 @@ impl LoginRateLimiter {
     }
 
     fn maybe_sweep(&self) {
-        let n = self.inner.ops_since_sweep.fetch_add(1, Ordering::Relaxed);
-        if n % self.inner.sweep_every == self.inner.sweep_every - 1 {
+        if self.inner.sweep.tick(self.inner.sweep_every) {
             self.sweep_idle_buckets();
         }
     }
