@@ -1,15 +1,26 @@
-// Per-user credentials UI.
+// Per-user credentials + server-side agent catalogue UI.
 //
-// Fetches the list of integrations from `/api/integrations` on
-// drawer-open, renders a row per service with a "Configure" / "Edit"
-// button, and wires the modal PUT/DELETE flow. CSRF tokens come
-// from `window.nagentAuth.csrfHeaders()` so the same middleware that
-// protects every other mutating request also covers us.
+// The drawer is a single flat list with two flavours of rows:
 //
-// Auth gate: the `/api/integrations*` routes are behind `RequireAuth`
-// and return 401 for anonymous clients. The section is hidden until
-// `window.nagentAuth.getUser()` returns a user, and the open/close
-// listener refreshes the list on toggle.
+// 1. **Agents** (top half) — every server-side tool the LLM can call,
+//    fetched from `/v1/agents`. These are *informational*: the server
+//    ships them preconfigured, the user does not need to fill any
+//    field. Listing them here gives the user a single place to audit
+//    what the chat can actually do, rather than the separate banner
+//    that only mentions names.
+//
+// 3. **Per-user integrations** (bottom half) — `ServiceDef` entries
+//    that DO need per-user credentials, fetched from
+//    `/api/integrations`. Each row carries a "Configure" / "Edit"
+//    button that opens the modal PUT/DELETE flow. CSRF tokens come
+//    from `window.nagentAuth.csrfHeaders()` so the same middleware
+//    that protects every other mutating request also covers us.
+//
+// Auth gate: `/api/integrations*` routes are behind `RequireAuth`
+// and return 401 for anonymous clients. `/v1/agents` is anonymous
+// (same envelope shape — see `chat.js::loadAgentsBanner`). The
+// section is hidden until `window.nagentAuth.getUser()` returns a
+// user, and the open/close listener refreshes the list on toggle.
 
 const SECTION_ID = "chat-integrations";
 const LIST_ID = "chat-integrations-list";
@@ -36,7 +47,68 @@ async function fetchIntegrations() {
   return body.data || [];
 }
 
-function renderRow(svc) {
+// Fetch the agent catalogue. `/v1/agents` is anonymous (same as the
+// chat-completions route family) and returns `{ data: [{ name,
+// description }, ...] }`. A 404 means the operator compiled the
+// build without any agent cargo feature — return `[]` so the drawer
+// still renders the per-user credentials rows below without a
+// confusing "agents unavailable" placeholder.
+async function fetchAgents() {
+  try {
+    const resp = await fetch("/v1/agents", {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    if (resp.status === 404) return [];
+    if (!resp.ok) throw new Error(`/v1/agents returned ${resp.status}`);
+    const body = await resp.json();
+    const arr = Array.isArray(body?.data) ? body.data : [];
+    return arr.filter((a) => a && typeof a.name === "string");
+  } catch (e) {
+    console.warn("agents list failed:", e);
+    return [];
+  }
+}
+
+function renderAgentRow(agent) {
+  const li = document.createElement("li");
+  li.className = "chat-integration-row chat-integration-row--agent";
+  li.dataset.agentName = agent.name;
+
+  const icon = document.createElement("span");
+  icon.className = "chat-integration-icon";
+  icon.textContent = "🛠";
+  li.appendChild(icon);
+
+  const label = document.createElement("span");
+  label.className = "chat-integration-label";
+  label.textContent = agent.name;
+  if (agent.description) label.title = agent.description;
+  li.appendChild(label);
+
+  const status = document.createElement("span");
+  status.className = "chat-integration-status chat-integration-status--agent";
+  status.textContent = "Server-side tool";
+  li.appendChild(status);
+
+  // Informational rows only — no Configure button. We still keep a
+  // ghost link so the visual weight of the row matches the
+  // per-user rows below (icon + label + status pill + button slot).
+  const placeholder = document.createElement("span");
+  placeholder.className = "chat-integration-edit chat-integration-edit--agent";
+  placeholder.setAttribute("aria-hidden", "true");
+  li.appendChild(placeholder);
+
+  if (agent.description) {
+    const desc = document.createElement("p");
+    desc.className = "chat-integration-description";
+    desc.textContent = agent.description;
+    li.appendChild(desc);
+  }
+  return li;
+}
+
+function renderIntegrationRow(svc) {
   const li = document.createElement("li");
   li.className = "chat-integration-row";
   li.dataset.serviceId = svc.id;
@@ -74,10 +146,19 @@ async function renderList() {
     setSectionVisible(false);
     return;
   }
-  let data;
+  // Fetch in parallel — the two endpoints are independent and
+  // parallelising shaves a round-trip off the first paint of the
+  // drawer.
+  let data = null;
+  let agents = [];
   try {
-    data = await fetchIntegrations();
+    [data, agents] = await Promise.all([
+      fetchIntegrations(),
+      fetchAgents(),
+    ]);
   } catch (e) {
+    // `Promise.all` rejects on the first failure; treat the same as
+    // a single-fetch rejection so we don't half-render the list.
     console.warn("integrations list failed:", e);
     return;
   }
@@ -86,14 +167,21 @@ async function renderList() {
     return;
   }
   setSectionVisible(true);
-  if (data.length === 0) {
+  let appended = 0;
+  for (const agent of agents) {
+    root.appendChild(renderAgentRow(agent));
+    appended++;
+  }
+  for (const svc of data) {
+    root.appendChild(renderIntegrationRow(svc));
+    appended++;
+  }
+  if (appended === 0) {
     const empty = document.createElement("li");
     empty.className = "chat-integrations-empty";
     empty.textContent = "No integrations available yet.";
     root.appendChild(empty);
-    return;
   }
-  for (const svc of data) root.appendChild(renderRow(svc));
 }
 
 function buildFormField(field) {

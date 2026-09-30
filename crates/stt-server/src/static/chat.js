@@ -71,6 +71,11 @@ import {
   saveCachedLocation,
   setLocationEnabled,
 } from "/static/geolocation.js";
+import {
+  currentFlags as acquireCurrentPreferenceFlags,
+  loadFromServer as loadPreferencesFromServer,
+  saveToServer as savePreferencesToServer,
+} from "/static/preferences.js";
 
 // ---- Chat session id (server-minted) ---------------------------------------
 //
@@ -744,23 +749,28 @@ const agentsBannerEl = $("chat-agents-banner");
 const agentsBannerNamesEl = $("chat-agents-banner-names");
 // Geolocation UI handles. The initial opt-in lives in the form footer;
 // the status pill in the header and the advanced-panel controls show
-// up only after a position has been cached. `null` checks protect
-// against an older `index.html` that lacks the elements.
-const locationShareBtn  = $("chat-location-share");
-const locationPill      = $("chat-location-pill");
-const locationPillText  = $("chat-location-pill-text");
-const locationAdvBox    = $("chat-location-advanced");
-const locationToggleEl  = $("chat-location-toggle");
-const locationRefresh   = $("chat-location-refresh");
-const locationForget    = $("chat-location-forget");
-const locationStatusEl  = $("chat-location-status");
+// up only after a position has been cached. Stored as `lazyEl` proxies
+// (rather than plain `document.getElementById`) because the chat UI
+// lives inside `<template id="app-shell-template">` and is only
+// cloned into the DOM after `auth.js` mounts the shell — a plain
+// `getElementById` at module top-level would return `null` and every
+// later `el.click` / `el.hidden = …` would crash or no-op.
+const locationShareBtn  = lazyEl("chat-location-share");
+const locationPill      = lazyEl("chat-location-pill");
+const locationPillText  = lazyEl("chat-location-pill-text");
+const locationAdvBox    = lazyEl("chat-location-advanced");
+const locationToggleEl  = lazyEl("chat-location-toggle");
+const locationRefresh   = lazyEl("chat-location-refresh");
+const locationForget    = lazyEl("chat-location-forget");
+const locationStatusEl  = lazyEl("chat-location-status");
 
 // Browser-timezone UI handles. Always visible (no permission, no
 // cache); the toggle mirrors the LOCATION_ENABLED_KEY pattern so a
-// fresh page reload picks up the user's choice. `null` checks protect
-// against an older `index.html` that lacks the elements.
-const timezoneToggleEl  = $("chat-timezone-toggle");
-const timezoneStatusEl  = $("chat-timezone-status");
+// fresh page reload picks up the user's choice. Same `lazyEl`
+// rationale as the geolocation handles — the elements are inside the
+// app-shell template and only resolve once the shell mounts.
+const timezoneToggleEl  = lazyEl("chat-timezone-toggle");
+const timezoneStatusEl  = lazyEl("chat-timezone-status");
 
 // The active session id is read at every operation rather than
 // cached, so a same-tab mutation (delete, new chat, switch from the
@@ -2010,8 +2020,16 @@ function renderTimezoneUi() {
 /// Click handler for `#chat-timezone-toggle`. The persisted flag is
 /// read at message-build time so a reload picks up the latest choice
 /// without any further bookkeeping.
+///
+/// The server-side preference row is atomic, so the PUT body
+/// always carries the *current* location flag alongside the
+/// freshly-clicked timezone flag — `acquireCurrentPreferenceFlags()`
+/// returns the cached state populated by `loadPreferencesFromServer`
+/// at boot, falling back to localStorage when the boot fetch has
+/// not resolved yet.
 function handleTimezoneToggleChange() {
-  setTimezoneEnabled(!!timezoneToggleEl?.checked);
+  const flags = acquireCurrentPreferenceFlags();
+  savePreferencesToServer(flags.location, !!timezoneToggleEl?.checked);
 }
 
 /// Update every geolocation control from the current cache + toggle.
@@ -2071,11 +2089,16 @@ function renderLocationUi() {
 /// fresh position, caches it, flips the enabled flag, and refreshes
 /// the UI. Surfaces errors inline via the advanced status text so
 /// the user knows why nothing happened.
+///
+/// Persists the location flag through the server-side preferences
+/// row (the localStorage mirror is updated by `savePreferencesToServer`
+/// so a slow PUT never blocks the toggle paint).
 async function handleShareLocationClick() {
   try {
     const loc = await getLocation();
     saveCachedLocation(loc);
-    setLocationEnabled(true);
+    const flags = acquireCurrentPreferenceFlags();
+    savePreferencesToServer(true, flags.timezone);
     renderLocationUi();
   } catch (err) {
     // GeolocationPositionError codes map cleanly to user-facing text;
@@ -2094,8 +2117,13 @@ async function handleShareLocationClick() {
 /// Click handler for the advanced-panel toggle. Disabling the toggle
 /// preserves the cache so the user can re-enable without re-granting
 /// browser permission; "Forget my location" is the destructive path.
+///
+/// Persists through the server-side preferences row so the choice
+/// survives a browser switch / private-browsing session / profile
+/// reset (the previous localStorage-only storage lost all three).
 function handleLocationToggleChange() {
-  setLocationEnabled(!!locationToggleEl?.checked);
+  const flags = acquireCurrentPreferenceFlags();
+  savePreferencesToServer(!!locationToggleEl?.checked, flags.timezone);
   renderLocationUi();
 }
 
@@ -2105,7 +2133,8 @@ async function handleLocationRefreshClick() {
   try {
     const loc = await getLocation();
     saveCachedLocation(loc);
-    setLocationEnabled(true);
+    const flags = acquireCurrentPreferenceFlags();
+    savePreferencesToServer(true, flags.timezone);
     if (locationToggleEl) locationToggleEl.checked = true;
     renderLocationUi();
   } catch (err) {
@@ -2120,7 +2149,8 @@ async function handleLocationRefreshClick() {
 /// enabled flag; the next turn does not get a location block.
 function handleLocationForgetClick() {
   clearCachedLocation();
-  setLocationEnabled(false);
+  const flags = acquireCurrentPreferenceFlags();
+  savePreferencesToServer(false, flags.timezone);
   if (locationToggleEl) locationToggleEl.checked = false;
   renderLocationUi();
 }
@@ -2131,7 +2161,10 @@ function handleLocationForgetClick() {
 /// so a different day / different place reload always starts from
 /// the user's current location rather than last week's. Permission
 /// revoked / denied in the meantime clears the toggle and the cache
-/// so the UI matches reality on the next render.
+/// so the UI matches reality on the next render. The server-side
+/// preferences row is left untouched — a permission change on this
+/// device does NOT echo back to the server, only the user's explicit
+/// toggle click does.
 async function refreshLocationOnBoot() {
   if (!loadLocationEnabled()) return;
   try {
@@ -2144,8 +2177,9 @@ async function refreshLocationOnBoot() {
     // fix. In every case the safe behaviour is to stop pretending
     // we have location: clear the toggle and the cache, then let
     // `renderLocationUi` hide the controls.
-    setLocationEnabled(false);
     clearCachedLocation();
+    const flags = acquireCurrentPreferenceFlags();
+    savePreferencesToServer(false, flags.timezone);
   }
   renderLocationUi();
 }
@@ -3420,22 +3454,65 @@ function renderSessionList() {
 
 newSessionBtnEl?.addEventListener("click", newSession);
 
-// ---- Wire up the geolocation controls -------------------------------------
+// ---- Wire up the geolocation / timezone controls --------------------------
 //
-// Bound in the same DOMContentLoaded-equivalent path as the other
-// chat form controls so the new buttons can't end up inert if the
-// index.html is loaded from a slightly older cache.
+// The chat UI lives inside `<template id="app-shell-template">` and
+// only enters the DOM after `auth.js` mounts the shell. Wiring at
+// module top-level (the form pattern used to live there too) would
+// see `null` for every element here — same trap that `wireFormOnce`
+// already works around. We mirror that pattern: re-look the elements
+// at wire-time (when the shell is in the DOM) and attach the
+// handlers, then trigger the initial paint + boot-time position
+// refresh so a cached fix is reflected without a tab click.
+//
+// The `_wired` guard makes the listener idempotent so a duplicate
+// `app-shell-mounted` (e.g. if `auth.js` ever dispatches twice) does
+// not stack two `click` listeners on the same button.
 
-locationShareBtn?.addEventListener("click", handleShareLocationClick);
-locationPill?.addEventListener("click", openAdvancedForLocation);
-locationToggleEl?.addEventListener("change", handleLocationToggleChange);
-locationRefresh?.addEventListener("click", handleLocationRefreshClick);
-locationForget?.addEventListener("click", handleLocationForgetClick);
+let _locationWired = false;
+function wireLocationControlsOnce() {
+  if (_locationWired) return;
+  // Re-query here instead of trusting the module-level `lazyEl`
+  // proxies: the listener may fire while the shell is still being
+  // cloned (defence in depth — today auth.js dispatches the event
+  // AFTER `appendChild`, but the contract is "elements are
+  // mountable" rather than "elements exist synchronously").
+  const shareBtn = document.getElementById("chat-location-share");
+  if (!shareBtn) return;
+  _locationWired = true;
+  shareBtn.addEventListener("click", handleShareLocationClick);
+  document.getElementById("chat-location-pill")
+    ?.addEventListener("click", openAdvancedForLocation);
+  document.getElementById("chat-location-toggle")
+    ?.addEventListener("change", handleLocationToggleChange);
+  document.getElementById("chat-location-refresh")
+    ?.addEventListener("click", handleLocationRefreshClick);
+  document.getElementById("chat-location-forget")
+    ?.addEventListener("click", handleLocationForgetClick);
+  document.getElementById("chat-timezone-toggle")
+    ?.addEventListener("change", handleTimezoneToggleChange);
+  // Elements are now live — paint the cached state and kick off the
+  // boot-time position refresh. Both are no-ops on a fresh visit (no
+  // cached fix, toggle off).
+  //
+  // `loadPreferencesFromServer` runs in parallel: it fetches
+  // `/api/me/preferences` and, on success, rewrites the
+  // localStorage keys the render functions below read from. When
+  // it resolves we re-render the toggles so the user sees the
+  // server-side choice immediately, not the (possibly stale)
+  // localStorage copy from a different device / browser.
+  loadPreferencesFromServer().then(() => {
+    renderLocationUi();
+    renderTimezoneUi();
+  });
+  renderLocationUi();
+  renderTimezoneUi();
+  refreshLocationOnBoot();
+}
 
-// Browser timezone is cheaper than geolocation — there is no
-// permission gate, no async fetch, no cache to refresh — so the only
-// runtime wiring is the toggle change handler.
-timezoneToggleEl?.addEventListener("change", handleTimezoneToggleChange);
+window.addEventListener("app-shell-mounted", wireLocationControlsOnce);
+// Cached page reload with the shell already in the DOM:
+wireLocationControlsOnce();
 
 // ---- Boot ------------------------------------------------------------------
 
@@ -3448,21 +3525,13 @@ currentSessionId = getActiveId();
 activeSessionId(); // validates / falls back / creates, updates sidebar
 renderSessionList();
 renderHistory(currentSessionId);
-// Paint the geolocation controls from the cached state. Done after
-// the history render so the layout is settled before scrollIntoView
-// is ever called from a click handler.
-renderLocationUi();
-// Same deal for the timezone toggle: paint the cached state and the
-// detected IANA name into the Advanced panel on boot so the user can
-// spot a wrong value (e.g. a VPN tunneling into a different region)
-// before they trust the LLM's clock to be theirs.
-renderTimezoneUi();
-// Re-fetch the position once on boot so the user does not inherit
-// yesterday's fix. `loadLocationEnabled` early-returns when the
-// toggle was off, so this is a no-op for users who have never opted
-// in. Awaited (best-effort) so a slow device does not block other
-// boot work, but errors are swallowed inside the helper.
-refreshLocationOnBoot();
+// Geolocation / timezone boot paint + wiring live inside
+// `wireLocationControlsOnce`, which fires on the `app-shell-mounted`
+// event. The chat UI lives inside a `<template>` and is only cloned
+// into the DOM by `auth.js` AFTER this module's top-level code has
+// executed, so calling these now would render against `null`
+// elements — which was the bug behind the inert "Refresh my
+// location" button.
 
 // Load the model list once on page boot. The previous version only
 // fired on `modechange`, which meant a Discussion-mode-persisted user

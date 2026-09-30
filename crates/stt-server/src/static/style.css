@@ -1788,6 +1788,25 @@ select, input[type="checkbox"] {
   align-items: center;
   gap: 0.5rem;
 }
+.chat-integration-row--agent {
+  /* Agent rows are informational: stack the description under the
+     icon / label / status / button slot, and dim the row slightly
+     so the configurable per-user rows below stay visually primary. */
+  flex-wrap: wrap;
+  opacity: 0.85;
+}
+.chat-integration-row--agent .chat-integration-edit--agent {
+  /* Reserve the button slot so the description text below aligns
+     across rows. The placeholder span carries no label, just keeps
+     the row's flex geometry identical to a configurable row. */
+  width: 5rem;
+}
+.chat-integration-description {
+  flex-basis: 100%;
+  margin: 0.2rem 0 0 1.9rem; /* align with .chat-integration-label */
+  font-size: 0.85em;
+  opacity: 0.7;
+}
 .chat-integration-icon {
   width: 1.4rem;
   text-align: center;
@@ -1798,6 +1817,11 @@ select, input[type="checkbox"] {
 .chat-integration-status {
   font-size: 0.85em;
   opacity: 0.75;
+}
+.chat-integration-status--agent {
+  /* "Server-side tool" pill is a quieter label than the
+     Configured / Not configured pill for per-user integrations. */
+  font-style: italic;
 }
 .chat-integration-edit {
   margin: 0;

@@ -561,6 +561,14 @@
   -->
   <script type="module" src="/static/integrations.js"></script>
   <!--
+    Per-user preferences sync (location / timezone opt-ins).
+    Loaded before `chat.js` so `acquireCurrentPreferenceFlags` is
+    available when the chat's toggle handlers fire; the actual
+    server-side `loadFromServer` call happens once at chat boot
+    (after `auth.js` has confirmed a session exists).
+  -->
+  <script type="module" src="/static/preferences.js"></script>
+  <!--
     Documents panel. Loaded as a module so `chat.js` can import
     the same `setSessionId` / `refresh` helpers it calls on
     session switch. The module is a no-op when the server
