@@ -1245,11 +1245,25 @@ function appendToolBubble(
   details.appendChild(summary);
   details.appendChild(div);
 
-  if (assistantEl && assistantEl.parentNode === messagesEl) {
+  if (assistantEl && messagesEl.contains(assistantEl)) {
     // Insert before the replay button if it's already attached
     // (`appendBubble` adds it before any tool_call lands). Falls
     // back to plain appendChild for callers that pass a detached
     // assistant bubble (tests).
+    //
+    // `messagesEl` is a `lazyEl` proxy — `contains()` resolves to
+    // the real DOM element's `contains` (via the get-trap binding
+    // on every access), so the ancestry check works across the
+    // proxy. The previous `assistantEl.parentNode === messagesEl`
+    // form failed silently after the proxy migration because the
+    // strict identity compare treats the proxy object and the
+    // real `<div id="chat-messages">` as different objects, so
+    // the condition was always false and every tool trace landed
+    // as a direct child of the messages container. That made
+    // `renderWeatherWidget`'s `details.parentElement.closest
+    // (".chat-assistant")` walk bail (no enclosing bubble), which
+    // is exactly the symptom that surfaced as "le widget météo ne
+    // s'affiche plus".
     const replayBtn = assistantEl.querySelector(".chat-message-replay");
     if (replayBtn) {
       assistantEl.insertBefore(details, replayBtn);
