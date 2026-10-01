@@ -503,6 +503,12 @@ pub struct TtsEngine {
     /// piper-rs's internal synthesis-config lock. Held only across the
     /// two calls (~80-200 ms each).
     synth_lock: std::sync::Mutex<()>,
+    /// Bounded blocking-pool semaphore (plan R4a). Piper-rs is
+    /// single-threaded in practice; the cap is normally `1` so
+    /// concurrent requests queue instead of saturating the CPU.
+    /// Wrapped in `Arc` so the route layer can `run_bounded`
+    /// without cloning the engine.
+    synth_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl std::fmt::Debug for TtsEngine {
@@ -568,6 +574,9 @@ impl TtsEngine {
                 default_lang: config.default_lang.clone(),
                 max_input_chars: config.max_input_chars,
                 synth_lock: std::sync::Mutex::new(()),
+                synth_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                    config.synth_concurrency.max(1),
+                )),
             }))
         }
     }
@@ -589,6 +598,7 @@ impl TtsEngine {
             default_lang: default_lang.into(),
             max_input_chars,
             synth_lock: std::sync::Mutex::new(()),
+            synth_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -658,6 +668,95 @@ impl TtsEngine {
         }
         let output = self.inner.synth(text, &voice_id)?;
         encode_wav(&output)
+    }
+
+/// Async wrapper around [`Self::synth_wav`] that runs the
+    /// synthesis on the bounded blocking pool (plan R4a). Holds
+    /// one permit from `synth_semaphore` for the duration of the
+    /// call so a burst of `POST /v1/audio/speech` requests cannot
+    /// fan out into N parallel Piper-rs invocations on a CPU that
+    /// has only one model in memory at a time.
+    pub async fn synth_wav_bounded(
+        self: &Arc<Self>,
+        text: &str,
+        voice_override: Option<&str>,
+        lang: Option<&str>,
+        speed: Option<f32>,
+    ) -> Result<Vec<u8>, TtsError> {
+        let engine = Arc::clone(self);
+        let text = text.to_string();
+        let voice = voice_override.map(str::to_string);
+        let lang = lang.map(str::to_string);
+        // Carry the typed `TtsError` across the `spawn_blocking`
+        // boundary as a JSON-friendly tagged string so we can
+        // re-materialise it on the async side — the route layer
+        // maps `EmptyInput` /VoiceNotFound /InputTooLong to 400 /
+        // 404 / 400 respectively, so losing the variant on the
+        // way back would silently turn every failure into a
+        // generic 500.
+        nagent_support::cpu::run_bounded(self.synth_semaphore.clone(), move |_permit| {
+            let r = engine.synth_wav(&text, voice.as_deref(), lang.as_deref(), speed);
+            r.map_err(|e| tts_error_to_kind(&e)).map_err(|kind| format!("{kind}"))
+        })
+        .await
+        .map_err(|e| TtsError::Synth(format!("tts blocking pool join: {e}")))?
+        .map_err(|kind| kind_to_tts_error(&kind))
+    }
+
+    /// Borrow the bounded blocking-pool semaphore. Surfaced so the
+    /// route layer can drive [`Self::synth_wav_bounded`] without
+    /// reaching for `Arc::clone(self)` twice.
+    pub fn synth_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
+        self.synth_semaphore.clone()
+    }
+}
+
+/// Stable string encoding for the [`TtsError`] variants that the
+/// route layer maps to specific HTTP statuses. Used to carry the
+/// variant across the `spawn_blocking` boundary in
+/// [`TtsEngine::synth_wav_bounded`] without losing the typed
+/// information on the way back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TtsErrorKind {
+    EmptyInput,
+    InputTooLong,
+    VoiceNotFound,
+    Synth,
+    Wav,
+}
+
+impl std::fmt::Display for TtsErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TtsErrorKind::EmptyInput => "EmptyInput",
+            TtsErrorKind::InputTooLong => "InputTooLong",
+            TtsErrorKind::VoiceNotFound => "VoiceNotFound",
+            TtsErrorKind::Synth => "Synth",
+            TtsErrorKind::Wav => "Wav",
+        })
+    }
+}
+
+fn tts_error_to_kind(e: &TtsError) -> TtsErrorKind {
+    match e {
+        TtsError::EmptyInput => TtsErrorKind::EmptyInput,
+        TtsError::InputTooLong(..) => TtsErrorKind::InputTooLong,
+        TtsError::VoiceNotFound(_) => TtsErrorKind::VoiceNotFound,
+        TtsError::Synth(_) => TtsErrorKind::Synth,
+        TtsError::Wav(_) => TtsErrorKind::Wav,
+    }
+}
+
+fn kind_to_tts_error(kind: &str) -> TtsError {
+    match kind {
+        "EmptyInput" => TtsError::EmptyInput,
+        "InputTooLong" => TtsError::InputTooLong(0, 0),
+        "VoiceNotFound" => TtsError::VoiceNotFound(String::new()),
+        "Synth" => TtsError::Synth(String::new()),
+        // Default to the generic 500-mapped variant for safety —
+        // future variants cannot accidentally turn into an
+        // unmapped success.
+        _ => TtsError::Synth(format!("unknown tts error: {kind}")),
     }
 }
 

@@ -13,8 +13,6 @@
 //! `audio_voices`) and the wire types (`SpeechRequest`, `VoicesResponse`,
 //! `VoiceMetaJson`) are unchanged.
 
-use std::sync::Arc;
-
 use axum::extract::{Json, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -74,34 +72,24 @@ impl From<&VoiceMeta> for VoiceMetaJson {
 
 /// `POST /v1/audio/speech` — synthesise a single chunk of text and
 /// return the WAV bytes (`audio/wav`). The actual Piper call runs on
-/// the blocking pool because piper-rs is synchronous and a single
-/// short-phrase inference can take 80-200 ms.
+/// the bounded blocking pool because piper-rs is synchronous and a
+/// single short-phrase inference can take 80-200 ms.
 pub async fn audio_speech(
     State(tts_state): State<TtsState>,
     Json(req): Json<SpeechRequest>,
 ) -> Response {
-    let engine = Arc::clone(&tts_state.engine);
-    // Piper-rs is sync and CPU-bound; run on the blocking pool so we
-    // do not stall the tokio runtime on a long inference.
-    let join = tokio::task::spawn_blocking(move || {
-        engine.synth_wav(
+    // Plan R4a: route through the bounded blocking pool. Piper-rs
+    // holds a model in memory; the semaphore (default cap = 1)
+    // keeps concurrent callers from competing for it.
+    let result = tts_state
+        .engine
+        .synth_wav_bounded(
             &req.input,
             req.voice.as_deref(),
             req.lang.as_deref(),
             req.speed,
         )
-    })
-    .await;
-    let result = match join {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("TTS worker panicked: {e}"),
-            )
-                .into_response();
-        }
-    };
+        .await;
     match result {
         Ok(wav) => {
             let len = wav.len();

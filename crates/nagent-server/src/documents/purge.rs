@@ -46,7 +46,7 @@ pub async fn purge_older_than(
     cache_dir: &Path,
     ttl: Duration,
 ) -> Result<usize, AuthError> {
-    let rows = store.db().documents.sweep_older_than(ttl).await?;
+    let rows = store.db().admin().documents.sweep_older_than(ttl).await?;
     let total = rows.len();
     for row in rows {
         // Skip files that escaped the cache dir (defence against a
@@ -62,7 +62,12 @@ pub async fn purge_older_than(
                 "skipping unlink: disk_path escaped cache_dir"
             );
             // Still drop the DB row so the next boot starts clean.
-            store.db().documents.delete_row_by_id(row.id).await?;
+            store
+                .db()
+                .admin()
+                .documents
+                .delete_row_by_id(row.id)
+                .await?;
             continue;
         }
         match std::fs::remove_file(&row.disk_path) {
@@ -81,7 +86,12 @@ pub async fn purge_older_than(
                 continue;
             }
         }
-        store.db().documents.delete_row_by_id(row.id).await?;
+        store
+            .db()
+            .admin()
+            .documents
+            .delete_row_by_id(row.id)
+            .await?;
     }
     Ok(total)
 }

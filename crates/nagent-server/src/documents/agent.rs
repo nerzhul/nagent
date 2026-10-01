@@ -148,6 +148,7 @@ impl Agent for ReadDocumentAgent {
         let row = self
             .store
             .db()
+            .admin()
             .documents
             .get_by_name(&req.name, ctx.user_id(), session_id)
             .await

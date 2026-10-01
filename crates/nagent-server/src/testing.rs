@@ -320,17 +320,21 @@ impl AppStateBuilder {
             rate_limiter: llm_limiter.clone(),
         });
 
-        let auth = self.auth_store.map(|store| AuthState {
-            store,
-            cfg: Arc::new(self.config.auth.clone()),
-            oidc: self.auth_oidc,
-            passkey: self.auth_passkey,
-            login_rate_limiter: LoginRateLimiter::new(),
-            services: self
-                .services
-                .unwrap_or_else(|| ServiceRegistry::empty().into_arc()),
-            credential_resolver: self.credential_resolver,
-            credentials_key: self.credentials_key,
+        let auth = self.auth_store.map(|store| {
+            let hash_concurrency = self.config.auth.password.hash_concurrency.max(1);
+            AuthState {
+                store,
+                cfg: Arc::new(self.config.auth.clone()),
+                oidc: self.auth_oidc,
+                passkey: self.auth_passkey,
+                login_rate_limiter: LoginRateLimiter::new(),
+                services: self
+                    .services
+                    .unwrap_or_else(|| ServiceRegistry::empty().into_arc()),
+                credential_resolver: self.credential_resolver,
+                credentials_key: self.credentials_key,
+                password_semaphore: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
+            }
         });
 
         let documents = self.documents.map(|store| DocumentsState { store });

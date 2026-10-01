@@ -201,6 +201,7 @@ async fn connect_store(
         db,
         cfg.documents.max_extracted_chars,
         cfg.documents.cache_dir.clone(),
+        cfg.documents.pdf_extract_concurrency,
     );
     Ok((doc_store, cfg.documents.cache_dir.clone()))
 }
@@ -218,6 +219,7 @@ async fn purge(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Err
         // Does not touch the DB or the disk.
         let rows = store
             .db()
+            .admin()
             .documents
             .sweep_older_than(ttl)
             .await

@@ -47,6 +47,7 @@ pub async fn extract_auth_user(
     let token_hash = session::sha256_of(&raw_token);
     let lookup = state
         .store
+        .admin()
         .sessions
         .lookup_by_token_hash(&token_hash)
         .await?;
@@ -82,7 +83,7 @@ pub async fn extract_auth_user(
     let store = state.store.clone();
     let token_hash_for_touch = token_hash;
     tokio::spawn(async move {
-        let _ = store.sessions.touch(&token_hash_for_touch).await;
+        let _ = store.admin().sessions.touch(&token_hash_for_touch).await;
     });
     Ok(Some(auth_user))
 }
@@ -242,12 +243,14 @@ mod tests {
         // register handler is gated by RequireAuth so it cannot
         // bootstrap itself).
         let user_id = store
+            .admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(b"dummy"))
             .await
             .unwrap();
         // Mint a session row.
         let session = store
+            .admin()
             .sessions
             .create(
                 user_id,
@@ -348,12 +351,14 @@ mod tests {
     async fn expired_session_returns_401() {
         let (store, cfg) = temp_store().await;
         let user_id = store
+            .admin()
             .users
             .create("bob@example.com", "Bob", "local", Some(b"dummy"))
             .await
             .unwrap();
         // 1-second TTL then sleep past expiry.
         let session = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(1), None, None)
             .await
@@ -388,11 +393,13 @@ mod tests {
     async fn csrf_mismatch_on_state_changer_returns_403() {
         let (store, cfg) = temp_store().await;
         let user_id = store
+            .admin()
             .users
             .create("eve@example.com", "Eve", "local", Some(b"dummy"))
             .await
             .unwrap();
         let session = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
@@ -504,11 +511,13 @@ mod tests {
     async fn csrf_bogus_bearer_header_does_not_bypass_cookie_csrf() {
         let (store, cfg) = temp_store().await;
         let user_id = store
+            .admin()
             .users
             .create("frank@example.com", "Frank", "local", Some(b"dummy"))
             .await
             .unwrap();
         let session = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
@@ -555,6 +564,7 @@ mod tests {
         // The cookie wins (still authenticated as a cookie
         // session), so CSRF is still enforced.
         let other_session = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
@@ -636,11 +646,13 @@ mod tests {
         // cannot silently swap sources.
         let (store, cfg) = temp_store().await;
         let user_id = store
+            .admin()
             .users
             .create("greta@example.com", "Greta", "local", Some(b"dummy"))
             .await
             .unwrap();
         let session = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await

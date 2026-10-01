@@ -273,8 +273,8 @@ pub async fn upload_handler(
     let current = state
         .store
         .db()
-        .documents
         .for_user(user.id)
+        .documents()
         .count_for_session(session_id)
         .await
         .map_err(DocumentRouteError::from)?;
@@ -356,20 +356,41 @@ pub async fn upload_handler(
 
     // Extract text. PDF path is feature-gated; on a build without
     // the feature we return 501 with a clear message so the
-    // operator knows the binary needs rebuilding.
+    // operator knows the binary needs rebuilding. The text path
+    // stays synchronous; the PDF path is routed through the
+    // bounded blocking pool (plan R1b).
     let timeout = Duration::from_secs(state.cfg.pdf_extract_timeout_secs);
-    let extraction = match super::extract::extract_text(&file.bytes, &ext, timeout) {
-        Ok(r) => r,
-        Err(ExtractionError::UnsupportedMime(m)) => {
-            return Err(DocumentRouteError::UnsupportedMediaType(m));
+    let extraction = if ext == "pdf" {
+        match super::extract::extract_pdf_bounded(state.store.pdf_semaphore(), &file.bytes, timeout)
+            .await
+        {
+            Ok(r) => r,
+            Err(ExtractionError::UnsupportedMime(m)) => {
+                return Err(DocumentRouteError::UnsupportedMediaType(m));
+            }
+            Err(ExtractionError::ParseFailed(m)) => {
+                return Err(DocumentRouteError::ExtractFailed(m));
+            }
+            Err(ExtractionError::Timeout(_)) => {
+                return Err(DocumentRouteError::ExtractFailed(
+                    "pdf extract exceeded the configured timeout".into(),
+                ));
+            }
         }
-        Err(ExtractionError::ParseFailed(m)) => {
-            return Err(DocumentRouteError::ExtractFailed(m));
-        }
-        Err(ExtractionError::Timeout(_)) => {
-            return Err(DocumentRouteError::ExtractFailed(
-                "pdf extract exceeded the configured timeout".into(),
-            ));
+    } else {
+        match super::extract::extract_text(&file.bytes, &ext) {
+            Ok(r) => r,
+            Err(ExtractionError::UnsupportedMime(m)) => {
+                return Err(DocumentRouteError::UnsupportedMediaType(m));
+            }
+            Err(ExtractionError::ParseFailed(m)) => {
+                return Err(DocumentRouteError::ExtractFailed(m));
+            }
+            Err(ExtractionError::Timeout(_)) => {
+                return Err(DocumentRouteError::ExtractFailed(
+                    "pdf extract exceeded the configured timeout".into(),
+                ));
+            }
         }
     };
 
@@ -403,8 +424,8 @@ pub async fn upload_handler(
     if let Err(e) = state
         .store
         .db()
-        .documents
         .for_user(user.id)
+        .documents()
         .insert(
             id,
             session_id,
@@ -454,8 +475,8 @@ pub async fn list_handler(
     let rows = state
         .store
         .db()
-        .documents
         .for_user(user.id)
+        .documents()
         .list_for_session(session_id)
         .await
         .map_err(DocumentRouteError::from)?;
@@ -494,8 +515,8 @@ pub async fn download_handler(
     let row = state
         .store
         .db()
-        .documents
         .for_user(user.id)
+        .documents()
         .get_by_id(id)
         .await
         .map_err(DocumentRouteError::from)?
@@ -547,8 +568,8 @@ pub async fn delete_handler(
     let path = match state
         .store
         .db()
-        .documents
         .for_user(user.id)
+        .documents()
         .delete(id, session_id)
         .await
         .map_err(DocumentRouteError::from)?

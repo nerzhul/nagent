@@ -356,6 +356,10 @@ pub struct TomlTtsConfig {
     pub noise_scale: Option<f32>,
     pub noise_w: Option<f32>,
     pub max_input_chars: Option<usize>,
+    /// Max concurrent Piper-rs synthesis calls on the bounded
+    /// blocking pool (plan R4a). `None` = `1` (Piper is single-
+    /// threaded in practice).
+    pub synth_concurrency: Option<usize>,
 }
 
 /// Authentication & user-identity knobs. Mirrors
@@ -446,6 +450,9 @@ pub struct TomlAuthPasswordConfig {
     /// When `true`, any logged-in user can POST to
     /// `/api/auth/password/register` to create a new local account.
     pub allow_registration: Option<bool>,
+    /// Max concurrent argon2 hash/verify operations on the blocking
+    /// pool (plan R1a). `None` = half the host cores.
+    pub hash_concurrency: Option<usize>,
 }
 
 /// OIDC backend knobs. Mirrors [`crate::config::AuthOidcConfig`].
@@ -506,6 +513,9 @@ pub struct TomlDocumentsConfig {
     pub max_extracted_chars: Option<usize>,
     pub max_docs_per_session: Option<u32>,
     pub pdf_extract_timeout_secs: Option<u64>,
+    /// Max concurrent PDF extracts on the bounded blocking pool
+    /// (plan R1b). `None` = half the host cores.
+    pub pdf_extract_concurrency: Option<usize>,
     pub purge_interval_hours: Option<u64>,
     pub default_ttl_days: Option<u32>,
 }
@@ -561,6 +571,7 @@ fn merge_toml_documents(
             max_extracted_chars: l.max_extracted_chars.or(e.max_extracted_chars),
             max_docs_per_session: l.max_docs_per_session.or(e.max_docs_per_session),
             pdf_extract_timeout_secs: l.pdf_extract_timeout_secs.or(e.pdf_extract_timeout_secs),
+            pdf_extract_concurrency: l.pdf_extract_concurrency.or(e.pdf_extract_concurrency),
             purge_interval_hours: l.purge_interval_hours.or(e.purge_interval_hours),
             default_ttl_days: l.default_ttl_days.or(e.default_ttl_days),
         }),
@@ -787,6 +798,7 @@ fn merge_toml_tts(
             noise_scale: l.noise_scale.or(e.noise_scale),
             noise_w: l.noise_w.or(e.noise_w),
             max_input_chars: l.max_input_chars.or(e.max_input_chars),
+            synth_concurrency: l.synth_concurrency.or(e.synth_concurrency),
         }),
     }
 }
@@ -862,6 +874,7 @@ fn merge_toml_auth_password(
             argon2_parallelism: l.argon2_parallelism.or(e.argon2_parallelism),
             min_password_length: l.min_password_length.or(e.min_password_length),
             allow_registration: l.allow_registration.or(e.allow_registration),
+            hash_concurrency: l.hash_concurrency.or(e.hash_concurrency),
         }),
     }
 }

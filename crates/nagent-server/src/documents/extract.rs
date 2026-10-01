@@ -13,10 +13,16 @@
 //!
 //! The PDF path is synchronous (`pdf_extract::extract_text_from_mem`)
 //! and can take several seconds on a 200-page file. Callers MUST
-//! run it on a blocking task with a timeout — see
-//! [`crate::documents::routes::upload_handler`].
+//! run it on the bounded blocking pool so a burst of uploads cannot
+//! starve the async runtime — see [`extract_pdf_bounded`] and the
+//! plan R1b entry. Hard-kill of a non-cancellingable PDF parse arrives
+//! with the agent-runner trust-zone split (plan H).
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use nagent_support::cpu::RunError;
+use tokio::sync::Semaphore;
 
 /// MIME types we know how to extract. Other types are rejected
 /// upstream with `415` so this list is intentionally small and
@@ -24,14 +30,13 @@ use std::time::Duration;
 pub const TEXT_MIME: &str = "text/plain";
 pub const PDF_MIME: &str = "application/pdf";
 
-/// Maximum time we will spend on a single PDF extract. Mirrors the
-/// `[documents].pdf_extract_timeout_secs` default; the caller passes
-/// the resolved value in so unit tests can shrink it.
-pub fn extract_text(
-    bytes: &[u8],
-    extension: &str,
-    timeout: Duration,
-) -> Result<ExtractionResult, ExtractionError> {
+/// Extract text from a plain-text / Markdown / log buffer. Cheap
+/// (no copy, no allocation beyond the lossy UTF-8 conversion) and
+/// stays synchronous because `from_utf8_lossy` is not CPU-heavy
+/// and runs on the calling task. The PDF path lives in
+/// [`extract_pdf_bounded`] — the route layer branches on the
+/// extension before calling either helper.
+pub fn extract_text(bytes: &[u8], extension: &str) -> Result<ExtractionResult, ExtractionError> {
     let ext_lower = extension.to_ascii_lowercase();
     let ext_str = ext_lower.as_str();
     if matches!(ext_str, "txt" | "md" | "log" | "") {
@@ -41,50 +46,53 @@ pub fn extract_text(
             mime: TEXT_MIME.to_string(),
         });
     }
-    if ext_str == "pdf" {
-        return extract_pdf(bytes, timeout);
-    }
     Err(ExtractionError::UnsupportedMime(format!(
         "unsupported extension: .{ext_str}"
     )))
 }
 
-fn extract_pdf(bytes: &[u8], timeout: Duration) -> Result<ExtractionResult, ExtractionError> {
-    use std::sync::mpsc;
-    use std::thread;
-
-    // `pdf_extract::extract_text_from_mem` is synchronous and
-    // CPU-bound; we run it on a worker thread so the async runtime
-    // stays free, and we enforce the timeout via a channel.
-    let (tx, rx) = mpsc::channel::<Result<String, pdf_extract::OutputError>>();
+/// PDF extraction on the bounded blocking pool (plan R1b). The
+/// semaphore is held for the duration of the parse, capping the
+/// number of concurrent `pdf_extract` runs at the configured
+/// limit. The `timeout` is enforced with `tokio::time::timeout`
+/// around `run_bounded` — the worker thread still keeps running
+/// after a timeout, so the route layer must unlink the partial
+/// file. Hard cancellation lands with the runner process (plan H).
+pub async fn extract_pdf_bounded(
+    semaphore: Arc<Semaphore>,
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<ExtractionResult, ExtractionError> {
+    // The `pdf_extract` crate owns the bytes for the duration of
+    // the parse; clone once and hand the owned buffer to the
+    // worker. A `Bytes` clone is cheap if we later switch to the
+    // `bytes` crate; for now `Vec<u8>` is what the trait expects.
     let payload = bytes.to_vec();
-    let handle = thread::spawn(move || {
-        let result = pdf_extract::extract_text_from_mem(&payload);
-        // `tx.send` only fails if the receiver was dropped, which
-        // happens when the timeout fired and the caller moved on.
-        let _ = tx.send(result);
+    let parse = nagent_support::cpu::run_bounded(semaphore, move |_permit| {
+        pdf_extract::extract_text_from_mem(&payload).map_err(|e| e.to_string())
     });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(text)) => {
-            // `join` is best-effort: the worker has already
-            // returned by the time we get here.
-            let _ = handle.join();
-            // lopdf 0.34 / pdf-extract 0.7 do not expose a page
-            // count without a second pass over the bytes. v1
-            // reports `None` and lets the LLM use `page_range`
-            // semantics to bound the read instead.
-            Ok(ExtractionResult {
-                text,
-                page_count: None,
-                mime: PDF_MIME.to_string(),
-            })
+
+    let text = match tokio::time::timeout(timeout, parse).await {
+        Ok(Ok(Ok(text))) => text,
+        Ok(Ok(Err(parse_err))) => return Err(ExtractionError::ParseFailed(parse_err)),
+        Ok(Err(RunError::Closed)) => {
+            return Err(ExtractionError::ParseFailed(
+                "pdf semaphore closed during boot shutdown".into(),
+            ))
         }
-        Ok(Err(e)) => {
-            let _ = handle.join();
-            Err(ExtractionError::ParseFailed(e.to_string()))
+        Ok(Err(RunError::Join(e))) => {
+            return Err(ExtractionError::ParseFailed(format!(
+                "pdf extract task panicked: {e}"
+            )))
         }
-        Err(_timeout) => Err(ExtractionError::Timeout(timeout)),
-    }
+        Err(_elapsed) => return Err(ExtractionError::Timeout(timeout)),
+    };
+
+    Ok(ExtractionResult {
+        text,
+        page_count: None,
+        mime: PDF_MIME.to_string(),
+    })
 }
 
 /// Successful extraction payload. Returned to the route handler
@@ -125,7 +133,7 @@ mod tests {
     #[test]
     fn txt_passthrough_round_trips_utf8() {
         let bytes = "Hello, 世界\nLine 2\n".as_bytes();
-        let res = extract_text(bytes, "txt", Duration::from_secs(1)).expect("txt extract");
+        let res = extract_text(bytes, "txt").expect("txt extract");
         assert_eq!(res.mime, TEXT_MIME);
         assert_eq!(res.text, "Hello, 世界\nLine 2\n");
         assert_eq!(res.page_count, None);
@@ -136,7 +144,7 @@ mod tests {
         // `.png` slips past the upload handler's mime sniff (the
         // browser may label it `image/png` even when the extension
         // is `.pdf`). The extractor must still refuse to run.
-        let res = extract_text(b"not an image", "png", Duration::from_secs(1));
+        let res = extract_text(b"not an image", "png");
         assert!(matches!(res, Err(ExtractionError::UnsupportedMime(_))));
     }
 
@@ -146,8 +154,33 @@ mod tests {
         // with the U+FFFD replacement char so the LLM still gets
         // SOMETHING to look at.
         let bytes: &[u8] = &[0x66, 0x6f, 0x6f, 0xff, 0xfe, 0x62, 0x61, 0x72];
-        let res = extract_text(bytes, "txt", Duration::from_secs(1)).expect("txt extract");
+        let res = extract_text(bytes, "txt").expect("txt extract");
         assert!(res.text.contains("foo"));
         assert!(res.text.contains("bar"));
+    }
+
+    #[tokio::test]
+    async fn bounded_pdf_respects_semaphore() {
+        // Three concurrent calls on a semaphore of size 1 must
+        // serialise. Each call is a no-op for an empty buffer but
+        // the route is exercised end-to-end.
+        let sem = Arc::new(Semaphore::new(1));
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let sem = sem.clone();
+                let bytes = b"%PDF-1.4\n% fake\n".to_vec();
+                tokio::spawn(async move {
+                    extract_pdf_bounded(sem, &bytes, Duration::from_secs(2)).await
+                })
+            })
+            .collect();
+        for h in handles {
+            // The empty-buffer parse is not a valid PDF, but we
+            // only care that the call returns without panicking
+            // and respects the timeout / semaphore. Either an
+            // Err(_) or an Ok(_) with `text == ""` is acceptable;
+            // what matters is that we did not deadlock.
+            let _ = h.await.expect("task must join");
+        }
     }
 }

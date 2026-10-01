@@ -51,6 +51,7 @@ argon2_memory_kib = 19456               # OWASP 2025 minimum; clamped to this va
 argon2_iterations = 2
 argon2_parallelism = 1
 min_password_length = 8
+# hash_concurrency = 0                          # argon2 ops on the blocking pool; 0 = half cores (plan R1a)
 allow_registration = true               # logged-in users can create accounts
 
 # Per-user credentials vault. 64 hex chars = 32 raw bytes

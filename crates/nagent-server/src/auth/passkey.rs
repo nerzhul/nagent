@@ -15,20 +15,28 @@
 //! Ceremony state between the two halves is held entirely
 //! server-side: the start response carries an opaque `state_token`
 //! the browser echoes back to the finish handler, which looks the
-//! state up in an in-process `DashMap` (keeps the passkey ceremony
-//! state out of the DB to avoid an extra table). A follow-up may
-//! move the state to the DB to survive process restarts.
+//! state up in a [`nagent_support::ttl_map::TtlMap`] (keeps the
+//! passkey ceremony state out of the DB to avoid an extra table).
+//! A follow-up may move the state to the DB to survive process
+//! restarts.
+//!
+//! Plan 4.B: the map is bounded (TTL = 5 min, hard cap) so a
+//! runaway client that keeps calling `/start` without finishing
+//! cannot grow the map without bound. The previous DashMap had
+//! the TTL but no cap; the new TtlMap enforces both.
 //!
 //! Per plan D11 the registration ceremony is open to any
 //! logged-in user by default; the operator can disable it with
 //! `auth.passkey.self_registration = false`.
+
+use std::time::Duration;
 
 use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
-use dashmap::DashMap;
+use nagent_support::ttl_map::TtlMap;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,12 +44,20 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::auth::error::AuthError;
-use crate::auth::error::{require_auth_store_from_auth, require_passkey_state_from_auth};
+use crate::auth::error::{require_admin_store_from_auth, require_passkey_state_from_auth};
 use crate::auth::middleware::{check_csrf, extract_auth_user};
 use crate::auth::session::{self, AuthUser, SessionSource};
 use nagent_db::{NewAuthEvent, NewPasskeyRecord};
 
-const CEREMONY_TTL_SECS: i64 = 5 * 60;
+/// TTL for an outstanding ceremony state. The browser has 5
+/// minutes to echo the `state_token` back; past that, the entry is
+/// dropped on the next read.
+const CEREMONY_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Hard cap on outstanding ceremonies. A misbehaving client is
+/// the only way to hit it; 4 KiB worth of small JSON payloads is
+/// more than enough for any realistic passkey flow.
+const MAX_CEREMONY_ENTRIES: usize = 4 * 1024;
 
 /// Shared state for the passkey handlers.
 #[derive(Clone)]
@@ -51,8 +67,10 @@ pub struct PasskeyState {
     pub webauthn: Arc<Webauthn>,
     /// In-memory ceremony state, keyed by the opaque state_token
     /// returned to the browser. Entries auto-expire after
-    /// [`CEREMONY_TTL_SECS`] (lazy eviction on the read path).
-    pub ceremonies: Arc<DashMap<String, CeremonyEntry>>,
+    /// [`CEREMONY_TTL`] (the TtlMap enforces this on every
+    /// read/insert); the hard cap drops the oldest live entry when
+    /// the map is full.
+    pub ceremonies: Arc<TtlMap<String, CeremonyEntry>>,
 }
 
 impl std::fmt::Debug for PasskeyState {
@@ -61,7 +79,7 @@ impl std::fmt::Debug for PasskeyState {
             .field("store", &"<store>")
             .field("cfg", &"<cfg>")
             .field("webauthn", &"<WebauthnServer>")
-            .field("ceremonies", &self.ceremonies.len())
+            .field("ceremonies", &self.ceremonies)
             .finish()
     }
 }
@@ -69,7 +87,6 @@ impl std::fmt::Debug for PasskeyState {
 #[derive(Debug)]
 pub struct CeremonyEntry {
     pub kind: CeremonyKind,
-    pub created_at: chrono::DateTime<chrono::Utc>,
     /// For registration: the user being enrolled.
     /// For login: empty (the assertion's credential_id resolves to
     /// the user).
@@ -77,7 +94,7 @@ pub struct CeremonyEntry {
     /// Server-side state required to complete the ceremony.
     /// `PasskeyRegistration` for `CeremonyKind::Register`,
     /// `PasskeyAuthentication` for `CeremonyKind::Authenticate`.
-    /// Stored as JSON so the `DashMap` value is `Send + Sync`
+    /// Stored as JSON so the TtlMap value is `Send + Sync`
     /// without needing a `Mutex`.
     pub state_json: String,
 }
@@ -132,7 +149,7 @@ pub fn build_state(
         store,
         cfg,
         webauthn: Arc::new(webauthn),
-        ceremonies: Arc::new(DashMap::new()),
+        ceremonies: Arc::new(TtlMap::new(CEREMONY_TTL, MAX_CEREMONY_ENTRIES)),
     })
 }
 
@@ -176,7 +193,6 @@ pub async fn register_start_handler(
         state_token.clone(),
         CeremonyEntry {
             kind: CeremonyKind::Register,
-            created_at: chrono::Utc::now(),
             user_id: Some(user_uuid),
             state_json,
         },
@@ -207,18 +223,13 @@ pub async fn register_finish_handler(
     Json(req): Json<FinishRegisterRequest>,
 ) -> Result<Response, AuthError> {
     let inner = require_passkey_state_from_auth(&state)?;
-    let (_token, entry) = inner
+    let entry = inner
         .ceremonies
-        .remove(&req.state_token)
+        .remove(&req.state_token.to_string())
         .ok_or_else(|| AuthError::BadRequest("unknown or expired state_token".into()))?;
     if !matches!(entry.kind, CeremonyKind::Register) {
         return Err(AuthError::BadRequest(
             "state_token belongs to a different ceremony".into(),
-        ));
-    }
-    if entry.created_at + chrono::Duration::seconds(CEREMONY_TTL_SECS) < chrono::Utc::now() {
-        return Err(AuthError::BadRequest(
-            "passkey ceremony state expired".into(),
         ));
     }
     let user_id = entry
@@ -246,7 +257,7 @@ pub async fn register_finish_handler(
     let passkey_json = serde_json::to_vec(&passkey)
         .map_err(|e| AuthError::Internal(format!("serialise passkey: {e}")))?;
     let _ = passkey_json; // stored as separate column in a future PR
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .passkeys
         .insert(NewPasskeyRecord {
             id: pk_id,
@@ -266,7 +277,7 @@ pub async fn register_finish_handler(
         passkey_id = %pk_id,
         "passkey register ok"
     );
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .events
         .record(nagent_db::NewAuthEvent::auth(
             Some(user_id),
@@ -307,7 +318,6 @@ pub async fn login_start_handler(
         state_token.clone(),
         CeremonyEntry {
             kind: CeremonyKind::Authenticate,
-            created_at: chrono::Utc::now(),
             user_id: None,
             state_json,
         },
@@ -337,7 +347,7 @@ pub async fn login_finish_handler(
 ) -> Result<Response, AuthError> {
     let ip = addr.ip();
     let inner = require_passkey_state_from_auth(&state)?;
-    let (_token, entry) = match inner.ceremonies.remove(&req.state_token) {
+    let entry = match inner.ceremonies.remove(&req.state_token.to_string()) {
         Some(e) => e,
         None => {
             tracing::warn!(
@@ -364,23 +374,11 @@ pub async fn login_finish_handler(
             "state_token belongs to a different ceremony".into(),
         ));
     }
-    if entry.created_at + chrono::Duration::seconds(CEREMONY_TTL_SECS) < chrono::Utc::now() {
-        tracing::warn!(
-            event = "auth.passkey.login",
-            outcome = "fail",
-            reason = "ceremony_expired",
-            ip = %ip,
-            "passkey login failed (ceremony state expired)"
-        );
-        return Err(AuthError::BadRequest(
-            "passkey ceremony state expired".into(),
-        ));
-    }
 
     let assertion: PublicKeyCredential = serde_json::from_value(req.response)
         .map_err(|e| AuthError::BadRequest(format!("invalid assertion: {e}")))?;
     let cred_id_bytes = assertion.raw_id.clone();
-    let stored = match require_auth_store_from_auth(&state)?
+    let stored = match require_admin_store_from_auth(&state)?
         .passkeys
         .get_by_credential_id(&cred_id_bytes)
         .await?
@@ -425,19 +423,19 @@ pub async fn login_finish_handler(
             );
             AuthError::BadRequest(format!("finish_discoverable_authentication: {e}"))
         })?;
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .passkeys
         .bump_counter(stored.id, passkey_counter_u32(&auth_result))
         .await?;
 
-    let user = require_auth_store_from_auth(&state)?
+    let user = require_admin_store_from_auth(&state)?
         .users
         .get_by_id(stored.user_id)
         .await?
         .ok_or_else(|| AuthError::Internal("passkey user disappeared".into()))?;
 
     let ttl = std::time::Duration::from_secs((state.cfg.session_ttl_days as u64) * 24 * 60 * 60);
-    let mut session = require_auth_store_from_auth(&state)?
+    let mut session = require_admin_store_from_auth(&state)?
         .sessions
         .create(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
@@ -465,7 +463,7 @@ pub async fn login_finish_handler(
         session_hash_prefix = %token_prefix,
         "passkey login ok"
     );
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .events
         .record(NewAuthEvent::auth(Some(user.id), "login_ok", "passkey"));
 

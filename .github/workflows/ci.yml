@@ -62,3 +62,58 @@ jobs:
         # affecting the dependency tree pinned by Cargo.lock. Uses the RustSec
         # advisory database, refreshed on each run.
         run: cargo audit
+
+  # Plan 4.A S9: Postgres parity tests. The `nagent-db` suite ships
+  # `#[ignore]` parity tests that run only when `NAGENT_TEST_PG_URL`
+  # is set; this job spins up a Postgres service container and runs
+  # them via `cargo test -- --include-ignored`. Without this job a
+  # sqlite-only build would silently diverge from Postgres behaviour
+  # (per-user isolation, audit rows, `for_user` scoping).
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: nagent_test
+          POSTGRES_USER: nagent
+          POSTGRES_PASSWORD: nagent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nagent -d nagent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NAGENT_TEST_PG_URL: postgres://nagent:nagent@localhost:5432/nagent_test
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/stt-proto
+            crates/stt-core
+            crates/nagent-support
+            crates/nagent-db
+            crates/nagent-agents
+            crates/nagent-server
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo test (Postgres parity)
+        # `--include-ignored` runs the parity tests in `tests.rs` that
+        # are `#[ignore]`d locally. CI sets `NAGENT_TEST_PG_URL` so
+        # the `pg_or_skip!` macro in `tests.rs` returns the live `Db`
+        # instead of short-circuiting.
+        run: cargo test -p nagent-db --lib -- --include-ignored

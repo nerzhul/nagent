@@ -50,6 +50,13 @@ pub struct TtsConfig {
     /// pathological LLM responses that stream a 50 KB paragraph in
     /// one shot.
     pub max_input_chars: usize,
+    /// Max concurrent Piper-rs synthesis calls on the bounded
+    /// blocking pool (plan R4a). Piper-rs is single-threaded in
+    /// practice; `1` is the safe default. `0` falls back to `1`
+    /// (NOT half cores — a model in memory only supports one
+    /// caller at a time, so the half-core heuristic would
+    /// over-allocate permits the engine cannot use).
+    pub synth_concurrency: usize,
 }
 
 impl Default for TtsConfig {
@@ -64,6 +71,7 @@ impl Default for TtsConfig {
             noise_scale: 0.667,
             noise_w: 0.8,
             max_input_chars: 2_000,
+            synth_concurrency: 1,
         }
     }
 }
@@ -126,6 +134,15 @@ impl TtsConfig {
             defaults.max_input_chars,
             "TTS_MAX_INPUT_CHARS",
         )?;
+        let synth_concurrency = match resolve_primitive(
+            env_opt("TTS_SYNTH_CONCURRENCY").as_deref(),
+            toml.synth_concurrency,
+            defaults.synth_concurrency,
+            "TTS_SYNTH_CONCURRENCY",
+        )? {
+            0 => 1,
+            n => n,
+        };
         Ok(Self {
             enabled,
             model_dir,
@@ -136,6 +153,7 @@ impl TtsConfig {
             noise_scale,
             noise_w,
             max_input_chars,
+            synth_concurrency,
         })
     }
 }

@@ -41,6 +41,10 @@ pub struct DocumentsConfig {
     /// the cap is enforced by wrapping the call in
     /// `tokio::task::spawn_blocking` + a timeout.
     pub pdf_extract_timeout_secs: u64,
+    /// Max concurrent PDF extracts on the bounded blocking pool
+    /// (plan R1b). `0` falls back to "half the host cores, clamped
+    /// to `[1, 16]`".
+    pub pdf_extract_concurrency: usize,
     /// Background sweep interval, in hours. A dedicated `tokio::spawn`
     /// task in `main.rs` calls `purge_older_than` every
     /// `purge_interval_hours`. Set to `0` to disable the background
@@ -61,6 +65,7 @@ impl Default for DocumentsConfig {
             max_extracted_chars: 100_000,
             max_docs_per_session: 50,
             pdf_extract_timeout_secs: 30,
+            pdf_extract_concurrency: 0,
             purge_interval_hours: 24,
             default_ttl_days: 30,
         }
@@ -108,6 +113,12 @@ impl DocumentsConfig {
                 toml.pdf_extract_timeout_secs,
                 defaults.pdf_extract_timeout_secs,
                 "DOCS_PDF_TIMEOUT_SECS",
+            )?,
+            pdf_extract_concurrency: resolve_primitive(
+                env_opt("DOCS_PDF_CONCURRENCY").as_deref(),
+                toml.pdf_extract_concurrency,
+                defaults.pdf_extract_concurrency,
+                "DOCS_PDF_CONCURRENCY",
             )?,
             purge_interval_hours: resolve_primitive(
                 env_opt("DOCS_PURGE_INTERVAL_H").as_deref(),

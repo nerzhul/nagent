@@ -51,6 +51,7 @@ pub mod storage;
 use std::sync::Arc;
 
 use serde::Serialize;
+use tokio::sync::Semaphore;
 
 /// Cheap to clone (the inner `Arc` wraps a `nagent_db::Db`).
 #[derive(Clone)]
@@ -75,6 +76,10 @@ struct DocumentStoreInner {
     /// reaching into `Config`. Always canonicalised on first use
     /// (see `storage::safe_disk_read`).
     cache_dir: std::path::PathBuf,
+    /// Semaphore gating concurrent PDF `pdf_extract::extract_text`
+    /// calls (plan R1b). Sized at boot; the route layer passes it
+    /// through `nagent_support::cpu::run_bounded`.
+    pdf_semaphore: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for DocumentStore {
@@ -83,24 +88,44 @@ impl std::fmt::Debug for DocumentStore {
             .field("db", &"<nagent_db::Db>")
             .field("max_extracted_chars", &self.inner.max_extracted_chars)
             .field("cache_dir", &self.inner.cache_dir)
+            .field("pdf_semaphore", &"<Arc<Semaphore>>")
             .finish()
     }
 }
 
 impl DocumentStore {
-    /// Build the shared documents state.
+    /// Build the shared documents state. `pdf_extract_concurrency`
+    /// is the cap on concurrent PDF extracts; `0` falls back to
+    /// "half the host cores, clamped to `[1, 16]`".
     pub fn new(
         db: nagent_db::Db,
         max_extracted_chars: usize,
         cache_dir: std::path::PathBuf,
+        pdf_extract_concurrency: usize,
     ) -> Self {
+        let permits = if pdf_extract_concurrency == 0 {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            ((cores + 1) / 2).clamp(1, 16)
+        } else {
+            pdf_extract_concurrency.max(1)
+        };
         Self {
             inner: Arc::new(DocumentStoreInner {
                 db,
                 max_extracted_chars,
                 cache_dir,
+                pdf_semaphore: Arc::new(Semaphore::new(permits)),
             }),
         }
+    }
+
+    /// Borrow the shared semaphore for PDF extracts. The upload
+    /// route hands this to
+    /// [`crate::documents::extract::extract_pdf_bounded`].
+    pub fn pdf_semaphore(&self) -> Arc<Semaphore> {
+        self.inner.pdf_semaphore.clone()
     }
 
     /// Borrow the shared [`nagent_db::Db`]. Routes / CLI / agent

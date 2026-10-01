@@ -42,7 +42,7 @@ async fn fresh_store() -> (DocumentStore, nagent_db::Db) {
         .expect("sqlite in-memory store must connect");
     // Run the migrations so `uploaded_documents` exists.
     store.migrate().await.expect("migrations must run");
-    let doc_store = DocumentStore::new(store.clone(), 100_000, std::env::temp_dir());
+    let doc_store = DocumentStore::new(store.clone(), 100_000, std::env::temp_dir(), 0);
     (doc_store, store)
 }
 
@@ -75,8 +75,8 @@ async fn read_document_happy_path_returns_extracted_text() {
 
     doc_store
         .db()
-        .documents
         .for_user(Uuid::nil())
+        .documents()
         .insert(
             doc_id,
             session_id,
@@ -143,8 +143,8 @@ async fn read_document_other_session_scope_is_unknown() {
 
     doc_store
         .db()
-        .documents
         .for_user(Uuid::nil())
+        .documents()
         .insert(
             doc_id,
             session_a,
@@ -209,8 +209,8 @@ async fn read_document_file_missing_on_disk_returns_agent_failed() {
 
     doc_store
         .db()
-        .documents
         .for_user(Uuid::nil())
+        .documents()
         .insert(
             doc_id,
             session_id,
@@ -298,6 +298,7 @@ async fn read_document_truncates_long_text() {
         },
         5,
         std::env::temp_dir(),
+        0,
     );
     let session_id = Uuid::new_v4();
     let doc_id = Uuid::new_v4();
@@ -314,8 +315,8 @@ async fn read_document_truncates_long_text() {
     std::fs::write(&file_path, "0123456789").unwrap();
     short_store
         .db()
-        .documents
         .for_user(Uuid::nil())
+        .documents()
         .insert(
             doc_id,
             session_id,
@@ -413,8 +414,8 @@ async fn read_document_blocks_cross_user_reads() {
     std::fs::write(&file_path, "user A secret").unwrap();
     doc_store
         .db()
-        .documents
         .for_user(user_a)
+        .documents()
         .insert(
             doc_id,
             session_id,
@@ -487,7 +488,7 @@ async fn read_document_blocks_disk_path_escape() {
             .as_nanos()
     ));
     std::fs::create_dir_all(cache_dir.join("ab/cd")).unwrap();
-    let doc_store = DocumentStore::new(auth, 100_000, cache_dir.clone());
+    let doc_store = DocumentStore::new(auth, 100_000, cache_dir.clone(), 0);
 
     let outside_dir = std::env::temp_dir().join(format!(
         "nagent-doc-escape-outside-{}-{}",
@@ -506,8 +507,8 @@ async fn read_document_blocks_disk_path_escape() {
 
     doc_store
         .db()
-        .documents
         .for_user(user_id)
+        .documents()
         .insert(
             doc_id,
             session_id,

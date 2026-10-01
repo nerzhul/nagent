@@ -97,7 +97,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // `Some`). The check runs early — a misconfigured server refuses
     // to boot with a clear error instead of 500-ing on every upload.
     let chat_sessions_state = auth_store.clone().map(|s| ChatSessionsState {
-        sessions: crate::chat::sessions::ChatSessions::new(s.chat_sessions.clone()),
+        sessions: crate::chat::sessions::ChatSessions::new(s.admin().chat_sessions),
     });
     let documents_state = if cfg.documents.enabled {
         let store = match auth_store.clone() {
@@ -120,6 +120,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
                 store,
                 cfg.documents.max_extracted_chars,
                 cfg.documents.cache_dir.clone(),
+                cfg.documents.pdf_extract_concurrency,
             ),
         };
         match crate::documents::purge::purge_older_than(
@@ -302,15 +303,19 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     };
 
     // ---- Compose AuthState ----------------------------------------------
-    let auth = auth_store.map(|store: nagent_db::Db| AuthState {
-        store,
-        cfg: Arc::new(cfg.auth.clone()),
-        oidc: auth_oidc,
-        passkey: auth_passkey,
-        login_rate_limiter: LoginRateLimiter::new(),
-        services: services.clone(),
-        credential_resolver,
-        credentials_key,
+    let auth = auth_store.map(|store: nagent_db::Db| {
+        let hash_concurrency = cfg.auth.password.hash_concurrency.max(1);
+        AuthState {
+            store,
+            cfg: Arc::new(cfg.auth.clone()),
+            oidc: auth_oidc,
+            passkey: auth_passkey,
+            login_rate_limiter: LoginRateLimiter::new(),
+            services: services.clone(),
+            credential_resolver,
+            credentials_key,
+            password_semaphore: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
+        }
     });
 
     // ---- SttState -------------------------------------------------------

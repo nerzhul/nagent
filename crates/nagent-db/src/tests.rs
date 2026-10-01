@@ -80,12 +80,12 @@ mod users {
     #[tokio::test]
     async fn create_then_get_and_conflict() {
         let db = sqlite_db().await;
-        let id = db
+        let id = db.admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(b"hash"))
             .await
             .expect("create");
-        let fetched = db
+        let fetched = db.admin()
             .users
             .get_by_id(id)
             .await
@@ -94,13 +94,13 @@ mod users {
         assert_eq!(fetched.email, "alice@example.com");
         assert_eq!(fetched.provider, "local");
         // Case-insensitive duplicate.
-        let dup = db
+        let dup = db.admin()
             .users
             .create("ALICE@example.com", "Alice2", "local", Some(b"hash"))
             .await;
         assert!(matches!(dup, Err(crate::Error::Conflict(_))));
         // get_by_email round-trips.
-        let by_email = db
+        let by_email = db.admin()
             .users
             .get_by_email("Alice@Example.COM")
             .await
@@ -108,31 +108,31 @@ mod users {
             .expect("row");
         assert_eq!(by_email.id, id);
         // set_password + delete + get_by_id is None.
-        let affected = db.users.set_password(id, b"new-hash").await.expect("set");
+        let affected = db.admin().users.set_password(id, b"new-hash").await.expect("set");
         assert_eq!(affected, 1);
-        let deleted = db.users.delete(id).await.expect("delete");
+        let deleted = db.admin().users.delete(id).await.expect("delete");
         assert_eq!(deleted, 1);
-        assert!(db.users.get_by_id(id).await.expect("get").is_none());
+        assert!(db.admin().users.get_by_id(id).await.expect("get").is_none());
     }
 
     #[cfg(feature = "db-sqlite")]
     #[tokio::test]
     async fn list_and_count_by_provider() {
         let db = sqlite_db().await;
-        db.users
+        db.admin().users
             .create("a@x", "A", "local", Some(b"h"))
             .await
             .unwrap();
-        db.users
+        db.admin().users
             .create("b@x", "B", "local", Some(b"h"))
             .await
             .unwrap();
-        db.users.create("c@x", "C", "oidc:foo", None).await.unwrap();
-        let all = db.users.list(None).await.expect("list");
+        db.admin().users.create("c@x", "C", "oidc:foo", None).await.unwrap();
+        let all = db.admin().users.list(None).await.expect("list");
         assert_eq!(all.len(), 3);
-        let locals = db.users.list(Some("local")).await.expect("list locals");
+        let locals = db.admin().users.list(Some("local")).await.expect("list locals");
         assert_eq!(locals.len(), 2);
-        let local_count = db.users.count_by_provider("local").await.expect("count");
+        let local_count = db.admin().users.count_by_provider("local").await.expect("count");
         assert_eq!(local_count, 2);
     }
 }
@@ -147,23 +147,23 @@ mod chat_sessions {
     #[tokio::test]
     async fn scoped_bind_and_verify() {
         let db = sqlite_db().await;
-        let user = db
+        let user = db.admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(b"h"))
             .await
             .unwrap();
-        let scoped = db.chat_sessions.for_user(user);
+        let scoped = db.for_user(user).chat_sessions();
         let session = Uuid::new_v4();
         scoped.bind(session).await.expect("bind");
         // First verify succeeds.
         scoped.touch_and_verify(session).await.expect("verify ok");
         // Second bind by a different user must NOT match.
-        let other = db
+        let other = db.admin()
             .users
             .create("bob@example.com", "Bob", "local", Some(b"h"))
             .await
             .unwrap();
-        let other_scoped = db.chat_sessions.for_user(other);
+        let other_scoped = db.for_user(other).chat_sessions();
         let res = other_scoped.touch_and_verify(session).await;
         assert!(
             matches!(
@@ -185,12 +185,12 @@ mod documents {
     #[tokio::test]
     async fn scoped_insert_list_delete() {
         let db = sqlite_db().await;
-        let user = db
+        let user = db.admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(b"h"))
             .await
             .unwrap();
-        let docs = db.documents.for_user(user);
+        let docs = db.for_user(user).documents();
         let session = Uuid::new_v4();
         let id = Uuid::new_v4();
         docs.insert(
@@ -211,12 +211,12 @@ mod documents {
         assert_eq!(listed[0].id, id);
         assert_eq!(listed[0].original_name, "test.txt");
         // Cross-user isolation: a different user must NOT see the row.
-        let other = db
+        let other = db.admin()
             .users
             .create("bob@example.com", "Bob", "local", Some(b"h"))
             .await
             .unwrap();
-        let other_docs = db.documents.for_user(other);
+        let other_docs = db.for_user(other).documents();
         assert_eq!(other_docs.count_for_session(session).await.unwrap(), 0);
         assert!(other_docs
             .get_for_session(id, session)
@@ -238,13 +238,15 @@ mod documents {
         let db = sqlite_db().await;
         // Insert a row, sweep with a 1ns TTL — the row must come back.
         let user = db
+            .admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(b"h"))
             .await
             .unwrap();
         let session = Uuid::new_v4();
         let id = Uuid::new_v4();
-        db.documents
+        db.admin()
+            .documents
             .insert(
                 id,
                 session,
@@ -259,6 +261,7 @@ mod documents {
             .await
             .expect("insert");
         let swept = db
+            .admin()
             .documents
             .sweep_older_than(std::time::Duration::from_nanos(1))
             .await
@@ -278,12 +281,12 @@ mod credentials {
     #[tokio::test]
     async fn scoped_upsert_fetch_list_delete() {
         let db = sqlite_db().await;
-        let user = db
+        let user = db.admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(b"h"))
             .await
             .unwrap();
-        let creds = db.credentials.for_user(user);
+        let creds = db.for_user(user).credentials();
         // First upsert: store two fields.
         let nonce1 = vec![0xAA; 12];
         let nonce2 = vec![0xBB; 12];
@@ -314,12 +317,12 @@ mod credentials {
         let keys = creds.list_field_keys("github").await.expect("list 2");
         assert_eq!(keys, vec!["only".to_string()]);
         // Cross-user isolation.
-        let other = db
+        let other = db.admin()
             .users
             .create("bob@example.com", "Bob", "local", Some(b"h"))
             .await
             .unwrap();
-        let other_creds = db.credentials.for_user(other);
+        let other_creds = db.for_user(other).credentials();
         assert!(other_creds
             .fetch("github", "only")
             .await
@@ -347,12 +350,12 @@ mod credentials {
 #[ignore = "requires NAGENT_TEST_PG_URL; run with --include-ignored in CI"]
 async fn postgres_parity_create_user() {
     let db = pg_or_skip!();
-    let id = db
+    let id = db.admin()
         .users
         .create("pg@example.com", "PG", "local", Some(b"h"))
         .await
         .expect("pg create");
-    let fetched = db.users.get_by_id(id).await.expect("get").expect("row");
+    let fetched = db.admin().users.get_by_id(id).await.expect("get").expect("row");
     assert_eq!(fetched.email, "pg@example.com");
 }
 
@@ -361,12 +364,12 @@ async fn postgres_parity_create_user() {
 #[ignore = "requires NAGENT_TEST_PG_URL; run with --include-ignored in CI"]
 async fn postgres_parity_documents_scoped() {
     let db = pg_or_skip!();
-    let user = db
+    let user = db.admin()
         .users
         .create("pg-doc@example.com", "PG", "local", Some(b"h"))
         .await
         .unwrap();
-    let docs = db.documents.for_user(user);
+    let docs = db.for_user(user).documents();
     let session = Uuid::new_v4();
     let id = Uuid::new_v4();
     docs.insert(id, session, "x.txt", "text/plain", 1, 1, None, "/tmp/x")
@@ -382,12 +385,12 @@ async fn postgres_parity_documents_scoped() {
 #[ignore = "requires NAGENT_TEST_PG_URL; run with --include-ignored in CI"]
 async fn postgres_parity_credentials_scoped() {
     let db = pg_or_skip!();
-    let user = db
+    let user = db.admin()
         .users
         .create("pg-cred@example.com", "PG", "local", Some(b"h"))
         .await
         .unwrap();
-    let creds = db.credentials.for_user(user);
+    let creds = db.for_user(user).credentials();
     let nonce = vec![0xCC; 12];
     creds
         .upsert("svc", &[("k".to_string(), nonce.clone(), vec![1])])

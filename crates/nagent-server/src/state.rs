@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use axum::extract::FromRef;
 use stt_core::{PoolDispatch, WhisperBackend};
+use tokio::sync::Semaphore;
 
 use crate::agents::ServiceRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
@@ -97,6 +98,11 @@ pub struct AuthState {
     pub services: Arc<ServiceRegistry>,
     pub credential_resolver: Option<Arc<CredentialResolver>>,
     pub credentials_key: Option<Arc<CredentialsKey>>,
+    /// Semaphore gating concurrent argon2 hash/verify calls on
+    /// the blocking pool (plan R1a). Sized by
+    /// `cfg.password.hash_concurrency` at boot; clone once and
+    /// pass to the password helpers via `Arc::clone`.
+    pub password_semaphore: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for AuthState {
@@ -127,6 +133,7 @@ impl AuthState {
     /// opts in. Used by tests that only care about the
     /// middleware/auth-store interaction.
     pub fn new(store: nagent_db::Db, cfg: Arc<Config>) -> Self {
+        let hash_concurrency = cfg.auth.password.hash_concurrency.max(1);
         Self {
             store,
             cfg: Arc::new(cfg.auth.clone()),
@@ -136,6 +143,7 @@ impl AuthState {
             services: ServiceRegistry::empty().into_arc(),
             credential_resolver: None,
             credentials_key: None,
+            password_semaphore: Arc::new(Semaphore::new(hash_concurrency)),
         }
     }
 

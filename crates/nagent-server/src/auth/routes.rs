@@ -21,7 +21,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::auth::error::{require_auth_store_from_auth, AuthError};
+use crate::auth::error::{require_admin_store_from_auth, require_auth_store_from_auth, AuthError};
 use crate::auth::middleware::check_csrf;
 use crate::auth::session;
 use crate::auth::AuthUser;
@@ -42,7 +42,7 @@ pub async fn get_preferences_handler(
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Result<Response, AuthError> {
     let store = require_auth_store_from_auth(&state)?;
-    let prefs = store.preferences.get(user.id).await?;
+    let prefs = store.for_user(user.id).preferences().get(user.id).await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
         "share_timezone_enabled": prefs.share_timezone_enabled,
@@ -88,7 +88,11 @@ pub async fn put_preferences_handler(
         ));
     };
     let store = require_auth_store_from_auth(&state)?;
-    let prefs = store.preferences.upsert(user.id, loc, tz).await?;
+    let prefs = store
+        .for_user(user.id)
+        .preferences()
+        .upsert(user.id, loc, tz)
+        .await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
         "share_timezone_enabled": prefs.share_timezone_enabled,
@@ -112,7 +116,7 @@ pub async fn logout_handler(
     // Security plans #1 + #7: `delete_session` expects the
     // SHA-256 of the opaque session token (the
     // `sessions.token_hash` primary key), NOT the user id.
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .sessions
         .delete(&user.session_token_hash)
         .await?;
@@ -125,7 +129,7 @@ pub async fn logout_handler(
         provider = %user.provider,
         "auth logout ok"
     );
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .events
         .record(nagent_db::NewAuthEvent::auth(
             Some(user.id),
@@ -222,11 +226,13 @@ mod tests {
     async fn logout_revokes_session_so_cookie_returns_401() {
         let (store, cfg) = temp_store().await;
         let user_id = store
+            .admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(b"hash"))
             .await
             .unwrap();
         let session = store
+            .admin()
             .sessions
             .create(
                 user_id,
@@ -280,6 +286,7 @@ mod tests {
             "extract_auth_user must populate user.session_token_hash from the row"
         );
         let deleted = store
+            .admin()
             .sessions
             .delete(&user.session_token_hash)
             .await
@@ -311,11 +318,13 @@ mod tests {
     async fn logout_revokes_session_so_bearer_returns_401() {
         let (store, cfg) = temp_store().await;
         let user_id = store
+            .admin()
             .users
             .create("bob@example.com", "Bob", "local", Some(b"hash"))
             .await
             .unwrap();
         let session = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
@@ -349,7 +358,12 @@ mod tests {
         );
 
         // 2. Delete via session token hash (the regression).
-        let deleted = store.sessions.delete(&session.token_hash).await.unwrap();
+        let deleted = store
+            .admin()
+            .sessions
+            .delete(&session.token_hash)
+            .await
+            .unwrap();
         assert_eq!(deleted, 1);
 
         // 3. Bearer now 401.
@@ -384,11 +398,13 @@ mod tests {
         // contract.
         let (store, _cfg) = temp_store().await;
         let user_id = store
+            .admin()
             .users
             .create("carol@example.com", "Carol", "local", Some(b"hash"))
             .await
             .unwrap();
         let s1 = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
@@ -398,6 +414,7 @@ mod tests {
             .clone()
             .expect("create_session must mint a plaintext token");
         let s2 = store
+            .admin()
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
@@ -408,12 +425,13 @@ mod tests {
             .expect("create_session must mint a plaintext token");
         assert_ne!(s1_token, s2_token);
 
-        let deleted = store.sessions.delete(&s1.token_hash).await.unwrap();
+        let deleted = store.admin().sessions.delete(&s1.token_hash).await.unwrap();
         assert_eq!(deleted, 1, "only the targeted session is removed");
 
         // s2 must still resolve (i.e. it was NOT deleted by s1's
         // logout).
         let s2_lookup = store
+            .admin()
             .sessions
             .lookup_by_token_hash(&s2.token_hash)
             .await

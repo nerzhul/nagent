@@ -60,12 +60,55 @@ impl std::str::FromStr for DbEngine {
 /// config-agnostic: the server crate translates its
 /// `config::AuthDbConfig` into this struct so the per-domain SQL
 /// never has to know about TOML keys or env vars.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DbOptions {
     pub backend: DbEngine,
     pub url: String,
     pub max_connections: u32,
     pub auto_migrate: bool,
+}
+
+/// Manually implemented to redact any password embedded in `url`
+/// (plan S11). A Postgres URL of the form
+/// `postgres://user:secret@host/db` would otherwise leak the
+/// `secret` half into every `Debug` print, log line, and panic
+/// message — both the access log and the startup banner build
+/// their lines from these options.
+impl std::fmt::Debug for DbOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbOptions")
+            .field("backend", &self.backend)
+            .field("url", &redact_url(&self.url))
+            .field("max_connections", &self.max_connections)
+            .field("auto_migrate", &self.auto_migrate)
+            .finish()
+    }
+}
+
+/// Strip the userinfo password (if any) from a connection URL.
+/// The scheme + host + database are kept so an operator reading
+/// the log can still see which database is being connected to.
+fn redact_url(url: &str) -> String {
+    // Cheap parser: locate `://`, then look for `@`. The substring
+    // between them is the userinfo; if it contains a `:`, only the
+    // password half is masked.
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    let Some(at) = after_scheme.find('@') else {
+        return url.to_string();
+    };
+    let userinfo = &after_scheme[..at];
+    let Some(colon) = userinfo.find(':') else {
+        return url.to_string();
+    };
+    format!(
+        "{}://{}:****{}",
+        &url[..scheme_end],
+        &userinfo[..colon],
+        &after_scheme[at..]
+    )
 }
 
 /// DB-pool handle returned by [`connect`] and by the [`Db`] facade.
@@ -147,4 +190,86 @@ pub async fn connect_postgres(opts: &DbOptions) -> Result<sqlx::PgPool, Error> {
         .connect(&opts.url)
         .await?;
     Ok(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_password_in_postgres_url() {
+        // Postgres URL: scheme://user:password@host:port/db
+        let opts = DbOptions {
+            backend: DbEngine::Postgres,
+            url: "postgres://alice:hunter2@db.example.com:5432/app".into(),
+            max_connections: 4,
+            auto_migrate: false,
+        };
+        let dbg = format!("{opts:?}");
+        assert!(
+            !dbg.contains("hunter2"),
+            "password must be redacted; got: {dbg}"
+        );
+        assert!(dbg.contains("alice"), "user must remain visible");
+        assert!(dbg.contains("db.example.com"), "host must remain visible");
+        assert!(dbg.contains("****"), "redaction marker must appear");
+    }
+
+    #[test]
+    fn debug_passes_through_url_without_password() {
+        // SQLite path-style URLs have no userinfo; the redaction
+        // helper must leave them alone.
+        let opts = DbOptions {
+            backend: DbEngine::Sqlite,
+            url: "sqlite://file:auth.db?mode=rwc".into(),
+            max_connections: 1,
+            auto_migrate: true,
+        };
+        let dbg = format!("{opts:?}");
+        assert!(
+            dbg.contains("sqlite://file:auth.db"),
+            "url must round-trip: {dbg}"
+        );
+        assert!(
+            !dbg.contains("****"),
+            "no-password url must not gain a redaction marker"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_password_in_userless_url() {
+        // Some URL formats embed `: something` without a user, e.g.
+        // `scheme://:password@host`. The redaction helper should
+        // still mask the password half.
+        let opts = DbOptions {
+            backend: DbEngine::Postgres,
+            url: "postgres://:hunter2@db.example.com/app".into(),
+            max_connections: 1,
+            auto_migrate: false,
+        };
+        let dbg = format!("{opts:?}");
+        assert!(
+            !dbg.contains("hunter2"),
+            "userless-password must be redacted; got: {dbg}"
+        );
+        assert!(dbg.contains("****"));
+    }
+
+    #[test]
+    fn debug_leaves_user_only_url_alone() {
+        // `user@host` (no password) — there is nothing to redact,
+        // the helper should round-trip.
+        let opts = DbOptions {
+            backend: DbEngine::Postgres,
+            url: "postgres://alice@db.example.com/app".into(),
+            max_connections: 1,
+            auto_migrate: false,
+        };
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("alice"));
+        assert!(
+            !dbg.contains("****"),
+            "user-only url must not gain a redaction marker"
+        );
+    }
 }

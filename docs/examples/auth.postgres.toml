@@ -40,6 +40,7 @@ argon2_memory_kib = 19456               # OWASP 2025 minimum
 argon2_iterations = 2
 argon2_parallelism = 1
 min_password_length = 12                # bump up for a production deployment
+# hash_concurrency = 0                          # argon2 ops on the blocking pool; 0 = half cores (plan R1a)
 allow_registration = false              # admin provisions accounts via the CLI
 
 [auth.oidc]

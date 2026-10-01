@@ -314,7 +314,7 @@ async fn create_admin(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyh
 
     let db = open_store(&cfg).await?;
 
-    if let Some(existing) = db.users.get_by_email(email).await? {
+    if let Some(existing) = db.admin().users.get_by_email(email).await? {
         return Err(anyhow::anyhow!(
             "a user with email {:?} already exists (id = {})",
             existing.email,
@@ -322,20 +322,31 @@ async fn create_admin(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyh
         ));
     }
 
-    let hash = crate::auth::password::hash_password(
-        &password,
-        cfg.auth.password.argon2_memory_kib,
-        cfg.auth.password.argon2_iterations,
-        cfg.auth.password.argon2_parallelism,
-    )
+    // Plan R1a: route the CLI create-admin hash through
+    // `spawn_blocking` so the CLI process does not freeze on a
+    // tens-of-MiB argon2 run (single-threaded CLIs are especially
+    // sensitive).
+    let cfg_snapshot = cfg.clone();
+    let password_for_blocking = password.clone();
+    let hash = tokio::task::spawn_blocking(move || {
+        crate::auth::password::hash_password(
+            &password_for_blocking,
+            cfg_snapshot.auth.password.argon2_memory_kib,
+            cfg_snapshot.auth.password.argon2_iterations,
+            cfg_snapshot.auth.password.argon2_parallelism,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("hash_password join: {e}"))?
     .map_err(|e| anyhow::anyhow!("hash_password failed: {e}"))?;
 
     let user_id = db
+        .admin()
         .users
         .create(email, email, "local", Some(&hash))
         .await
         .map_err(|e| anyhow::anyhow!("create_user failed: {e}"))?;
-    db.events.record(nagent_db::NewAuthEvent::auth(
+    db.admin().events.record(nagent_db::NewAuthEvent::auth(
         Some(user_id),
         "create_admin",
         "local",
@@ -390,7 +401,7 @@ async fn list_users(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow
     check_running_server(opts.force)?;
     let cfg = Config::load(cli)?;
     let db = open_store(&cfg).await?;
-    let users = db.users.list(opts.provider.as_deref()).await?;
+    let users = db.admin().users.list(opts.provider.as_deref()).await?;
     for u in users {
         println!(
             "{}\t{}\t{}\t{}",
@@ -445,6 +456,7 @@ async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyho
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("--email is required"))?;
     let target = db
+        .admin()
         .users
         .get_by_email(email)
         .await?
@@ -455,7 +467,7 @@ async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyho
     // "1 local user minimum" guard is enough to prevent the
     // lockout class.
     if target.provider == "local" && cfg.auth.enabled {
-        let local_count = db.users.count_by_provider("local").await?;
+        let local_count = db.admin().users.count_by_provider("local").await?;
         if local_count <= 1 {
             return Err(anyhow::anyhow!(
                 "refusing to delete the last local user while auth is enabled; \
@@ -477,7 +489,7 @@ async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyho
         }
     }
 
-    db.users.delete(target.id).await?;
+    db.admin().users.delete(target.id).await?;
     println!("deleted {}", target.id);
     Ok(ExitCode::from(0))
 }

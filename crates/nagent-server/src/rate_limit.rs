@@ -36,8 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
-use dashmap::DashMap;
-use nagent_support::ratelimit::SweepClock;
+use nagent_support::ratelimit::TokenDecision;
 use thiserror::Error;
 
 /// Outcome of a single rate-limit check.
@@ -80,20 +79,17 @@ impl RateLimitPolicy {
     }
 }
 
-/// Per-IP bucket state.
-#[derive(Debug)]
-struct Bucket {
-    /// Current token count (fractional; refills are continuous).
-    tokens: f64,
-    /// Last time the bucket was updated (`check` or refill).
-    last_update: Instant,
-}
-
 /// A per-IP token-bucket rate limiter.
 ///
-/// Cheap to clone: the inner map and the sweep clock are wrapped in
-/// `Arc`s, and a `RateLimiter` instance is meant to live in the
-/// shared [`crate::AppState`].
+/// Cheap to clone: the inner map is wrapped in `Arc`s, and a
+/// `RateLimiter` instance is meant to live in the shared
+/// [`crate::AppState`].
+///
+/// Plan 4.B: the per-bucket math and the sweep clock live in
+/// [`nagent_support::ratelimit::TokenBucketMap`] so every limiter
+/// in the workspace (per-IP today, per-user limiter in SF-5) shares
+/// the same primitive. This struct only layers the loopback bypass
+/// and the per-IP keying on top.
 #[derive(Clone)]
 pub struct RateLimiter {
     inner: Arc<RateLimiterInner>,
@@ -101,12 +97,10 @@ pub struct RateLimiter {
 
 struct RateLimiterInner {
     policy: RateLimitPolicy,
-    /// Buckets keyed by source IP.
-    buckets: DashMap<IpAddr, Bucket>,
-    sweep: SweepClock,
-    /// Counter used to throttle the eviction sweep. `1` means run a
-    /// sweep at most every 1024 `check()` calls.
-    sweep_every: u64,
+    /// Buckets keyed by source IP. The shared `TokenBucketMap`
+    /// owns the per-entry math + sweep; this module only layers
+    /// the loopback bypass and the per-IP keying on top.
+    buckets: nagent_support::ratelimit::TokenBucketMap<IpAddr>,
 }
 
 impl std::fmt::Debug for RateLimiter {
@@ -130,9 +124,7 @@ impl RateLimiter {
         Self {
             inner: Arc::new(RateLimiterInner {
                 policy,
-                buckets: DashMap::new(),
-                sweep: SweepClock::new(),
-                sweep_every: nagent_support::ratelimit::DEFAULT_SWEEP_EVERY,
+                buckets: nagent_support::ratelimit::TokenBucketMap::new(),
             }),
         }
     }
@@ -157,41 +149,21 @@ impl RateLimiter {
             return Ok(());
         }
 
-        self.maybe_sweep();
+        if self.inner.buckets.should_sweep() {
+            self.sweep_idle_buckets_inner(Duration::from_secs(60));
+        }
 
         let policy = self.inner.policy;
         let cap = policy.tokens_per_minute as f64;
         let refill = policy.refill_per_ms();
         let now = Instant::now();
 
-        // Per-bucket critical section: DashMap shard lock is fine here,
-        // the work is O(1) and contains no `.await`.
-        let mut entry = self.inner.buckets.entry(ip).or_insert_with(|| Bucket {
-            tokens: cap,
-            last_update: now,
-        });
-        let bucket = entry.value_mut();
-
-        // Refill since the last touch. `last_update` is monotonic per
-        // bucket, so a clock jump backwards cannot inflate the bucket.
-        let elapsed_ms = now
-            .saturating_duration_since(bucket.last_update)
-            .as_secs_f64()
-            * 1000.0;
-        bucket.tokens = (bucket.tokens + elapsed_ms * refill).min(cap);
-        bucket.last_update = now;
-
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
-            Ok(())
-        } else {
-            // Time to accumulate a full token at the configured rate.
-            let retry_after_ms = if refill > 0.0 {
-                ((1.0 - bucket.tokens) / refill).ceil() as u64
-            } else {
-                u64::MAX / 2 // effectively infinite
-            };
-            Err(RateLimitError::Limited { ip, retry_after_ms })
+        match self.inner.buckets.try_consume(ip, cap, refill, now) {
+            TokenDecision::Allow => Ok(()),
+            TokenDecision::Deny { retry_after } => {
+                let retry_after_ms = retry_after.as_millis().min(u64::MAX as u128) as u64;
+                Err(RateLimitError::Limited { ip, retry_after_ms })
+            }
         }
     }
 
@@ -215,31 +187,16 @@ impl RateLimiter {
 
     /// Trigger the eviction sweep deterministically (test-only entry
     /// point). Production code drives the sweep indirectly through
-    /// `maybe_sweep()`.
+    /// the shared
+    /// [`nagent_support::ratelimit::SweepClock`].
     #[doc(hidden)]
     pub fn sweep_idle_buckets(&self) {
         self.sweep_idle_buckets_inner(Duration::from_secs(60));
     }
 
-    fn maybe_sweep(&self) {
-        if self.inner.sweep.tick(self.inner.sweep_every) {
-            self.sweep_idle_buckets_inner(Duration::from_secs(60));
-        }
-    }
-
     fn sweep_idle_buckets_inner(&self, idle_for: Duration) {
-        let now = Instant::now();
         let cap = self.inner.policy.tokens_per_minute as f64;
-        self.inner.buckets.retain(|_ip, bucket| {
-            // Keep the bucket if it has been touched recently *or* if
-            // it is not yet back to full capacity (an idle bucket
-            // that is still refilling is one that was just used).
-            nagent_support::ratelimit::should_keep_during_idle_eviction(
-                now,
-                bucket.last_update,
-                idle_for,
-            ) || bucket.tokens < cap
-        });
+        let _ = self.inner.buckets.sweep_idle(Instant::now(), idle_for, cap);
     }
 }
 
@@ -427,7 +384,7 @@ mod tests {
         }
         // Manually drain both back to full and force their last_update
         // into the past.
-        for mut e in rl.inner.buckets.iter_mut() {
+        for mut e in rl.inner.buckets.buckets_for_tests().iter_mut() {
             e.value_mut().tokens = 60.0;
             e.value_mut().last_update = Instant::now() - Duration::from_secs(120);
         }

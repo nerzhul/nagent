@@ -7,8 +7,28 @@ description = "Per-domain repositories over a shared sqlx pool (sqlite + postgre
 
 [features]
 default = ["db-sqlite", "db-postgres"]
+# Compile-time markers that downstream crates (currently
+# `nagent-server`) forward so an operator can build with only one
+# engine enabled. Plan 4.A R6 also attempted to gate the actual
+# sqlx driver features on these; the per-domain repositories each
+# do `use sqlx::{Row, SqlitePool}` / `use sqlx::{PgPool, Row}`
+# unconditionally, so a true slim build (no libpq or no libsqlite
+# in the binary) would require turning every per-domain `use`
+# into `cfg(feature = …)` pairs. Per the plan's escape hatch
+# ("If this proves too invasive, remove the features instead of
+# keeping them half-wired"), we keep the markers but document the
+# limitation; the `AnyPool` enum variants and every per-domain
+# module's `match` arm remain `#[cfg]`-gated so the code itself is
+# fully per-engine.
 db-sqlite = []
 db-postgres = []
+# Compile-time escape hatches the integration tests use to assert
+# on schema shape, audit rows the spawned task wrote, etc. The
+# helpers run caller-supplied SQL, so the `test-util` feature is
+# OFF by default and ON only through the dev-dependency of crates
+# that need them. Production binaries cannot reach them at the
+# type level (plan S10).
+test-util = []
 
 [dependencies]
 nagent-support = { path = "../nagent-support" }
@@ -23,7 +43,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-# Both drivers are always linked; the `db-sqlite` / `db-postgres`
-# cargo features are forwarded from `nagent-server` as
-# documentation markers (see the `features` table above).
+# Both drivers are always linked; the per-domain SQL uses
+# `use sqlx::{Row, SqlitePool}` / `use sqlx::{PgPool, Row}` and
+# the `AnyPool` enum is per-driver via `cfg`, so the runtime cost
+# is one libpq / libsqlite pair rather than the full PostgreSQL
+# client. See the `db-sqlite` / `db-postgres` features above for
+# the slim-build limitation.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"] }

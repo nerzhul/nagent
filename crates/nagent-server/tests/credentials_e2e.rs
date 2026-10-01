@@ -74,6 +74,7 @@ async fn migration_creates_user_credentials_and_target_service() {
 async fn upsert_delete_round_trip() {
     let store = temp_store().await;
     let user_id = store
+        .admin()
         .users
         .create("alice@example.com", "Alice", "local", Some(b"x"))
         .await
@@ -83,6 +84,7 @@ async fn upsert_delete_round_trip() {
     let s1 = encrypt(&key, "secret-value-1").expect("seal 1");
     let s2 = encrypt(&key, "secret-value-2").expect("seal 2");
     store
+        .admin()
         .credentials
         .upsert(
             user_id,
@@ -96,6 +98,7 @@ async fn upsert_delete_round_trip() {
         .expect("upsert");
 
     let filled = store
+        .admin()
         .credentials
         .list_field_keys(user_id, "test_svc")
         .await
@@ -105,6 +108,7 @@ async fn upsert_delete_round_trip() {
     assert_eq!(keys, vec!["host", "token"]);
 
     let row = store
+        .admin()
         .credentials
         .fetch(user_id, "test_svc", "host")
         .await
@@ -125,6 +129,7 @@ async fn upsert_delete_round_trip() {
     // the `token` row.
     let s3 = encrypt(&key, "new-host").expect("seal 3");
     store
+        .admin()
         .credentials
         .upsert(
             user_id,
@@ -134,6 +139,7 @@ async fn upsert_delete_round_trip() {
         .await
         .expect("replace");
     let filled = store
+        .admin()
         .credentials
         .list_field_keys(user_id, "test_svc")
         .await
@@ -142,12 +148,14 @@ async fn upsert_delete_round_trip() {
 
     // DELETE clears the whole service.
     let cleared = store
+        .admin()
         .credentials
         .delete_service(user_id, "test_svc")
         .await
         .expect("delete");
     assert_eq!(cleared, 1);
     assert!(store
+        .admin()
         .credentials
         .list_field_keys(user_id, "test_svc")
         .await
@@ -159,6 +167,7 @@ async fn upsert_delete_round_trip() {
 async fn delete_service_credentials_unknown_user_is_zero() {
     let store = temp_store().await;
     let n = store
+        .admin()
         .credentials
         .delete_service(Uuid::new_v4(), "nope")
         .await
@@ -174,6 +183,7 @@ async fn resolver_audit_row_records_target_service() {
     // and assert the audit row shows up.
     let store = temp_store().await;
     let user_id = store
+        .admin()
         .users
         .create("bob@example.com", "Bob", "local", Some(b"x"))
         .await

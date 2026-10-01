@@ -78,6 +78,17 @@ pub fn require_auth_store_from_auth(state: &crate::AuthState) -> Result<&nagent_
     Ok(&state.store)
 }
 
+/// Helper for auth handlers that need the unscoped, cross-user
+/// repositories ([`nagent_db::AdminDb`]). The auth subtree is the
+/// place where lookups like `users.get_by_email` /
+/// `passkeys.get_by_credential_id` legitimately need cross-user
+/// reach — the layering guard (package E) tracks the call sites.
+pub fn require_admin_store_from_auth(
+    state: &crate::AuthState,
+) -> Result<nagent_db::AdminDb, AuthError> {
+    Ok(state.store.admin())
+}
+
 /// Helper for auth handlers: pull the passkey sub-state off an
 /// `Arc<AppState>`. Returns `AuthError::Internal` when passkey is
 /// not enabled — the passkey routes are only mounted when

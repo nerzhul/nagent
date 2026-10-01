@@ -8,20 +8,36 @@
 //!
 //! ## Db facade
 //!
-//! [`Db`] bundles every per-domain repository on top of a shared
-//! [`AnyPool`]. Production code talks to a `Db`; the legacy
-//! `auth/store.rs::AuthStore` facade in `nagent-server` is a thin
-//! wrapper that forwards every call to a `Db`.
+//! [`Db`] owns the shared [`AnyPool`] and exposes two capability-
+//! narrowed handles (plan S4):
 //!
-//! ## Per-user scoping
+//! - [`Db::for_user`] returns a [`UserDb`] that owns the scoped
+//!   per-user views ([`documents::Documents::for_user`],
+//!   [`credentials::Credentials::for_user`],
+//!   [`chat_sessions::ChatSessions::for_user`]) and the per-user
+//!   repositories that already take `user_id` as a parameter
+//!   ([`preferences::Preferences`], [`sessions::Sessions`]).
+//!   Handlers and agents receive a `UserDb`; the scoped views do
+//!   not have a `user_id` argument on their per-row methods, so
+//!   the SQL filter cannot be accidentally dropped.
+//! - [`Db::admin`] returns an [`AdminDb`] with every unscoped
+//!   repository (`users`, `events`, `passkeys`, the unscoped
+//!   `sessions`, …). Production code reaches for it only in the
+//!   `nagent-server` CLI subcommands and the documents purge job;
+//!   the layering guard (package E) bans the call site everywhere
+//!   else.
 //!
-//! The user-bound repositories ([`documents::Documents`],
-//! [`credentials::Credentials`], [`chat_sessions::ChatSessions`])
-//! expose a `for_user(user_id)` helper that returns a scoped view.
-//! The scoped view does not have a `user_id` argument on its
-//! per-row methods, so the SQL filter cannot be accidentally
-//! dropped . Admin / CLI paths keep using the
-//! unscoped `Db` repository directly.
+//! ## Raw SQL escape hatch
+//!
+//! The integration tests need to assert on schema shape (column
+//! counts, audit rows the spawned task wrote behind the scenes)
+//! that the typed API does not expose. The [`Db::raw_execute`] /
+//! [`Db::raw_query_*`] / [`Db::raw_insert_one_str`] helpers route
+//! raw SQL through the engine enum and return plain values the
+//! tests can assert on. They run caller-supplied SQL on the live
+//! pool and are gated behind the `test-util` cargo feature (plan
+//! S10) so production binaries cannot reach them at the type
+//! level.
 //!
 //! ## SQL policy
 //!
@@ -64,25 +80,20 @@ pub use types::{
 /// Engine-agnostic DB handle. Cheap to clone (each repository wraps
 /// the same `Arc`-backed [`AnyPool`]).
 ///
-/// Produced by [`Db::connect`]; the legacy `auth/store.rs::AuthStore`
-/// facade in `nagent-server` is a thin wrapper around this type.
+/// Produced by [`Db::connect`]; the migration runner and the test
+/// suite are the only paths that still hold a `Db` directly —
+/// production code goes through one of the two capability-
+/// narrowed handles ([`UserDb`] for handlers and agents,
+/// [`AdminDb`] for the CLI / purge job).
 #[derive(Debug, Clone)]
 pub struct Db {
     pool: AnyPool,
-    pub users: users::Users,
-    pub sessions: sessions::Sessions,
-    pub passkeys: passkeys::Passkeys,
-    pub events: events::Events,
-    pub credentials: credentials::Credentials,
-    pub preferences: preferences::Preferences,
-    pub documents: documents::Documents,
-    pub chat_sessions: chat_sessions::ChatSessions,
 }
 
 impl Db {
     /// Connect to the DB described by `opts` and build a fresh
-    /// [`Db`] handle. Each per-domain repository is a thin wrapper
-    /// over the same pool, so cloning the `Db` is essentially free.
+    /// [`Db`] handle. The pool is the only piece of state worth
+    /// sharing, so cloning the `Db` is essentially free.
     pub async fn connect(opts: &DbOptions) -> Result<Self, Error> {
         let pool = AnyPool::connect(opts).await?;
         Ok(Self::from_pool(pool))
@@ -92,21 +103,13 @@ impl Db {
     /// integration tests and any code path that already holds a
     /// pool (the `migrate` CLI, the auto-bootstrap).
     pub fn from_pool(pool: AnyPool) -> Self {
-        Self {
-            users: users::Users::new(&pool),
-            sessions: sessions::Sessions::new(&pool),
-            passkeys: passkeys::Passkeys::new(&pool),
-            events: events::Events::new(&pool),
-            credentials: credentials::Credentials::new(&pool),
-            preferences: preferences::Preferences::new(&pool),
-            documents: documents::Documents::new(&pool),
-            chat_sessions: chat_sessions::ChatSessions::new(&pool),
-            pool,
-        }
+        Self { pool }
     }
 
-    /// Underlying pool. Useful for the few places that need to run
-    /// raw SQL (integration tests, one-off admin queries).
+    /// Underlying pool. Kept `pub` so the migration runner +
+    /// the `test-util` raw-SQL helpers can reach it; production
+    /// code paths should use [`Db::for_user`] / [`Db::admin`]
+    /// instead (plan S4).
     pub fn pool(&self) -> &AnyPool {
         &self.pool
     }
@@ -134,6 +137,42 @@ impl Db {
         migrate::revert_to(&self.pool, target_version).await
     }
 
+    /// Capability-narrowed handle for code paths that already
+    /// resolved a `user_id`. Owns the scoped per-user views
+    /// ([`documents::Documents::for_user`],
+    /// [`credentials::Credentials::for_user`],
+    /// [`chat_sessions::ChatSessions::for_user`]) plus the
+    /// per-user repositories that take `user_id` as a parameter
+    /// ([`preferences::Preferences`], [`sessions::Sessions`]).
+    ///
+    /// Handlers and agents receive a `UserDb`; the scoped views
+    /// do not have a `user_id` argument on their per-row methods,
+    /// so the SQL filter cannot be accidentally dropped.
+    pub fn for_user(&self, user_id: uuid::Uuid) -> UserDb {
+        UserDb {
+            inner: self.clone(),
+            user_id,
+        }
+    }
+
+    /// Capability-narrowed handle for unscoped, cross-user
+    /// operations. Production code reaches for it only from the
+    /// `nagent-server` CLI subcommands and the documents purge
+    /// job; the layering guard (package E) bans the call site
+    /// anywhere else.
+    pub fn admin(&self) -> AdminDb {
+        AdminDb {
+            users: users::Users::new(&self.pool),
+            sessions: sessions::Sessions::new(&self.pool),
+            passkeys: passkeys::Passkeys::new(&self.pool),
+            events: events::Events::new(&self.pool),
+            credentials: credentials::Credentials::new(&self.pool),
+            preferences: preferences::Preferences::new(&self.pool),
+            documents: documents::Documents::new(&self.pool),
+            chat_sessions: chat_sessions::ChatSessions::new(&self.pool),
+        }
+    }
+
     // -- Raw SQL escape hatch (integration tests only) -------------
     //
     // Production code talks to the per-domain repositories
@@ -146,11 +185,18 @@ impl Db {
     // mirrors the type the per-domain SQL uses — these helpers
     // route raw SQL through the engine enum and return plain
     // values the tests can assert on.
+    //
+    // SECURITY: the helpers run caller-supplied SQL on the live
+    // pool. They are gated behind the `test-util` cargo feature
+    // (plan S10) so production binaries cannot reach them at the
+    // type level. The `nagent-server` dev-dependency enables
+    // `test-util` so the integration tests still compile.
 
     /// Run a raw statement (DML or DDL). Used by tests for
     /// schema probes (`COUNT(*)`, `PRAGMA`) and for INSERTs that
     /// bypass the typed `users.create` helper (when the test needs
     /// to seed an arbitrary row shape).
+    #[cfg(feature = "test-util")]
     pub async fn raw_execute(&self, sql: &str) -> Result<(), Error> {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
@@ -169,6 +215,7 @@ impl Db {
     /// Used for row counts, `pragma` ints, etc. Postgres-only
     /// callers must set `params` to a non-empty slice; sqlite uses
     /// positional `?N` markers.
+    #[cfg(feature = "test-util")]
     pub async fn raw_query_scalar_i64(&self, sql: &str) -> Result<i64, Error> {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
@@ -195,6 +242,7 @@ impl Db {
     /// All rows of `sql` reduced to a `Vec<String>` of their first
     /// column. Used for `SELECT id FROM auth_events WHERE …`
     /// style assertions in the integration tests.
+    #[cfg(feature = "test-util")]
     pub async fn raw_query_text_vec(&self, sql: &str) -> Result<Vec<String>, Error> {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
@@ -227,6 +275,7 @@ impl Db {
     /// tests. The postgres variant binds its arguments in order
     /// (Postgres uses `$1`, `$2`, …); sqlite positional `?1`/`?2`
     /// takes them in the same order.
+    #[cfg(feature = "test-util")]
     pub async fn raw_query_one_pair(
         &self,
         sql: &str,
@@ -268,6 +317,7 @@ impl Db {
     /// Used by `tests/chat_sessions.rs` to seed a `users` row
     /// without depending on the typed `users.create` helper (the
     /// tests need full control over the column shape).
+    #[cfg(feature = "test-util")]
     pub async fn raw_insert_one_str(&self, sql: &str, params: &[&str]) -> Result<(), Error> {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
@@ -288,5 +338,116 @@ impl Db {
             }
         }
         Ok(())
+    }
+}
+
+/// Capability-narrowed handle for code paths that already
+/// resolved a `user_id`. Built by [`Db::for_user`].
+///
+/// Owns the **scoped** per-user views (the `for_user` helpers on
+/// [`documents::Documents`], [`credentials::Credentials`],
+/// [`chat_sessions::ChatSessions`]) plus the per-user repositories
+/// that already take `user_id` as a parameter
+/// ([`preferences::Preferences`], [`sessions::Sessions`]).
+///
+/// The scoped views do not have a `user_id` argument on their
+/// per-row methods, so the SQL filter cannot be accidentally
+/// dropped. [`UserDb`] is `Clone` (everything is `Arc`-backed)
+/// and is the type handlers / agents carry around; production
+/// code never sees a bare [`AdminDb`] (it would mean the caller is
+/// about to do something cross-user, which only the CLI /
+/// purge job should).
+#[derive(Debug, Clone)]
+pub struct UserDb {
+    inner: Db,
+    user_id: uuid::Uuid,
+}
+
+impl UserDb {
+    /// User this handle is scoped to. Surfaced for tests +
+    /// diagnostic logs that need to echo the binding.
+    pub fn user_id(&self) -> uuid::Uuid {
+        self.user_id
+    }
+
+    /// Borrow the underlying [`Db`] for operations that genuinely
+    /// need a non-scoped handle (migrations, the raw-SQL test
+    /// helpers). Production code should prefer the scoped fields
+    /// below; the layering guard (package E) tracks this.
+    pub fn db(&self) -> &Db {
+        &self.inner
+    }
+
+    /// Scoped documents: every per-row method filters by
+    /// `user_id` automatically.
+    pub fn documents(&self) -> documents::ScopedDocuments {
+        documents::Documents::new(&self.inner.pool).for_user(self.user_id)
+    }
+
+    /// Scoped credentials: every per-row method filters by
+    /// `user_id` automatically.
+    pub fn credentials(&self) -> credentials::ScopedCredentials {
+        credentials::Credentials::new(&self.inner.pool).for_user(self.user_id)
+    }
+
+    /// Scoped chat sessions: every per-row method filters by
+    /// `user_id` automatically.
+    pub fn chat_sessions(&self) -> chat_sessions::ScopedChatSessions {
+        chat_sessions::ChatSessions::new(&self.inner.pool).for_user(self.user_id)
+    }
+
+    /// Per-user preferences. The repository's methods already
+    /// take `user_id` as a parameter — this handle just saves the
+    /// caller from passing it on every call.
+    pub fn preferences(&self) -> preferences::Preferences {
+        preferences::Preferences::new(&self.inner.pool)
+    }
+
+    /// Per-user sessions. The repository's methods already take
+    /// `user_id` as a parameter (or operate by `token_hash`); the
+    /// handle exposes the repository so `delete_for_user` can be
+    /// called when the auth subtree needs to revoke every session
+    /// for a user.
+    pub fn sessions(&self) -> sessions::Sessions {
+        sessions::Sessions::new(&self.inner.pool)
+    }
+}
+
+/// Capability-narrowed handle for unscoped, cross-user
+/// operations. Built by [`Db::admin`].
+///
+/// Production code reaches for it only from the `nagent-server`
+/// CLI subcommands and the documents purge job; the layering
+/// guard (package E) bans the call site anywhere else. Every
+/// repository here already takes the scoping argument it needs
+/// (`user_id`, `service_id`, etc.) — the unscoped access is the
+/// point, not a footgun.
+#[derive(Debug, Clone)]
+pub struct AdminDb {
+    pub users: users::Users,
+    pub sessions: sessions::Sessions,
+    pub passkeys: passkeys::Passkeys,
+    pub events: events::Events,
+    pub credentials: credentials::Credentials,
+    pub preferences: preferences::Preferences,
+    pub documents: documents::Documents,
+    pub chat_sessions: chat_sessions::ChatSessions,
+}
+
+impl AdminDb {
+    /// Convenience constructor for the migration runner and the
+    /// integration tests, which already hold a pool and want to
+    /// build a fresh handle without going through [`Db::admin`].
+    pub fn from_pool(pool: &AnyPool) -> Self {
+        Self {
+            users: users::Users::new(pool),
+            sessions: sessions::Sessions::new(pool),
+            passkeys: passkeys::Passkeys::new(pool),
+            events: events::Events::new(pool),
+            credentials: credentials::Credentials::new(pool),
+            preferences: preferences::Preferences::new(pool),
+            documents: documents::Documents::new(pool),
+            chat_sessions: chat_sessions::ChatSessions::new(pool),
+        }
     }
 }

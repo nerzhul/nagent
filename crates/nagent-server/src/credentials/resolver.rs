@@ -111,7 +111,12 @@ impl CredentialResolver {
         if let Some(hit) = cache.get(service, field) {
             return Ok(Some(hit));
         }
-        let row = self.db.credentials.fetch(user_id, service, field).await?;
+        let row = self
+            .db
+            .admin()
+            .credentials
+            .fetch(user_id, service, field)
+            .await?;
         let Some(sealed) = row else {
             // Missing: audit + return Ok(None) so the calling agent
             // can decide whether to fall through or surface a
@@ -143,7 +148,7 @@ impl CredentialResolver {
     }
 
     fn audit(&self, user_id: Uuid, kind: &str, target_service: &str) {
-        self.db.events.record(NewAuthEvent {
+        self.db.admin().events.record(NewAuthEvent {
             user_id: Some(user_id),
             kind: kind.to_string(),
             provider: "credentials".to_string(),

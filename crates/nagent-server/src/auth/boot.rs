@@ -109,6 +109,7 @@ pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<nagent_db::Db>, 
     // running the migrations.
     if cfg.auth.db.backend == "sqlite" && cfg.auth.db.auto_migrate {
         let local_count = store
+            .admin()
             .users
             .count_by_provider("local")
             .await
@@ -175,20 +176,31 @@ async fn bootstrap_first_admin(store: &nagent_db::Db, cfg: &Config) -> Result<()
         .unwrap_or_else(|| DEFAULT_BOOTSTRAP_EMAIL.to_string());
     let password = random_password(BOOTSTRAP_PASSWORD_LEN);
 
-    let hash = password::hash_password(
-        &password,
-        cfg.auth.password.argon2_memory_kib,
-        cfg.auth.password.argon2_iterations,
-        cfg.auth.password.argon2_parallelism,
-    )
+    // Plan R1a: route the one-shot bootstrap hash through
+    // `spawn_blocking` so a slow argon2 run (tens of MiB of
+    // memory, hundreds of ms of CPU) does not stall the
+    // tokio executor on first boot.
+    let cfg_snapshot = cfg.clone();
+    let password_for_blocking = password.clone();
+    let hash = tokio::task::spawn_blocking(move || {
+        password::hash_password(
+            &password_for_blocking,
+            cfg_snapshot.auth.password.argon2_memory_kib,
+            cfg_snapshot.auth.password.argon2_iterations,
+            cfg_snapshot.auth.password.argon2_parallelism,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("hash bootstrap password join: {e}"))?
     .map_err(|e| anyhow::anyhow!("hash bootstrap password: {e}"))?;
 
     let user_id = store
+        .admin()
         .users
         .create(&email, &email, "local", Some(&hash))
         .await
         .map_err(|e| anyhow::anyhow!("create bootstrap user: {e}"))?;
-    store.events.record(NewAuthEvent::auth(
+    store.admin().events.record(NewAuthEvent::auth(
         Some(user_id),
         "bootstrap_admin",
         "local",
@@ -378,7 +390,7 @@ mod tests {
             .expect("sqlite bootstrap must succeed")
             .expect("auth.enabled = true so store must be Some");
         // The auto-bootstrap should have created exactly one local user.
-        let users = store.users.list(Some("local")).await.unwrap();
+        let users = store.admin().users.list(Some("local")).await.unwrap();
         assert_eq!(users.len(), 1, "exactly one local admin");
         let admin = &users[0];
         assert!(admin.password_hash.is_some(), "hash must be present");
@@ -396,6 +408,7 @@ mod tests {
         store.migrate().await.unwrap();
         let hash = b"pre-existing-argon2id-blob".to_vec();
         store
+            .admin()
             .users
             .create("alice@example.com", "Alice", "local", Some(&hash))
             .await
@@ -404,7 +417,7 @@ mod tests {
         crate::auth::boot::auto_bootstrap(&cfg)
             .await
             .expect("bootstrap must succeed");
-        let users = store.users.list(Some("local")).await.unwrap();
+        let users = store.admin().users.list(Some("local")).await.unwrap();
         assert_eq!(
             users.len(),
             1,

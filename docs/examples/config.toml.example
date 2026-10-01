@@ -143,6 +143,7 @@
 # noise_scale = 0.667                          # Piper upstream default; controls variability
 # noise_w = 0.8                                # Piper upstream default; controls phoneme variability
 # max_input_chars = 2000                       # hard cap per /v1/audio/speech request body
+# synth_concurrency = 1                         # max concurrent Piper-rs calls on the bounded blocking pool (plan R4a)
 
 # ---------------------------------------------------------------------------
 # Authentication & user identity (PR1)
@@ -174,6 +175,7 @@
 # argon2_parallelism = 1
 # min_password_length = 8
 # allow_registration = true                  # logged-in users can create accounts
+# hash_concurrency = 0                        # max concurrent argon2 runs on the blocking pool; 0 = half cores (plan R1a)
 #
 # [auth.oidc]
 # auto_provision = true                       # create users row on first OIDC login

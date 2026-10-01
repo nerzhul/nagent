@@ -61,12 +61,14 @@ mod tests {
 
         let hash = b"fake-argon2id-blob".to_vec();
         let user_id = store
+            .admin()
             .users
             .create("alice@example.com", "Alice Doe", "local", Some(&hash))
             .await
             .expect("create_user");
 
         let dup = store
+            .admin()
             .users
             .create("ALICE@example.com", "Alice Other", "local", Some(&hash))
             .await;
@@ -76,6 +78,7 @@ mod tests {
         );
 
         let by_email = store
+            .admin()
             .users
             .get_by_email("Alice@Example.COM")
             .await
@@ -95,11 +98,13 @@ mod tests {
             .expect("disable update");
 
         let session = store
+            .admin()
             .sessions
             .create(user_id, Duration::from_secs(60), None, None)
             .await
             .expect("create_session");
         let lookup = store
+            .admin()
             .sessions
             .lookup_by_token_hash(&session.token_hash)
             .await
@@ -114,6 +119,7 @@ mod tests {
             .await
             .expect("re-enable update");
         let lookup = store
+            .admin()
             .sessions
             .lookup_by_token_hash(&session.token_hash)
             .await
@@ -125,6 +131,7 @@ mod tests {
         let public_key = vec![0xb2u8; 64];
         let pk_id = uuid::Uuid::new_v4();
         store
+            .admin()
             .passkeys
             .insert(NewPasskeyRecord {
                 id: pk_id,
@@ -139,6 +146,7 @@ mod tests {
             .expect("insert_passkey");
 
         let fetched: PasskeyRecord = store
+            .admin()
             .passkeys
             .get_by_credential_id(&cred_id)
             .await
@@ -148,11 +156,13 @@ mod tests {
         assert_eq!(fetched.counter, 0);
 
         store
+            .admin()
             .passkeys
             .bump_counter(pk_id, 7)
             .await
             .expect("bump_passkey_counter");
         let fetched: PasskeyRecord = store
+            .admin()
             .passkeys
             .get_by_credential_id(&cred_id)
             .await
@@ -161,6 +171,7 @@ mod tests {
         assert_eq!(fetched.counter, 7, "counter must advance monotonically");
 
         let dup = store
+            .admin()
             .passkeys
             .insert(NewPasskeyRecord {
                 id: uuid::Uuid::new_v4(),
@@ -178,12 +189,14 @@ mod tests {
         );
 
         store
+            .admin()
             .sessions
             .delete(&session.token_hash)
             .await
             .expect("delete_session");
         assert!(
             store
+                .admin()
                 .sessions
                 .lookup_by_token_hash(&session.token_hash)
                 .await
@@ -192,10 +205,16 @@ mod tests {
             "session must be gone after delete"
         );
 
-        let deleted = store.users.delete(user_id).await.expect("delete_user");
+        let deleted = store
+            .admin()
+            .users
+            .delete(user_id)
+            .await
+            .expect("delete_user");
         assert_eq!(deleted, 1, "exactly one row removed");
         assert!(
             store
+                .admin()
                 .users
                 .get_by_id(user_id)
                 .await
@@ -205,6 +224,7 @@ mod tests {
         );
         assert!(
             store
+                .admin()
                 .passkeys
                 .get_by_credential_id(&cred_id)
                 .await
@@ -213,7 +233,7 @@ mod tests {
             "passkey must cascade-delete with its user"
         );
 
-        store.events.record(NewAuthEvent {
+        store.admin().events.record(NewAuthEvent {
             user_id: None,
             kind: "test_event".into(),
             provider: "test".into(),
@@ -240,30 +260,40 @@ mod tests {
 
         let h = b"hash".to_vec();
         store
+            .admin()
             .users
             .create("a@x.com", "A", "local", Some(&h))
             .await
             .unwrap();
         store
+            .admin()
             .users
             .create("b@x.com", "B", "local", Some(&h))
             .await
             .unwrap();
         store
+            .admin()
             .users
             .create("c@x.com", "C", "oidc:https://idp/", None)
             .await
             .unwrap();
         store
+            .admin()
             .users
             .create("d@x.com", "D", "passkey", None)
             .await
             .unwrap();
 
-        let all: Vec<AuthUserRecord> = store.users.list(None).await.expect("list_users(None)");
+        let all: Vec<AuthUserRecord> = store
+            .admin()
+            .users
+            .list(None)
+            .await
+            .expect("list_users(None)");
         assert_eq!(all.len(), 4, "all users");
 
         let locals: Vec<AuthUserRecord> = store
+            .admin()
             .users
             .list(Some("local"))
             .await
@@ -272,6 +302,7 @@ mod tests {
         assert!(locals.iter().all(|u| u.provider == "local"));
 
         let oidcs: Vec<AuthUserRecord> = store
+            .admin()
             .users
             .list(Some("oidc"))
             .await
@@ -287,13 +318,24 @@ mod tests {
         store.migrate().await.expect("migrations apply");
         let h = b"hash".to_vec();
         store
+            .admin()
             .users
             .create("a@x.com", "A", "local", Some(&h))
             .await
             .unwrap();
-        let count = store.users.count_by_provider("local").await.unwrap();
+        let count = store
+            .admin()
+            .users
+            .count_by_provider("local")
+            .await
+            .unwrap();
         assert_eq!(count, 1, "exactly one local user");
-        let count_oidc = store.users.count_by_provider("oidc:foo").await.unwrap();
+        let count_oidc = store
+            .admin()
+            .users
+            .count_by_provider("oidc:foo")
+            .await
+            .unwrap();
         assert_eq!(count_oidc, 0, "no oidc users");
     }
 
@@ -328,7 +370,7 @@ mod tests {
         let store1 = connect_db(&cfg).await;
         store1.migrate().await.expect("store 1 migrate");
         for i in 0..5 {
-            store1.events.record(NewAuthEvent {
+            store1.admin().events.record(NewAuthEvent {
                 user_id: None,
                 kind: format!("first_run_{i}"),
                 provider: "test".into(),
@@ -368,7 +410,7 @@ mod tests {
         // none of them can collide with the first batch.
         let store2 = connect_db(&cfg).await;
         for i in 0..5 {
-            store2.events.record(NewAuthEvent {
+            store2.admin().events.record(NewAuthEvent {
                 user_id: None,
                 kind: format!("second_run_{i}"),
                 provider: "test".into(),

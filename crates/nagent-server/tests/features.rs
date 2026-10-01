@@ -76,6 +76,7 @@ async fn build_state_with_features(
             auth_store.clone(),
             100_000,
             std::path::PathBuf::from("/tmp/features-test-cache"),
+            0,
         ))
     } else {
         None
@@ -84,7 +85,7 @@ async fn build_state_with_features(
         builder = builder.with_documents(store);
     }
     builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
-        auth_store.chat_sessions.clone(),
+        auth_store.admin().chat_sessions.clone(),
     ));
     if llm_enabled {
         // Deliberately unreachable so the upstream fetch falls back
@@ -107,11 +108,13 @@ async fn build_state_with_features(
 /// browser would send.
 async fn login_cookie(store: &nagent_db::Db, email: &str) -> String {
     let user_id = store
+        .admin()
         .users
         .create(email, "Alice", "local", Some(b"hash"))
         .await
         .expect("create_user");
     let session = store
+        .admin()
         .sessions
         .create(user_id, Duration::from_secs(60), None, None)
         .await
@@ -344,7 +347,7 @@ async fn features_llm_models_reflects_upstream_list() {
     builder = builder.with_auth(auth_store.clone());
     builder = builder.with_llm(llm_client);
     builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
-        auth_store.chat_sessions.clone(),
+        auth_store.admin().chat_sessions.clone(),
     ));
     let state = builder.build();
 
@@ -437,7 +440,7 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
     builder = builder.with_auth(auth_store.clone());
     builder = builder.with_llm(llm_client);
     builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
-        auth_store.chat_sessions.clone(),
+        auth_store.admin().chat_sessions.clone(),
     ));
     let state = builder.build();
 

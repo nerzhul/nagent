@@ -158,6 +158,12 @@ pub struct AuthPasswordConfig {
     /// When `true`, any logged-in user can POST to
     /// `/api/auth/password/register` to create a new local account.
     pub allow_registration: bool,
+    /// Maximum number of in-flight argon2 hash/verify operations
+    /// on the blocking pool (plan R1a). Each hash allocates
+    /// ~`argon2_memory_kib` KiB, so an unbounded burst starves the
+    /// tokio runtime and spikes memory. `0` means "auto" — half the
+    /// host cores, bounded to at least `1`. Plan R1a default.
+    pub hash_concurrency: usize,
 }
 
 impl Default for AuthPasswordConfig {
@@ -168,8 +174,22 @@ impl Default for AuthPasswordConfig {
             argon2_parallelism: 1,
             min_password_length: 8,
             allow_registration: true,
+            hash_concurrency: default_hash_concurrency(),
         }
     }
+}
+
+/// Auto-resolved default for [`AuthPasswordConfig::hash_concurrency`]:
+/// half the host cores, bounded to at least `1`. Plan R1a: the
+/// goal is "concurrency cap that keeps the runtime responsive",
+/// not "exhaust the box". Capped to 32 so a 256-core monster does
+/// not blow past reasonable defaults either.
+fn default_hash_concurrency() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let half = (cores + 1) / 2; // ceiling of half
+    half.clamp(1, 32)
 }
 
 /// OIDC backend knobs. Mirrors `[auth.oidc]`.
@@ -522,12 +542,27 @@ impl AuthPasswordConfig {
                 .allow_registration
                 .unwrap_or(defaults.allow_registration),
         };
+        // Plan R1a: bound the concurrent argon2 operations on the
+        // blocking pool. `0` is the documented escape hatch and
+        // resolves to the auto default (half cores, clamped to
+        // `[1, 32]`); any other value is honoured verbatim so the
+        // operator can dial the cap for their box.
+        let hash_concurrency = match resolve_primitive(
+            env_opt("NAGENT_AUTH_PASSWORD_HASH_CONCURRENCY").as_deref(),
+            toml.hash_concurrency,
+            defaults.hash_concurrency,
+            "NAGENT_AUTH_PASSWORD_HASH_CONCURRENCY",
+        )? {
+            0 => default_hash_concurrency(),
+            n => n,
+        };
         Ok(Self {
             argon2_memory_kib,
             argon2_iterations,
             argon2_parallelism,
             min_password_length,
             allow_registration,
+            hash_concurrency,
         })
     }
 }
@@ -710,6 +745,7 @@ mod tests {
             argon2_parallelism: Some(1),
             min_password_length: Some(8),
             allow_registration: Some(true),
+            hash_concurrency: Some(4),
         });
         let cfg =
             crate::config::Config::from_env_with_toml(Some(&base)).expect("clamp must not error");

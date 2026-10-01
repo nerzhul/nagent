@@ -222,11 +222,13 @@ async fn api_me_succeeds_with_valid_session_cookie() {
         .store
         .clone();
     let user_id = auth_store
+        .admin()
         .users
         .create("alice@example.com", "Alice", "local", Some(b"hash"))
         .await
         .expect("create_user");
     let session = auth_store
+        .admin()
         .sessions
         .create(user_id, std::time::Duration::from_secs(60), None, None)
         .await

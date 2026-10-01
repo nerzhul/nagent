@@ -114,8 +114,9 @@ pub async fn list_integrations(
     for svc in state.services.list() {
         let filled = state
             .store
-            .credentials
-            .list_field_keys(user.id, svc.id)
+            .for_user(user.id)
+            .credentials()
+            .list_field_keys(svc.id)
             .await?;
         data.push(svc.to_summary(&filled));
     }
@@ -134,8 +135,9 @@ pub async fn get_integration(
     };
     let filled = state
         .store
-        .credentials
-        .list_field_keys(user.id, svc.id)
+        .for_user(user.id)
+        .credentials()
+        .list_field_keys(svc.id)
         .await?;
     Ok(Json(svc.to_summary(&filled)).into_response())
 }
@@ -190,8 +192,9 @@ pub async fn put_credentials(
     }
     state
         .store
-        .credentials
-        .upsert(user.id, svc.id, &rows)
+        .for_user(user.id)
+        .credentials()
+        .upsert(svc.id, &rows)
         .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -208,7 +211,12 @@ pub async fn delete_credentials(
     if state.services.get(&id).is_none() {
         return Err(AuthError::BadRequest(format!("unknown service: {id}")));
     }
-    state.store.credentials.delete_service(user.id, &id).await?;
+    state
+        .store
+        .for_user(user.id)
+        .credentials()
+        .delete_service(&id)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

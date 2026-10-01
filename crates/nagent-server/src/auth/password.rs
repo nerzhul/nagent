@@ -16,17 +16,55 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use crate::auth::error::{require_auth_store_from_auth, AuthError};
+use crate::auth::error::{require_admin_store_from_auth, AuthError};
 use crate::auth::login_rate_limit::LoginRateLimitDecision;
 use crate::auth::session;
 use crate::auth::session::SessionSource;
 use crate::auth::AuthUser;
 
-/// Hash a password with argon2id. Returns the encoded `phc-string`
-/// (includes the salt + parameters in a single string), which is
-/// what the store layer persists as a BLOB.
-pub fn hash_password(
+/// Hash a password with argon2id on the bounded blocking pool
+/// (plan R1a). Returns the encoded `phc-string` (includes the
+/// salt + parameters in a single string), which is what the
+/// store layer persists as a BLOB.
+///
+/// The closure runs on `spawn_blocking` after acquiring one
+/// permit from `semaphore`. The permit is held for the duration
+/// of the hash, so a runaway burst cannot exhaust the runtime's
+/// memory budget — the cap is enforced at the queue, not after
+/// the fact.
+pub async fn hash_password_bounded(
+    semaphore: Arc<tokio::sync::Semaphore>,
+    password: &str,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<Vec<u8>, AuthError> {
+    let password = password.to_string();
+    nagent_support::cpu::run_bounded(semaphore, move |_permit| {
+        hash_password_sync(&password, memory_kib, iterations, parallelism)
+            .map_err(|e| format!("{e}"))
+    })
+    .await
+    .map_err(|e| AuthError::Internal(format!("argon2 hash failed: {e}")))?
+    .map_err(|s| AuthError::Internal(s))
+}
+
+/// Synchronous argon2id hash. Used directly by tests + by
+/// [`hash_password_bounded`] which gates it behind a semaphore.
+/// Kept `pub(crate)` so the existing unit tests can exercise
+/// the math without going through the async wrapper.
+pub(crate) fn hash_password(
+    password: &str,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<Vec<u8>, AuthError> {
+    hash_password_sync(password, memory_kib, iterations, parallelism)
+}
+
+fn hash_password_sync(
     password: &str,
     memory_kib: u32,
     iterations: u32,
@@ -63,6 +101,25 @@ pub fn verify_password(password: &str, encoded: &[u8]) -> Result<bool, AuthError
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
+}
+
+/// Verify a password on the bounded blocking pool (plan R1a).
+/// Same semantics as [`verify_password`] but routed through the
+/// shared semaphore so a login burst cannot bypass the cap by
+/// hammering `verify` faster than `hash`.
+pub async fn verify_password_bounded(
+    semaphore: Arc<tokio::sync::Semaphore>,
+    password: &str,
+    encoded: &[u8],
+) -> Result<bool, AuthError> {
+    let password = password.to_string();
+    let encoded = encoded.to_vec();
+    nagent_support::cpu::run_bounded(semaphore, move |_permit| {
+        verify_password(&password, &encoded).map_err(|e| format!("{e}"))
+    })
+    .await
+    .map_err(|e| AuthError::Internal(format!("argon2 verify failed: {e}")))?
+    .map_err(|s| AuthError::Internal(s))
 }
 
 // ---- HTTP handlers ---------------------------------------------------------
@@ -120,7 +177,7 @@ pub async fn login_handler(
             retry_after_secs,
             "password login rate-limited"
         );
-        require_auth_store_from_auth(&state)?
+        require_admin_store_from_auth(&state)?
             .events
             .record(nagent_db::NewAuthEvent::auth(
                 None,
@@ -130,7 +187,7 @@ pub async fn login_handler(
         return Err(AuthError::RateLimited { retry_after_secs });
     }
 
-    let user = match require_auth_store_from_auth(&state)?
+    let user = match require_admin_store_from_auth(&state)?
         .users
         .get_by_email(&body.email)
         .await?
@@ -140,8 +197,16 @@ pub async fn login_handler(
             // Always run argon2 even on a miss, so an attacker
             // cannot distinguish "unknown email" from "wrong
             // password" by timing. Constant-time-ish on the lookup
-            // itself (DB lookup dominates either way).
-            let _ = verify_password(&body.password, b"$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+            // itself (DB lookup dominates either way). Plan R1a:
+            // route through the bounded blocking helper — a
+            // credential-stuffing burst must not bypass the cap by
+            // hitting the dummy verify.
+            let _ = verify_password_bounded(
+                state.password_semaphore.clone(),
+                &body.password,
+                b"$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )
+            .await;
             tracing::warn!(
                 event = "auth.password.login",
                 outcome = "fail",
@@ -150,14 +215,19 @@ pub async fn login_handler(
                 ip = %ip,
                 "password login failed (unknown email or no password hash)"
             );
-            require_auth_store_from_auth(&state)?
+            require_admin_store_from_auth(&state)?
                 .events
                 .record(nagent_db::NewAuthEvent::auth(None, "login_fail", "local"));
             return Err(AuthError::InvalidCredentials);
         }
     };
 
-    let ok = verify_password(&body.password, user.password_hash.as_deref().unwrap_or(b""))?;
+    let ok = verify_password_bounded(
+        state.password_semaphore.clone(),
+        &body.password,
+        user.password_hash.as_deref().unwrap_or(b""),
+    )
+    .await?;
     if !ok {
         tracing::warn!(
             event = "auth.password.login",
@@ -168,7 +238,7 @@ pub async fn login_handler(
             ip = %ip,
             "password login failed (wrong password)"
         );
-        require_auth_store_from_auth(&state)?
+        require_admin_store_from_auth(&state)?
             .events
             .record(nagent_db::NewAuthEvent::auth(
                 Some(user.id),
@@ -179,7 +249,7 @@ pub async fn login_handler(
     }
 
     let ttl = std::time::Duration::from_secs((state.cfg.session_ttl_days as u64) * 24 * 60 * 60);
-    let mut session = require_auth_store_from_auth(&state)?
+    let mut session = require_admin_store_from_auth(&state)?
         .sessions
         .create(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
@@ -216,7 +286,7 @@ pub async fn login_handler(
         session_hash_prefix = %token_prefix,
         "password login ok"
     );
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .events
         .record(nagent_db::NewAuthEvent::auth(
             Some(user.id),
@@ -323,14 +393,16 @@ pub async fn register_handler(
         )));
     }
 
-    let hash = hash_password(
+    let hash = hash_password_bounded(
+        state.password_semaphore.clone(),
         &body.password,
         state.cfg.password.argon2_memory_kib,
         state.cfg.password.argon2_iterations,
         state.cfg.password.argon2_parallelism,
-    )?;
+    )
+    .await?;
 
-    let user_id = require_auth_store_from_auth(&state)?
+    let user_id = require_admin_store_from_auth(&state)?
         .users
         .create(&body.email, &body.display_name, "local", Some(&hash))
         .await
@@ -355,7 +427,7 @@ pub async fn register_handler(
         ip = %ip,
         "password register ok"
     );
-    require_auth_store_from_auth(&state)?
+    require_admin_store_from_auth(&state)?
         .events
         .record(nagent_db::NewAuthEvent::auth(
             Some(user_id),
@@ -363,7 +435,7 @@ pub async fn register_handler(
             "local",
         ));
 
-    let user = require_auth_store_from_auth(&state)?
+    let user = require_admin_store_from_auth(&state)?
         .users
         .get_by_id(user_id)
         .await?
