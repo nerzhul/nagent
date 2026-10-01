@@ -63,18 +63,41 @@ pub async fn extract_pdf_bounded(
     bytes: &[u8],
     timeout: Duration,
 ) -> Result<ExtractionResult, ExtractionError> {
+    extract_pdf_bounded_with_queue(semaphore, None, bytes, timeout).await
+}
+
+/// Plan R1a variant: pair the concurrency semaphore with an
+/// optional queue gate so a saturated pool answers `503` +
+/// `Retry-After` instead of piling up unbounded.
+pub async fn extract_pdf_bounded_with_queue(
+    semaphore: Arc<Semaphore>,
+    queue: Option<nagent_support::cpu::BoundedQueue>,
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<ExtractionResult, ExtractionError> {
     // The `pdf_extract` crate owns the bytes for the duration of
     // the parse; clone once and hand the owned buffer to the
     // worker. A `Bytes` clone is cheap if we later switch to the
     // `bytes` crate; for now `Vec<u8>` is what the trait expects.
     let payload = bytes.to_vec();
-    let parse = nagent_support::cpu::run_bounded(semaphore, move |_permit| {
+    let cfg = nagent_support::cpu::BoundedConfig {
+        semaphore: semaphore.clone(),
+        queue,
+        timeout: None,
+    };
+    let parse = nagent_support::cpu::run_bounded(cfg, move |_permit| {
         pdf_extract::extract_text_from_mem(&payload).map_err(|e| e.to_string())
     });
 
     let text = match tokio::time::timeout(timeout, parse).await {
         Ok(Ok(Ok(text))) => text,
         Ok(Ok(Err(parse_err))) => return Err(ExtractionError::ParseFailed(parse_err)),
+        Ok(Err(RunError::QueueFull(max))) => {
+            return Err(ExtractionError::Saturated { max_waiters: max });
+        }
+        Ok(Err(RunError::QueueTimeout(t))) => {
+            return Err(ExtractionError::SaturatedTimeout(t));
+        }
         Ok(Err(RunError::Closed)) => {
             return Err(ExtractionError::ParseFailed(
                 "pdf semaphore closed during boot shutdown".into(),
@@ -124,6 +147,16 @@ pub enum ExtractionError {
     /// `422`.
     #[error("pdf extract exceeded timeout of {0:?}")]
     Timeout(Duration),
+    /// Plan R1a: the bounded blocking pool rejected the call
+    /// because the queue was over capacity. The route layer
+    /// answers `503 Service Unavailable` with `Retry-After`.
+    #[error("pdf extract saturated: queue full ({max_waiters} waiters)")]
+    Saturated { max_waiters: usize },
+    /// Plan R1a: the bounded blocking pool's wait timeout fired
+    /// before the call could acquire a permit. The route layer
+    /// answers `429 Too Many Requests` with `Retry-After`.
+    #[error("pdf extract saturated: wait timeout of {0:?}")]
+    SaturatedTimeout(Duration),
 }
 
 #[cfg(test)]

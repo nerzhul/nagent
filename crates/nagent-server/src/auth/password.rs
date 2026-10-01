@@ -33,7 +33,9 @@ use crate::auth::AuthUser;
 /// permit from `semaphore`. The permit is held for the duration
 /// of the hash, so a runaway burst cannot exhaust the runtime's
 /// memory budget — the cap is enforced at the queue, not after
-/// the fact.
+/// the fact. Plan R1a: the optional `queue` / `timeout` knobs
+/// bound the wait so saturation answers `503` + `Retry-After`
+/// instead of piling up unbounded.
 pub async fn hash_password_bounded(
     semaphore: Arc<tokio::sync::Semaphore>,
     password: &str,
@@ -41,13 +43,47 @@ pub async fn hash_password_bounded(
     iterations: u32,
     parallelism: u32,
 ) -> Result<Vec<u8>, AuthError> {
+    hash_password_bounded_with_queue(
+        semaphore,
+        None,
+        None,
+        password,
+        memory_kib,
+        iterations,
+        parallelism,
+    )
+    .await
+}
+
+/// Plan R1a variant of [`hash_password_bounded`] that threads the
+/// queue gate + wait timeout through. The unit tests and the
+/// existing call sites keep the simpler signature above; the
+/// password route / CLI use this when R1a is enabled in config.
+pub async fn hash_password_bounded_with_queue(
+    semaphore: Arc<tokio::sync::Semaphore>,
+    queue: Option<nagent_support::cpu::BoundedQueue>,
+    timeout: Option<std::time::Duration>,
+    password: &str,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<Vec<u8>, AuthError> {
     let password = password.to_string();
-    nagent_support::cpu::run_bounded(semaphore, move |_permit| {
+    let cfg = nagent_support::cpu::BoundedConfig {
+        semaphore: semaphore.clone(),
+        queue,
+        timeout,
+    };
+    nagent_support::cpu::run_bounded(cfg, move |_permit| {
         hash_password_sync(&password, memory_kib, iterations, parallelism)
             .map_err(|e| format!("{e}"))
     })
     .await
-    .map_err(|e| AuthError::Internal(format!("argon2 hash failed: {e}")))?
+    .map_err(|e| match e {
+        nagent_support::cpu::RunError::QueueFull(_) => AuthError::Saturated,
+        nagent_support::cpu::RunError::QueueTimeout(_) => AuthError::Saturated,
+        other => AuthError::Internal(format!("argon2 hash failed: {other}")),
+    })?
     .map_err(|s| AuthError::Internal(s))
 }
 
@@ -114,7 +150,8 @@ pub async fn verify_password_bounded(
 ) -> Result<bool, AuthError> {
     let password = password.to_string();
     let encoded = encoded.to_vec();
-    nagent_support::cpu::run_bounded(semaphore, move |_permit| {
+    let cfg = nagent_support::cpu::BoundedConfig::unbounded(semaphore);
+    nagent_support::cpu::run_bounded(cfg, move |_permit| {
         verify_password(&password, &encoded).map_err(|e| format!("{e}"))
     })
     .await

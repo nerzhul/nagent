@@ -45,6 +45,13 @@ pub enum AuthError {
     /// Cryptographic / hashing error (argon2, base64, etc.).
     #[error("crypto error: {0}")]
     Crypto(String),
+    /// Bounded blocking pool saturated (plan R1a): the queue is
+    /// full or the wait timeout fired before Argon2 / PDF could
+    /// acquire a permit. Maps to `503 Service Unavailable` with
+    /// a `Retry-After` header so a burst cannot pile up
+    /// unbounded.
+    #[error("auth subsystem saturated; retry shortly")]
+    Saturated,
     /// Internal misconfiguration — the operator-facing message
     /// says "server misconfigured" so secrets do not leak.
     #[error("internal: {0}")]
@@ -193,6 +200,23 @@ impl IntoResponse for AuthError {
                     resp.headers_mut()
                         .insert(axum::http::header::RETRY_AFTER, v);
                 }
+                return resp;
+            }
+            // Plan R1a: bounded blocking-pool saturation. Surface
+            // as `503 Service Unavailable` with a `Retry-After`
+            // hint. The route handler can be tuned to emit `429`
+            // instead when the cause is `QueueTimeout` vs
+            // `QueueFull` once the variants get finer granularity.
+            AuthError::Saturated => {
+                let mut resp = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": self.to_string() })),
+                )
+                    .into_response();
+                resp.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    HeaderValue::from_static("5"),
+                );
                 return resp;
             }
             AuthError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),

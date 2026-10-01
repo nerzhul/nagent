@@ -57,6 +57,17 @@ pub struct TtsConfig {
     /// caller at a time, so the half-core heuristic would
     /// over-allocate permits the engine cannot use).
     pub synth_concurrency: usize,
+    /// Max callers queued waiting for a concurrency permit (plan
+    /// R1a). `0` disables the queue gate (backwards compatible —
+    /// callers wait indefinitely). Saturated callers are answered
+    /// with `503 Service Unavailable + Retry-After` so a burst
+    /// cannot pile up unbounded.
+    pub synth_max_queue: usize,
+    /// Maximum wait time for a concurrency permit, in
+    /// milliseconds (plan R1a). `0` waits indefinitely (backwards
+    /// compatible). Exceeding this surface as `429 Too Many
+    /// Requests + Retry-After`.
+    pub synth_queue_timeout_ms: u64,
 }
 
 impl Default for TtsConfig {
@@ -72,6 +83,13 @@ impl Default for TtsConfig {
             noise_w: 0.8,
             max_input_chars: 2_000,
             synth_concurrency: 1,
+            // Defaults preserve the historical behaviour (no
+            // queue gate, no wait timeout) so existing
+            // deployments do not silently change semantics on
+            // upgrade. Operators opt in via `[tts].synth_max_queue`
+            // / `TTS_SYNTH_QUEUE_TIMEOUT_MS`.
+            synth_max_queue: 0,
+            synth_queue_timeout_ms: 0,
         }
     }
 }
@@ -143,6 +161,18 @@ impl TtsConfig {
             0 => 1,
             n => n,
         };
+        let synth_max_queue = resolve_primitive(
+            env_opt("TTS_SYNTH_MAX_QUEUE").as_deref(),
+            toml.synth_max_queue,
+            defaults.synth_max_queue,
+            "TTS_SYNTH_MAX_QUEUE",
+        )?;
+        let synth_queue_timeout_ms = resolve_primitive(
+            env_opt("TTS_SYNTH_QUEUE_TIMEOUT_MS").as_deref(),
+            toml.synth_queue_timeout_ms,
+            defaults.synth_queue_timeout_ms,
+            "TTS_SYNTH_QUEUE_TIMEOUT_MS",
+        )?;
         Ok(Self {
             enabled,
             model_dir,
@@ -154,6 +184,8 @@ impl TtsConfig {
             noise_w,
             max_input_chars,
             synth_concurrency,
+            synth_max_queue,
+            synth_queue_timeout_ms,
         })
     }
 }
@@ -173,6 +205,8 @@ impl From<&TtsConfig> for nagent_tts::TtsSettings {
             default_lang: c.default_lang.clone(),
             max_input_chars: c.max_input_chars,
             synth_concurrency: c.synth_concurrency,
+            synth_max_queue: c.synth_max_queue,
+            synth_queue_timeout_ms: c.synth_queue_timeout_ms,
         }
     }
 }

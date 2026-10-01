@@ -382,6 +382,12 @@ pub struct TomlTtsConfig {
     /// blocking pool (plan R4a). `None` = `1` (Piper is single-
     /// threaded in practice).
     pub synth_concurrency: Option<usize>,
+    /// Max callers queued waiting for a concurrency permit (plan
+    /// R1a). `None` = unbounded (no queue gate).
+    pub synth_max_queue: Option<usize>,
+    /// Maximum wait time for a concurrency permit, in
+    /// milliseconds (plan R1a). `None` = unbounded.
+    pub synth_queue_timeout_ms: Option<u64>,
 }
 
 /// Authentication & user-identity knobs. Mirrors
@@ -856,6 +862,8 @@ fn merge_toml_tts(
             noise_w: l.noise_w.or(e.noise_w),
             max_input_chars: l.max_input_chars.or(e.max_input_chars),
             synth_concurrency: l.synth_concurrency.or(e.synth_concurrency),
+            synth_max_queue: l.synth_max_queue.or(e.synth_max_queue),
+            synth_queue_timeout_ms: l.synth_queue_timeout_ms.or(e.synth_queue_timeout_ms),
         }),
     }
 }

@@ -74,6 +74,13 @@ pub enum TtsError {
     /// completeness.
     #[error("wav writer: {0}")]
     Wav(String),
+    /// The bounded blocking pool is saturated (plan R1a):
+    /// queue full or wait timeout fired. Surfaced by the HTTP
+    /// handler as `503 Service Unavailable` (queue full) or
+    /// `429 Too Many Requests` (wait timeout), each with a
+    /// `Retry-After` header.
+    #[error("tts synthesis saturated (retry shortly)")]
+    Saturated,
 }
 
 impl From<hound::Error> for TtsError {
@@ -114,6 +121,16 @@ pub struct TtsSettings {
     /// blocking pool. Piper-rs is single-threaded in practice; `1`
     /// is the safe default. `0` falls back to `1`.
     pub synth_concurrency: usize,
+    /// Max callers queued waiting for a concurrency permit (plan
+    /// R1a). Callers past this cap are answered with `503
+    /// Service Unavailable` + `Retry-After` so a burst cannot
+    /// pile up unbounded. `0` disables the queue gate (the
+    /// historical behaviour).
+    pub synth_max_queue: usize,
+    /// Maximum wait time for a concurrency permit (plan R1a).
+    /// `None` waits indefinitely. Exceeding this surface as `429
+    /// Too Many Requests` + `Retry-After`.
+    pub synth_queue_timeout_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +576,13 @@ pub struct TtsEngine {
     /// Wrapped in `Arc` so the route layer can `run_bounded`
     /// without cloning the engine.
     synth_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Optional queue gate (plan R1a). `Some` when
+    /// `TtsSettings::synth_max_queue > 0`; surfaces
+    /// [`TtsError::Saturated`] as `503` when the queue is full.
+    synth_queue: Option<nagent_support::cpu::BoundedQueue>,
+    /// Optional wait timeout for the concurrency permit (plan
+    /// R1a). `None` waits indefinitely.
+    synth_queue_timeout: Option<std::time::Duration>,
 }
 
 impl std::fmt::Debug for TtsEngine {
@@ -627,6 +651,21 @@ impl TtsEngine {
                 synth_semaphore: Arc::new(tokio::sync::Semaphore::new(
                     settings.synth_concurrency.max(1),
                 )),
+                synth_queue: if settings.synth_max_queue > 0 {
+                    Some(nagent_support::cpu::BoundedQueue {
+                        semaphore: Arc::new(tokio::sync::Semaphore::new(settings.synth_max_queue)),
+                        max_waiters: settings.synth_max_queue,
+                    })
+                } else {
+                    None
+                },
+                synth_queue_timeout: if settings.synth_queue_timeout_ms > 0 {
+                    Some(std::time::Duration::from_millis(
+                        settings.synth_queue_timeout_ms,
+                    ))
+                } else {
+                    None
+                },
             }))
         }
     }
@@ -649,6 +688,8 @@ impl TtsEngine {
             max_input_chars,
             synth_lock: std::sync::Mutex::new(()),
             synth_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            synth_queue: None,
+            synth_queue_timeout: None,
         }
     }
 
@@ -721,11 +762,14 @@ impl TtsEngine {
     }
 
     /// Async wrapper around [`Self::synth_wav`] that runs the
-    /// synthesis on the bounded blocking pool (plan R4a). Holds
-    /// one permit from `synth_semaphore` for the duration of the
-    /// call so a burst of `POST /v1/audio/speech` requests cannot
-    /// fan out into N parallel Piper-rs invocations on a CPU that
-    /// has only one model in memory at a time.
+    /// synthesis on the bounded blocking pool (plan R4a + R1a).
+    /// Holds one permit from `synth_semaphore` for the duration of
+    /// the call so a burst of `POST /v1/audio/speech` requests
+    /// cannot fan out into N parallel Piper-rs invocations on a
+    /// CPU that has only one model in memory at a time. With the
+    /// R1a knobs on, saturation is observable: [`TtsError::Saturated`]
+    /// when the queue is over capacity (route → `503 + Retry-After`)
+    /// or when the wait timeout fires (route → `429 + Retry-After`).
     pub async fn synth_wav_bounded(
         self: &Arc<Self>,
         text: &str,
@@ -737,6 +781,11 @@ impl TtsEngine {
         let text = text.to_string();
         let voice = voice_override.map(str::to_string);
         let lang = lang.map(str::to_string);
+        let cfg = nagent_support::cpu::BoundedConfig {
+            semaphore: Arc::clone(&self.synth_semaphore),
+            queue: self.synth_queue.clone(),
+            timeout: self.synth_queue_timeout,
+        };
         // Carry the typed `TtsError` across the `spawn_blocking`
         // boundary as a JSON-friendly tagged string so we can
         // re-materialise it on the async side — the route layer
@@ -744,13 +793,20 @@ impl TtsEngine {
         // 404 / 400 respectively, so losing the variant on the
         // way back would silently turn every failure into a
         // generic 500.
-        nagent_support::cpu::run_bounded(self.synth_semaphore.clone(), move |_permit| {
+        nagent_support::cpu::run_bounded(cfg, move |_permit| {
             let r = engine.synth_wav(&text, voice.as_deref(), lang.as_deref(), speed);
             r.map_err(|e| tts_error_to_kind(&e))
                 .map_err(|kind| format!("{kind}"))
         })
         .await
-        .map_err(|e| TtsError::Synth(format!("tts blocking pool join: {e}")))?
+        .map_err(|e| match e {
+            nagent_support::cpu::RunError::QueueFull(_) => TtsError::Saturated,
+            nagent_support::cpu::RunError::QueueTimeout(_) => TtsError::Saturated,
+            nagent_support::cpu::RunError::Closed => TtsError::Saturated,
+            nagent_support::cpu::RunError::Join(j) => {
+                TtsError::Synth(format!("tts blocking pool join: {j}"))
+            }
+        })?
         .map_err(|kind| kind_to_tts_error(&kind))
     }
 
@@ -774,6 +830,7 @@ enum TtsErrorKind {
     VoiceNotFound,
     Synth,
     Wav,
+    Saturated,
 }
 
 impl std::fmt::Display for TtsErrorKind {
@@ -784,6 +841,7 @@ impl std::fmt::Display for TtsErrorKind {
             TtsErrorKind::VoiceNotFound => "VoiceNotFound",
             TtsErrorKind::Synth => "Synth",
             TtsErrorKind::Wav => "Wav",
+            TtsErrorKind::Saturated => "Saturated",
         })
     }
 }
@@ -795,6 +853,7 @@ fn tts_error_to_kind(e: &TtsError) -> TtsErrorKind {
         TtsError::VoiceNotFound(_) => TtsErrorKind::VoiceNotFound,
         TtsError::Synth(_) => TtsErrorKind::Synth,
         TtsError::Wav(_) => TtsErrorKind::Wav,
+        TtsError::Saturated => TtsErrorKind::Saturated,
     }
 }
 
@@ -804,6 +863,7 @@ fn kind_to_tts_error(kind: &str) -> TtsError {
         "InputTooLong" => TtsError::InputTooLong(0, 0),
         "VoiceNotFound" => TtsError::VoiceNotFound(String::new()),
         "Synth" => TtsError::Synth(String::new()),
+        "Saturated" => TtsError::Saturated,
         // Default to the generic 500-mapped variant for safety —
         // future variants cannot accidentally turn into an
         // unmapped success.

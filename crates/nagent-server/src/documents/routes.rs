@@ -156,6 +156,11 @@ pub enum DocumentRouteError {
     QuotaExceeded { current: u64, max: u64 },
     #[error("extract failed: {0}")]
     ExtractFailed(String),
+    /// Plan R1a: bounded blocking pool saturated (queue full or
+    /// wait timeout fired). Mapped to `503 Service Unavailable`
+    /// with `Retry-After` so a burst cannot pile up unbounded.
+    #[error("pdf extract saturated; retry shortly")]
+    ExtractSaturated,
     #[error("disk write failed: {0}")]
     DiskWrite(String),
     #[error("db error: {0}")]
@@ -189,6 +194,14 @@ impl IntoResponse for DocumentRouteError {
             }
             DocumentRouteError::ExtractFailed(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
+            }
+            DocumentRouteError::ExtractSaturated => {
+                let mut resp = (StatusCode::SERVICE_UNAVAILABLE, self.to_string()).into_response();
+                resp.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    HeaderValue::from_static("5"),
+                );
+                return resp;
             }
             DocumentRouteError::DiskWrite(_) => {
                 (StatusCode::INSUFFICIENT_STORAGE, self.to_string())
@@ -376,6 +389,13 @@ pub async fn upload_handler(
                     "pdf extract exceeded the configured timeout".into(),
                 ));
             }
+            // Plan R1a: pool saturation. Both variants map to the
+            // same route-layer error (`ExtractSaturated`) so the
+            // route answers `503 + Retry-After` whether the queue
+            // was full or the wait timed out.
+            Err(ExtractionError::Saturated { .. }) | Err(ExtractionError::SaturatedTimeout(_)) => {
+                return Err(DocumentRouteError::ExtractSaturated);
+            }
         }
     } else {
         match super::extract::extract_text(&file.bytes, &ext) {
@@ -390,6 +410,14 @@ pub async fn upload_handler(
                 return Err(DocumentRouteError::ExtractFailed(
                     "pdf extract exceeded the configured timeout".into(),
                 ));
+            }
+            // Plain-text extraction never goes through the bounded
+            // pool, so the saturation variants are unreachable
+            // here. Match them defensively (unreachable! in the
+            // tests would be a stronger assertion; today the
+            // route layer's match has to be exhaustive).
+            Err(ExtractionError::Saturated { .. }) | Err(ExtractionError::SaturatedTimeout(_)) => {
+                return Err(DocumentRouteError::ExtractSaturated);
             }
         }
     };

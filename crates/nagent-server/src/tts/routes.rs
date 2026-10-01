@@ -140,6 +140,23 @@ pub async fn audio_speech(
             format!("voice not found: {name}"),
         )
             .into_response(),
+        // Plan R1a: bounded blocking-pool saturation. The route
+        // tells the client to retry shortly via `Retry-After`. A
+        // generic 503 is the conservative default — operators can
+        // wire a tighter mapping (429 vs 503 by cause) once the
+        // TtsError gains finer granularity.
+        Err(TtsError::Saturated) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+                (header::RETRY_AFTER, HeaderValue::from_static("5")),
+            ],
+            "tts synthesis saturated; retry shortly",
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             [(
