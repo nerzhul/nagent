@@ -65,24 +65,23 @@ async fn insert_user_for_test(store: &nagent_db::Db, user_id: Uuid) {
         .to_string();
     let now = chrono::Utc::now().to_rfc3339();
     // Bypass the typed `create_user` helper (which mints its own
-    // UUID) by writing through `AuthStore::pool()`. The pool is
-    // typed `AnyPool`; we unwrap to sqlite for the test harness.
-    let pool = store.pool();
-    let nagent_db::AnyPool::Sqlite(sqlite_pool) = pool else {
-        panic!("chat_sessions integration tests require sqlite");
-    };
-    sqlx::query::<sqlx::Sqlite>(
-        "INSERT INTO users (id, email, display_name, provider, password_hash, created_at) \
-         VALUES (?1, ?2, ?3, 'local', ?4, ?5)",
-    )
-    .bind(user_id.to_string())
-    .bind(format!("{user_id}@test.invalid"))
-    .bind("Test User")
-    .bind(hash)
-    .bind(now)
-    .execute(sqlite_pool)
-    .await
-    .expect("users insert must succeed");
+    // UUID) by writing through `Db::raw_insert_one_str`. The test
+    // does not exercise the password_hash check on this row; it
+    // just needs a valid FK target for `chat_sessions.user_id`.
+    store
+        .raw_insert_one_str(
+            "INSERT INTO users (id, email, display_name, provider, password_hash, created_at) \
+             VALUES (?1, ?2, ?3, 'local', ?4, ?5)",
+            &[
+                &user_id.to_string(),
+                &format!("{user_id}@test.invalid"),
+                "Test User",
+                &hash,
+                &now,
+            ],
+        )
+        .await
+        .expect("users insert must succeed");
 }
 
 #[tokio::test]

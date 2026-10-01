@@ -18,7 +18,7 @@
 mod tests {
     use std::time::Duration;
 
-    use nagent_db::{AnyPool, AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord};
+    use nagent_db::{AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord};
     use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
 
     async fn connect_db(cfg: &AuthConfig) -> nagent_db::Db {
@@ -53,38 +53,11 @@ mod tests {
         }
     }
 
-    /// Run a SQL statement on the underlying pool regardless of which
-    /// engine is in use. PR1 only runs against sqlite in the test
-    /// suite (postgres would need a test container) but the helper is
-    /// kept generic so the same test body can move to a postgres
-    /// harness in PR2.
-    async fn raw_execute(pool: &AnyPool, sql: &str) -> Result<(), sqlx::Error> {
-        match pool {
-            AnyPool::Sqlite(p) => sqlx::query(sql).execute(p).await.map(|_| ()),
-            AnyPool::Postgres(p) => sqlx::query(sql).execute(p).await.map(|_| ()),
-        }
-    }
-
-    async fn raw_query_scalar_i64(pool: &AnyPool, sql: &str) -> Result<i64, sqlx::Error> {
-        use sqlx::Row;
-        match pool {
-            AnyPool::Sqlite(p) => {
-                let row = sqlx::query(sql).fetch_one(p).await?;
-                row.try_get::<i64, _>(0)
-            }
-            AnyPool::Postgres(p) => {
-                let row = sqlx::query(sql).fetch_one(p).await?;
-                row.try_get::<i64, _>(0)
-            }
-        }
-    }
-
     #[tokio::test]
     async fn full_lifecycle_local_user_session_and_passkey() {
         let cfg = test_config();
         let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrations apply");
-        let pool = store.pool();
 
         let hash = b"fake-argon2id-blob".to_vec();
         let user_id = store
@@ -113,15 +86,13 @@ mod tests {
         assert!(by_email.password_hash.is_some());
 
         let disabled_at = chrono::Utc::now().to_rfc3339();
-        raw_execute(
-            &pool,
-            &format!(
+        store
+            .raw_execute(&format!(
                 "UPDATE users SET disabled_at = '{disabled_at}' WHERE id = '{}'",
                 user_id
-            ),
-        )
-        .await
-        .expect("disable update");
+            ))
+            .await
+            .expect("disable update");
 
         let session = store
             .sessions
@@ -135,15 +106,13 @@ mod tests {
             .expect("lookup_session");
         assert!(lookup.is_none(), "disabled user must not resolve a session");
 
-        raw_execute(
-            &pool,
-            &format!(
+        store
+            .raw_execute(&format!(
                 "UPDATE users SET disabled_at = NULL WHERE id = '{}'",
                 user_id
-            ),
-        )
-        .await
-        .expect("re-enable update");
+            ))
+            .await
+            .expect("re-enable update");
         let lookup = store
             .sessions
             .lookup_by_token_hash(&session.token_hash)
@@ -253,12 +222,10 @@ mod tests {
             target_service: None,
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let count = raw_query_scalar_i64(
-            &pool,
-            "SELECT COUNT(*) FROM auth_events WHERE kind = 'test_event'",
-        )
-        .await
-        .expect("count auth_events");
+        let count = store
+            .raw_query_scalar_i64("SELECT COUNT(*) FROM auth_events WHERE kind = 'test_event'")
+            .await
+            .expect("count auth_events");
         assert!(
             count >= 1,
             "audit row should have been written, got count = {count}"
@@ -360,7 +327,6 @@ mod tests {
         // First "process": write 5 events.
         let store1 = connect_db(&cfg).await;
         store1.migrate().await.expect("store 1 migrate");
-        let pool1 = store1.pool();
         for i in 0..5 {
             store1.events.record(NewAuthEvent {
                 user_id: None,
@@ -377,15 +343,12 @@ mod tests {
         // comfortably fit in this budget on every test host we
         // support.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let first_ids: Vec<String> = match &pool1 {
-            AnyPool::Sqlite(p) => sqlx::query_scalar(
+        let first_ids: Vec<String> = store1
+            .raw_query_text_vec(
                 "SELECT id FROM auth_events WHERE kind LIKE 'first_run_%' ORDER BY kind",
             )
-            .fetch_all(p)
             .await
-            .unwrap(),
-            AnyPool::Postgres(_) => unreachable!(),
-        };
+            .unwrap();
         assert_eq!(
             first_ids.len(),
             5,
@@ -404,7 +367,6 @@ mod tests {
         // construction, so all 5 second-batch rows must land and
         // none of them can collide with the first batch.
         let store2 = connect_db(&cfg).await;
-        let pool2 = store2.pool();
         for i in 0..5 {
             store2.events.record(NewAuthEvent {
                 user_id: None,
@@ -416,15 +378,12 @@ mod tests {
             });
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let second_ids: Vec<String> = match &pool2 {
-            AnyPool::Sqlite(p) => sqlx::query_scalar(
+        let second_ids: Vec<String> = store2
+            .raw_query_text_vec(
                 "SELECT id FROM auth_events WHERE kind LIKE 'second_run_%' ORDER BY kind",
             )
-            .fetch_all(p)
             .await
-            .unwrap(),
-            AnyPool::Postgres(_) => unreachable!(),
-        };
+            .unwrap();
         assert_eq!(
             second_ids.len(),
             5,

@@ -51,24 +51,22 @@ async fn temp_store() -> nagent_db::Db {
 #[tokio::test]
 async fn migration_creates_user_credentials_and_target_service() {
     let store = temp_store().await;
-    let pool_handle = store.pool();
-    let pool = pool_handle.sqlite().expect("sqlite pool");
     // The two new schema objects must exist after migration.
-    let table_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='user_credentials'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("count user_credentials");
+    let table_count: i64 = store
+        .raw_query_scalar_i64(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='user_credentials'",
+        )
+        .await
+        .expect("count user_credentials");
     assert_eq!(table_count, 1, "user_credentials table missing");
 
     // The auth_events table gained a target_service column.
-    let column_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('auth_events') WHERE name='target_service'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("pragma");
+    let column_count: i64 = store
+        .raw_query_scalar_i64(
+            "SELECT COUNT(*) FROM pragma_table_info('auth_events') WHERE name='target_service'",
+        )
+        .await
+        .expect("pragma");
     assert_eq!(column_count, 1, "auth_events.target_service missing");
 }
 
@@ -191,16 +189,14 @@ async fn resolver_audit_row_records_target_service() {
     ));
     // Fire-and-forget audit: give the spawned task time to land.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let pool_handle = store.pool();
-    let pool = pool_handle.sqlite().expect("sqlite pool");
-    let row: (String, Option<String>) = sqlx::query_as(
-        "SELECT kind, target_service FROM auth_events WHERE user_id = ? \
-         ORDER BY occurred_at DESC LIMIT 1",
-    )
-    .bind(user_id.to_string())
-    .fetch_one(pool)
-    .await
-    .expect("audit row");
+    let row: (String, Option<String>) = store
+        .raw_query_one_pair(
+            "SELECT kind, target_service FROM auth_events WHERE user_id = ? \
+             ORDER BY occurred_at DESC LIMIT 1",
+            &[&user_id.to_string()],
+        )
+        .await
+        .expect("audit row");
     assert_eq!(row.0, "credential_missing");
     assert_eq!(row.1.as_deref(), Some("test_svc"));
 }

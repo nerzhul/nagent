@@ -133,4 +133,160 @@ impl Db {
     pub async fn revert_to(&self, target_version: i64) -> Result<(), Error> {
         migrate::revert_to(&self.pool, target_version).await
     }
+
+    // -- Raw SQL escape hatch (integration tests only) -------------
+    //
+    // Production code talks to the per-domain repositories
+    // (`db.users.create`, `db.documents.for_user(uid).insert`, …).
+    // The integration tests, however, need to assert on schema
+    // shape (column counts, audit rows the spawned task wrote
+    // behind the scenes) that the typed API does not expose. To
+    // keep those tests from importing sqlx directly — which would
+    // force the `nagent-server` crate to keep a sqlx dev-dep that
+    // mirrors the type the per-domain SQL uses — these helpers
+    // route raw SQL through the engine enum and return plain
+    // values the tests can assert on.
+
+    /// Run a raw statement (DML or DDL). Used by tests for
+    /// schema probes (`COUNT(*)`, `PRAGMA`) and for INSERTs that
+    /// bypass the typed `users.create` helper (when the test needs
+    /// to seed an arbitrary row shape).
+    pub async fn raw_execute(&self, sql: &str) -> Result<(), Error> {
+        match &self.pool {
+            #[cfg(feature = "db-sqlite")]
+            AnyPool::Sqlite(p) => {
+                sqlx::query(sql).execute(p).await.map_err(Error::Database)?;
+            }
+            #[cfg(feature = "db-postgres")]
+            AnyPool::Postgres(p) => {
+                sqlx::query(sql).execute(p).await.map_err(Error::Database)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// First column of the first row of `sql`, decoded as `i64`.
+    /// Used for row counts, `pragma` ints, etc. Postgres-only
+    /// callers must set `params` to a non-empty slice; sqlite uses
+    /// positional `?N` markers.
+    pub async fn raw_query_scalar_i64(&self, sql: &str) -> Result<i64, Error> {
+        match &self.pool {
+            #[cfg(feature = "db-sqlite")]
+            AnyPool::Sqlite(p) => {
+                let row = sqlx::query(sql)
+                    .fetch_one(p)
+                    .await
+                    .map_err(Error::Database)?;
+                use sqlx::Row;
+                row.try_get::<i64, _>(0).map_err(Error::Database)
+            }
+            #[cfg(feature = "db-postgres")]
+            AnyPool::Postgres(p) => {
+                let row = sqlx::query(sql)
+                    .fetch_one(p)
+                    .await
+                    .map_err(Error::Database)?;
+                use sqlx::Row;
+                row.try_get::<i64, _>(0).map_err(Error::Database)
+            }
+        }
+    }
+
+    /// All rows of `sql` reduced to a `Vec<String>` of their first
+    /// column. Used for `SELECT id FROM auth_events WHERE …`
+    /// style assertions in the integration tests.
+    pub async fn raw_query_text_vec(&self, sql: &str) -> Result<Vec<String>, Error> {
+        match &self.pool {
+            #[cfg(feature = "db-sqlite")]
+            AnyPool::Sqlite(p) => {
+                let rows = sqlx::query(sql)
+                    .fetch_all(p)
+                    .await
+                    .map_err(Error::Database)?;
+                use sqlx::Row;
+                rows.into_iter()
+                    .map(|r| r.try_get::<String, _>(0).map_err(Error::Database))
+                    .collect()
+            }
+            #[cfg(feature = "db-postgres")]
+            AnyPool::Postgres(p) => {
+                let rows = sqlx::query(sql)
+                    .fetch_all(p)
+                    .await
+                    .map_err(Error::Database)?;
+                use sqlx::Row;
+                rows.into_iter()
+                    .map(|r| r.try_get::<String, _>(0).map_err(Error::Database))
+                    .collect()
+            }
+        }
+    }
+
+    /// Single row `(String, Option<String>)` — enough for the
+    /// `kind` / `target_service` audit-row assertions used by the
+    /// tests. The postgres variant binds its arguments in order
+    /// (Postgres uses `$1`, `$2`, …); sqlite positional `?1`/`?2`
+    /// takes them in the same order.
+    pub async fn raw_query_one_pair(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<(String, Option<String>), Error> {
+        match &self.pool {
+            #[cfg(feature = "db-sqlite")]
+            AnyPool::Sqlite(p) => {
+                let mut q = sqlx::query(sql);
+                for p in params {
+                    q = q.bind(*p);
+                }
+                let row = q.fetch_one(p).await.map_err(Error::Database)?;
+                use sqlx::Row;
+                Ok((
+                    row.try_get::<String, _>(0).map_err(Error::Database)?,
+                    row.try_get::<Option<String>, _>(1)
+                        .map_err(Error::Database)?,
+                ))
+            }
+            #[cfg(feature = "db-postgres")]
+            AnyPool::Postgres(p) => {
+                let mut q = sqlx::query(sql);
+                for p in params {
+                    q = q.bind(*p);
+                }
+                let row = q.fetch_one(p).await.map_err(Error::Database)?;
+                use sqlx::Row;
+                Ok((
+                    row.try_get::<String, _>(0).map_err(Error::Database)?,
+                    row.try_get::<Option<String>, _>(1)
+                        .map_err(Error::Database)?,
+                ))
+            }
+        }
+    }
+
+    /// INSERT one row with up to five positional string bindings.
+    /// Used by `tests/chat_sessions.rs` to seed a `users` row
+    /// without depending on the typed `users.create` helper (the
+    /// tests need full control over the column shape).
+    pub async fn raw_insert_one_str(&self, sql: &str, params: &[&str]) -> Result<(), Error> {
+        match &self.pool {
+            #[cfg(feature = "db-sqlite")]
+            AnyPool::Sqlite(p) => {
+                let mut q = sqlx::query(sql);
+                for p in params {
+                    q = q.bind(*p);
+                }
+                q.execute(p).await.map_err(Error::Database)?;
+            }
+            #[cfg(feature = "db-postgres")]
+            AnyPool::Postgres(p) => {
+                let mut q = sqlx::query(sql);
+                for p in params {
+                    q = q.bind(*p);
+                }
+                q.execute(p).await.map_err(Error::Database)?;
+            }
+        }
+        Ok(())
+    }
 }
