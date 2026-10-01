@@ -362,11 +362,10 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 //
 // `is_addr_allowed` and `host_matches_allowlist` now live in
 // `crate::agents::egress`  so every network agent shares
-// the same SSRF policy. Re-imported here for the unit tests that
-// exercise the predicates directly.
-
-#[cfg(test)]
-use crate::egress::{host_matches_allowlist as _, is_addr_allowed as _};
+// the same SSRF policy. `host_matches_allowlist` is already
+// imported at the module head (line 50); the test module below
+// imports `is_addr_allowed` so the unit tests that exercise the
+// predicate directly can reach it.
 
 // ---- HTML / text handling ------------------------------------------------
 
@@ -641,6 +640,7 @@ fn format_bytes(n: usize) -> String {
 mod tests {
     use super::*;
     use crate::agents::UserContext;
+    use crate::egress::{host_matches_allowlist, is_addr_allowed};
     use serde_json::json;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

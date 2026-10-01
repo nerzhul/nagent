@@ -46,12 +46,12 @@
 //! accept the extra round-trips so a stock quote for "Atos" Just
 //! Works without making the user memorise the ticker convention.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::agents::{Agent, AgentError, UserContext};
+use crate::config::StockAgentConfig;
+use crate::egress::{EgressClient, EgressConfig};
 
 /// Hard cap on the response body. The Stooq CSV is at most a few
 /// hundred bytes; 16 KiB leaves room for occasional bloat (an
@@ -61,7 +61,7 @@ const MAX_UPSTREAM_BYTES: usize = 16 * 1024;
 
 /// HTTP per-request timeout. Stooq is sub-second normally; 8 s is
 /// the same bound the weather agent uses so we keep one knob.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+const HTTP_TIMEOUT_MS: u64 = 8_000;
 
 /// Common European exchanges to try when the user did not pin an
 /// explicit suffix and the primary lookup returns no data. Listed
@@ -174,13 +174,14 @@ const KNOWN_COMPANIES: &[(&str, &str)] = &[
 /// Build of the `get_stock_quote` agent.
 #[derive(Clone)]
 pub struct StockAgent {
-    http: reqwest::Client,
+    /// Plan R5: shared hardened HTTP client.
+    egress: EgressClient,
 }
 
 impl std::fmt::Debug for StockAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StockAgent")
-            .field("http", &"<reqwest::Client>")
+            .field("egress", &"<EgressClient>")
             .finish()
     }
 }
@@ -192,21 +193,40 @@ impl Default for StockAgent {
 }
 
 impl StockAgent {
+    /// Build the agent with its own connection pool. The default
+    /// `StockAgentConfig` carries no overrides; the agent pulls from
+    /// Stooq anonymously.
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .connect_timeout(HTTP_TIMEOUT)
-            .build()
-            .expect("reqwest client build");
-        Self { http }
+        Self::from_config(StockAgentConfig::default())
     }
 
-    /// Uniform constructor for the static factory table. The
-    /// `StockAgentConfig` is currently empty of active knobs (the
-    /// agent pulls from Yahoo Finance anonymously); the argument is
-    /// reserved for a future API-key path.
-    pub fn from_config(_cfg: crate::config::StockAgentConfig) -> Self {
-        Self::new()
+    /// Uniform constructor for the static factory table.
+    pub fn from_config(cfg: StockAgentConfig) -> Self {
+        let egress = EgressClient::new(egress_config_for(&cfg));
+        Self { egress }
+    }
+
+    /// Build the agent on top of a shared `reqwest::Client` so
+    /// multiple agents of the same policy class drain the same
+    /// pool (plan 4.C / R5).
+    pub fn with_shared_pool(http: reqwest::Client, cfg: StockAgentConfig) -> Self {
+        let egress = EgressClient::from_shared_client(http, egress_config_for(&cfg));
+        Self { egress }
+    }
+}
+
+fn egress_config_for(cfg: &StockAgentConfig) -> EgressConfig {
+    EgressConfig {
+        timeout_ms: cfg.timeout_ms.max(HTTP_TIMEOUT_MS),
+        allow_public: true,
+        // Pin to Stooq's host; the agent has no base-url knob today,
+        // so the value is hard-coded here.
+        allowlist: vec!["stooq.com".to_string()],
+        max_bytes: 16 * 1024,
+        user_agent: format!(
+            "nagent-stock-agent/{} (+https://github.com/nagent/nagent)",
+            env!("CARGO_PKG_VERSION")
+        ),
     }
 }
 
@@ -256,7 +276,7 @@ impl Agent for StockAgent {
         // Step 2 + 3: try the resolved ticker, with multi-exchange
         // fallback when the primary doesn't return data.
         let tried_ref = tried_symbols(&resolved_input);
-        let (body, resolved_ticker) = fetch_with_fallback(&self.http, &resolved_input).await?;
+        let (body, resolved_ticker) = fetch_with_fallback(&self.egress, &resolved_input).await?;
         let payload = parse_stooq_csv(&body, &resolved_ticker)?;
 
         Ok(serde_json::to_string(&json!({
@@ -384,7 +404,7 @@ fn tried_symbols(resolved: &str) -> Vec<String> {
 /// actually produced it (so the CSV parser's exchange field reflects
 /// what matched).
 async fn fetch_with_fallback(
-    http: &reqwest::Client,
+    egress: &EgressClient,
     resolved: &str,
 ) -> Result<(String, String), AgentError> {
     let mut last_err: Option<AgentError> = None;
@@ -393,7 +413,7 @@ async fn fetch_with_fallback(
             "https://stooq.com/q/l/?s={}&f=sd2t2ohlcv&h&e=csv",
             url_encode(&ticker)
         );
-        match fetch_csv(http, &url).await {
+        match fetch_csv(egress, &url).await {
             Ok(body) if !is_no_data(&body) => return Ok((body, ticker)),
             Ok(_) => {
                 // `N/D`, empty, or HTML error page — the symbol
@@ -420,12 +440,13 @@ async fn fetch_with_fallback(
 
 // ---- HTTP helper ---------------------------------------------------------
 
-async fn fetch_csv(http: &reqwest::Client, url: &str) -> Result<String, AgentError> {
-    let resp = http
+async fn fetch_csv(egress: &EgressClient, url: &str) -> Result<String, AgentError> {
+    let resp = egress
+        .inner()
         .get(url)
         .header(
             reqwest::header::USER_AGENT,
-            "nagent-stock-agent/0.1 (+https://github.com/nagent/nagent)",
+            egress.config().user_agent.clone(),
         )
         .send()
         .await

@@ -44,8 +44,14 @@
 //!
 //! One HTTP round-trip per query. WeatherAPI's p95 is well under
 //! a second, so the agent stays in the budget for a chat tool.
-
-use std::time::Duration;
+//!
+//! ## HTTP pool (R5)
+//!
+//! Built on top of [`crate::egress::EgressClient`] with `allow_public = true`
+//! (the upstream is a public, well-known API). The connection pool
+//! can be shared across agents of the same policy class via
+//! [`EgressClient::from_shared_client`]; today each agent owns
+//! its pool, so the wiring stays opt-in.
 
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
@@ -53,6 +59,7 @@ use serde_json::{json, Value};
 
 use crate::agents::{Agent, AgentError, UserContext};
 use crate::config::WeatherAgentConfig;
+use crate::egress::{EgressClient, EgressConfig};
 
 /// Hard cap on the response body. WeatherAPI payloads are small
 /// (a few KB) but the cap bounds memory if a misbehaving upstream
@@ -91,14 +98,17 @@ enum Mode {
 #[derive(Clone)]
 pub struct WeatherAgent {
     cfg: WeatherAgentConfig,
-    http: reqwest::Client,
+    /// Plan R5: shared hardened HTTP client. The agent-specific
+    /// allow-list (`["api.weatherapi.com"]`) keeps the SSRF
+    /// pre-flight active even though the upstream is a public API.
+    egress: EgressClient,
 }
 
 impl std::fmt::Debug for WeatherAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WeatherAgent")
             .field("cfg", &self.cfg)
-            .field("http", &"<reqwest::Client>")
+            .field("egress", &"<EgressClient>")
             .finish()
     }
 }
@@ -114,15 +124,55 @@ impl Default for WeatherAgent {
 }
 
 impl WeatherAgent {
+    /// Build the agent with its own connection pool.
     pub fn new(cfg: WeatherAgentConfig) -> Self {
-        let timeout = Duration::from_millis(cfg.timeout_ms.max(1_000));
-        let http = reqwest::Client::builder()
-            .timeout(timeout)
-            .connect_timeout(timeout)
-            .build()
-            .expect("reqwest client build");
-        Self { cfg, http }
+        let egress = EgressClient::new(egress_config_for(&cfg));
+        Self { cfg, egress }
     }
+
+    /// Build the agent on top of a shared `reqwest::Client` so
+    /// multiple agents of the same policy class drain the same
+    /// pool (plan 4.C / R5). The shared pool is the server's
+    /// "public APIs" pool.
+    pub fn with_shared_pool(http: reqwest::Client, cfg: WeatherAgentConfig) -> Self {
+        let egress = EgressClient::from_shared_client(http, egress_config_for(&cfg));
+        Self { cfg, egress }
+    }
+}
+
+/// Translate the agent's config into the egress layer's config.
+/// `allow_public = true` because the WeatherAPI host is a
+/// well-known public endpoint; the hostname allow-list keeps
+/// the SSRF pre-flight active so a misconfigured `base_url`
+/// cannot be redirected to a private IP.
+fn egress_config_for(cfg: &WeatherAgentConfig) -> EgressConfig {
+    EgressConfig {
+        timeout_ms: cfg.timeout_ms.max(1_000),
+        allow_public: true,
+        // The hostname allow-list pins the egress layer to the
+        // upstream set in `cfg.base_url` so a misconfigured /
+        // malicious `base_url` (e.g. https://localhost/) cannot
+        // bypass the SSRF check.
+        allowlist: vec![host_of(&cfg.base_url)],
+        max_bytes: 128 * 1024,
+        user_agent: format!(
+            "nagent-weather-agent/{} (+https://github.com/nagent/nagent)",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
+/// Extract the host portion of a base URL (`https://host[:port]/…`).
+fn host_of(base_url: &str) -> String {
+    let after_scheme = base_url.split_once("://").map(|x| x.1).unwrap_or(base_url);
+    after_scheme
+        .split('/')
+        .next()
+        .unwrap_or(after_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(after_scheme)
+        .to_string()
 }
 
 #[async_trait]
@@ -188,7 +238,7 @@ impl Agent for WeatherAgent {
         let mode = select_mode(req.days, req.date.as_deref())?;
 
         let url = build_url(&self.cfg.base_url, &self.cfg.api_key, &req.location, mode);
-        let body = fetch_json(&self.http, &url).await?;
+        let body = fetch_json(&self.egress, &url).await?;
         let payload = build_payload(&body, mode, req.hourly)?;
 
         Ok(serde_json::to_string(&json!({
@@ -297,12 +347,13 @@ fn build_url(base_url: &str, api_key: &str, location: &str, mode: Mode) -> Strin
 
 // ---- HTTP helper ---------------------------------------------------------
 
-async fn fetch_json(http: &reqwest::Client, url: &str) -> Result<Value, AgentError> {
-    let resp = http
+async fn fetch_json(egress: &EgressClient, url: &str) -> Result<Value, AgentError> {
+    let resp = egress
+        .inner()
         .get(url)
         .header(
             reqwest::header::USER_AGENT,
-            "nagent-weather-agent/0.1 (+https://github.com/nagent/nagent)",
+            egress.config().user_agent.clone(),
         )
         .send()
         .await

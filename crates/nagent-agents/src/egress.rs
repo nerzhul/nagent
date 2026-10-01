@@ -210,6 +210,23 @@ impl EgressClient {
         Self { cfg, http }
     }
 
+    /// Build a client that shares an existing `reqwest::Client` pool
+    /// (plan 4.C / R5). Use this when two agents share the same
+    /// policy class so they don't each own a separate connection
+    /// pool: construct one `reqwest::Client` with the policy class'
+    /// timeouts / TLS roots, wrap it in N [`EgressClient`]s with
+    /// the agent-specific `User-Agent` and allow-list overrides,
+    /// and every agent drains the same pool.
+    ///
+    /// The shared client MUST already be configured with the
+    /// redirect policy; [`Self::new`] builds one for you. The
+    /// per-call `validate` step (SSRF pre-flight) still applies, so
+    /// a shared pool does NOT loosen the policy.
+    pub fn from_shared_client(http: reqwest::Client, cfg: EgressConfig) -> Self {
+        let cfg = Arc::new(cfg.finalize());
+        Self { cfg, http }
+    }
+
     /// Access the configuration (read-only). Agents that need the
     /// timeout or allow-list for per-call clamping can read it via
     /// this accessor.

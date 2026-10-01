@@ -41,13 +41,12 @@
 //! One HTTP round-trip per query. The Free Dictionary API sits
 //! behind a CDN and typically returns in well under a second.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::agents::{Agent, AgentError, UserContext};
 use crate::config::DictionaryAgentConfig;
+use crate::egress::{EgressClient, EgressConfig};
 
 /// Hard cap on the response body. The endpoint usually returns a
 /// few KiB per word; 128 KiB leaves generous room for words with
@@ -63,14 +62,15 @@ const MAX_WORD_LEN: usize = 100;
 #[derive(Clone)]
 pub struct DictionaryAgent {
     cfg: DictionaryAgentConfig,
-    http: reqwest::Client,
+    /// Plan R5: shared hardened HTTP client.
+    egress: EgressClient,
 }
 
 impl std::fmt::Debug for DictionaryAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DictionaryAgent")
             .field("cfg", &self.cfg)
-            .field("http", &"<reqwest::Client>")
+            .field("egress", &"<EgressClient>")
             .finish()
     }
 }
@@ -82,15 +82,44 @@ impl Default for DictionaryAgent {
 }
 
 impl DictionaryAgent {
+    /// Build the agent with its own connection pool.
     pub fn new(cfg: DictionaryAgentConfig) -> Self {
-        let timeout = Duration::from_millis(cfg.timeout_ms.max(1_000));
-        let http = reqwest::Client::builder()
-            .timeout(timeout)
-            .connect_timeout(timeout)
-            .build()
-            .expect("reqwest client build");
-        Self { cfg, http }
+        let egress = EgressClient::new(egress_config_for(&cfg));
+        Self { cfg, egress }
     }
+
+    /// Build the agent on top of a shared `reqwest::Client` so
+    /// multiple agents of the same policy class drain the same
+    /// pool (plan 4.C / R5).
+    pub fn with_shared_pool(http: reqwest::Client, cfg: DictionaryAgentConfig) -> Self {
+        let egress = EgressClient::from_shared_client(http, egress_config_for(&cfg));
+        Self { cfg, egress }
+    }
+}
+
+fn egress_config_for(cfg: &DictionaryAgentConfig) -> EgressConfig {
+    EgressConfig {
+        timeout_ms: cfg.timeout_ms.max(1_000),
+        allow_public: true,
+        allowlist: vec![host_of(&cfg.base_url)],
+        max_bytes: 128 * 1024,
+        user_agent: format!(
+            "nagent-dictionary-agent/{} (+https://github.com/nagent/nagent)",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
+fn host_of(base_url: &str) -> String {
+    let after_scheme = base_url.split_once("://").map(|x| x.1).unwrap_or(base_url);
+    after_scheme
+        .split('/')
+        .next()
+        .unwrap_or(after_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(after_scheme)
+        .to_string()
 }
 
 #[async_trait]
@@ -132,7 +161,7 @@ impl Agent for DictionaryAgent {
     async fn invoke(&self, _ctx: &UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_args(&args)?;
         let url = build_entries_url(&self.cfg.base_url, &req.word);
-        let body = fetch_json(&self.http, &url).await?;
+        let body = fetch_json(&self.egress, &url).await?;
         let payload = shape_payload(&body, &req.word)?;
         Ok(serde_json::to_string(&json!({
             "ok": true,
@@ -173,8 +202,9 @@ fn url_encode_path_segment(s: &str) -> String {
 
 // ---- HTTP helper ---------------------------------------------------------
 
-async fn fetch_json(http: &reqwest::Client, url: &str) -> Result<Value, AgentError> {
-    let resp = http
+async fn fetch_json(egress: &EgressClient, url: &str) -> Result<Value, AgentError> {
+    let resp = egress
+        .inner()
         .get(url)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
