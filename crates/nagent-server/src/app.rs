@@ -261,7 +261,10 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
 
     // ---- TTS ------------------------------------------------------------
     setup_espeak_data_dir();
-    let tts = TtsEngine::load(&cfg.tts)
+    // Plan 4.F: the engine itself lives in `nagent-tts`; we project
+    // the server's `TtsConfig` onto its plain `TtsSettings` so the
+    // crate stays decoupled from our config plumbing.
+    let tts = TtsEngine::load(&nagent_tts::TtsSettings::from(&cfg.tts))
         .await
         .map_err(|e| anyhow::anyhow!("TTS init failed: {e}"))?
         .map(|engine| TtsState {

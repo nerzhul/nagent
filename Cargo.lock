@@ -2191,9 +2191,9 @@ dependencies = [
  "nagent-db",
  "nagent-server",
  "nagent-support",
+ "nagent-tts",
  "openidconnect",
  "pdf-extract",
- "piper-rs",
  "postcard",
  "rand 0.8.8",
  "reqwest",
@@ -2225,6 +2225,20 @@ dependencies = [
  "dashmap",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "nagent-tts"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "nagent-support",
+ "piper-rs",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

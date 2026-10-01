@@ -1,26 +1,42 @@
-//! Local text-to-speech (Piper ONNX) engine.
+//! `nagent-tts` — local text-to-speech engine (Piper ONNX).
 //!
-//! Owns the [`Synthesizer`] trait (mock + Piper backends), the
-//! [`TtsEngine`] facade that does language→voice resolution + the
-//! `max_input_chars` cap, and the 16-bit PCM mono WAV encoder. The
-//! HTTP routes that wrap this live in [`crate::tts::routes`].
+//! Plan 4.F: the Piper engine and its supporting types
+//! (`Synthesizer` trait, `TtsEngine`, `MockSynthesizer`,
+//! `PiperSynthesizer`, `TtsError`, `VoiceMeta`, `SynthOutput`)
+//! moved out of `nagent-server` into this crate so the second
+//! heavy native runtime can be split into its own inference
+//! tier later (plan H) without restructuring the web tier.
 //!
-//! Phase 1 of the architecture refactor split the original
-//! `tts.rs` into this file (engine) and `routes.rs` (HTTP
-//! handlers); the public API surface is unchanged.
+//! ## Public surface
+//!
+//! - [`TtsEngine`] — the facade used by the HTTP route. Cheap to
+//!   clone via `Arc<TtsEngine>`.
+//! - [`TtsSettings`] — the plain per-engine config the crate
+//!   reads; `nagent-server` builds one from its own
+//!   `[tts]` config section so the two stay decoupled.
+//! - [`Synthesizer`] trait — implemented by [`MockSynthesizer`]
+//!   (always available) and [`PiperSynthesizer`] (only when the
+//!   `tts` cargo feature is on).
+//! - [`TtsError`] — the error enum the route layer maps to HTTP
+//!   statuses.
+//!
+//! The HTTP routes that wrap this engine live in
+//! `nagent-server/src/tts/routes.rs` and stay in the server crate
+//! (they depend on axum and the server's state type).
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use hound::{SampleFormat, WavSpec, WavWriter};
 use tracing::{info, warn};
 
-use crate::config::TtsConfig;
-
 #[cfg(feature = "tts")]
 use std::collections::HashMap;
 #[cfg(feature = "tts")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 // `std::sync::Mutex` (not `tokio::sync::Mutex`) — piper-rs's
 // `Piper::create` takes `&mut self` and is CPU-bound, so we can hold
 // the lock across the inference call without blocking the tokio
@@ -39,7 +55,7 @@ pub enum TtsError {
     /// Request body had zero characters.
     #[error("input is empty")]
     EmptyInput,
-    /// Request body exceeded `TtsConfig::max_input_chars`. Defends
+    /// Request body exceeded `TtsSettings::max_input_chars`. Defends
     /// against pathological LLM responses streaming one giant
     /// paragraph in a single chunk.
     #[error("input too long: {0} chars (max {1})")]
@@ -64,6 +80,40 @@ impl From<hound::Error> for TtsError {
     fn from(e: hound::Error) -> Self {
         TtsError::Wav(e.to_string())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Plain per-engine settings
+// ---------------------------------------------------------------------------
+
+/// Plain per-engine settings the crate consumes. Built from the
+/// server's `[tts]` config section; lives here so the crate stays
+/// decoupled from `nagent-server`'s config plumbing (plan 4.D:
+/// agents expose plain `*Config` structs, the server builds them
+/// from env + TOML).
+#[derive(Debug, Clone)]
+pub struct TtsSettings {
+    /// Master switch for the engine. When `false` the engine
+    /// returns `Ok(None)` from [`TtsEngine::load`) and the HTTP
+    /// layer simply does not register `/v1/audio/*` routes.
+    pub enabled: bool,
+    /// Directory holding the Piper voice checkpoints
+    /// (`<voice>.onnx` + `<voice>.onnx.json`). Ignored when
+    /// `enabled` is `false`.
+    pub model_dir: PathBuf,
+    /// Default voice id used when the request specifies a
+    /// non-French language without a voice override.
+    pub voice_en: String,
+    /// Default voice id used when the request specifies `lang = "fr"`.
+    pub voice_fr: String,
+    /// Default language code used when the request omits one.
+    pub default_lang: String,
+    /// Hard cap on `input` length in characters.
+    pub max_input_chars: usize,
+    /// Max concurrent Piper-rs synthesis calls on the bounded
+    /// blocking pool. Piper-rs is single-threaded in practice; `1`
+    /// is the safe default. `0` falls back to `1`.
+    pub synth_concurrency: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +156,7 @@ pub struct SynthOutput {
 /// don't depend on piper-rs (which requires espeak-ng C headers +
 /// libclang at build time and a real voice file at runtime).
 pub trait Synthesizer: Send + Sync {
-    /// Synthesise `text` with `voice_id`. The voice id must have been
+    /// Synthesize `text` with `voice_id`. The voice id must have been
     /// advertised by [`Synthesizer::voices`] on a prior call; behaviour
     /// for unknown ids is implementation-defined (the real Piper
     /// backend returns [`TtsError::Synth`], the mock returns
@@ -132,8 +182,8 @@ pub trait Synthesizer: Send + Sync {
 
 /// Test double that produces a short sine-wave clip proportional to the
 /// input length, plus the requested voice metadata. Used by the unit
-/// tests in this module and by the HTTP integration tests in
-/// `tests/tts.rs` — never instantiated in production.
+/// tests in this module and by the HTTP integration tests —
+/// never instantiated in production.
 #[derive(Debug)]
 pub struct MockSynthesizer {
     voices: Vec<VoiceMeta>,
@@ -194,8 +244,8 @@ impl Synthesizer for MockSynthesizer {
 // ---------------------------------------------------------------------------
 
 /// Wrapper around `piper-rs`. Loads one Piper voice per `<id>.onnx.json`
-/// file in `model_dir` on first use (the underlying ONNX session is
-/// heavy — ~50 MB of weights — so we lazy-init). Per-call synthesis is
+/// file in `model_dir` on first use (the underlying ONNX session
+/// is heavy — ~50 MB of weights — so we lazy-init). Per-call synthesis is
 /// serialised by [`TtsEngine`] (see its `synth_lock`) because piper-rs's
 /// per-voice `PiperSynthesisConfig` lives behind a `RwLock` and we tweak
 /// `length_scale` per request; concurrent requests on the same engine
@@ -379,7 +429,7 @@ impl PiperSynthesizer {
     /// on this inner `Mutex` is between the lazy load and the
     /// inference -- safe to hold across both.
     fn load_voice<'a>(
-        &'a self,
+        &self,
         voice_id: &str,
         cache: &'a mut HashMap<String, piper_rs::Piper>,
     ) -> Result<&'a mut piper_rs::Piper, TtsError> {
@@ -483,7 +533,7 @@ impl Synthesizer for PiperSynthesizer {
 // TtsEngine (public facade used by the HTTP handler + tests)
 // ---------------------------------------------------------------------------
 
-/// User-facing TTS engine. Owned by [`crate::AppState`] (one per
+/// User-facing TTS engine. Owned by `nagent-server`'s `TtsState` (one per
 /// server), cloneable via `Arc<TtsEngine>` when passed to handlers.
 pub struct TtsEngine {
     inner: Arc<dyn Synthesizer>,
@@ -523,7 +573,7 @@ impl std::fmt::Debug for TtsEngine {
 }
 
 impl TtsEngine {
-    /// Build a `TtsEngine` from config. Returns `Ok(None)` when TTS is
+    /// Build a `TtsEngine` from settings. Returns `Ok(None)` when TTS is
     /// disabled (so the HTTP layer can simply not register the
     /// routes). When enabled but `model_dir` is missing or contains no
     /// voices, returns `Err` so the binary refuses to start with a
@@ -532,50 +582,50 @@ impl TtsEngine {
     /// than a silent runtime 503 on every request.
     ///
     /// Returns `Ok(None)` with a startup warning when the `tts`
-    /// cargo feature is **off** even if `TTS_ENABLED=true`: the
-    /// binary has no `piper-rs` compiled in, so we cannot honour
+    /// cargo feature is **off** even if `settings.enabled` is `true`:
+    /// the binary has no `piper-rs` compiled in, so we cannot honour
     /// the request. The warning tells the operator to rebuild with
-    /// `--features stt-server/tts`.
-    pub async fn load(config: &TtsConfig) -> Result<Option<Self>, TtsError> {
-        if !config.enabled {
-            info!("TTS disabled (TTS_ENABLED=false); /v1/audio/* routes will not be registered");
+    /// `--features nagent-tts/tts`.
+    pub async fn load(settings: &TtsSettings) -> Result<Option<Self>, TtsError> {
+        if !settings.enabled {
+            info!("TTS disabled; /v1/audio/* routes will not be registered");
             return Ok(None);
         }
         #[cfg(not(feature = "tts"))]
         {
             warn!(
-                "TTS_ENABLED=true but the server was compiled without the `tts` cargo feature; \
-                 rebuild with `--features stt-server/tts` to enable Piper. \
+                "TTS enabled but the crate was built without the `tts` cargo feature; \
+                 rebuild with `--features nagent-tts/tts` to enable Piper. \
                  /v1/audio/* routes will not be registered."
             );
             Ok(None)
         }
         #[cfg(feature = "tts")]
         {
-            let piper = PiperSynthesizer::discover(&config.model_dir)?;
+            let piper = PiperSynthesizer::discover(&settings.model_dir)?;
             let count = piper.voices().len();
             if count == 0 {
                 warn!(
-                    model_dir = %config.model_dir.display(),
+                    model_dir = %settings.model_dir.display(),
                     "TTS enabled but no Piper voices found in model_dir; \
                      /v1/audio/* routes will respond with an error until voices are added"
                 );
             } else {
                 info!(
-                    model_dir = %config.model_dir.display(),
+                    model_dir = %settings.model_dir.display(),
                     voices = count,
                     "Piper TTS engine ready"
                 );
             }
             Ok(Some(Self {
                 inner: Arc::new(piper),
-                default_voice_en: config.voice_en.clone(),
-                default_voice_fr: config.voice_fr.clone(),
-                default_lang: config.default_lang.clone(),
-                max_input_chars: config.max_input_chars,
+                default_voice_en: settings.voice_en.clone(),
+                default_voice_fr: settings.voice_fr.clone(),
+                default_lang: settings.default_lang.clone(),
+                max_input_chars: settings.max_input_chars,
                 synth_lock: std::sync::Mutex::new(()),
                 synth_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                    config.synth_concurrency.max(1),
+                    settings.synth_concurrency.max(1),
                 )),
             }))
         }
@@ -994,7 +1044,7 @@ mod tests {
         )
         .unwrap();
         // Deliberately no `.onnx` companion file.
-        let p = PiperSynthesizer::discover(&dir).expect("discover must succeed");
+        let p = PiperSynthesizer::discover(&dir).expect("discover must parse");
         assert_eq!(p.voices().len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

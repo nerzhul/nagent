@@ -1,19 +1,21 @@
 //! Local text-to-speech (Piper ONNX) subsystem.
 //!
-//! - [`engine`] — the [`Synthesizer`] trait (mock + Piper backends),
-//! the [`TtsEngine`](engine::TtsEngine) facade, and the 16-bit PCM
-//! mono WAV encoder.
-//! - [`routes`] — the HTTP handlers `POST /v1/audio/speech` and
-//! `GET /v1/audio/voices`.
+//! Plan 4.F moved the engine itself (`Synthesizer`, `TtsEngine`,
+//! `MockSynthesizer`, `PiperSynthesizer`, `TtsError`, `VoiceMeta`)
+//! into the `nagent-tts` crate so the second heavy native runtime
+//! can be split into its own inference tier later (plan H). The
+//! HTTP routes stay here because they depend on axum and the
+//! server's state type.
 //!
-//! Phase 1 of the architecture refactor split the original
-//! `tts.rs` into these two files; the public API is unchanged.
+//! The public re-exports below keep the old `crate::tts::TtsEngine`
+//! call sites compiling until the routes are migrated in place.
 
-pub mod engine;
 pub mod routes;
 
-// Back-compat re-exports — the pre-split callers reached these items
-// through `crate::tts::*`; keep that working until the follow-up
-// commit rewrites the call sites in place.
-pub use engine::{MockSynthesizer, Synthesizer, TtsEngine, TtsError, VoiceMeta};
+// Re-export the engine surface so existing call sites (routes,
+// `TtsState`, the unit tests) keep working. New code should reach
+// for `nagent_tts::*` directly.
+pub use nagent_tts::{
+    MockSynthesizer, SynthOutput, Synthesizer, TtsEngine, TtsError, TtsSettings, VoiceMeta,
+};
 pub use routes::{audio_speech, audio_voices, SpeechRequest, VoiceMetaJson, VoicesResponse};

@@ -18,7 +18,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::tts::engine::{TtsEngine, TtsError, VoiceMeta};
+use crate::tts::{TtsEngine, TtsError, VoiceMeta};
 use crate::TtsState;
 
 /// Request body for `POST /v1/audio/speech`. Mirrors the fields the

@@ -24,8 +24,10 @@ dictionary-agent = ["nagent-agents/dictionary-agent"]
 read-document-agent = ["nagent-agents/read-document-agent"]
 # Convenience meta-feature: every agent compiled in.
 all-agents = ["nagent-agents/all-agents"]
-# Piper TTS; pulls piper-rs + ort + espeak-ng FFI.
-tts = ["dep:piper-rs"]
+# Piper TTS; pulls piper-rs + ort + espeak-ng FFI through the
+# `nagent-tts` crate so the engine can be split into its own
+# inference tier later (plan 4.F / plan H).
+tts = ["nagent-tts/tts"]
 # Integration-test AppState builder (crate::testing).
 test-util = []
 
@@ -39,6 +41,7 @@ stt-core           = { path = "../stt-core" }
 nagent-support     = { path = "../nagent-support" }
 nagent-db          = { path = "../nagent-db" }
 nagent-agents      = { path = "../nagent-agents" }
+nagent-tts         = { path = "../nagent-tts" }
 axum               = { workspace = true }
 tokio              = { workspace = true }
 tower-http         = { workspace = true }
@@ -64,8 +67,8 @@ url = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # IANA tz database (datetime agent); drops bundled tzfiles.
 chrono-tz = { version = "0.10", default-features = false, features = ["std"], optional = true }
-# ONNX-based Piper TTS. Requires espeak-ng C library + headers + libclang + libssl-dev on the host.
-piper-rs = { version = "0.2", optional = true }
+# ONNX-based Piper TTS moved to `nagent-tts` (plan 4.F); the
+# server only consumes the engine through that crate.
 # Sandboxed expression evaluator for the calculate tool.
 meval = { version = "0.2", optional = true }
 argon2 = "0.5"

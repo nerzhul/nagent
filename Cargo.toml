@@ -6,6 +6,7 @@ members = [
     "crates/nagent-support",
     "crates/nagent-db",
     "crates/nagent-agents",
+    "crates/nagent-tts",
     "crates/nagent-server",
 ]
 

@@ -157,3 +157,22 @@ impl TtsConfig {
         })
     }
 }
+
+// Plan 4.F: project the server's `TtsConfig` onto the plain
+// `TtsSettings` the `nagent-tts` crate consumes. Keeps the crate
+// decoupled from our config plumbing so the engine can be split
+// into its own inference tier later (plan H) without surgery on
+// the config layer.
+impl From<&TtsConfig> for nagent_tts::TtsSettings {
+    fn from(c: &TtsConfig) -> Self {
+        Self {
+            enabled: c.enabled,
+            model_dir: c.model_dir.clone(),
+            voice_en: c.voice_en.clone(),
+            voice_fr: c.voice_fr.clone(),
+            default_lang: c.default_lang.clone(),
+            max_input_chars: c.max_input_chars,
+            synth_concurrency: c.synth_concurrency,
+        }
+    }
+}
