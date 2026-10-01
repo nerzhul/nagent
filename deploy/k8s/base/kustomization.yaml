@@ -5,12 +5,12 @@ namespace: stt
 
 resources:
   - serviceaccount.yaml
-  - rbac.yaml
   - pvc.yaml
   - configmap.yaml
   - deployment.yaml
   - service.yaml
   - model-downloader-job.yaml
+  - networkpolicy.yaml
 
 labels:
   - includeSelectors: true

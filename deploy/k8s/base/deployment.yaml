@@ -18,6 +18,7 @@ spec:
         app.kubernetes.io/component: nagent-server
     spec:
       serviceAccountName: nagent-server
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

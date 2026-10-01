@@ -1,0 +1,100 @@
+# Security plan S1 (defence in depth at the L3/L4 layer).
+#
+# Default-deny NetworkPolicy: the pod may only egress on the
+# destinations it actually needs. The plan calls out four targets:
+#
+#   1. DNS resolution (kube-dns / CoreDNS)
+#   2. The configured database (sqlite lives on local PVC, no
+#      egress; postgres lives behind a ClusterIP Service — both
+#      are addressed via the cluster CIDR)
+#   3. The LLM upstream (operator-supplied hostname, e.g.
+#      api.openai.com)
+#   4. The Internet at large, MINUS RFC1918 / link-local /
+#      cluster CIDRs (the network agent egress; the in-app SSRF
+#      filter still applies on top of the policy).
+#
+# Requires a CNI that supports `ipBlock.except` (Calico, Cilium,
+# Weave). The cluster operator must enable NetworkPolicy admission
+# — most managed clusters already do, but bare-metal clusters may
+# need the CNI configured for it.
+#
+# Ingress is left at cluster-default: the Service (ClusterIP) and
+# any Ingress in the prod overlay already front the pod, and a
+# blanket deny here would break the liveness / readiness probes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nagent-server
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nagent-server
+      app.kubernetes.io/component: nagent-server
+  policyTypes:
+    - Egress
+    # Ingress is intentionally NOT denied here: the probes need
+    # to reach the kubelet, and the in-app auth + CORS layers
+    # already enforce the security boundary at L7. Tightening
+    # this requires the cluster operator to wire the kubelet +
+    # metrics scraper CIDRs into an explicit allow-list, which is
+    # out of scope for the base manifest.
+  egress:
+    # ---- DNS resolution (kube-system) ----
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # ---- Database (sqlite on local PVC; postgres via ClusterIP) ----
+    #
+    # `ipBlock` is intentionally broad here (private ranges only):
+    # postgres is typically reached via a Service in the cluster,
+    # which resolves to a pod IP inside the cluster CIDR. Operators
+    # with a stricter setup should overlay a tighter rule.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+        - ipBlock:
+            cidr: 172.16.0.0/12
+        - ipBlock:
+            cidr: 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 5432
+    # ---- LLM upstream + Internet (minus private ranges) ----
+    #
+    # One rule covers both: the operator-supplied LLM hostname and
+    # the public hosts the network agents (weather / stock /
+    # wikipedia / dictionary / web_fetch) reach. The in-app SSRF
+    # filter still rejects loopback / RFC1918 / ULA / link-local
+    # addresses at the application layer; this policy is the
+    # defence-in-depth backstop.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+              - ::/128
+              - ::1/128
+              - fe80::/10
+              - fc00::/7
+              - ff00::/8
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
