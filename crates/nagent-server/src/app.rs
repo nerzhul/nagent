@@ -49,7 +49,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // fatal — a half-broken auth DB on a server that expects it
     // is the worst-case state (silent fallthrough to the pre-PR1
     // trust boundary would be a security regression).
-    let auth_store = match crate::auth::boot::auto_bootstrap(&cfg).await {
+    let auth_store: Option<nagent_db::Db> = match crate::auth::boot::auto_bootstrap(&cfg).await {
         Ok(store) => store,
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -98,7 +98,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // `Some`). The check runs early — a misconfigured server refuses
     // to boot with a clear error instead of 500-ing on every upload.
     let chat_sessions_state = auth_store.clone().map(|s| ChatSessionsState {
-        sessions: crate::chat::sessions::ChatSessions::new(s.db().chat_sessions.clone()),
+        sessions: crate::chat::sessions::ChatSessions::new(s.chat_sessions.clone()),
     });
     let documents_state = if cfg.documents.enabled {
         let store = match auth_store.clone() {
@@ -303,7 +303,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     };
 
     // ---- Compose AuthState ----------------------------------------------
-    let auth = auth_store.map(|store| AuthState {
+    let auth = auth_store.map(|store: nagent_db::Db| AuthState {
         store,
         cfg: Arc::new(cfg.auth.clone()),
         oidc: auth_oidc,

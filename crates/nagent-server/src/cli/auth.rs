@@ -130,18 +130,16 @@ pub fn ensure_sqlite_parent_dir(url: &str) -> Result<(), anyhow::Error> {
 /// directory exists first. Used by every CLI subcommand that
 /// touches the DB so the operator does not have to `mkdir -p
 /// ./data/` before running the very first command.
-async fn open_store(
-    cfg: &crate::config::Config,
-) -> Result<crate::auth::store::AuthStore, anyhow::Error> {
+async fn open_store(cfg: &crate::config::Config) -> Result<nagent_db::Db, anyhow::Error> {
     ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
-    let store = crate::auth::store::AuthStore::connect(&cfg.auth)
+    let opts: nagent_db::DbOptions = (&cfg.auth).into();
+    let db = nagent_db::Db::connect(&opts)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))?;
-    store
-        .migrate()
+    db.migrate()
         .await
         .map_err(|e| anyhow::anyhow!("auth migrations failed: {e}"))?;
-    Ok(store)
+    Ok(db)
 }
 
 fn print_help() {
@@ -314,9 +312,9 @@ async fn create_admin(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyh
         ));
     }
 
-    let store = open_store(&cfg).await?;
+    let db = open_store(&cfg).await?;
 
-    if let Some(existing) = store.get_user_by_email(email).await? {
+    if let Some(existing) = db.users.get_by_email(email).await? {
         return Err(anyhow::anyhow!(
             "a user with email {:?} already exists (id = {})",
             existing.email,
@@ -332,11 +330,12 @@ async fn create_admin(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyh
     )
     .map_err(|e| anyhow::anyhow!("hash_password failed: {e}"))?;
 
-    let user_id = store
-        .create_user(email, email, "local", Some(&hash))
+    let user_id = db
+        .users
+        .create(email, email, "local", Some(&hash))
         .await
         .map_err(|e| anyhow::anyhow!("create_user failed: {e}"))?;
-    store.record_event(crate::auth::store::NewAuthEvent::auth(
+    db.events.record(nagent_db::NewAuthEvent::auth(
         Some(user_id),
         "create_admin",
         "local",
@@ -390,8 +389,8 @@ async fn list_users(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow
     let opts = parse_list_users(args)?;
     check_running_server(opts.force)?;
     let cfg = Config::load(cli)?;
-    let store = open_store(&cfg).await?;
-    let users = store.list_users(opts.provider.as_deref()).await?;
+    let db = open_store(&cfg).await?;
+    let users = db.users.list(opts.provider.as_deref()).await?;
     for u in users {
         println!(
             "{}\t{}\t{}\t{}",
@@ -440,13 +439,14 @@ async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyho
     let opts = parse_delete_user(args)?;
     check_running_server(opts.force)?;
     let cfg = Config::load(cli)?;
-    let store = open_store(&cfg).await?;
+    let db = open_store(&cfg).await?;
     let email = opts
         .email
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("--email is required"))?;
-    let target = store
-        .get_user_by_email(email)
+    let target = db
+        .users
+        .get_by_email(email)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no user with email {email:?}"))?;
 
@@ -455,7 +455,7 @@ async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyho
     // "1 local user minimum" guard is enough to prevent the
     // lockout class.
     if target.provider == "local" && cfg.auth.enabled {
-        let local_count = store.count_users_by_provider("local").await?;
+        let local_count = db.users.count_by_provider("local").await?;
         if local_count <= 1 {
             return Err(anyhow::anyhow!(
                 "refusing to delete the last local user while auth is enabled; \
@@ -477,7 +477,7 @@ async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyho
         }
     }
 
-    store.delete_user(target.id).await?;
+    db.users.delete(target.id).await?;
     println!("deleted {}", target.id);
     Ok(ExitCode::from(0))
 }

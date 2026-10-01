@@ -15,7 +15,11 @@
 //! indexes to be gone.
 
 mod tests {
-    use nagent_server::auth::store::AuthStore;
+    async fn connect_db(cfg: &nagent_server::config::AuthConfig) -> nagent_db::Db {
+        let opts: nagent_db::DbOptions = cfg.into();
+        nagent_db::Db::connect(&opts).await.expect("store connects")
+    }
+
     use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
 
     fn test_config(label: &str) -> AuthConfig {
@@ -47,7 +51,7 @@ mod tests {
         // "no such table" error and returns an empty applied set.
         // `pending` must contain every known migration.
         let cfg = test_config("fresh");
-        let store = AuthStore::connect(&cfg).await.expect("store");
+        let store = connect_db(&cfg).await;
         let status = store.migration_status().await.expect("status");
         assert!(
             status.applied.is_empty(),
@@ -75,7 +79,7 @@ mod tests {
     #[tokio::test]
     async fn migrate_up_is_idempotent() {
         let cfg = test_config("idem");
-        let store = AuthStore::connect(&cfg).await.expect("store");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("first migrate");
         let after_first = store.migration_status().await.unwrap();
         let highest = after_first
@@ -93,7 +97,7 @@ mod tests {
     #[tokio::test]
     async fn status_after_apply_lists_both_migrations() {
         let cfg = test_config("both");
-        let store = AuthStore::connect(&cfg).await.expect("store");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrate");
         let status = store.migration_status().await.unwrap();
         let highest = status.highest_applied.expect("at least one migration");
@@ -119,7 +123,7 @@ mod tests {
         // diff must reflect exactly one migration going from
         // `applied` to `pending`.
         let cfg = test_config("revert_one");
-        let store = AuthStore::connect(&cfg).await.expect("store");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrate");
         let before = store.migration_status().await.unwrap();
         let highest = before.highest_applied.expect("at least one migration");
@@ -140,7 +144,7 @@ mod tests {
         // applied migration). After this, status must report zero
         // applied, every migration pending.
         let cfg = test_config("revert_all");
-        let store = AuthStore::connect(&cfg).await.expect("store");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrate");
         let before = store.migration_status().await.unwrap();
         let total = (before.applied.len() + before.pending.len()) as i64;
@@ -161,7 +165,7 @@ mod tests {
         // {1..N}). Catches the "checksum mismatch after re-applying
         // the same SQL" class of regressions.
         let cfg = test_config("roundtrip");
-        let store = AuthStore::connect(&cfg).await.expect("store");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrate");
         let before = store.migration_status().await.unwrap();
         let target = before.highest_applied.expect("at least one") - 1;

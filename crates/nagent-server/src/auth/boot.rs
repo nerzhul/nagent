@@ -26,8 +26,8 @@ use rand::RngCore;
 
 use crate::auth::error::AuthError;
 use crate::auth::password;
-use crate::auth::store::{AuthStore, NewAuthEvent};
 use crate::config::Config;
+use nagent_db::NewAuthEvent;
 
 /// Default bootstrap email when the env var is not set. The
 /// `@localhost` domain matches the in-process dev setup; operators
@@ -49,7 +49,7 @@ const BOOTSTRAP_PASSWORD_LEN: usize = 24;
 /// Returns `Ok(None)` when `auth.enabled = false` (the subsystem
 /// is silently skipped). Returns `Ok(Some(store))` on success.
 /// Errors are fatal — the caller should refuse to boot the server.
-pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<AuthStore>, anyhow::Error> {
+pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<nagent_db::Db>, anyhow::Error> {
     if !cfg.auth.enabled {
         tracing::info!("auth subsystem disabled (auth.enabled = false); skipping bootstrap");
         return Ok(None);
@@ -68,7 +68,8 @@ pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<AuthStore>, anyh
     // first run of a fresh host.
     ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
 
-    let store = AuthStore::connect(&cfg.auth)
+    let opts: nagent_db::DbOptions = (&cfg.auth).into();
+    let store = nagent_db::Db::connect(&opts)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))?;
     // Boot-time migration is gated on `[auth.db].auto_migrate` (env
@@ -108,7 +109,8 @@ pub async fn auto_bootstrap(cfg: &Arc<Config>) -> Result<Option<AuthStore>, anyh
     // running the migrations.
     if cfg.auth.db.backend == "sqlite" && cfg.auth.db.auto_migrate {
         let local_count = store
-            .count_users_by_provider("local")
+            .users
+            .count_by_provider("local")
             .await
             .map_err(|e| anyhow::anyhow!("count local users: {e}"))?;
         if local_count == 0 {
@@ -166,7 +168,7 @@ fn ensure_sqlite_parent_dir(url: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn bootstrap_first_admin(store: &AuthStore, cfg: &Config) -> Result<(), anyhow::Error> {
+async fn bootstrap_first_admin(store: &nagent_db::Db, cfg: &Config) -> Result<(), anyhow::Error> {
     let email = std::env::var("NAGENT_AUTH_BOOTSTRAP_EMAIL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -182,10 +184,11 @@ async fn bootstrap_first_admin(store: &AuthStore, cfg: &Config) -> Result<(), an
     .map_err(|e| anyhow::anyhow!("hash bootstrap password: {e}"))?;
 
     let user_id = store
-        .create_user(&email, &email, "local", Some(&hash))
+        .users
+        .create(&email, &email, "local", Some(&hash))
         .await
         .map_err(|e| anyhow::anyhow!("create bootstrap user: {e}"))?;
-    store.record_event(NewAuthEvent::auth(
+    store.events.record(NewAuthEvent::auth(
         Some(user_id),
         "bootstrap_admin",
         "local",
@@ -309,7 +312,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use crate::auth::store::AuthStore;
     use crate::config::Config;
     use crate::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
 
@@ -376,7 +378,7 @@ mod tests {
             .expect("sqlite bootstrap must succeed")
             .expect("auth.enabled = true so store must be Some");
         // The auto-bootstrap should have created exactly one local user.
-        let users = store.list_users(Some("local")).await.unwrap();
+        let users = store.users.list(Some("local")).await.unwrap();
         assert_eq!(users.len(), 1, "exactly one local admin");
         let admin = &users[0];
         assert!(admin.password_hash.is_some(), "hash must be present");
@@ -389,18 +391,20 @@ mod tests {
         let cfg = sqlite_config("skip");
         let cfg = Arc::new(cfg.clone());
         // Connect + migrate manually.
-        let store = AuthStore::connect(&cfg.auth).await.unwrap();
+        let opts: nagent_db::DbOptions = (&cfg.auth).into();
+        let store = nagent_db::Db::connect(&opts).await.unwrap();
         store.migrate().await.unwrap();
         let hash = b"pre-existing-argon2id-blob".to_vec();
         store
-            .create_user("alice@example.com", "Alice", "local", Some(&hash))
+            .users
+            .create("alice@example.com", "Alice", "local", Some(&hash))
             .await
             .unwrap();
         // Re-run bootstrap. It should not create a second admin.
         crate::auth::boot::auto_bootstrap(&cfg)
             .await
             .expect("bootstrap must succeed");
-        let users = store.list_users(Some("local")).await.unwrap();
+        let users = store.users.list(Some("local")).await.unwrap();
         assert_eq!(
             users.len(),
             1,

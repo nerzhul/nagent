@@ -35,7 +35,7 @@ use stt_core::{PoolDispatch, WhisperBackend};
 
 use crate::agents::ServiceRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
-use crate::auth::{AuthStore, OidcState, PasskeyState};
+use crate::auth::{OidcState, PasskeyState};
 use crate::config::{AuthConfig, Config};
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::rate_limit::RateLimiter;
@@ -82,14 +82,14 @@ impl std::fmt::Debug for LlmState {
 }
 
 /// Auth subsystem sub-state. `Some` when `auth.enabled = true`
-/// AND `auto_bootstrap` produced an `AuthStore`.
+/// AND `auto_bootstrap` produced a `nagent_db::Db` connection.
 ///
 /// `cfg` is `Arc<AuthConfig>` (not the whole `Config`) so the
 /// auth subtree cannot reach into unrelated sections (LLM,
 /// agents, documents, …).
 #[derive(Clone)]
 pub struct AuthState {
-    pub store: AuthStore,
+    pub store: nagent_db::Db,
     pub cfg: Arc<AuthConfig>,
     pub oidc: Option<OidcState>,
     pub passkey: Option<PasskeyState>,
@@ -126,7 +126,7 @@ impl AuthState {
     /// `app::build_app` boot path adds them when the operator
     /// opts in. Used by tests that only care about the
     /// middleware/auth-store interaction.
-    pub fn new(store: AuthStore, cfg: Arc<Config>) -> Self {
+    pub fn new(store: nagent_db::Db, cfg: Arc<Config>) -> Self {
         Self {
             store,
             cfg: Arc::new(cfg.auth.clone()),

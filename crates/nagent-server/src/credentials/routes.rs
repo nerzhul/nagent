@@ -28,16 +28,20 @@ use uuid::Uuid;
 use crate::agents::ServiceRegistry;
 use crate::auth::error::{require_auth_store, AuthError};
 use crate::auth::middleware::check_csrf;
-use crate::auth::store::AuthStore;
+// Plan 4.A: the `AuthStore` shim is on its way out. The
+// `CredentialState` exposes the shared `nagent_db::Db` directly
+// (its `store: nagent_db::Db` field) and route handlers reach
+// per-user scoped views through it.
 use crate::auth::AuthUser;
 use crate::credentials::crypto::encrypt;
 use crate::credentials::key::CredentialsKey;
 
-/// All routes need an `AuthUser` (mounted behind `RequireAuth`) and
-/// the resolved per-user `AuthStore` from `AppState`.
+/// Per-route state. `store` is the shared `nagent_db::Db`; the
+/// handlers reach the per-user `credentials` repository through
+/// `state.store.credentials.for_user(user.id)`.
 #[derive(Clone)]
 pub struct CredentialState {
-    pub store: AuthStore,
+    pub store: nagent_db::Db,
     pub services: Arc<ServiceRegistry>,
     pub key: Arc<CredentialsKey>,
 }
@@ -66,7 +70,7 @@ pub fn build_protected_credentials_router(
             // `AppState` so we can also write rows (the resolver only
             // exposes reads). Pulling it off the resolver is safe — the
             // `AuthStore` is `Clone` and shares the same pool.
-            store: auth_store_from_resolver(state.clone()),
+            store: auth_db(state.clone()),
             services: state
                 .auth
                 .as_ref()
@@ -94,12 +98,9 @@ pub fn build_protected_credentials_router(
 
 /// Walk the resolver back to its `AuthStore`. Avoids a second field
 /// on `AppState`; the resolver already carries it.
-fn auth_store_from_resolver(state: Arc<crate::AppState>) -> AuthStore {
-    // We expose the resolver's store indirectly: the resolver is
-    // built from `AuthStore::clone()` and keeps the same pool, so
-    // we read it back via the auth handler's helper.
+fn auth_db(state: Arc<crate::AppState>) -> nagent_db::Db {
     require_auth_store(&state)
-        .expect("auth_store wired in main")
+        .expect("auth store wired in main")
         .clone()
 }
 
@@ -113,7 +114,8 @@ pub async fn list_integrations(
     for svc in state.services.list() {
         let filled = state
             .store
-            .list_configured_field_keys(user.id, svc.id)
+            .credentials
+            .list_field_keys(user.id, svc.id)
             .await?;
         data.push(svc.to_summary(&filled));
     }
@@ -132,7 +134,8 @@ pub async fn get_integration(
     };
     let filled = state
         .store
-        .list_configured_field_keys(user.id, svc.id)
+        .credentials
+        .list_field_keys(user.id, svc.id)
         .await?;
     Ok(Json(svc.to_summary(&filled)).into_response())
 }
@@ -187,7 +190,8 @@ pub async fn put_credentials(
     }
     state
         .store
-        .upsert_user_credentials(user.id, svc.id, &rows)
+        .credentials
+        .upsert(user.id, svc.id, &rows)
         .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -204,7 +208,7 @@ pub async fn delete_credentials(
     if state.services.get(&id).is_none() {
         return Err(AuthError::BadRequest(format!("unknown service: {id}")));
     }
-    state.store.delete_service_credentials(user.id, &id).await?;
+    state.store.credentials.delete_service(user.id, &id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

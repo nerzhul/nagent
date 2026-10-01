@@ -147,7 +147,9 @@ impl Agent for ReadDocumentAgent {
         //    user's docs even if they guess the UUID.
         let row = self
             .store
-            .get_document_by_name(&req.name, ctx.user_id(), session_id)
+            .db()
+            .documents
+            .get_by_name(&req.name, ctx.user_id(), session_id)
             .await
             .map_err(|e| AgentError::AgentFailed(format!("document lookup failed: {e}")))?;
         let row = row.ok_or_else(|| {

@@ -18,7 +18,11 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use nagent_server::auth::store::AuthStore;
+async fn connect_db(cfg: &nagent_server::config::AuthConfig) -> nagent_db::Db {
+    let opts: nagent_db::DbOptions = cfg.into();
+    nagent_db::Db::connect(&opts).await.expect("store connects")
+}
+
 use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig};
 use nagent_server::http::build_router;
 use nagent_server::testing::app_state;
@@ -49,9 +53,7 @@ async fn build_state_with_auth() -> Arc<AppState> {
         },
         ..AuthConfig::default()
     };
-    let auth_store = AuthStore::connect(&auth_cfg)
-        .await
-        .expect("auth store must connect");
+    let auth_store = connect_db(&auth_cfg).await;
     auth_store.migrate().await.expect("migrations must apply");
 
     let mut builder = app_state();
@@ -220,11 +222,13 @@ async fn api_me_succeeds_with_valid_session_cookie() {
         .store
         .clone();
     let user_id = auth_store
-        .create_user("alice@example.com", "Alice", "local", Some(b"hash"))
+        .users
+        .create("alice@example.com", "Alice", "local", Some(b"hash"))
         .await
         .expect("create_user");
     let session = auth_store
-        .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+        .sessions
+        .create(user_id, std::time::Duration::from_secs(60), None, None)
         .await
         .expect("create_session");
     let session_token = session

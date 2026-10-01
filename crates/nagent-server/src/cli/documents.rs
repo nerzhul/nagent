@@ -193,11 +193,12 @@ async fn connect_store(
         ));
     }
     crate::cli::auth::ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
-    let store = crate::auth::store::AuthStore::connect(&cfg.auth)
+    let db_opts: nagent_db::DbOptions = (&cfg.auth).into();
+    let db = nagent_db::Db::connect(&db_opts)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))?;
     let doc_store = crate::documents::DocumentStore::new(
-        store,
+        db,
         cfg.documents.max_extracted_chars,
         cfg.documents.cache_dir.clone(),
     );
@@ -216,6 +217,8 @@ async fn purge(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Err
         // Inspect-only path: list the rows the sweep WOULD remove.
         // Does not touch the DB or the disk.
         let rows = store
+            .db()
+            .documents
             .sweep_older_than(ttl)
             .await
             .map_err(|e| anyhow::anyhow!("sweep failed: {e}"))?;

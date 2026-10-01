@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::auth::error::AuthError;
 use crate::auth::session::{self, AuthUser};
-use crate::auth::store::NewAuthEvent;
+use nagent_db::NewAuthEvent;
 
 /// Mirrors `crate::auth::config::AuthOidcConfig` so the OIDC handlers
 /// can run unit tests without depending on the live config. Tests
@@ -96,7 +96,7 @@ pub async fn callback_handler(
 /// note). Returns `Some(OidcState)` when OIDC is enabled so the
 /// application router can mount the routes; the handlers return 501.
 pub async fn build_state(
-    store: crate::auth::store::AuthStore,
+    store: nagent_db::Db,
     cfg: Arc<crate::config::Config>,
 ) -> Result<OidcState, AuthError> {
     let _ = store;

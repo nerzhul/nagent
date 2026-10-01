@@ -12,12 +12,16 @@
 
 use std::sync::Arc;
 
-use nagent_server::auth::store::AuthStore;
+async fn connect_db(cfg: &nagent_server::config::AuthConfig) -> nagent_db::Db {
+    let opts: nagent_db::DbOptions = cfg.into();
+    nagent_db::Db::connect(&opts).await.expect("store connects")
+}
+
 use nagent_server::chat::sessions::{ChatSessionError, ChatSessions};
 use nagent_server::config::{AuthConfig, AuthDbConfig};
 use uuid::Uuid;
 
-async fn fresh_store() -> AuthStore {
+async fn fresh_store() -> nagent_db::Db {
     let cfg = AuthConfig {
         enabled: true,
         backends: vec![],
@@ -37,9 +41,7 @@ async fn fresh_store() -> AuthStore {
         passkey: Default::default(),
         credentials: Default::default(),
     };
-    let store = AuthStore::connect(&cfg)
-        .await
-        .expect("sqlite in-memory store must connect");
+    let store = connect_db(&cfg).await;
     // Migrations create `chat_sessions` (migration 0004) AND
     // `users` (the FK target). The users table starts empty;
     // tests that need a user row call `insert_user_for_test`.
@@ -53,7 +55,7 @@ async fn fresh_store() -> AuthStore {
 /// `"local"` provider. We bypass the typed `create_user` helper
 /// (which mints its own UUID) by writing through the
 /// `AuthStore::sqlite()` accessor.
-async fn insert_user_for_test(store: &AuthStore, user_id: Uuid) {
+async fn insert_user_for_test(store: &nagent_db::Db, user_id: Uuid) {
     use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
     use argon2::Argon2;
     let salt = SaltString::generate(&mut OsRng);
@@ -66,7 +68,7 @@ async fn insert_user_for_test(store: &AuthStore, user_id: Uuid) {
     // UUID) by writing through `AuthStore::pool()`. The pool is
     // typed `AnyPool`; we unwrap to sqlite for the test harness.
     let pool = store.pool();
-    let nagent_server::auth::store::AnyPool::Sqlite(sqlite_pool) = pool else {
+    let nagent_db::AnyPool::Sqlite(sqlite_pool) = pool else {
         panic!("chat_sessions integration tests require sqlite");
     };
     sqlx::query::<sqlx::Sqlite>(
@@ -88,7 +90,7 @@ async fn bind_then_touch_and_verify_succeeds() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
+    let cs = ChatSessions::new(auth.chat_sessions.clone());
     let session_id = Uuid::new_v4();
     cs.bind(session_id, user_id)
         .await
@@ -103,7 +105,7 @@ async fn touch_and_verify_rejects_never_bound_session() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
+    let cs = ChatSessions::new(auth.chat_sessions.clone());
     // Random UUID that was never inserted. The call must surface
     // `NotBound` so the route layer can map it to 403.
     let err = cs
@@ -124,7 +126,7 @@ async fn touch_and_verify_rejects_session_bound_to_other_user() {
     let user_b = Uuid::new_v4();
     insert_user_for_test(&auth, user_a).await;
     insert_user_for_test(&auth, user_b).await;
-    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
+    let cs = ChatSessions::new(auth.chat_sessions.clone());
     let session_id = Uuid::new_v4();
     assert_ne!(user_a, user_b, "test must use distinct users");
     cs.bind(session_id, user_a)
@@ -146,7 +148,7 @@ async fn bind_is_idempotent_for_same_user() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
+    let cs = ChatSessions::new(auth.chat_sessions.clone());
     let session_id = Uuid::new_v4();
     cs.bind(session_id, user_id).await.expect("first bind");
     cs.bind(session_id, user_id)
@@ -168,7 +170,7 @@ async fn touch_and_verify_refreshes_last_seen_at() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
+    let cs = ChatSessions::new(auth.chat_sessions.clone());
     let session_id = Uuid::new_v4();
     cs.bind(session_id, user_id).await.unwrap();
     for _ in 0..3 {

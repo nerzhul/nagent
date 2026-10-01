@@ -12,6 +12,21 @@ use std::time::Duration;
 
 use crate::auth::error::AuthError;
 use crate::documents::DocumentStore;
+use nagent_db::documents::DocumentError as DbDocumentError;
+
+/// Convert a `nagent_db::documents::DocumentError` into the
+/// server's [`AuthError`] so the route / CLI error mapping stays
+/// intact.
+impl From<DbDocumentError> for AuthError {
+    fn from(e: DbDocumentError) -> Self {
+        match e {
+            DbDocumentError::Sqlx(inner) => AuthError::Database(inner.into()),
+            DbDocumentError::SchemaMissing => AuthError::Internal(
+                "uploaded_documents table is missing; run `nagent migrate up`".into(),
+            ),
+        }
+    }
+}
 
 /// Sweep documents whose `created_at + ttl` is older than `ttl`
 /// ago. For each matched row:
@@ -31,7 +46,7 @@ pub async fn purge_older_than(
     cache_dir: &Path,
     ttl: Duration,
 ) -> Result<usize, AuthError> {
-    let rows = store.sweep_older_than(ttl).await?;
+    let rows = store.db().documents.sweep_older_than(ttl).await?;
     let total = rows.len();
     for row in rows {
         // Skip files that escaped the cache dir (defence against a
@@ -47,7 +62,7 @@ pub async fn purge_older_than(
                 "skipping unlink: disk_path escaped cache_dir"
             );
             // Still drop the DB row so the next boot starts clean.
-            store.delete_row_by_id(row.id).await?;
+            store.db().documents.delete_row_by_id(row.id).await?;
             continue;
         }
         match std::fs::remove_file(&row.disk_path) {
@@ -66,7 +81,7 @@ pub async fn purge_older_than(
                 continue;
             }
         }
-        store.delete_row_by_id(row.id).await?;
+        store.db().documents.delete_row_by_id(row.id).await?;
     }
     Ok(total)
 }

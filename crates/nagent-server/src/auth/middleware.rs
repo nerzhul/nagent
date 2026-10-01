@@ -47,7 +47,8 @@ pub async fn extract_auth_user(
     let token_hash = session::sha256_of(&raw_token);
     let lookup = state
         .store
-        .lookup_session_by_token_hash(&token_hash)
+        .sessions
+        .lookup_by_token_hash(&token_hash)
         .await?;
     let Some((session, user)) = lookup else {
         return Ok(None);
@@ -81,7 +82,7 @@ pub async fn extract_auth_user(
     let store = state.store.clone();
     let token_hash_for_touch = token_hash;
     tokio::spawn(async move {
-        let _ = store.touch_session(&token_hash_for_touch).await;
+        let _ = store.sessions.touch(&token_hash_for_touch).await;
     });
     Ok(Some(auth_user))
 }
@@ -170,7 +171,6 @@ fn unauthorized_response() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::store::AuthStore;
     use crate::config::Config;
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode};
@@ -182,7 +182,7 @@ mod tests {
     /// Build an in-memory sqlite-backed `AuthStore` and run the
     /// migrations. Returns the store + the auth config that drove
     /// its creation.
-    async fn temp_store() -> (AuthStore, std::sync::Arc<Config>) {
+    async fn temp_store() -> (nagent_db::Db, std::sync::Arc<Config>) {
         // We never read the bind address; an ephemeral port is
         // fine. The `public_url` is set to `https://example.com`
         // so the cookie code path picks `Secure = true` for the
@@ -206,7 +206,8 @@ mod tests {
         );
         cfg.auth.db.max_connections = 1;
         let cfg = std::sync::Arc::new(cfg);
-        let store = AuthStore::connect(&cfg.auth)
+        let opts: nagent_db::DbOptions = (&cfg.auth).into();
+        let store = nagent_db::Db::connect(&opts)
             .await
             .expect("store must connect");
         store.migrate().await.expect("migrations must apply");
@@ -241,12 +242,14 @@ mod tests {
         // register handler is gated by RequireAuth so it cannot
         // bootstrap itself).
         let user_id = store
-            .create_user("alice@example.com", "Alice", "local", Some(b"dummy"))
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"dummy"))
             .await
             .unwrap();
         // Mint a session row.
         let session = store
-            .create_session(
+            .sessions
+            .create(
                 user_id,
                 std::time::Duration::from_secs(60),
                 Some("127.0.0.1"),
@@ -345,12 +348,14 @@ mod tests {
     async fn expired_session_returns_401() {
         let (store, cfg) = temp_store().await;
         let user_id = store
-            .create_user("bob@example.com", "Bob", "local", Some(b"dummy"))
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"dummy"))
             .await
             .unwrap();
         // 1-second TTL then sleep past expiry.
         let session = store
-            .create_session(user_id, std::time::Duration::from_secs(1), None, None)
+            .sessions
+            .create(user_id, std::time::Duration::from_secs(1), None, None)
             .await
             .unwrap();
         let session_token = session
@@ -383,11 +388,13 @@ mod tests {
     async fn csrf_mismatch_on_state_changer_returns_403() {
         let (store, cfg) = temp_store().await;
         let user_id = store
-            .create_user("eve@example.com", "Eve", "local", Some(b"dummy"))
+            .users
+            .create("eve@example.com", "Eve", "local", Some(b"dummy"))
             .await
             .unwrap();
         let session = store
-            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .sessions
+            .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
         let session_token = session
@@ -497,11 +504,13 @@ mod tests {
     async fn csrf_bogus_bearer_header_does_not_bypass_cookie_csrf() {
         let (store, cfg) = temp_store().await;
         let user_id = store
-            .create_user("frank@example.com", "Frank", "local", Some(b"dummy"))
+            .users
+            .create("frank@example.com", "Frank", "local", Some(b"dummy"))
             .await
             .unwrap();
         let session = store
-            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .sessions
+            .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
         let session_token = session
@@ -546,7 +555,8 @@ mod tests {
         //    The cookie wins (still authenticated as a cookie
         //    session), so CSRF is still enforced.
         let other_session = store
-            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .sessions
+            .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
         let other_session_token = other_session
@@ -626,11 +636,13 @@ mod tests {
         // cannot silently swap sources.
         let (store, cfg) = temp_store().await;
         let user_id = store
-            .create_user("greta@example.com", "Greta", "local", Some(b"dummy"))
+            .users
+            .create("greta@example.com", "Greta", "local", Some(b"dummy"))
             .await
             .unwrap();
         let session = store
-            .create_session(user_id, std::time::Duration::from_secs(60), None, None)
+            .sessions
+            .create(user_id, std::time::Duration::from_secs(60), None, None)
             .await
             .unwrap();
         let session_token = session

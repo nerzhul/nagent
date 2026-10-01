@@ -18,11 +18,13 @@
 mod tests {
     use std::time::Duration;
 
-    use nagent_server::auth::store::{
-        AnyPool, AuthStore, AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord,
-    };
-    use nagent_server::auth::AuthError;
+    use nagent_db::{AnyPool, AuthUserRecord, NewAuthEvent, NewPasskeyRecord, PasskeyRecord};
     use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig};
+
+    async fn connect_db(cfg: &AuthConfig) -> nagent_db::Db {
+        let opts: nagent_db::DbOptions = cfg.into();
+        nagent_db::Db::connect(&opts).await.expect("store connects")
+    }
 
     fn test_config() -> AuthConfig {
         AuthConfig {
@@ -80,26 +82,29 @@ mod tests {
     #[tokio::test]
     async fn full_lifecycle_local_user_session_and_passkey() {
         let cfg = test_config();
-        let store = AuthStore::connect(&cfg).await.expect("store connects");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrations apply");
         let pool = store.pool();
 
         let hash = b"fake-argon2id-blob".to_vec();
         let user_id = store
-            .create_user("alice@example.com", "Alice Doe", "local", Some(&hash))
+            .users
+            .create("alice@example.com", "Alice Doe", "local", Some(&hash))
             .await
             .expect("create_user");
 
         let dup = store
-            .create_user("ALICE@example.com", "Alice Other", "local", Some(&hash))
+            .users
+            .create("ALICE@example.com", "Alice Other", "local", Some(&hash))
             .await;
         assert!(
-            matches!(dup, Err(AuthError::Conflict(_))),
+            matches!(dup, Err(nagent_db::Error::Conflict(_))),
             "duplicate email must return Conflict, got {dup:?}"
         );
 
         let by_email = store
-            .get_user_by_email("Alice@Example.COM")
+            .users
+            .get_by_email("Alice@Example.COM")
             .await
             .expect("get_user_by_email")
             .expect("user exists");
@@ -119,11 +124,13 @@ mod tests {
         .expect("disable update");
 
         let session = store
-            .create_session(user_id, Duration::from_secs(60), None, None)
+            .sessions
+            .create(user_id, Duration::from_secs(60), None, None)
             .await
             .expect("create_session");
         let lookup = store
-            .lookup_session_by_token_hash(&session.token_hash)
+            .sessions
+            .lookup_by_token_hash(&session.token_hash)
             .await
             .expect("lookup_session");
         assert!(lookup.is_none(), "disabled user must not resolve a session");
@@ -138,7 +145,8 @@ mod tests {
         .await
         .expect("re-enable update");
         let lookup = store
-            .lookup_session_by_token_hash(&session.token_hash)
+            .sessions
+            .lookup_by_token_hash(&session.token_hash)
             .await
             .expect("lookup_session")
             .expect("session now resolves");
@@ -148,7 +156,8 @@ mod tests {
         let public_key = vec![0xb2u8; 64];
         let pk_id = uuid::Uuid::new_v4();
         store
-            .insert_passkey(NewPasskeyRecord {
+            .passkeys
+            .insert(NewPasskeyRecord {
                 id: pk_id,
                 user_id,
                 credential_id: cred_id.clone(),
@@ -161,7 +170,8 @@ mod tests {
             .expect("insert_passkey");
 
         let fetched: PasskeyRecord = store
-            .get_passkey_by_credential_id(&cred_id)
+            .passkeys
+            .get_by_credential_id(&cred_id)
             .await
             .expect("get_passkey_by_credential_id")
             .expect("passkey exists");
@@ -169,18 +179,21 @@ mod tests {
         assert_eq!(fetched.counter, 0);
 
         store
-            .bump_passkey_counter(pk_id, 7)
+            .passkeys
+            .bump_counter(pk_id, 7)
             .await
             .expect("bump_passkey_counter");
         let fetched: PasskeyRecord = store
-            .get_passkey_by_credential_id(&cred_id)
+            .passkeys
+            .get_by_credential_id(&cred_id)
             .await
             .expect("get_passkey_by_credential_id")
             .expect("passkey exists");
         assert_eq!(fetched.counter, 7, "counter must advance monotonically");
 
         let dup = store
-            .insert_passkey(NewPasskeyRecord {
+            .passkeys
+            .insert(NewPasskeyRecord {
                 id: uuid::Uuid::new_v4(),
                 user_id,
                 credential_id: cred_id.clone(),
@@ -191,28 +204,31 @@ mod tests {
             })
             .await;
         assert!(
-            matches!(dup, Err(AuthError::Conflict(_))),
+            matches!(dup, Err(nagent_db::Error::Conflict(_))),
             "duplicate credential_id must return Conflict, got {dup:?}"
         );
 
         store
-            .delete_session(&session.token_hash)
+            .sessions
+            .delete(&session.token_hash)
             .await
             .expect("delete_session");
         assert!(
             store
-                .lookup_session_by_token_hash(&session.token_hash)
+                .sessions
+                .lookup_by_token_hash(&session.token_hash)
                 .await
                 .expect("lookup_session after delete")
                 .is_none(),
             "session must be gone after delete"
         );
 
-        let deleted = store.delete_user(user_id).await.expect("delete_user");
+        let deleted = store.users.delete(user_id).await.expect("delete_user");
         assert_eq!(deleted, 1, "exactly one row removed");
         assert!(
             store
-                .get_user_by_id(user_id)
+                .users
+                .get_by_id(user_id)
                 .await
                 .expect("get_user_by_id after delete")
                 .is_none(),
@@ -220,14 +236,15 @@ mod tests {
         );
         assert!(
             store
-                .get_passkey_by_credential_id(&cred_id)
+                .passkeys
+                .get_by_credential_id(&cred_id)
                 .await
                 .expect("get_passkey_by_credential_id after delete")
                 .is_none(),
             "passkey must cascade-delete with its user"
         );
 
-        store.record_event(NewAuthEvent {
+        store.events.record(NewAuthEvent {
             user_id: None,
             kind: "test_event".into(),
             provider: "test".into(),
@@ -251,39 +268,45 @@ mod tests {
     #[tokio::test]
     async fn list_users_filters_by_provider_prefix() {
         let cfg = test_config();
-        let store = AuthStore::connect(&cfg).await.expect("store connects");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrations apply");
 
         let h = b"hash".to_vec();
         store
-            .create_user("a@x.com", "A", "local", Some(&h))
+            .users
+            .create("a@x.com", "A", "local", Some(&h))
             .await
             .unwrap();
         store
-            .create_user("b@x.com", "B", "local", Some(&h))
+            .users
+            .create("b@x.com", "B", "local", Some(&h))
             .await
             .unwrap();
         store
-            .create_user("c@x.com", "C", "oidc:https://idp/", None)
+            .users
+            .create("c@x.com", "C", "oidc:https://idp/", None)
             .await
             .unwrap();
         store
-            .create_user("d@x.com", "D", "passkey", None)
+            .users
+            .create("d@x.com", "D", "passkey", None)
             .await
             .unwrap();
 
-        let all: Vec<AuthUserRecord> = store.list_users(None).await.expect("list_users(None)");
+        let all: Vec<AuthUserRecord> = store.users.list(None).await.expect("list_users(None)");
         assert_eq!(all.len(), 4, "all users");
 
         let locals: Vec<AuthUserRecord> = store
-            .list_users(Some("local"))
+            .users
+            .list(Some("local"))
             .await
             .expect("list_users(Some(local))");
         assert_eq!(locals.len(), 2, "only local");
         assert!(locals.iter().all(|u| u.provider == "local"));
 
         let oidcs: Vec<AuthUserRecord> = store
-            .list_users(Some("oidc"))
+            .users
+            .list(Some("oidc"))
             .await
             .expect("list_users(Some(oidc))");
         assert_eq!(oidcs.len(), 1);
@@ -293,16 +316,17 @@ mod tests {
     #[tokio::test]
     async fn last_local_user_count_via_store() {
         let cfg = test_config();
-        let store = AuthStore::connect(&cfg).await.expect("store connects");
+        let store = connect_db(&cfg).await;
         store.migrate().await.expect("migrations apply");
         let h = b"hash".to_vec();
         store
-            .create_user("a@x.com", "A", "local", Some(&h))
+            .users
+            .create("a@x.com", "A", "local", Some(&h))
             .await
             .unwrap();
-        let count = store.count_users_by_provider("local").await.unwrap();
+        let count = store.users.count_by_provider("local").await.unwrap();
         assert_eq!(count, 1, "exactly one local user");
-        let count_oidc = store.count_users_by_provider("oidc:foo").await.unwrap();
+        let count_oidc = store.users.count_by_provider("oidc:foo").await.unwrap();
         assert_eq!(count_oidc, 0, "no oidc users");
     }
 
@@ -334,11 +358,11 @@ mod tests {
         cfg.db.max_connections = 1;
 
         // First "process": write 5 events.
-        let store1 = AuthStore::connect(&cfg).await.expect("store 1 connects");
+        let store1 = connect_db(&cfg).await;
         store1.migrate().await.expect("store 1 migrate");
         let pool1 = store1.pool();
         for i in 0..5 {
-            store1.record_event(NewAuthEvent {
+            store1.events.record(NewAuthEvent {
                 user_id: None,
                 kind: format!("first_run_{i}"),
                 provider: "test".into(),
@@ -379,10 +403,10 @@ mod tests {
         // The new UUID-based schema makes every id unique by
         // construction, so all 5 second-batch rows must land and
         // none of them can collide with the first batch.
-        let store2 = AuthStore::connect(&cfg).await.expect("store 2 connects");
+        let store2 = connect_db(&cfg).await;
         let pool2 = store2.pool();
         for i in 0..5 {
-            store2.record_event(NewAuthEvent {
+            store2.events.record(NewAuthEvent {
                 user_id: None,
                 kind: format!("second_run_{i}"),
                 provider: "test".into(),

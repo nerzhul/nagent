@@ -58,7 +58,7 @@ pub enum AuthError {
 /// `auto_bootstrap` enforces by populating `state.auth`).
 pub fn require_auth_store(
     state: &std::sync::Arc<crate::AppState>,
-) -> Result<&crate::auth::AuthStore, AuthError> {
+) -> Result<&nagent_db::Db, AuthError> {
     state
         .auth
         .as_ref()
@@ -74,9 +74,7 @@ pub fn require_auth_store(
 /// `AuthState` sub-state via `FromRef`. Same semantics as
 /// [`require_auth_store`] but skips the `Option` unwrap because
 /// the auth subtree is only mounted when `auth` is `Some`.
-pub fn require_auth_store_from_auth(
-    state: &crate::AuthState,
-) -> Result<&crate::auth::AuthStore, AuthError> {
+pub fn require_auth_store_from_auth(state: &crate::AuthState) -> Result<&nagent_db::Db, AuthError> {
     Ok(&state.store)
 }
 

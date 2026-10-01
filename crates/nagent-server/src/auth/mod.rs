@@ -51,16 +51,35 @@ pub mod password;
 pub mod router;
 pub mod routes;
 pub mod session;
-pub mod store;
 
 pub use crate::state::AuthState;
 pub use error::AuthError;
 pub use error::{require_auth_store, require_oidc_state, require_passkey_state};
+pub use nagent_db::UserPreferences;
 pub use oidc::OidcState;
 pub use passkey::PasskeyState;
 pub use session::{AuthUser, SessionRecord};
-pub use store::AuthStore;
-pub use store::UserPreferences;
+
+/// Translate a server-side [`AuthConfig`] into the DB-layer
+/// [`nagent_db::DbOptions`]. Keeps the DB crate free of TOML /
+/// env / CLI concerns — the server is the only component that
+/// knows about those.
+impl From<&crate::config::AuthConfig> for nagent_db::DbOptions {
+    fn from(cfg: &crate::config::AuthConfig) -> Self {
+        // `connect()` rejects unknown engines with a clear error
+        // message, so we fall back to sqlite here purely to keep
+        // `DbOptions` constructible for every input (the actual
+        // connect call surfaces the real failure).
+        let backend =
+            nagent_db::DbEngine::parse(&cfg.db.backend).unwrap_or(nagent_db::DbEngine::Sqlite);
+        Self {
+            backend,
+            url: cfg.db.url.clone(),
+            max_connections: cfg.db.max_connections,
+            auto_migrate: cfg.db.auto_migrate,
+        }
+    }
+}
 
 /// Names of the auth backends an operator can enable.
 ///

@@ -12,18 +12,20 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use nagent_server::{
-    auth::store::AuthStore,
-    credentials::{
-        crypto::{decrypt, encrypt},
-        key::CredentialsKey,
-        CredentialResolver,
-    },
+async fn connect_db(cfg: &nagent_server::config::AuthConfig) -> nagent_db::Db {
+    let opts: nagent_db::DbOptions = cfg.into();
+    nagent_db::Db::connect(&opts).await.expect("store connects")
+}
+
+use nagent_server::credentials::{
+    crypto::{decrypt, encrypt},
+    key::CredentialsKey,
+    CredentialResolver,
 };
 use tower::ServiceExt;
 use uuid::Uuid;
 
-async fn temp_store() -> AuthStore {
+async fn temp_store() -> nagent_db::Db {
     let cfg = nagent_server::config::AuthConfig {
         enabled: true,
         backends: vec![nagent_server::config::AuthBackendKind::Local],
@@ -41,7 +43,7 @@ async fn temp_store() -> AuthStore {
         },
         ..Default::default()
     };
-    let store = AuthStore::connect(&cfg).await.expect("store");
+    let store = connect_db(&cfg).await;
     store.migrate().await.expect("migrate");
     store
 }
@@ -74,7 +76,8 @@ async fn migration_creates_user_credentials_and_target_service() {
 async fn upsert_delete_round_trip() {
     let store = temp_store().await;
     let user_id = store
-        .create_user("alice@example.com", "Alice", "local", Some(b"x"))
+        .users
+        .create("alice@example.com", "Alice", "local", Some(b"x"))
         .await
         .expect("create user");
 
@@ -82,7 +85,8 @@ async fn upsert_delete_round_trip() {
     let s1 = encrypt(&key, "secret-value-1").expect("seal 1");
     let s2 = encrypt(&key, "secret-value-2").expect("seal 2");
     store
-        .upsert_user_credentials(
+        .credentials
+        .upsert(
             user_id,
             "test_svc",
             &[
@@ -94,7 +98,8 @@ async fn upsert_delete_round_trip() {
         .expect("upsert");
 
     let filled = store
-        .list_configured_field_keys(user_id, "test_svc")
+        .credentials
+        .list_field_keys(user_id, "test_svc")
         .await
         .expect("list");
     let mut keys: Vec<&str> = filled.iter().map(String::as_str).collect();
@@ -102,7 +107,8 @@ async fn upsert_delete_round_trip() {
     assert_eq!(keys, vec!["host", "token"]);
 
     let row = store
-        .fetch_user_credential(user_id, "test_svc", "host")
+        .credentials
+        .fetch(user_id, "test_svc", "host")
         .await
         .expect("fetch")
         .expect("row exists");
@@ -121,7 +127,8 @@ async fn upsert_delete_round_trip() {
     // the `token` row.
     let s3 = encrypt(&key, "new-host").expect("seal 3");
     store
-        .upsert_user_credentials(
+        .credentials
+        .upsert(
             user_id,
             "test_svc",
             &[("host".to_string(), s3.nonce, s3.ciphertext)],
@@ -129,19 +136,22 @@ async fn upsert_delete_round_trip() {
         .await
         .expect("replace");
     let filled = store
-        .list_configured_field_keys(user_id, "test_svc")
+        .credentials
+        .list_field_keys(user_id, "test_svc")
         .await
         .expect("list 2");
     assert_eq!(filled, vec!["host"]);
 
     // DELETE clears the whole service.
     let cleared = store
-        .delete_service_credentials(user_id, "test_svc")
+        .credentials
+        .delete_service(user_id, "test_svc")
         .await
         .expect("delete");
     assert_eq!(cleared, 1);
     assert!(store
-        .list_configured_field_keys(user_id, "test_svc")
+        .credentials
+        .list_field_keys(user_id, "test_svc")
         .await
         .unwrap()
         .is_empty());
@@ -151,7 +161,8 @@ async fn upsert_delete_round_trip() {
 async fn delete_service_credentials_unknown_user_is_zero() {
     let store = temp_store().await;
     let n = store
-        .delete_service_credentials(Uuid::new_v4(), "nope")
+        .credentials
+        .delete_service(Uuid::new_v4(), "nope")
         .await
         .expect("delete");
     assert_eq!(n, 0);
@@ -165,7 +176,8 @@ async fn resolver_audit_row_records_target_service() {
     // and assert the audit row shows up.
     let store = temp_store().await;
     let user_id = store
-        .create_user("bob@example.com", "Bob", "local", Some(b"x"))
+        .users
+        .create("bob@example.com", "Bob", "local", Some(b"x"))
         .await
         .expect("user");
     let key = Arc::new(CredentialsKey::from_bytes([9u8; 32]));

@@ -38,6 +38,17 @@ use super::extract::ExtractionError;
 use super::storage::DiskLayout;
 use super::DocumentStore;
 use crate::auth::error::AuthError as DocumentError;
+use nagent_db::documents::DocumentError as DbDocumentError;
+
+/// Translate a `nagent_db::documents::DocumentError` into the
+/// route-level [`DocumentRouteError::Db`] variant. Goes through
+/// `AuthError` so the existing `IntoResponse` mapping (500 with
+/// a sanitised message) keeps working unchanged.
+impl From<DbDocumentError> for DocumentRouteError {
+    fn from(e: DbDocumentError) -> Self {
+        DocumentRouteError::Db(e.into())
+    }
+}
 
 /// Build a tiny router that mounts only `POST /v1/chat/session`
 /// (the SEV 2 server-bound chat session id mint endpoint). This
@@ -261,8 +272,12 @@ pub async fn upload_handler(
     // so two tabs of the same user get isolated quotas.
     let current = state
         .store
-        .count_documents_for_session(user.id, session_id)
-        .await?;
+        .db()
+        .documents
+        .for_user(user.id)
+        .count_for_session(session_id)
+        .await
+        .map_err(DocumentRouteError::from)?;
     if current >= max_docs as u64 {
         return Err(DocumentRouteError::QuotaExceeded {
             current,
@@ -387,10 +402,12 @@ pub async fn upload_handler(
     // cross-user / cross-tab reads are rejected at the DB layer.
     if let Err(e) = state
         .store
-        .insert_document(
+        .db()
+        .documents
+        .for_user(user.id)
+        .insert(
             id,
             session_id,
-            user.id,
             &file.name,
             &mime,
             written_bytes,
@@ -401,7 +418,7 @@ pub async fn upload_handler(
         .await
     {
         let _ = std::fs::remove_file(&layout.path);
-        return Err(DocumentRouteError::Db(e));
+        return Err(DocumentRouteError::from(e));
     }
 
     let summary = super::DocumentSummary {
@@ -436,8 +453,12 @@ pub async fn list_handler(
     // caller cannot enumerate another user's docs.
     let rows = state
         .store
-        .list_documents_for_session(user.id, session_id)
-        .await?;
+        .db()
+        .documents
+        .for_user(user.id)
+        .list_for_session(session_id)
+        .await
+        .map_err(DocumentRouteError::from)?;
     let out: Vec<super::DocumentSummary> = rows
         .into_iter()
         .map(|r| super::DocumentSummary {
@@ -472,8 +493,12 @@ pub async fn download_handler(
     // response shape does not reveal whether the doc exists.
     let row = state
         .store
-        .get_document_by_id(id, user.id)
-        .await?
+        .db()
+        .documents
+        .for_user(user.id)
+        .get_by_id(id)
+        .await
+        .map_err(DocumentRouteError::from)?
         .ok_or_else(|| DocumentRouteError::BadMultipart(format!("unknown document: {id}")))?;
     // SEV 1 fix: never `open()` a DB-supplied `disk_path` without
     // verifying it canonicalises inside `cache_dir`.
@@ -519,7 +544,15 @@ pub async fn delete_handler(
     // delete by `(user, session)` so a user cannot delete another
     // user's docs.
     verify_session_binding(&state.app, user.id, session_id).await?;
-    let path = match state.store.delete_document(id, user.id, session_id).await? {
+    let path = match state
+        .store
+        .db()
+        .documents
+        .for_user(user.id)
+        .delete(id, session_id)
+        .await
+        .map_err(DocumentRouteError::from)?
+    {
         Some(p) => p,
         None => {
             return Err(DocumentRouteError::BadMultipart(format!(

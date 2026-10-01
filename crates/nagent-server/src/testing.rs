@@ -91,7 +91,7 @@ pub struct AppStateBuilder {
     pub agents: Option<AgentRegistry>,
     /// Pre-built `AuthStore` (sqlite / postgres). `None` by
     /// default; set via [`Self::with_auth`].
-    pub auth_store: Option<crate::auth::AuthStore>,
+    pub auth_store: Option<nagent_db::Db>,
     /// OIDC sub-state to attach to `state.auth.oidc`. `None` by
     /// default; tests that exercise OIDC routes build their own.
     pub auth_oidc: Option<crate::auth::OidcState>,
@@ -219,7 +219,7 @@ impl AppStateBuilder {
 
     /// Wire an auth store. OIDC/passkey sub-states are attached
     /// separately via [`Self::with_oidc`] / [`Self::with_passkey`].
-    pub fn with_auth(mut self, store: crate::auth::AuthStore) -> Self {
+    pub fn with_auth(mut self, store: nagent_db::Db) -> Self {
         self.auth_store = Some(store);
         self
     }

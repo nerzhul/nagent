@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use nagent_server::auth::store::AuthStore;
+
 use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmConfig};
 use nagent_server::http::build_router;
 use nagent_server::testing::app_state;
@@ -25,6 +25,11 @@ use nagent_server::AppState;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+async fn connect_db(cfg: &AuthConfig) -> nagent_db::Db {
+    let opts: nagent_db::DbOptions = cfg.into();
+    nagent_db::Db::connect(&opts).await.expect("store connects")
+}
 
 /// Build a minimal in-process `AppState`. The STT backend is
 /// stubbed; we only exercise HTTP routing here.
@@ -40,7 +45,7 @@ use uuid::Uuid;
 async fn build_state_with_features(
     documents_enabled: bool,
     llm_enabled: bool,
-) -> (Arc<AppState>, AuthStore) {
+) -> (Arc<AppState>, nagent_db::Db) {
     let auth_cfg = AuthConfig {
         enabled: true,
         backends: vec![AuthBackendKind::Local],
@@ -58,9 +63,7 @@ async fn build_state_with_features(
         },
         ..AuthConfig::default()
     };
-    let auth_store = AuthStore::connect(&auth_cfg)
-        .await
-        .expect("auth store must connect");
+    let auth_store = connect_db(&auth_cfg).await;
     auth_store.migrate().await.expect("migrations must apply");
 
     let mut builder = app_state();
@@ -81,7 +84,7 @@ async fn build_state_with_features(
         builder = builder.with_documents(store);
     }
     builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
-        auth_store.db().chat_sessions.clone(),
+        auth_store.chat_sessions.clone(),
     ));
     if llm_enabled {
         // Deliberately unreachable so the upstream fetch falls back
@@ -102,13 +105,15 @@ async fn build_state_with_features(
 
 /// Mint a session for `email` and return the cookie string the
 /// browser would send.
-async fn login_cookie(store: &AuthStore, email: &str) -> String {
+async fn login_cookie(store: &nagent_db::Db, email: &str) -> String {
     let user_id = store
-        .create_user(email, "Alice", "local", Some(b"hash"))
+        .users
+        .create(email, "Alice", "local", Some(b"hash"))
         .await
         .expect("create_user");
     let session = store
-        .create_session(user_id, Duration::from_secs(60), None, None)
+        .sessions
+        .create(user_id, Duration::from_secs(60), None, None)
         .await
         .expect("create_session");
     // The cookie name is the same as `auth.config.cookie_name()`;
@@ -314,9 +319,7 @@ async fn features_llm_models_reflects_upstream_list() {
         },
         ..AuthConfig::default()
     };
-    let auth_store = AuthStore::connect(&auth_cfg)
-        .await
-        .expect("auth store must connect");
+    let auth_store = connect_db(&auth_cfg).await;
     auth_store.migrate().await.expect("migrations must apply");
 
     let llm_cfg = LlmConfig {
@@ -341,7 +344,7 @@ async fn features_llm_models_reflects_upstream_list() {
     builder = builder.with_auth(auth_store.clone());
     builder = builder.with_llm(llm_client);
     builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
-        auth_store.db().chat_sessions.clone(),
+        auth_store.chat_sessions.clone(),
     ));
     let state = builder.build();
 
@@ -404,7 +407,7 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
         },
         ..AuthConfig::default()
     };
-    let auth_store = AuthStore::connect(&auth_cfg).await.unwrap();
+    let auth_store = connect_db(&auth_cfg).await;
     auth_store.migrate().await.unwrap();
 
     // Use a port that nothing is listening on so the connect
@@ -434,7 +437,7 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
     builder = builder.with_auth(auth_store.clone());
     builder = builder.with_llm(llm_client);
     builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
-        auth_store.db().chat_sessions.clone(),
+        auth_store.chat_sessions.clone(),
     ));
     let state = builder.build();
 

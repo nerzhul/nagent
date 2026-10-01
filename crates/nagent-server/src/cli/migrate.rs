@@ -28,9 +28,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::auth::error::AuthError;
-use crate::auth::store::{AuthStore, MigrationRow, MigrationStatus};
 use crate::config::{CliArgs, Config};
+use nagent_db::{MigrationRow, MigrationStatus};
 
 /// Top-level dispatch: called from `main` when `argv[1] == "migrate"`.
 /// Returns `Ok(exit_code)` so the binary returns the right status to
@@ -100,9 +99,10 @@ fn split_global_flags(args: Vec<String>) -> (CliArgs, Vec<String>) {
 /// subcommand then drives the migration primitives directly so the
 /// `status` view reflects what is on disk, not what would have been
 /// applied by `connect()`.
-async fn connect_store(cfg: &Config) -> Result<AuthStore, anyhow::Error> {
+async fn connect_store(cfg: &Config) -> Result<nagent_db::Db, anyhow::Error> {
     crate::cli::auth::ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
-    AuthStore::connect(&cfg.auth)
+    let opts: nagent_db::DbOptions = (&cfg.auth).into();
+    nagent_db::Db::connect(&opts)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))
 }
@@ -480,9 +480,8 @@ fn print_status_table(status: &MigrationStatus) {
 }
 
 /// Map the auth subsystem's error into `anyhow` so the CLI can use a
-/// single error type. `AuthError::Database` already wraps the sqlx
-/// error verbatim; we preserve the message and discard the variant.
-fn map_auth_err(e: AuthError) -> anyhow::Error {
+/// Map a `nagent_db::Error` to the CLI's `anyhow` error type.
+fn map_auth_err(e: nagent_db::Error) -> anyhow::Error {
     anyhow::anyhow!("{e}")
 }
 
@@ -494,7 +493,7 @@ mod tests {
     //! module only covers the pure-Rust flag-parsing branches so
     //! they run as fast unit tests inside the crate.
     use super::*;
-    use crate::auth::store::MigrationRow;
+    use nagent_db::MigrationRow;
 
     fn status_with(applied: Vec<i64>, pending: Vec<i64>) -> MigrationStatus {
         let applied: Vec<MigrationRow> = applied

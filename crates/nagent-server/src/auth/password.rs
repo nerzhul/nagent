@@ -120,16 +120,19 @@ pub async fn login_handler(
             retry_after_secs,
             "password login rate-limited"
         );
-        require_auth_store_from_auth(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
-            None,
-            "login_rate_limited",
-            "local",
-        ));
+        require_auth_store_from_auth(&state)?
+            .events
+            .record(nagent_db::NewAuthEvent::auth(
+                None,
+                "login_rate_limited",
+                "local",
+            ));
         return Err(AuthError::RateLimited { retry_after_secs });
     }
 
     let user = match require_auth_store_from_auth(&state)?
-        .get_user_by_email(&body.email)
+        .users
+        .get_by_email(&body.email)
         .await?
     {
         Some(u) if u.password_hash.is_some() => u,
@@ -147,9 +150,9 @@ pub async fn login_handler(
                 ip = %ip,
                 "password login failed (unknown email or no password hash)"
             );
-            require_auth_store_from_auth(&state)?.record_event(
-                crate::auth::store::NewAuthEvent::auth(None, "login_fail", "local"),
-            );
+            require_auth_store_from_auth(&state)?
+                .events
+                .record(nagent_db::NewAuthEvent::auth(None, "login_fail", "local"));
             return Err(AuthError::InvalidCredentials);
         }
     };
@@ -165,17 +168,20 @@ pub async fn login_handler(
             ip = %ip,
             "password login failed (wrong password)"
         );
-        require_auth_store_from_auth(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
-            Some(user.id),
-            "login_fail",
-            "local",
-        ));
+        require_auth_store_from_auth(&state)?
+            .events
+            .record(nagent_db::NewAuthEvent::auth(
+                Some(user.id),
+                "login_fail",
+                "local",
+            ));
         return Err(AuthError::InvalidCredentials);
     }
 
     let ttl = std::time::Duration::from_secs((state.cfg.session_ttl_days as u64) * 24 * 60 * 60);
     let mut session = require_auth_store_from_auth(&state)?
-        .create_session(user.id, ttl, Some(&ip.to_string()), None)
+        .sessions
+        .create(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
     // Security plan #7: pull the plaintext token out of the
     // SessionRecord exactly once — it is the only moment the
@@ -210,11 +216,13 @@ pub async fn login_handler(
         session_hash_prefix = %token_prefix,
         "password login ok"
     );
-    require_auth_store_from_auth(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
-        Some(user.id),
-        "login_ok",
-        "local",
-    ));
+    require_auth_store_from_auth(&state)?
+        .events
+        .record(nagent_db::NewAuthEvent::auth(
+            Some(user.id),
+            "login_ok",
+            "local",
+        ));
 
     let auth_user = AuthUser {
         id: user.id,
@@ -323,7 +331,8 @@ pub async fn register_handler(
     )?;
 
     let user_id = require_auth_store_from_auth(&state)?
-        .create_user(&body.email, &body.display_name, "local", Some(&hash))
+        .users
+        .create(&body.email, &body.display_name, "local", Some(&hash))
         .await
         .map_err(|e| {
             tracing::warn!(
@@ -346,14 +355,17 @@ pub async fn register_handler(
         ip = %ip,
         "password register ok"
     );
-    require_auth_store_from_auth(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
-        Some(user_id),
-        "register_local",
-        "local",
-    ));
+    require_auth_store_from_auth(&state)?
+        .events
+        .record(nagent_db::NewAuthEvent::auth(
+            Some(user_id),
+            "register_local",
+            "local",
+        ));
 
     let user = require_auth_store_from_auth(&state)?
-        .get_user_by_id(user_id)
+        .users
+        .get_by_id(user_id)
         .await?
         .ok_or_else(|| AuthError::Internal("just-created user disappeared".into()))?;
 

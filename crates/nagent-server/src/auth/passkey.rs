@@ -39,14 +39,14 @@ use crate::auth::error::AuthError;
 use crate::auth::error::{require_auth_store_from_auth, require_passkey_state_from_auth};
 use crate::auth::middleware::{check_csrf, extract_auth_user};
 use crate::auth::session::{self, AuthUser, SessionSource};
-use crate::auth::store::{AuthStore, NewAuthEvent, NewPasskeyRecord};
+use nagent_db::{NewAuthEvent, NewPasskeyRecord};
 
 const CEREMONY_TTL_SECS: i64 = 5 * 60;
 
 /// Shared state for the passkey handlers.
 #[derive(Clone)]
 pub struct PasskeyState {
-    pub store: AuthStore,
+    pub store: nagent_db::Db,
     pub cfg: std::sync::Arc<crate::config::Config>,
     pub webauthn: Arc<Webauthn>,
     /// In-memory ceremony state, keyed by the opaque state_token
@@ -93,7 +93,7 @@ pub enum CeremonyKind {
 /// configuration is invalid (see plan §"WebAuthn `rp_id` must
 /// match the browser's effective domain").
 pub fn build_state(
-    store: AuthStore,
+    store: nagent_db::Db,
     cfg: std::sync::Arc<crate::config::Config>,
 ) -> Result<PasskeyState, AuthError> {
     if cfg.auth.passkey.origins.is_empty() {
@@ -247,7 +247,8 @@ pub async fn register_finish_handler(
         .map_err(|e| AuthError::Internal(format!("serialise passkey: {e}")))?;
     let _ = passkey_json; // stored as separate column in a future PR
     require_auth_store_from_auth(&state)?
-        .insert_passkey(NewPasskeyRecord {
+        .passkeys
+        .insert(NewPasskeyRecord {
             id: pk_id,
             user_id,
             credential_id: cred_id,
@@ -265,11 +266,13 @@ pub async fn register_finish_handler(
         passkey_id = %pk_id,
         "passkey register ok"
     );
-    require_auth_store_from_auth(&state)?.record_event(crate::auth::store::NewAuthEvent::auth(
-        Some(user_id),
-        "passkey_register",
-        "passkey",
-    ));
+    require_auth_store_from_auth(&state)?
+        .events
+        .record(nagent_db::NewAuthEvent::auth(
+            Some(user_id),
+            "passkey_register",
+            "passkey",
+        ));
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"passkey_id": pk_id})),
@@ -378,7 +381,8 @@ pub async fn login_finish_handler(
         .map_err(|e| AuthError::BadRequest(format!("invalid assertion: {e}")))?;
     let cred_id_bytes = assertion.raw_id.clone();
     let stored = match require_auth_store_from_auth(&state)?
-        .get_passkey_by_credential_id(&cred_id_bytes)
+        .passkeys
+        .get_by_credential_id(&cred_id_bytes)
         .await?
     {
         Some(s) => s,
@@ -422,17 +426,20 @@ pub async fn login_finish_handler(
             AuthError::BadRequest(format!("finish_discoverable_authentication: {e}"))
         })?;
     require_auth_store_from_auth(&state)?
-        .bump_passkey_counter(stored.id, passkey_counter_u32(&auth_result))
+        .passkeys
+        .bump_counter(stored.id, passkey_counter_u32(&auth_result))
         .await?;
 
     let user = require_auth_store_from_auth(&state)?
-        .get_user_by_id(stored.user_id)
+        .users
+        .get_by_id(stored.user_id)
         .await?
         .ok_or_else(|| AuthError::Internal("passkey user disappeared".into()))?;
 
     let ttl = std::time::Duration::from_secs((state.cfg.session_ttl_days as u64) * 24 * 60 * 60);
     let mut session = require_auth_store_from_auth(&state)?
-        .create_session(user.id, ttl, Some(&ip.to_string()), None)
+        .sessions
+        .create(user.id, ttl, Some(&ip.to_string()), None)
         .await?;
     // Security plan #7: pull the plaintext token out of the
     // SessionRecord exactly once. After this line the token is
@@ -458,11 +465,9 @@ pub async fn login_finish_handler(
         session_hash_prefix = %token_prefix,
         "passkey login ok"
     );
-    require_auth_store_from_auth(&state)?.record_event(NewAuthEvent::auth(
-        Some(user.id),
-        "login_ok",
-        "passkey",
-    ));
+    require_auth_store_from_auth(&state)?
+        .events
+        .record(NewAuthEvent::auth(Some(user.id), "login_ok", "passkey"));
 
     let auth_user = AuthUser {
         id: user.id,

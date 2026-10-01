@@ -10,14 +10,13 @@
 use std::sync::Arc;
 
 use nagent_server::agents::{Agent, ServiceRegistry, UserContext};
-use nagent_server::auth::store::AuthStore;
 use nagent_server::config::AuthConfig;
 use nagent_server::documents::{DocumentStore, ReadDocumentAgent};
 use serde_json::json;
 
 use uuid::Uuid;
 
-async fn fresh_store() -> (DocumentStore, AuthStore) {
+async fn fresh_store() -> (DocumentStore, nagent_db::Db) {
     let cfg = AuthConfig {
         enabled: true,
         backends: vec![],
@@ -37,7 +36,8 @@ async fn fresh_store() -> (DocumentStore, AuthStore) {
         passkey: Default::default(),
         credentials: Default::default(),
     };
-    let store = AuthStore::connect(&cfg)
+    let opts: nagent_db::DbOptions = (&cfg).into();
+    let store = nagent_db::Db::connect(&opts)
         .await
         .expect("sqlite in-memory store must connect");
     // Run the migrations so `uploaded_documents` exists.
@@ -74,10 +74,12 @@ async fn read_document_happy_path_returns_extracted_text() {
     std::fs::write(&file_path, "Hello, document!").unwrap();
 
     doc_store
-        .insert_document(
+        .db()
+        .documents
+        .for_user(Uuid::nil())
+        .insert(
             doc_id,
             session_id,
-            Uuid::nil(),
             "test.txt",
             "text/plain",
             16,
@@ -140,10 +142,12 @@ async fn read_document_other_session_scope_is_unknown() {
     std::fs::write(&file_path, "scoped to A").unwrap();
 
     doc_store
-        .insert_document(
+        .db()
+        .documents
+        .for_user(Uuid::nil())
+        .insert(
             doc_id,
             session_a,
-            Uuid::nil(),
             "test.txt",
             "text/plain",
             12,
@@ -204,10 +208,12 @@ async fn read_document_file_missing_on_disk_returns_agent_failed() {
     std::fs::remove_file(&file_path).unwrap();
 
     doc_store
-        .insert_document(
+        .db()
+        .documents
+        .for_user(Uuid::nil())
+        .insert(
             doc_id,
             session_id,
-            Uuid::nil(),
             "vanishing.txt",
             "text/plain",
             9,
@@ -285,7 +291,8 @@ async fn read_document_truncates_long_text() {
                 passkey: Default::default(),
                 credentials: Default::default(),
             };
-            let store = AuthStore::connect(&cfg).await.unwrap();
+            let opts: nagent_db::DbOptions = (&cfg).into();
+            let store = nagent_db::Db::connect(&opts).await.unwrap();
             store.migrate().await.unwrap();
             store
         },
@@ -306,10 +313,12 @@ async fn read_document_truncates_long_text() {
     let file_path = cache_dir.join("ab/cd").join(format!("{doc_id}.txt"));
     std::fs::write(&file_path, "0123456789").unwrap();
     short_store
-        .insert_document(
+        .db()
+        .documents
+        .for_user(Uuid::nil())
+        .insert(
             doc_id,
             session_id,
-            Uuid::nil(),
             "long.txt",
             "text/plain",
             10,
@@ -403,10 +412,12 @@ async fn read_document_blocks_cross_user_reads() {
     let file_path = cache_dir.join("ab/cd").join(format!("{doc_id}.txt"));
     std::fs::write(&file_path, "user A secret").unwrap();
     doc_store
-        .insert_document(
+        .db()
+        .documents
+        .for_user(user_a)
+        .insert(
             doc_id,
             session_id,
-            user_a,
             "user-a-secret.txt",
             "text/plain",
             12,
@@ -494,10 +505,12 @@ async fn read_document_blocks_disk_path_escape() {
     std::os::unix::fs::symlink(&outside_file, &link).unwrap();
 
     doc_store
-        .insert_document(
+        .db()
+        .documents
+        .for_user(user_id)
+        .insert(
             doc_id,
             session_id,
-            user_id,
             "escape.txt",
             "text/plain",
             10,

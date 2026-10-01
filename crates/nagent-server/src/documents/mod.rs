@@ -35,6 +35,11 @@
 //! | OFF            | (anything)      | `[documents]` parses but `/v1/documents*` returns 404; `read_document` not registered; PDF upload rejected with 501 |
 //! | ON             | `false`         | Same as OFF |
 //! | ON             | `true`          | Full feature set |
+//!
+//! Plan 4.A: `DocumentStore` now wraps [`nagent_db::Db`] directly
+//! (no more `AuthStore` shim) and exposes a `.db()` accessor for the
+//! shared DB handle so routes / CLI / agent can reach per-user
+//! repositories without an intermediate facade.
 
 pub mod agent;
 pub mod db;
@@ -47,8 +52,6 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::auth::store::AuthStore;
-
 /// Cheap to clone (the inner `Arc` wraps a `nagent_db::Db`).
 #[derive(Clone)]
 pub struct DocumentStore {
@@ -56,13 +59,12 @@ pub struct DocumentStore {
 }
 
 struct DocumentStoreInner {
-    /// The shared [`nagent_db::Db`]. The `uploaded_documents`
-    /// table lives in the auth DB so the CLI can sweep rows +
-    /// files from a single connection without touching a second
-    /// pool. Reachable via [`DocumentStore::store`] (returns the
-    /// `AuthStore` shim for backwards compatibility with the CLI)
-    /// or [`DocumentStore::db`] (the underlying `nagent_db::Db`).
-    store: AuthStore,
+    /// Shared [`nagent_db::Db`]. The `uploaded_documents` table
+    /// lives in the auth DB so the CLI can sweep rows + files from a
+    /// single connection without touching a second pool. Routes
+    /// reach the per-user `documents` repository via
+    /// [`DocumentStore::db`].
+    db: nagent_db::Db,
     /// Maximum number of characters the agent returns per read.
     /// Pulled from `DocumentsConfig` at boot so a reload (out of
     /// scope today) would pick it up.
@@ -78,7 +80,7 @@ struct DocumentStoreInner {
 impl std::fmt::Debug for DocumentStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DocumentStore")
-            .field("store", &"<nagent_db::Db>")
+            .field("db", &"<nagent_db::Db>")
             .field("max_extracted_chars", &self.inner.max_extracted_chars)
             .field("cache_dir", &self.inner.cache_dir)
             .finish()
@@ -86,26 +88,28 @@ impl std::fmt::Debug for DocumentStore {
 }
 
 impl DocumentStore {
-    /// Wrap an existing [`AuthStore`]. Cheap to clone.
+    /// Build the shared documents state.
     pub fn new(
-        store: AuthStore,
+        db: nagent_db::Db,
         max_extracted_chars: usize,
         cache_dir: std::path::PathBuf,
     ) -> Self {
         Self {
             inner: Arc::new(DocumentStoreInner {
-                store,
+                db,
                 max_extracted_chars,
                 cache_dir,
             }),
         }
     }
 
-    /// Borrow the underlying [`AuthStore`] (the newtype shim
-    /// around [`nagent_db::Db`]). Used by the CLI to drive the
-    /// purge sweep without exposing the inner Arc.
-    pub fn store(&self) -> &AuthStore {
-        &self.inner.store
+    /// Borrow the shared [`nagent_db::Db`]. Routes / CLI / agent
+    /// reach per-user repositories through this handle; the
+    /// documents domain in particular exposes a scoped per-user
+    /// view via [`nagent_db::documents::Documents::for_user`]
+    /// (plan 4.A S4).
+    pub fn db(&self) -> &nagent_db::Db {
+        &self.inner.db
     }
 
     /// Maximum number of characters the agent returns per read.
