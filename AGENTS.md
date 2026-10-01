@@ -31,7 +31,7 @@ Commits must follow a strict format so the history stays readable and usable.
   - Single line, no trailing period.
 - **Description (body)**:
   - **Maximum 5 sentences**.
-  - **Maximum 500 characters** in total.
+  - **Maximum 450 characters** in total.
   - Explain the **why** more than the **what** when relevant.
   - Separate the title from the body by a blank line, per standard Git convention.
 
