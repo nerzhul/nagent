@@ -20,6 +20,18 @@ impl Preferences {
         }
     }
 
+    /// Scope every per-user method to a single `user_id`. The
+    /// returned [`ScopedPreferences`] drops the `user_id` argument
+    /// on its per-row methods so a route handler holding a scoped
+    /// view cannot accidentally target another user's row (plan
+    /// 4.A, plan S4).
+    pub fn for_user(&self, user_id: Uuid) -> ScopedPreferences {
+        ScopedPreferences {
+            inner: self.clone(),
+            user_id,
+        }
+    }
+
     pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
         match self {
             Preferences::Sqlite(s) => s.get(user_id).await,
@@ -43,6 +55,41 @@ impl Preferences {
                     .await
             }
         }
+    }
+}
+
+/// Per-user scoped view over [`Preferences`].
+///
+/// The scoped methods (`get`, `upsert`) do NOT take a `user_id`
+/// argument; the filter is fixed at construction. Plan 4.A / S4
+/// (per-user isolation enforced by construction).
+#[derive(Debug, Clone)]
+pub struct ScopedPreferences {
+    inner: Preferences,
+    user_id: Uuid,
+}
+
+impl ScopedPreferences {
+    /// `user_id` this view is bound to. Surfaced for tests +
+    /// diagnostic logs.
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    /// Read the preferences row for the scoped user.
+    pub async fn get(&self) -> Result<UserPreferences, Error> {
+        self.inner.get(self.user_id).await
+    }
+
+    /// Replace the preferences row for the scoped user.
+    pub async fn upsert(
+        &self,
+        share_location_enabled: bool,
+        share_timezone_enabled: bool,
+    ) -> Result<UserPreferences, Error> {
+        self.inner
+            .upsert(self.user_id, share_location_enabled, share_timezone_enabled)
+            .await
     }
 }
 

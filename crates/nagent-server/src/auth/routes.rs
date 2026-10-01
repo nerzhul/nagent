@@ -42,7 +42,7 @@ pub async fn get_preferences_handler(
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Result<Response, AuthError> {
     let store = require_auth_store_from_auth(&state)?;
-    let prefs = store.for_user(user.id).preferences().get(user.id).await?;
+    let prefs = store.for_user(user.id).preferences().get().await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
         "share_timezone_enabled": prefs.share_timezone_enabled,
@@ -91,7 +91,7 @@ pub async fn put_preferences_handler(
     let prefs = store
         .for_user(user.id)
         .preferences()
-        .upsert(user.id, loc, tz)
+        .upsert(loc, tz)
         .await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,

@@ -64,7 +64,8 @@ pub mod users;
 #[cfg(any(test, feature = "db-sqlite", feature = "db-postgres"))]
 mod tests;
 
-pub use pool::{AnyPool, DbEngine, DbOptions};
+pub(crate) use pool::AnyPool;
+pub use pool::{DbEngine, DbOptions};
 
 // Re-export the row types that the per-domain SQL
 // serialises / deserialises so external callers can keep
@@ -87,7 +88,7 @@ pub use types::{
 /// [`AdminDb`] for the CLI / purge job).
 #[derive(Debug, Clone)]
 pub struct Db {
-    pool: AnyPool,
+    pub(crate) pool: AnyPool,
 }
 
 impl Db {
@@ -104,14 +105,6 @@ impl Db {
     /// pool (the `migrate` CLI, the auto-bootstrap).
     pub fn from_pool(pool: AnyPool) -> Self {
         Self { pool }
-    }
-
-    /// Underlying pool. Kept `pub` so the migration runner +
-    /// the `test-util` raw-SQL helpers can reach it; production
-    /// code paths should use [`Db::for_user`] / [`Db::admin`]
-    /// instead (plan S4).
-    pub fn pool(&self) -> &AnyPool {
-        &self.pool
     }
 
     /// Engine this DB was built against.
@@ -346,9 +339,9 @@ impl Db {
 ///
 /// Owns the **scoped** per-user views (the `for_user` helpers on
 /// [`documents::Documents`], [`credentials::Credentials`],
-/// [`chat_sessions::ChatSessions`]) plus the per-user repositories
-/// that already take `user_id` as a parameter
-/// ([`preferences::Preferences`], [`sessions::Sessions`]).
+/// [`chat_sessions::ChatSessions`],
+/// [`preferences::Preferences`], [`passkeys::Passkeys`],
+/// [`sessions::Sessions`]).
 ///
 /// The scoped views do not have a `user_id` argument on their
 /// per-row methods, so the SQL filter cannot be accidentally
@@ -396,20 +389,27 @@ impl UserDb {
         chat_sessions::ChatSessions::new(&self.inner.pool).for_user(self.user_id)
     }
 
-    /// Per-user preferences. The repository's methods already
-    /// take `user_id` as a parameter — this handle just saves the
-    /// caller from passing it on every call.
-    pub fn preferences(&self) -> preferences::Preferences {
-        preferences::Preferences::new(&self.inner.pool)
+    /// Scoped preferences: `get` / `upsert` filter by `user_id`
+    /// automatically. Plan 4.A.
+    pub fn preferences(&self) -> preferences::ScopedPreferences {
+        preferences::Preferences::new(&self.inner.pool).for_user(self.user_id)
     }
 
-    /// Per-user sessions. The repository's methods already take
-    /// `user_id` as a parameter (or operate by `token_hash`); the
-    /// handle exposes the repository so `delete_for_user` can be
-    /// called when the auth subtree needs to revoke every session
-    /// for a user.
-    pub fn sessions(&self) -> sessions::Sessions {
-        sessions::Sessions::new(&self.inner.pool)
+    /// Scoped passkeys: `list` / `delete_all` filter by `user_id`
+    /// automatically. Plan 4.A. The auth-ceremony lookups
+    /// (`get_by_credential_id`, `bump_counter`) stay on the
+    /// unscoped repository because they are keyed by
+    /// `credential_id` / `passkey_id`.
+    pub fn passkeys(&self) -> passkeys::ScopedPasskeys {
+        passkeys::Passkeys::new(&self.inner.pool).for_user(self.user_id)
+    }
+
+    /// Scoped sessions: `delete_all` / `count` filter by `user_id`
+    /// automatically. Plan 4.A. The auth-ceremony operations
+    /// (`lookup_by_token_hash`, `touch`, `delete`) stay on the
+    /// unscoped repository because they are keyed by `token_hash`.
+    pub fn sessions(&self) -> sessions::ScopedSessions {
+        sessions::Sessions::new(&self.inner.pool).for_user(self.user_id)
     }
 }
 

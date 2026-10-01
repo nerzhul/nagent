@@ -202,6 +202,239 @@ mod chat_sessions {
     }
 }
 
+// ---- preferences (scoped) ----------------------------------------------
+//
+// Plan 4.A: confirm the scoped view drops the `user_id` argument
+// on `get` / `upsert` and that a handler holding one scoped view
+// cannot read or write another user's row.
+
+#[cfg(test)]
+mod preferences {
+    use super::*;
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn scoped_get_default_then_upsert() {
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let scoped = db.for_user(user).preferences();
+        // First read returns the defaults (no row yet).
+        let prefs = scoped.get().await.expect("default prefs");
+        assert!(!prefs.share_location_enabled);
+        assert!(!prefs.share_timezone_enabled);
+        // Scoped upsert writes only the bound user's row.
+        let updated = scoped.upsert(true, false).await.expect("upsert");
+        assert!(updated.share_location_enabled);
+        assert!(!updated.share_timezone_enabled);
+        let reread = scoped.get().await.expect("reread");
+        assert!(reread.share_location_enabled);
+        assert!(!reread.share_timezone_enabled);
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn scoped_views_are_isolated_per_user() {
+        let db = sqlite_db().await;
+        let alice = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let bob = db
+            .admin()
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"h"))
+            .await
+            .unwrap();
+        db.for_user(alice)
+            .preferences()
+            .upsert(true, false)
+            .await
+            .unwrap();
+        db.for_user(bob)
+            .preferences()
+            .upsert(false, true)
+            .await
+            .unwrap();
+        let alice_prefs = db.for_user(alice).preferences().get().await.unwrap();
+        let bob_prefs = db.for_user(bob).preferences().get().await.unwrap();
+        assert!(alice_prefs.share_location_enabled);
+        assert!(!alice_prefs.share_timezone_enabled);
+        assert!(!bob_prefs.share_location_enabled);
+        assert!(bob_prefs.share_timezone_enabled);
+    }
+}
+
+// ---- passkeys (scoped) -------------------------------------------------
+//
+// Plan 4.A: confirm the scoped view's `list` / `delete_all` only
+// touches the bound user's rows.
+
+#[cfg(test)]
+mod passkeys {
+    use super::*;
+    use crate::types::NewPasskeyRecord;
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn scoped_list_filters_by_user() {
+        let db = sqlite_db().await;
+        let alice = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let bob = db
+            .admin()
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"h"))
+            .await
+            .unwrap();
+        // Two passkeys for Alice, one for Bob.
+        for i in 0..2 {
+            db.admin()
+                .passkeys
+                .insert(NewPasskeyRecord {
+                    id: Uuid::new_v4(),
+                    user_id: alice,
+                    credential_id: vec![i as u8, 0xaa, 0xbb],
+                    public_key: vec![0x10, 0x20, 0x30],
+                    counter: 0,
+                    transports: "internal".to_string(),
+                    aaguid: None,
+                })
+                .await
+                .unwrap();
+        }
+        db.admin()
+            .passkeys
+            .insert(NewPasskeyRecord {
+                id: Uuid::new_v4(),
+                user_id: bob,
+                credential_id: vec![0xff, 0xee, 0xdd],
+                public_key: vec![0x40, 0x50, 0x60],
+                counter: 0,
+                transports: "internal".to_string(),
+                aaguid: None,
+            })
+            .await
+            .unwrap();
+        let alice_keys = db.for_user(alice).passkeys().list().await.unwrap();
+        let bob_keys = db.for_user(bob).passkeys().list().await.unwrap();
+        assert_eq!(alice_keys.len(), 2);
+        assert_eq!(bob_keys.len(), 1);
+        assert!(alice_keys.iter().all(|p| p.user_id == alice));
+        assert!(bob_keys.iter().all(|p| p.user_id == bob));
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn scoped_delete_all_only_removes_bound_users_rows() {
+        let db = sqlite_db().await;
+        let alice = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let bob = db
+            .admin()
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"h"))
+            .await
+            .unwrap();
+        for i in 0..2 {
+            db.admin()
+                .passkeys
+                .insert(NewPasskeyRecord {
+                    id: Uuid::new_v4(),
+                    user_id: alice,
+                    credential_id: vec![i as u8, 0xaa, 0xbb],
+                    public_key: vec![0x10, 0x20, 0x30],
+                    counter: 0,
+                    transports: "internal".to_string(),
+                    aaguid: None,
+                })
+                .await
+                .unwrap();
+        }
+        db.admin()
+            .passkeys
+            .insert(NewPasskeyRecord {
+                id: Uuid::new_v4(),
+                user_id: bob,
+                credential_id: vec![0xff, 0xee, 0xdd],
+                public_key: vec![0x40, 0x50, 0x60],
+                counter: 0,
+                transports: "internal".to_string(),
+                aaguid: None,
+            })
+            .await
+            .unwrap();
+        let deleted = db.for_user(alice).passkeys().delete_all().await.unwrap();
+        assert_eq!(deleted, 2, "only Alice's two rows are removed");
+        let bob_keys = db.for_user(bob).passkeys().list().await.unwrap();
+        assert_eq!(bob_keys.len(), 1, "Bob's row must survive");
+        let alice_keys = db.for_user(alice).passkeys().list().await.unwrap();
+        assert!(alice_keys.is_empty());
+    }
+}
+
+// ---- sessions (scoped) --------------------------------------------------
+//
+// Plan 4.A: confirm `delete_all` / `count` only touch the bound
+// user's rows. The auth-ceremony operations stay on the unscoped
+// repository because they are keyed by `token_hash`.
+
+#[cfg(test)]
+mod sessions {
+    use super::*;
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn scoped_delete_all_and_count() {
+        let db = sqlite_db().await;
+        let alice = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let bob = db
+            .admin()
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"h"))
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            db.admin()
+                .sessions
+                .create(alice, std::time::Duration::from_secs(60), None, None)
+                .await
+                .unwrap();
+        }
+        db.admin()
+            .sessions
+            .create(bob, std::time::Duration::from_secs(60), None, None)
+            .await
+            .unwrap();
+        let alice_scoped = db.for_user(alice).sessions();
+        assert_eq!(alice_scoped.count().await.unwrap(), 3);
+        let deleted = alice_scoped.delete_all().await.unwrap();
+        assert_eq!(deleted, 3);
+        assert_eq!(alice_scoped.count().await.unwrap(), 0);
+        // Bob's session is untouched.
+        assert_eq!(db.for_user(bob).sessions().count().await.unwrap(), 1);
+    }
+}
+
 // ---- documents (scoped) --------------------------------------------------
 
 #[cfg(test)]

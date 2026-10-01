@@ -20,6 +20,22 @@ impl Passkeys {
         }
     }
 
+    /// Scope per-user operations to a single `user_id`. The
+    /// returned [`ScopedPasskeys`] does not take a `user_id`
+    /// argument on its per-row methods so a handler holding a
+    /// scoped view cannot accidentally delete / list another
+    /// user's passkeys (plan 4.A, plan S4).
+    ///
+    /// Operations that are inherently keyed by `credential_id` or
+    /// `passkey_id` (the auth ceremony lookups) stay on the
+    /// unscoped repository.
+    pub fn for_user(&self, user_id: Uuid) -> ScopedPasskeys {
+        ScopedPasskeys {
+            inner: self.clone(),
+            user_id,
+        }
+    }
+
     pub async fn insert(&self, record: NewPasskeyRecord) -> Result<Uuid, Error> {
         match self {
             Passkeys::Sqlite(s) => s.insert(record).await,
@@ -42,6 +58,54 @@ impl Passkeys {
             Passkeys::Sqlite(s) => s.bump_counter(passkey_id, new_counter).await,
             Passkeys::Postgres(s) => s.bump_counter(passkey_id, new_counter).await,
         }
+    }
+
+    /// All passkey rows for `user_id`. Used by the scoped view's
+    /// `list` and the per-user account-deletion sweep.
+    pub async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<PasskeyRecord>, Error> {
+        match self {
+            Passkeys::Sqlite(s) => s.list_for_user(user_id).await,
+            Passkeys::Postgres(s) => s.list_for_user(user_id).await,
+        }
+    }
+
+    /// Delete every passkey row for `user_id`. Returns the number
+    /// of rows removed. Used by the account-deletion path.
+    pub async fn delete_for_user(&self, user_id: Uuid) -> Result<u64, Error> {
+        match self {
+            Passkeys::Sqlite(s) => s.delete_for_user(user_id).await,
+            Passkeys::Postgres(s) => s.delete_for_user(user_id).await,
+        }
+    }
+}
+
+/// Per-user scoped view over [`Passkeys`].
+///
+/// Only the operations whose SQL has a `user_id` filter move to
+/// the scoped view (`list`, `delete_for_user`). The auth-ceremony
+/// lookups (`get_by_credential_id`, `bump_counter`) stay on the
+/// unscoped repository because they are keyed by
+/// `credential_id` / `passkey_id`, not `user_id`.
+#[derive(Debug, Clone)]
+pub struct ScopedPasskeys {
+    inner: Passkeys,
+    user_id: Uuid,
+}
+
+impl ScopedPasskeys {
+    /// `user_id` this view is bound to.
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    /// List every passkey for the scoped user.
+    pub async fn list(&self) -> Result<Vec<PasskeyRecord>, Error> {
+        self.inner.list_for_user(self.user_id).await
+    }
+
+    /// Delete every passkey for the scoped user.
+    pub async fn delete_all(&self) -> Result<u64, Error> {
+        self.inner.delete_for_user(self.user_id).await
     }
 }
 
@@ -118,6 +182,38 @@ pub(crate) mod sqlite {
                 .execute(&self.pool)
                 .await?;
             Ok(())
+        }
+
+        pub async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<PasskeyRecord>, Error> {
+            let rows = sqlx::query(
+                "SELECT id, user_id, credential_id, public_key, counter, transports \
+                 FROM passkeys WHERE user_id = ? ORDER BY created_at ASC",
+            )
+            .bind(user_id.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+            rows.into_iter()
+                .map(|r| {
+                    Ok(PasskeyRecord {
+                        id: Uuid::parse_str(&r.try_get::<String, _>("id")?)
+                            .expect("DB UUID must parse"),
+                        user_id: Uuid::parse_str(&r.try_get::<String, _>("user_id")?)
+                            .expect("DB UUID must parse"),
+                        credential_id: r.try_get("credential_id")?,
+                        public_key: r.try_get("public_key")?,
+                        counter: r.try_get::<i64, _>("counter")? as u32,
+                        transports: r.try_get("transports")?,
+                    })
+                })
+                .collect()
+        }
+
+        pub async fn delete_for_user(&self, user_id: Uuid) -> Result<u64, Error> {
+            let res = sqlx::query("DELETE FROM passkeys WHERE user_id = ?")
+                .bind(user_id.to_string())
+                .execute(&self.pool)
+                .await?;
+            Ok(res.rows_affected())
         }
     }
 
@@ -200,6 +296,38 @@ pub(crate) mod postgres {
                 .execute(&self.pool)
                 .await?;
             Ok(())
+        }
+
+        pub async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<PasskeyRecord>, Error> {
+            let rows = sqlx::query(
+                "SELECT id, user_id::text AS user_id, credential_id, public_key, counter, transports \
+                 FROM passkeys WHERE user_id = $1 ORDER BY created_at ASC",
+            )
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await?;
+            rows.into_iter()
+                .map(|r| {
+                    Ok(PasskeyRecord {
+                        id: Uuid::parse_str(&r.try_get::<String, _>("id")?)
+                            .expect("DB UUID must parse"),
+                        user_id: Uuid::parse_str(&r.try_get::<String, _>("user_id")?)
+                            .expect("DB UUID must parse"),
+                        credential_id: r.try_get("credential_id")?,
+                        public_key: r.try_get("public_key")?,
+                        counter: r.try_get::<i64, _>("counter")? as u32,
+                        transports: r.try_get("transports")?,
+                    })
+                })
+                .collect()
+        }
+
+        pub async fn delete_for_user(&self, user_id: Uuid) -> Result<u64, Error> {
+            let res = sqlx::query("DELETE FROM passkeys WHERE user_id = $1")
+                .bind(user_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(res.rows_affected())
         }
     }
 }

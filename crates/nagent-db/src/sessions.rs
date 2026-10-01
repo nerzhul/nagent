@@ -28,6 +28,24 @@ impl Sessions {
         }
     }
 
+    /// Scope per-user operations to a single `user_id`. The
+    /// returned [`ScopedSessions`] does not take a `user_id`
+    /// argument on its per-row methods so a handler holding a
+    /// scoped view cannot accidentally delete another user's
+    /// sessions (plan 4.A, plan S4).
+    ///
+    /// Operations that are inherently keyed by `token_hash` (the
+    /// auth-ceremony lookups: `lookup_by_token_hash`, `touch`,
+    /// `delete`) stay on the unscoped repository because they
+    /// identify the session by its opaque cookie hash, not by
+    /// `user_id`.
+    pub fn for_user(&self, user_id: Uuid) -> ScopedSessions {
+        ScopedSessions {
+            inner: self.clone(),
+            user_id,
+        }
+    }
+
     pub async fn create(
         &self,
         user_id: Uuid,
@@ -70,6 +88,47 @@ impl Sessions {
             Sessions::Sqlite(s) => s.delete_for_user(user_id).await,
             Sessions::Postgres(s) => s.delete_for_user(user_id).await,
         }
+    }
+
+    /// Number of sessions currently held by `user_id`. Used by
+    /// the scoped view and by tests that assert on session
+    /// lifecycle.
+    pub async fn count_for_user(&self, user_id: Uuid) -> Result<u64, Error> {
+        match self {
+            Sessions::Sqlite(s) => s.count_for_user(user_id).await,
+            Sessions::Postgres(s) => s.count_for_user(user_id).await,
+        }
+    }
+}
+
+/// Per-user scoped view over [`Sessions`].
+///
+/// Only the operations whose SQL has a `user_id` filter move to
+/// the scoped view (`delete_all`, `count`). The auth-ceremony
+/// operations (`lookup_by_token_hash`, `touch`, `delete`) stay on
+/// the unscoped repository because they are keyed by `token_hash`,
+/// not `user_id`; the cookie hash IS the scoping mechanism.
+#[derive(Debug, Clone)]
+pub struct ScopedSessions {
+    inner: Sessions,
+    user_id: Uuid,
+}
+
+impl ScopedSessions {
+    /// `user_id` this view is bound to.
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    /// Delete every session for the scoped user. Returns the number
+    /// of rows removed.
+    pub async fn delete_all(&self) -> Result<u64, Error> {
+        self.inner.delete_for_user(self.user_id).await
+    }
+
+    /// Count sessions currently held by the scoped user.
+    pub async fn count(&self) -> Result<u64, Error> {
+        self.inner.count_for_user(self.user_id).await
     }
 }
 
@@ -203,6 +262,15 @@ pub(crate) mod sqlite {
                 .execute(&self.pool)
                 .await?;
             Ok(res.rows_affected())
+        }
+
+        pub async fn count_for_user(&self, user_id: Uuid) -> Result<u64, Error> {
+            let row = sqlx::query("SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?")
+                .bind(user_id.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+            let n: i64 = row.try_get("n")?;
+            Ok(n as u64)
         }
     }
 
@@ -343,6 +411,15 @@ pub(crate) mod postgres {
                 .execute(&self.pool)
                 .await?;
             Ok(res.rows_affected())
+        }
+
+        pub async fn count_for_user(&self, user_id: Uuid) -> Result<u64, Error> {
+            let row = sqlx::query("SELECT COUNT(*)::bigint AS n FROM sessions WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await?;
+            let n: i64 = row.try_get("n")?;
+            Ok(n as u64)
         }
     }
 
