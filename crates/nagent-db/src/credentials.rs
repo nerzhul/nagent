@@ -1,4 +1,9 @@
-//! Per-user credentials repository — plan 5.D extraction.
+//! Per-user credentials repository — plan 4.A scoped per-user view.
+//!
+//! The credentials vault stores one row per `(user, service,
+//! field)`. Callers that have already resolved a `user_id` should
+//! prefer [`Credentials::for_user`] so the `WHERE user_id = ?`
+//! filter cannot be accidentally dropped (plan 4.A S4).
 
 use uuid::Uuid;
 
@@ -17,6 +22,18 @@ impl Credentials {
         match pool {
             AnyPool::Sqlite(p) => Self::Sqlite(sqlite::SqliteCredentials::new(p.clone())),
             AnyPool::Postgres(p) => Self::Postgres(postgres::PgCredentials::new(p.clone())),
+        }
+    }
+
+    /// Scope every per-row method to a single `user_id`. The
+    /// returned [`ScopedCredentials`] does not take a `user_id`
+    /// argument on its per-row methods, so a route handler that
+    /// holds a `ScopedCredentials` cannot accidentally drop the
+    /// `WHERE user_id = ?` filter (plan 4.A S4).
+    pub fn for_user(&self, user_id: Uuid) -> ScopedCredentials {
+        ScopedCredentials {
+            inner: self.clone(),
+            user_id,
         }
     }
 
@@ -63,7 +80,52 @@ impl Credentials {
     }
 }
 
-pub mod sqlite {
+/// Per-user scoped view over [`Credentials`].
+#[derive(Debug, Clone)]
+pub struct ScopedCredentials {
+    inner: Credentials,
+    user_id: Uuid,
+}
+
+impl ScopedCredentials {
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    /// Atomic replace of every configured field for one
+    /// `(user, service)`. Caller encrypts each field before
+    /// passing it in.
+    pub async fn upsert(
+        &self,
+        service_id: &str,
+        fields: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), Error> {
+        self.inner.upsert(self.user_id, service_id, fields).await
+    }
+
+    /// Remove every configured field for one `(user, service)`.
+    pub async fn delete_service(&self, service_id: &str) -> Result<u64, Error> {
+        self.inner.delete_service(self.user_id, service_id).await
+    }
+
+    /// List every `field_key` currently configured for
+    /// `(user, service)`. Used by `GET /api/integrations/:id`.
+    pub async fn list_field_keys(&self, service_id: &str) -> Result<Vec<String>, Error> {
+        self.inner.list_field_keys(self.user_id, service_id).await
+    }
+
+    /// Fetch the `(nonce, ciphertext)` row for `(user, service,
+    /// field)`. Returns `None` when the field is not configured.
+    pub async fn fetch(
+        &self,
+        service_id: &str,
+        field_key: &str,
+    ) -> Result<Option<UserCredentialRow>, Error> {
+        self.inner.fetch(self.user_id, service_id, field_key).await
+    }
+}
+
+pub(crate) mod sqlite {
     use sqlx::{Row, SqlitePool};
     use uuid::Uuid;
 
@@ -72,11 +134,11 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct SqliteCredentials {
-        pub(crate) pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqliteCredentials {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -172,7 +234,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     use sqlx::{PgPool, Row};
     use uuid::Uuid;
 
@@ -181,11 +243,11 @@ pub mod postgres {
 
     #[derive(Clone, Debug)]
     pub struct PgCredentials {
-        pub(crate) pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgCredentials {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

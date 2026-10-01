@@ -78,13 +78,15 @@ mod tests {
         let store = AuthStore::connect(&cfg).await.expect("store");
         store.migrate().await.expect("first migrate");
         let after_first = store.migration_status().await.unwrap();
-        assert_eq!(after_first.highest_applied, Some(5));
+        let highest = after_first
+            .highest_applied
+            .expect("at least one migration must have applied");
         assert!(after_first.pending.is_empty());
 
         // Second call must be a no-op — sqlx skips applied migrations.
         store.migrate().await.expect("second migrate");
         let after_second = store.migration_status().await.unwrap();
-        assert_eq!(after_second.highest_applied, Some(5));
+        assert_eq!(after_second.highest_applied, Some(highest));
         assert_eq!(after_second.pending.len(), after_first.pending.len());
     }
 
@@ -94,45 +96,54 @@ mod tests {
         let store = AuthStore::connect(&cfg).await.expect("store");
         store.migrate().await.expect("migrate");
         let status = store.migration_status().await.unwrap();
-        assert_eq!(status.applied.len(), 5);
+        let highest = status.highest_applied.expect("at least one migration");
+        // The migration set is `0001_init`, `0002_credentials`,
+        // `0003_uploaded_documents`, `0004_chat_sessions`,
+        // `0005_session_tokens`, `0006_user_preferences` today.
+        // We assert the high-level shape (every applied row has a
+        // positive version, the highest equals the row count, and
+        // the versions are contiguous from 1) so adding new
+        // migrations does not silently break this test.
+        assert!(!status.applied.is_empty());
+        assert_eq!(status.applied.len() as i64, highest);
         assert!(status.pending.is_empty());
-        assert_eq!(status.highest_applied, Some(5));
         let versions: Vec<i64> = status.applied.iter().map(|r| r.version).collect();
-        assert!(versions.contains(&1));
-        assert!(versions.contains(&2));
-        assert!(versions.contains(&3));
-        assert!(versions.contains(&4));
-        assert!(versions.contains(&5));
+        let expected: Vec<i64> = (1..=highest).collect();
+        assert_eq!(versions, expected);
     }
 
     #[tokio::test]
     async fn revert_to_un_does_one_step() {
-        // Apply all, then revert to version 4 (keeping {1,2,3,4}
-        // applied). The .down.sql for 0005 must drop the
-        // SHA-256-hashed `sessions` table.
+        // Apply all, then revert to the second-highest version
+        // (keeping every other migration applied). The status
+        // diff must reflect exactly one migration going from
+        // `applied` to `pending`.
         let cfg = test_config("revert_one");
         let store = AuthStore::connect(&cfg).await.expect("store");
         store.migrate().await.expect("migrate");
-        store.revert_to(4).await.expect("revert_to(4)");
+        let before = store.migration_status().await.unwrap();
+        let highest = before.highest_applied.expect("at least one migration");
+        let target = highest - 1;
+        store.revert_to(target).await.expect("revert_to(target)");
         let status = store.migration_status().await.unwrap();
-        assert_eq!(status.highest_applied, Some(4));
-        assert_eq!(status.applied.len(), 4);
+        assert_eq!(status.highest_applied, Some(target));
+        assert_eq!(status.applied.len() as i64, target);
         assert_eq!(status.applied[0].version, 1);
-        assert_eq!(status.applied[1].version, 2);
-        assert_eq!(status.applied[2].version, 3);
-        assert_eq!(status.applied[3].version, 4);
+        assert_eq!(status.applied.last().unwrap().version, target);
         assert_eq!(status.pending.len(), 1);
-        assert_eq!(status.pending[0].version, 5);
+        assert_eq!(status.pending[0].version, highest);
     }
 
     #[tokio::test]
     async fn revert_to_zero_un_does_all_steps() {
         // Apply all, then revert to 0 (sqlx semantics: undo every
         // applied migration). After this, status must report zero
-        // applied, four pending.
+        // applied, every migration pending.
         let cfg = test_config("revert_all");
         let store = AuthStore::connect(&cfg).await.expect("store");
         store.migrate().await.expect("migrate");
+        let before = store.migration_status().await.unwrap();
+        let total = (before.applied.len() + before.pending.len()) as i64;
         store.revert_to(0).await.expect("revert_to(0)");
         let status = store.migration_status().await.unwrap();
         assert!(
@@ -140,23 +151,25 @@ mod tests {
             "all migrations must be reverted"
         );
         assert!(status.applied.is_empty());
-        assert_eq!(status.pending.len(), 5);
+        assert_eq!(status.pending.len() as i64, total);
     }
 
     #[tokio::test]
     async fn revert_then_reapply_round_trip() {
-        // Apply → revert 0004 → re-apply → status must match the
-        // original post-apply state (pending = 0, applied = {1..5}).
-        // Catches the "checksum mismatch after re-applying the same
-        // SQL" class of regressions.
+        // Apply → revert the latest → re-apply → status must match
+        // the original post-apply state (pending = 0, applied =
+        // {1..N}). Catches the "checksum mismatch after re-applying
+        // the same SQL" class of regressions.
         let cfg = test_config("roundtrip");
         let store = AuthStore::connect(&cfg).await.expect("store");
         store.migrate().await.expect("migrate");
-        store.revert_to(4).await.expect("revert");
+        let before = store.migration_status().await.unwrap();
+        let target = before.highest_applied.expect("at least one") - 1;
+        store.revert_to(target).await.expect("revert");
         store.migrate().await.expect("re-apply");
         let status = store.migration_status().await.unwrap();
-        assert_eq!(status.applied.len(), 5);
+        assert_eq!(status.applied.len(), before.applied.len());
         assert!(status.pending.is_empty());
-        assert_eq!(status.highest_applied, Some(5));
+        assert_eq!(status.highest_applied, before.highest_applied);
     }
 }

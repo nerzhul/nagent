@@ -30,48 +30,37 @@
 //! cookie is shared across tabs. A table that binds
 //! `(user_id, chat_session_id)` lets multiple tabs coexist
 //! without one tab's docs leaking to the others.
+//!
+//! Plan 4.A: the SQL and the binding primitives live in
+//! `nagent_db::chat_sessions`; this module only owns the HTTP
+//! handler + the `axum` state wrapper.
 
 use std::sync::Arc;
 
+pub use nagent_db::chat_sessions::ChatSessionError;
+use nagent_db::chat_sessions::ScopedChatSessions;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::auth::error::AuthError;
-use crate::auth::store::AuthStore;
-
-/// Errors surfaced by the `chat_sessions` API. Mapped to HTTP
-/// statuses by the route layer.
+/// HTTP error wrapper around [`ChatSessionError`]. The orphan
+/// rule forbids `impl IntoResponse for ChatSessionError` (the
+/// error type lives in `nagent_db`), so the routes use this
+/// newtype as the response error.
 #[derive(Debug, thiserror::Error)]
-pub enum ChatSessionError {
+pub enum RouteError {
     #[error(transparent)]
-    Sqlx(#[from] sqlx::Error),
-    #[error("chat session {0} is not bound to user {1}")]
-    NotBound(Uuid, Uuid),
+    Chat(#[from] ChatSessionError),
 }
 
-impl From<AuthError> for ChatSessionError {
-    fn from(e: AuthError) -> Self {
-        match e {
-            AuthError::Database(inner) => ChatSessionError::Sqlx(inner),
-            other => ChatSessionError::Sqlx(sqlx::Error::Protocol(other.to_string())),
-        }
-    }
-}
-
-/// `ChatSessionError` → HTTP status mapping. `NotBound` surfaces
-/// as `503` (the chat sessions subsystem is reachable but the
-/// binding is missing — a misconfigured server or a stale id);
-/// `Sqlx` becomes `500` with a generic message so we never leak
-/// DB internals.
-impl axum::response::IntoResponse for ChatSessionError {
+impl axum::response::IntoResponse for RouteError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
         let (status, msg) = match &self {
-            ChatSessionError::NotBound(_, _) => (
+            RouteError::Chat(ChatSessionError::NotBound(_, _)) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "chat sessions unavailable".to_string(),
             ),
-            ChatSessionError::Sqlx(_) => {
+            RouteError::Chat(ChatSessionError::Sqlx(_)) => {
                 tracing::error!(error = %self, "chat_sessions DB error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -83,28 +72,31 @@ impl axum::response::IntoResponse for ChatSessionError {
     }
 }
 
-/// Cheap to clone (the inner `Arc` wraps the auth sqlx pool).
+/// Cheap to clone (the inner `Arc` wraps a `nagent_db::Db`).
 #[derive(Clone)]
 pub struct ChatSessions {
     inner: Arc<ChatSessionsInner>,
 }
 
 struct ChatSessionsInner {
-    store: AuthStore,
+    repo: nagent_db::chat_sessions::ChatSessions,
 }
 
 impl std::fmt::Debug for ChatSessions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChatSessions")
-            .field("store", &self.inner.store)
+            .field("repo", &"<nagent_db::chat_sessions::ChatSessions>")
             .finish()
     }
 }
 
 impl ChatSessions {
-    pub fn new(store: AuthStore) -> Self {
+    /// Build a `ChatSessions` from the `ChatSessions` repository
+    /// already owned by [`crate::AppState::chat_sessions`]'s
+    /// underlying `AuthStore`.
+    pub fn new(repo: nagent_db::chat_sessions::ChatSessions) -> Self {
         Self {
-            inner: Arc::new(ChatSessionsInner { store }),
+            inner: Arc::new(ChatSessionsInner { repo }),
         }
     }
 
@@ -112,10 +104,7 @@ impl ChatSessions {
     /// table. The browser calls this through
     /// `POST /v1/chat/session` (the server mints the UUID).
     pub async fn bind(&self, session_id: Uuid, user_id: Uuid) -> Result<(), ChatSessionError> {
-        match &self.inner.store {
-            AuthStore::Sqlite(s) => bind_sqlite(s.pool(), session_id, user_id).await,
-            AuthStore::Postgres(s) => bind_postgres(s.pool(), session_id, user_id).await,
-        }
+        self.inner.repo.bind(session_id, user_id).await
     }
 
     /// Verify `session_id` is bound to `user_id` AND refresh its
@@ -128,98 +117,16 @@ impl ChatSessions {
         session_id: Uuid,
         user_id: Uuid,
     ) -> Result<(), ChatSessionError> {
-        match &self.inner.store {
-            AuthStore::Sqlite(s) => touch_and_verify_sqlite(s.pool(), session_id, user_id).await,
-            AuthStore::Postgres(s) => {
-                touch_and_verify_postgres(s.pool(), session_id, user_id).await
-            }
-        }
+        self.inner.repo.touch_and_verify(session_id, user_id).await
     }
-}
 
-// ---- sqlite --------------------------------------------------------------
-
-async fn bind_sqlite(
-    pool: &sqlx::SqlitePool,
-    session_id: Uuid,
-    user_id: Uuid,
-) -> Result<(), ChatSessionError> {
-    // `INSERT OR REPLACE` so re-binding the same (session_id,
-    // user_id) is idempotent — useful when the user logs out
-    // and back in. A different `user_id` would orphan the old
-    // row; the FK ON DELETE CASCADE on `users.id` cleans up.
-    sqlx::query(
-        "INSERT OR REPLACE INTO chat_sessions (id, user_id, created_at, last_seen_at) \
-         VALUES (?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-    )
-    .bind(session_id.to_string())
-    .bind(user_id.to_string())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn touch_and_verify_sqlite(
-    pool: &sqlx::SqlitePool,
-    session_id: Uuid,
-    user_id: Uuid,
-) -> Result<(), ChatSessionError> {
-    // Atomic update — the WHERE user_id = ?2 clause is the
-    // auth gate. If the row is missing OR owned by a different
-    // user, the UPDATE matches zero rows and we surface
-    // `NotBound`.
-    let updated = sqlx::query(
-        "UPDATE chat_sessions SET last_seen_at = CURRENT_TIMESTAMP \
-         WHERE id = ?1 AND user_id = ?2",
-    )
-    .bind(session_id.to_string())
-    .bind(user_id.to_string())
-    .execute(pool)
-    .await?
-    .rows_affected();
-    if updated == 0 {
-        return Err(ChatSessionError::NotBound(session_id, user_id));
+    /// Return a scoped view of the repository bound to `user_id`.
+    /// Route handlers that already hold an `AuthUser` should
+    /// prefer this so the `user_id` filter cannot be dropped
+    /// (plan 4.A S4).
+    pub fn for_user(&self, user_id: Uuid) -> ScopedChatSessions {
+        self.inner.repo.for_user(user_id)
     }
-    Ok(())
-}
-
-// ---- postgres ------------------------------------------------------------
-
-async fn bind_postgres(
-    pool: &sqlx::PgPool,
-    session_id: Uuid,
-    user_id: Uuid,
-) -> Result<(), ChatSessionError> {
-    sqlx::query(
-        "INSERT INTO chat_sessions (id, user_id, created_at, last_seen_at) \
-         VALUES ($1, $2, NOW(), NOW()) \
-         ON CONFLICT (id) DO UPDATE SET user_id = EXCLUDED.user_id, last_seen_at = NOW()",
-    )
-    .bind(session_id)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn touch_and_verify_postgres(
-    pool: &sqlx::PgPool,
-    session_id: Uuid,
-    user_id: Uuid,
-) -> Result<(), ChatSessionError> {
-    let updated = sqlx::query(
-        "UPDATE chat_sessions SET last_seen_at = NOW() \
-         WHERE id = $1 AND user_id = $2",
-    )
-    .bind(session_id)
-    .bind(user_id)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    if updated == 0 {
-        return Err(ChatSessionError::NotBound(session_id, user_id));
-    }
-    Ok(())
 }
 
 /// Response shape of `POST /v1/chat/session`. The browser caches
@@ -255,7 +162,7 @@ pub struct ChatSessionResponse {
 pub async fn mint_handler(
     axum::extract::State(state): axum::extract::State<crate::ChatSessionsState>,
     axum::Extension(user): axum::Extension<crate::auth::session::AuthUser>,
-) -> Result<axum::Json<ChatSessionResponse>, ChatSessionError> {
+) -> Result<axum::Json<ChatSessionResponse>, RouteError> {
     // SEV 2 fix: server-bound chat session id. We mint a fresh
     // UUID v4 server-side (the browser is not allowed to pick)
     // and bind it to the authenticated user. The browser
@@ -263,7 +170,9 @@ pub async fn mint_handler(
     // across page reloads until the server rejects it with 403
     // (e.g. logout from another tab).
     let id = uuid::Uuid::new_v4();
-    state.sessions.bind(id, user.id).await?;
+    // Use the scoped accessor so the binding cannot target a
+    // different user (plan 4.A S4).
+    state.sessions.for_user(user.id).bind(id).await?;
     Ok(axum::Json(ChatSessionResponse { id }))
 }
 
@@ -272,18 +181,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_errors_have_correct_display() {
-        // Sanity: every variant carries enough info to drive
-        // the IntoResponse impl without panicking on missing
-        // fields.
-        let id = Uuid::nil();
-        let e = ChatSessionError::NotBound(id, id);
-        assert!(e.to_string().contains("not bound"));
-        // Sqlx variant is opaque — we don't assert on the
-        // message but ensure Debug works.
-        let _ = format!(
-            "{:?}",
-            ChatSessionError::Sqlx(sqlx::Error::Protocol("x".into()))
-        );
+    fn not_bound_error_carries_ids_in_message() {
+        // Sanity: the variant carries enough info to drive the
+        // IntoResponse impl + surface a useful diagnostic.
+        let session = Uuid::nil();
+        let user = Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").unwrap();
+        let e = ChatSessionError::NotBound(session, user);
+        let s = e.to_string();
+        assert!(s.contains("not bound"));
+        assert!(s.contains(&user.to_string()));
     }
 }

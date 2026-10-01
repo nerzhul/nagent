@@ -1,13 +1,22 @@
-//! `auth/store` — thin facade over the per-domain `nagent-db` repositories.
+//! `auth/store` — thin compatibility shim over [`nagent_db::Db`].
 //!
-//! The row types live in `nagent-db::types` since plan 4.G; the
-//! legacy `crate::auth::store::AuthUserRecord` and friends are
-//! re-exported from there so existing call sites in this crate
-//! keep resolving.
+//! The legacy `AuthStore` facade was a 500-line match-dispatched enum
+//! over every per-domain repository. Plan 4.A replaces it with
+//! [`nagent_db::Db`], a single handle that owns every repository.
+//!
+//! This module keeps the `AuthStore` name as a newtype around `Db`
+//! so existing call sites (`AuthStore::connect`, `store.method`)
+//! keep compiling while the call sites are progressively migrated
+//! to use `nagent_db::Db` directly. Once every site is migrated
+//! (per plan 4.A), this module is deleted.
+//!
+//! New code should depend on [`nagent_db::Db`] directly and reach
+//! the per-domain repositories via `db.users`, `db.documents`, etc.
 
 use crate::auth::error::AuthError;
 use crate::auth::session::SessionRecord;
 use crate::config::AuthConfig;
+use std::ops::Deref;
 use uuid::Uuid;
 
 /// Translate a server-side [`AuthConfig`] into the DB-layer
@@ -16,12 +25,12 @@ use uuid::Uuid;
 /// knows about those.
 impl From<&AuthConfig> for nagent_db::DbOptions {
     fn from(cfg: &AuthConfig) -> Self {
-        use nagent_db::DbEngine;
-        let backend = match cfg.db.backend.as_str() {
-            "sqlite" => DbEngine::Sqlite,
-            "postgres" => DbEngine::Postgres,
-            _other => DbEngine::Sqlite, // unreachable: connect() rejects unknown engines
-        };
+        // `connect()` rejects unknown engines with a clear error
+        // message, so we fall back to sqlite here purely to keep
+        // `DbOptions` constructible for every input (the actual
+        // connect call surfaces the real failure).
+        let backend =
+            nagent_db::DbEngine::parse(&cfg.db.backend).unwrap_or(nagent_db::DbEngine::Sqlite);
         Self {
             backend,
             url: cfg.db.url.clone(),
@@ -43,156 +52,84 @@ pub use nagent_db::{
 // keep resolving it through `crate::auth::store::AnyPool`.
 pub use nagent_db::AnyPool;
 
-use nagent_db::{chat_sessions::ChatSessions as DbChatSessions, documents::Documents};
-
-// ---- Row types are re-exported from `nagent_db::types` above. ----
-
-// ---- Variants ------------------------------------------------------------
-
-/// SQLite engine arm of [`AuthStore`].
-#[derive(Clone, Debug)]
-pub struct SqliteStore {
-    pub(crate) pool: sqlx::SqlitePool,
-    pub(crate) users: nagent_db::users::sqlite::SqliteUsers,
-    pub(crate) sessions: nagent_db::sessions::sqlite::SqliteSessions,
-    pub(crate) passkeys: nagent_db::passkeys::sqlite::SqlitePasskeys,
-    pub(crate) events: nagent_db::events::sqlite::SqliteEvents,
-    pub(crate) credentials: nagent_db::credentials::sqlite::SqliteCredentials,
-    pub(crate) preferences: nagent_db::preferences::sqlite::SqlitePreferences,
-    pub(crate) documents: nagent_db::documents::sqlite::SqliteDocuments,
-    pub(crate) chat_sessions: nagent_db::chat_sessions::sqlite::SqliteChatSessions,
+/// Backwards-compatible wrapper around [`nagent_db::Db`].
+///
+/// The legacy `AuthStore` was a match-dispatched enum. Plan 4.A
+/// collapses the per-engine state into [`nagent_db::Db`]; this
+/// newtype preserves the name + the legacy method set so the
+/// auth subsystem + CLI + integration tests keep compiling
+/// during the migration.
+#[derive(Debug, Clone)]
+pub struct AuthStore {
+    inner: nagent_db::Db,
 }
 
-/// Postgres engine arm of [`AuthStore`].
-#[derive(Clone, Debug)]
-pub struct PgStore {
-    pub(crate) pool: sqlx::PgPool,
-    pub(crate) users: nagent_db::users::postgres::PgUsers,
-    pub(crate) sessions: nagent_db::sessions::postgres::PgSessions,
-    pub(crate) passkeys: nagent_db::passkeys::postgres::PgPasskeys,
-    pub(crate) events: nagent_db::events::postgres::PgEvents,
-    pub(crate) credentials: nagent_db::credentials::postgres::PgCredentials,
-    pub(crate) preferences: nagent_db::preferences::postgres::PgPreferences,
-    pub(crate) documents: nagent_db::documents::postgres::PgDocuments,
-    pub(crate) chat_sessions: nagent_db::chat_sessions::postgres::PgChatSessions,
-}
-
-impl SqliteStore {
-    pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
-        let pool = nagent_db::pool::connect_sqlite(&cfg.into()).await?;
-        Ok(Self {
-            users: nagent_db::users::sqlite::SqliteUsers::new(pool.clone()),
-            sessions: nagent_db::sessions::sqlite::SqliteSessions::new(pool.clone()),
-            passkeys: nagent_db::passkeys::sqlite::SqlitePasskeys::new(pool.clone()),
-            events: nagent_db::events::sqlite::SqliteEvents::new(pool.clone()),
-            credentials: nagent_db::credentials::sqlite::SqliteCredentials::new(pool.clone()),
-            preferences: nagent_db::preferences::sqlite::SqlitePreferences::new(pool.clone()),
-            documents: nagent_db::documents::sqlite::SqliteDocuments::new(pool.clone()),
-            chat_sessions: nagent_db::chat_sessions::sqlite::SqliteChatSessions::new(pool.clone()),
-            pool,
-        })
+impl Deref for AuthStore {
+    type Target = nagent_db::Db;
+    fn deref(&self) -> &nagent_db::Db {
+        &self.inner
     }
-
-    pub(crate) fn pool(&self) -> &sqlx::SqlitePool {
-        &self.pool
-    }
-
-    /// Public pool handle for legacy callers (`chat/sessions.rs`,
-    /// `documents/db.rs`) that still dispatch on
-    /// `AuthStore::Sqlite(s).pool()`.
-    pub fn pool_handle(&self) -> sqlx::SqlitePool {
-        self.pool.clone()
-    }
-}
-
-impl PgStore {
-    pub(crate) async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
-        let pool = nagent_db::pool::connect_postgres(&cfg.into()).await?;
-        Ok(Self {
-            users: nagent_db::users::postgres::PgUsers::new(pool.clone()),
-            sessions: nagent_db::sessions::postgres::PgSessions::new(pool.clone()),
-            passkeys: nagent_db::passkeys::postgres::PgPasskeys::new(pool.clone()),
-            events: nagent_db::events::postgres::PgEvents::new(pool.clone()),
-            credentials: nagent_db::credentials::postgres::PgCredentials::new(pool.clone()),
-            preferences: nagent_db::preferences::postgres::PgPreferences::new(pool.clone()),
-            documents: nagent_db::documents::postgres::PgDocuments::new(pool.clone()),
-            chat_sessions: nagent_db::chat_sessions::postgres::PgChatSessions::new(pool.clone()),
-            pool,
-        })
-    }
-
-    pub(crate) fn pool(&self) -> &sqlx::PgPool {
-        &self.pool
-    }
-
-    pub fn pool_handle(&self) -> sqlx::PgPool {
-        self.pool.clone()
-    }
-}
-
-// ---- AuthStore facade ----------------------------------------------------
-
-/// DB-agnostic auth store. Cheap to clone (each variant wraps a
-/// sqlx pool which itself is `Arc`-backed).
-#[derive(Clone, Debug)]
-pub enum AuthStore {
-    Sqlite(SqliteStore),
-    Postgres(PgStore),
 }
 
 impl AuthStore {
+    /// Connect to the auth DB described by `cfg` and wrap the
+    /// resulting [`nagent_db::Db`] in an `AuthStore`. Backwards-
+    /// compatible shim around [`nagent_db::Db::connect`].
     pub async fn connect(cfg: &AuthConfig) -> Result<Self, AuthError> {
-        match cfg.db.backend.as_str() {
-            "sqlite" => SqliteStore::connect(cfg).await.map(AuthStore::Sqlite),
-            "postgres" => PgStore::connect(cfg).await.map(AuthStore::Postgres),
-            other => Err(AuthError::Internal(format!(
-                "unsupported auth.db.backend: {other}"
-            ))),
-        }
+        let opts: nagent_db::DbOptions = cfg.into();
+        let db = nagent_db::Db::connect(&opts)
+            .await
+            .map_err(AuthError::from)?;
+        Ok(Self { inner: db })
     }
 
+    /// Borrow the underlying [`nagent_db::Db`].
+    pub fn db(&self) -> &nagent_db::Db {
+        &self.inner
+    }
+
+    /// Underlying engine-agnostic pool. Used by integration tests
+    /// that need to run raw SQL.
+    pub fn pool(&self) -> &AnyPool {
+        self.inner.pool()
+    }
+
+    // -- Migrations ------------------------------------------------
+
     pub async fn migrate(&self) -> Result<(), AuthError> {
-        nagent_db::migrate::run(&self.pool())
-            .await
-            .map_err(AuthError::from)
+        self.inner.migrate().await.map_err(AuthError::from)
     }
 
     pub async fn migration_status(&self) -> Result<MigrationStatus, AuthError> {
-        nagent_db::migrate::status(&self.pool())
-            .await
-            .map_err(AuthError::from)
+        self.inner.migration_status().await.map_err(AuthError::from)
     }
 
     pub async fn revert_to(&self, target_version: i64) -> Result<(), AuthError> {
-        nagent_db::migrate::revert_to(&self.pool(), target_version)
+        self.inner
+            .revert_to(target_version)
             .await
             .map_err(AuthError::from)
     }
 
-    pub fn pool(&self) -> AnyPool {
-        match self {
-            AuthStore::Sqlite(s) => AnyPool::Sqlite(s.pool.clone()),
-            AuthStore::Postgres(s) => AnyPool::Postgres(s.pool.clone()),
-        }
-    }
-
-    // ---- Users ------------------------------------------------------
+    // -- User accessors -------------------------------------------
 
     pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<AuthUserRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.users.get_by_id(id).await.map_err(AuthError::from),
-            AuthStore::Postgres(s) => s.users.get_by_id(id).await.map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .get_by_id(id)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn get_user_by_email(
         &self,
         email: &str,
     ) -> Result<Option<AuthUserRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.users.get_by_email(email).await.map_err(AuthError::from),
-            AuthStore::Postgres(s) => s.users.get_by_email(email).await.map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .get_by_email(email)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn create_user(
@@ -202,18 +139,11 @@ impl AuthStore {
         provider: &str,
         password_hash: Option<&[u8]>,
     ) -> Result<Uuid, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .users
-                .create(email, display_name, provider, password_hash)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .users
-                .create(email, display_name, provider, password_hash)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .create(email, display_name, provider, password_hash)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn set_password(
@@ -221,68 +151,49 @@ impl AuthStore {
         user_id: Uuid,
         password_hash: &[u8],
     ) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .users
-                .set_password(user_id, password_hash)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .users
-                .set_password(user_id, password_hash)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .set_password(user_id, password_hash)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn delete_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.users.delete(user_id).await.map_err(AuthError::from),
-            AuthStore::Postgres(s) => s.users.delete(user_id).await.map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .delete(user_id)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn delete_user_by_email(&self, email: &str) -> Result<Option<Uuid>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .users
-                .delete_by_email(email)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .users
-                .delete_by_email(email)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .delete_by_email(email)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn count_users_by_provider(&self, provider: &str) -> Result<i64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .users
-                .count_by_provider(provider)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .users
-                .count_by_provider(provider)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .count_by_provider(provider)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn list_users(
         &self,
         provider_prefix: Option<&str>,
     ) -> Result<Vec<AuthUserRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.users.list(provider_prefix).await.map_err(AuthError::from),
-            AuthStore::Postgres(s) => s.users.list(provider_prefix).await.map_err(AuthError::from),
-        }
+        self.inner
+            .users
+            .list(provider_prefix)
+            .await
+            .map_err(AuthError::from)
     }
 
-    // ---- Sessions ---------------------------------------------------
+    // -- Session accessors ----------------------------------------
 
     pub async fn create_session(
         &self,
@@ -291,98 +202,73 @@ impl AuthStore {
         ip: Option<&str>,
         user_agent: Option<&str>,
     ) -> Result<SessionRecord, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .sessions
-                .create(user_id, ttl, ip, user_agent)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .sessions
-                .create(user_id, ttl, ip, user_agent)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .sessions
+            .create(user_id, ttl, ip, user_agent)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn lookup_session_by_token_hash(
         &self,
         token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<Option<(SessionRecord, AuthUserRecord)>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .sessions
-                .lookup_by_token_hash(token_hash)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .sessions
-                .lookup_by_token_hash(token_hash)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .sessions
+            .lookup_by_token_hash(token_hash)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn touch_session(
         &self,
         token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => Ok(s.sessions.touch(token_hash).await?),
-            AuthStore::Postgres(s) => Ok(s.sessions.touch(token_hash).await?),
-        }
+        self.inner
+            .sessions
+            .touch(token_hash)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn delete_session(
         &self,
         token_hash: &crate::auth::session::SessionTokenHash,
     ) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.sessions.delete(token_hash).await.map_err(AuthError::from),
-            AuthStore::Postgres(s) => s.sessions.delete(token_hash).await.map_err(AuthError::from),
-        }
+        self.inner
+            .sessions
+            .delete(token_hash)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn delete_sessions_for_user(&self, user_id: Uuid) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .sessions
-                .delete_for_user(user_id)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .sessions
-                .delete_for_user(user_id)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .sessions
+            .delete_for_user(user_id)
+            .await
+            .map_err(AuthError::from)
     }
 
-    // ---- Passkeys ---------------------------------------------------
+    // -- Passkey accessors -----------------------------------------
 
     pub async fn insert_passkey(&self, record: NewPasskeyRecord) -> Result<Uuid, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.passkeys.insert(record).await.map_err(AuthError::from),
-            AuthStore::Postgres(s) => s.passkeys.insert(record).await.map_err(AuthError::from),
-        }
+        self.inner
+            .passkeys
+            .insert(record)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn get_passkey_by_credential_id(
         &self,
         credential_id: &[u8],
     ) -> Result<Option<PasskeyRecord>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .passkeys
-                .get_by_credential_id(credential_id)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .passkeys
-                .get_by_credential_id(credential_id)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .passkeys
+            .get_by_credential_id(credential_id)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn bump_passkey_counter(
@@ -390,31 +276,21 @@ impl AuthStore {
         passkey_id: Uuid,
         new_counter: u32,
     ) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .passkeys
-                .bump_counter(passkey_id, new_counter)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .passkeys
-                .bump_counter(passkey_id, new_counter)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .passkeys
+            .bump_counter(passkey_id, new_counter)
+            .await
+            .map_err(AuthError::from)
     }
 
-    // ---- Audit ------------------------------------------------------
+    // -- Audit -----------------------------------------------------
 
     /// Append an `auth_events` row. Best-effort.
     pub fn record_event(&self, event: NewAuthEvent) {
-        match self {
-            AuthStore::Sqlite(s) => s.events.record(event),
-            AuthStore::Postgres(s) => s.events.record(event),
-        }
+        self.inner.events.record(event);
     }
 
-    // ---- Per-user credentials --------------------------------------
+    // -- Per-user credentials --------------------------------------
 
     pub async fn upsert_user_credentials(
         &self,
@@ -422,18 +298,11 @@ impl AuthStore {
         service_id: &str,
         fields: &[(String, Vec<u8>, Vec<u8>)],
     ) -> Result<(), AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .credentials
-                .upsert(user_id, service_id, fields)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .credentials
-                .upsert(user_id, service_id, fields)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .credentials
+            .upsert(user_id, service_id, fields)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn delete_service_credentials(
@@ -441,18 +310,11 @@ impl AuthStore {
         user_id: Uuid,
         service_id: &str,
     ) -> Result<u64, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .credentials
-                .delete_service(user_id, service_id)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .credentials
-                .delete_service(user_id, service_id)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .credentials
+            .delete_service(user_id, service_id)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn list_configured_field_keys(
@@ -460,18 +322,11 @@ impl AuthStore {
         user_id: Uuid,
         service_id: &str,
     ) -> Result<Vec<String>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .credentials
-                .list_field_keys(user_id, service_id)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .credentials
-                .list_field_keys(user_id, service_id)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .credentials
+            .list_field_keys(user_id, service_id)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn fetch_user_credential(
@@ -480,25 +335,21 @@ impl AuthStore {
         service_id: &str,
         field_key: &str,
     ) -> Result<Option<UserCredentialRow>, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .credentials
-                .fetch(user_id, service_id, field_key)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .credentials
-                .fetch(user_id, service_id, field_key)
-                .await
-                .map_err(AuthError::from),
-        }
+        self.inner
+            .credentials
+            .fetch(user_id, service_id, field_key)
+            .await
+            .map_err(AuthError::from)
     }
 
+    // -- Per-user preferences --------------------------------------
+
     pub async fn get_user_preferences(&self, user_id: Uuid) -> Result<UserPreferences, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s.preferences.get(user_id).await.map_err(AuthError::from),
-            AuthStore::Postgres(s) => s.preferences.get(user_id).await.map_err(AuthError::from),
-        }
+        self.inner
+            .preferences
+            .get(user_id)
+            .await
+            .map_err(AuthError::from)
     }
 
     pub async fn upsert_user_preferences(
@@ -507,33 +358,10 @@ impl AuthStore {
         share_location_enabled: bool,
         share_timezone_enabled: bool,
     ) -> Result<UserPreferences, AuthError> {
-        match self {
-            AuthStore::Sqlite(s) => s
-                .preferences
-                .upsert(user_id, share_location_enabled, share_timezone_enabled)
-                .await
-                .map_err(AuthError::from),
-            AuthStore::Postgres(s) => s
-                .preferences
-                .upsert(user_id, share_location_enabled, share_timezone_enabled)
-                .await
-                .map_err(AuthError::from),
-        }
-    }
-
-    // ---- Documents + chat sessions (legacy accessors) ---------------
-
-    pub fn documents(&self) -> Documents {
-        match self {
-            AuthStore::Sqlite(s) => Documents::Sqlite(s.documents.clone()),
-            AuthStore::Postgres(s) => Documents::Postgres(s.documents.clone()),
-        }
-    }
-
-    pub fn chat_sessions_repo(&self) -> DbChatSessions {
-        match self {
-            AuthStore::Sqlite(s) => DbChatSessions::Sqlite(s.chat_sessions.clone()),
-            AuthStore::Postgres(s) => DbChatSessions::Postgres(s.chat_sessions.clone()),
-        }
+        self.inner
+            .preferences
+            .upsert(user_id, share_location_enabled, share_timezone_enabled)
+            .await
+            .map_err(AuthError::from)
     }
 }

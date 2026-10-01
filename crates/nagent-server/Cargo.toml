@@ -63,8 +63,6 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"], op
 piper-rs = { version = "0.2", optional = true }
 # Sandboxed expression evaluator for the calculate tool.
 meval = { version = "0.2", optional = true }
-# `macros` is needed for `sqlx::migrate!`; runtime SQL is plain `sqlx::query` (no `DATABASE_URL` at build).
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"] }
 argon2 = "0.5"
 # Reuses the workspace's reqwest + rustls TLS stack.
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
@@ -92,6 +90,18 @@ mime_guess = "2"
 ipnet = "2"
 
 [dev-dependencies]
+# `test-util` enables the `crate::testing::app_state` builder that
+# the integration tests import. Listed here so `cargo test` builds
+# the module without requiring `--features test-util` on the
+# command line.
+nagent-server = { path = ".", features = ["test-util"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures = "0.3"
 tokio-tungstenite = "0.24"
+# `sqlx` is a dev-only dep now: production code talks to the DB
+# through `nagent_db::Db` (plan 4.A), so the server binary no
+# longer needs to link the drivers directly. The integration tests
+# still use `sqlx::query` / `sqlx::query_scalar` for one-off raw
+# SQL (audit row assertions, schema probes); they live in
+# `tests/` so the binary stays slim.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros"] }

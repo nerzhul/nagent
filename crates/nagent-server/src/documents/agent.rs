@@ -310,16 +310,9 @@ fn validate_page_range(pr: &str) -> Result<(), AgentError> {
 
 // ---- DB row ----------------------------------------------------------------
 
-/// Subset of the `uploaded_documents` row the agent needs. Keeps
-/// the DB layer's UUID / RFC 3339 string handling out of the agent
-/// module.
-#[derive(Debug, Clone)]
-pub struct DocumentRow {
-    pub id: uuid::Uuid,
-    pub original_name: String,
-    pub mime: String,
-    pub size_bytes: u64,
-    pub extracted_chars: u64,
-    pub page_count: Option<u32>,
-    pub disk_path: std::path::PathBuf,
-}
+// Plan 4.A: the `DocumentRow` type lives in `nagent_db::types`
+// alongside the repository that decodes it. Re-export it here so
+// the `documents::agent` module surface (and the legacy
+// `documents::db` wrapper) keeps compiling while the rest of the
+// modules are migrated.
+pub use nagent_db::DocumentRow;

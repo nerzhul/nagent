@@ -98,7 +98,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // `Some`). The check runs early — a misconfigured server refuses
     // to boot with a clear error instead of 500-ing on every upload.
     let chat_sessions_state = auth_store.clone().map(|s| ChatSessionsState {
-        sessions: crate::chat::sessions::ChatSessions::new(s),
+        sessions: crate::chat::sessions::ChatSessions::new(s.db().chat_sessions.clone()),
     });
     let documents_state = if cfg.documents.enabled {
         let store = match auth_store.clone() {

@@ -27,7 +27,7 @@ impl Events {
     }
 }
 
-pub mod sqlite {
+pub(crate) mod sqlite {
     use chrono::Utc;
     use sqlx::SqlitePool;
     use uuid::Uuid;
@@ -36,11 +36,11 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct SqliteEvents {
-        pub(crate) pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqliteEvents {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -70,7 +70,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     use chrono::Utc;
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -79,11 +79,11 @@ pub mod postgres {
 
     #[derive(Clone, Debug)]
     pub struct PgEvents {
-        pub(crate) pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgEvents {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

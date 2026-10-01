@@ -49,17 +49,19 @@ use serde::Serialize;
 
 use crate::auth::store::AuthStore;
 
-/// Cheap to clone (the inner `Arc` wraps a sqlx pool).
+/// Cheap to clone (the inner `Arc` wraps a `nagent_db::Db`).
 #[derive(Clone)]
 pub struct DocumentStore {
     inner: Arc<DocumentStoreInner>,
 }
 
 struct DocumentStoreInner {
-    /// The same sqlx pool the auth subsystem uses. The
-    /// `uploaded_documents` table lives in the auth DB so the CLI
-    /// can sweep rows + files from a single connection without
-    /// touching a second pool.
+    /// The shared [`nagent_db::Db`]. The `uploaded_documents`
+    /// table lives in the auth DB so the CLI can sweep rows +
+    /// files from a single connection without touching a second
+    /// pool. Reachable via [`DocumentStore::store`] (returns the
+    /// `AuthStore` shim for backwards compatibility with the CLI)
+    /// or [`DocumentStore::db`] (the underlying `nagent_db::Db`).
     store: AuthStore,
     /// Maximum number of characters the agent returns per read.
     /// Pulled from `DocumentsConfig` at boot so a reload (out of
@@ -76,7 +78,7 @@ struct DocumentStoreInner {
 impl std::fmt::Debug for DocumentStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DocumentStore")
-            .field("store", &self.inner.store)
+            .field("store", &"<nagent_db::Db>")
             .field("max_extracted_chars", &self.inner.max_extracted_chars)
             .field("cache_dir", &self.inner.cache_dir)
             .finish()
@@ -99,8 +101,9 @@ impl DocumentStore {
         }
     }
 
-    /// Borrow the underlying [`AuthStore`]. Used by the CLI to drive
-    /// the purge sweep without exposing the inner Arc.
+    /// Borrow the underlying [`AuthStore`] (the newtype shim
+    /// around [`nagent_db::Db`]). Used by the CLI to drive the
+    /// purge sweep without exposing the inner Arc.
     pub fn store(&self) -> &AuthStore {
         &self.inner.store
     }

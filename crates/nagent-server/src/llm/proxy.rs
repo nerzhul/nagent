@@ -325,11 +325,10 @@ pub async fn chat_completions(
 ///
 /// Returning `Vec<String>` (not the raw OpenAI JSON envelope) lets the
 /// features endpoint serialise it directly without re-shaping.
-pub(crate) async fn fetch_upstream_model_list(client: &crate::llm::client::LlmClient) -> Vec<String> {
-    let url = format!(
-        "{}/v1/models",
-        client.cfg().base_url.trim_end_matches('/')
-    );
+pub(crate) async fn fetch_upstream_model_list(
+    client: &crate::llm::client::LlmClient,
+) -> Vec<String> {
+    let url = format!("{}/v1/models", client.cfg().base_url.trim_end_matches('/'));
     debug!(%url, "fetching upstream models for /api/features");
 
     let mut req = client.http.get(&url);

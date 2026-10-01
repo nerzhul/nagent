@@ -73,7 +73,7 @@ impl Sessions {
     }
 }
 
-pub mod sqlite {
+pub(crate) mod sqlite {
     use std::time::Duration;
 
     use chrono::{DateTime, Utc};
@@ -86,11 +86,11 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct SqliteSessions {
-        pub(crate) pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqliteSessions {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -213,7 +213,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     use std::time::Duration;
 
     use chrono::{DateTime, Utc};
@@ -226,11 +226,11 @@ pub mod postgres {
 
     #[derive(Clone, Debug)]
     pub struct PgSessions {
-        pub(crate) pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgSessions {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

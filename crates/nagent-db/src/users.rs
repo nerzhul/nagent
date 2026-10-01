@@ -120,7 +120,7 @@ impl Users {
 
 // ---- Per-engine implementations -----------------------------------------
 
-pub mod sqlite {
+pub(crate) mod sqlite {
     //! SQLite implementation of [`super::Users`]. Owns the SQL
     //! previously embedded in
     //! [`crate::auth::db_sqlite`].
@@ -135,11 +135,11 @@ pub mod sqlite {
     /// Cheap to clone — the underlying pool is `Arc`-backed.
     #[derive(Clone, Debug)]
     pub struct SqliteUsers {
-        pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqliteUsers {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -290,7 +290,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     //! Postgres implementation of [`super::Users`]. Owns the SQL
     //! previously embedded in [`crate::auth::db_postgres`].
 
@@ -304,11 +304,11 @@ pub mod postgres {
     /// Cheap to clone — the underlying pool is `Arc`-backed.
     #[derive(Clone, Debug)]
     pub struct PgUsers {
-        pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgUsers {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

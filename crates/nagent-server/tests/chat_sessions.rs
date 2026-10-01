@@ -66,22 +66,21 @@ async fn insert_user_for_test(store: &AuthStore, user_id: Uuid) {
     // UUID) by writing through `AuthStore::pool()`. The pool is
     // typed `AnyPool`; we unwrap to sqlite for the test harness.
     let pool = store.pool();
-    if let nagent_server::auth::store::AnyPool::Sqlite(sqlite_pool) = pool {
-        sqlx::query::<sqlx::Sqlite>(
-            "INSERT INTO users (id, email, display_name, provider, password_hash, created_at) \
-             VALUES (?1, ?2, ?3, 'local', ?4, ?5)",
-        )
-        .bind(user_id.to_string())
-        .bind(format!("{user_id}@test.invalid"))
-        .bind("Test User")
-        .bind(hash)
-        .bind(now)
-        .execute(&sqlite_pool)
-        .await
-        .expect("users insert must succeed");
-    } else {
+    let nagent_server::auth::store::AnyPool::Sqlite(sqlite_pool) = pool else {
         panic!("chat_sessions integration tests require sqlite");
-    }
+    };
+    sqlx::query::<sqlx::Sqlite>(
+        "INSERT INTO users (id, email, display_name, provider, password_hash, created_at) \
+         VALUES (?1, ?2, ?3, 'local', ?4, ?5)",
+    )
+    .bind(user_id.to_string())
+    .bind(format!("{user_id}@test.invalid"))
+    .bind("Test User")
+    .bind(hash)
+    .bind(now)
+    .execute(sqlite_pool)
+    .await
+    .expect("users insert must succeed");
 }
 
 #[tokio::test]
@@ -89,7 +88,7 @@ async fn bind_then_touch_and_verify_succeeds() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth.clone());
+    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
     let session_id = Uuid::new_v4();
     cs.bind(session_id, user_id)
         .await
@@ -104,7 +103,7 @@ async fn touch_and_verify_rejects_never_bound_session() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth);
+    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
     // Random UUID that was never inserted. The call must surface
     // `NotBound` so the route layer can map it to 403.
     let err = cs
@@ -125,7 +124,7 @@ async fn touch_and_verify_rejects_session_bound_to_other_user() {
     let user_b = Uuid::new_v4();
     insert_user_for_test(&auth, user_a).await;
     insert_user_for_test(&auth, user_b).await;
-    let cs = ChatSessions::new(auth);
+    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
     let session_id = Uuid::new_v4();
     assert_ne!(user_a, user_b, "test must use distinct users");
     cs.bind(session_id, user_a)
@@ -147,7 +146,7 @@ async fn bind_is_idempotent_for_same_user() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth);
+    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
     let session_id = Uuid::new_v4();
     cs.bind(session_id, user_id).await.expect("first bind");
     cs.bind(session_id, user_id)
@@ -169,7 +168,7 @@ async fn touch_and_verify_refreshes_last_seen_at() {
     let auth = fresh_store().await;
     let user_id = Uuid::new_v4();
     insert_user_for_test(&auth, user_id).await;
-    let cs = ChatSessions::new(auth);
+    let cs = ChatSessions::new(auth.db().chat_sessions.clone());
     let session_id = Uuid::new_v4();
     cs.bind(session_id, user_id).await.unwrap();
     for _ in 0..3 {

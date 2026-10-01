@@ -1,16 +1,21 @@
-//! Documents repository — plan 5.D extraction.
+//! Documents repository — plan 4.A scoped per-user view.
 //!
-//! Owns the SQL for the `uploaded_documents` table that previously
-//! lived in [`crate::documents::db`].
+//! Owns the SQL for the `uploaded_documents` table. Callers that
+//! have already resolved a `user_id` should prefer
+//! [`Documents::for_user`] so the `WHERE user_id = ?` filter
+//! cannot be accidentally dropped (plan 4.A S4). Admin / CLI paths
+//! (background sweep, `nagent documents purge`) keep using the
+//! unscoped repository directly.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::Utc;
 use uuid::Uuid;
 
 use crate::error::Error;
-use crate::migrate::{self as migrate_runner, MigrationStatus};
+use crate::migrate::MigrationStatus;
 use crate::pool::AnyPool;
 use crate::types::DocumentRow;
 
@@ -18,7 +23,7 @@ use crate::types::DocumentRow;
 pub enum DocumentError {
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
-    #[error("uploaded_documents table is missing; run `stt-server migrate up`")]
+    #[error("uploaded_documents table is missing; run `nagent migrate up`")]
     SchemaMissing,
 }
 
@@ -31,6 +36,8 @@ impl From<Error> for DocumentError {
     }
 }
 
+/// Engine-agnostic documents repository. Cheap to clone (each
+/// variant wraps a sqlx pool which itself is `Arc`-backed).
 #[derive(Debug, Clone)]
 pub enum Documents {
     Sqlite(sqlite::SqliteDocuments),
@@ -45,23 +52,54 @@ impl Documents {
         }
     }
 
+    /// Scope every per-row method to a single `user_id`. The
+    /// returned [`ScopedDocuments`] does not take a `user_id`
+    /// argument on its per-row methods, so a route handler that
+    /// holds a `ScopedDocuments` cannot accidentally drop the
+    /// `WHERE user_id = ?` filter (plan 4.A S4).
+    pub fn for_user(&self, user_id: Uuid) -> ScopedDocuments {
+        ScopedDocuments {
+            inner: self.clone(),
+            user_id,
+        }
+    }
+
+    /// Look up a document by UUID within a `(user, session)` pair.
+    /// Kept on the unscoped repository for the legacy `name`-based
+    /// call path used by the routes today; new callers should use
+    /// [`ScopedDocuments::get_by_id`].
     pub async fn get_by_name(
         &self,
         name: &str,
         user_id: Uuid,
         session_id: Uuid,
     ) -> Result<Option<DocumentRow>, DocumentError> {
-        let id = Uuid::parse_str(name).map_err(|parse_err| {
+        let id = Uuid::from_str(name).map_err(|parse_err| {
             DocumentError::Sqlx(sqlx::Error::Protocol(format!(
                 "document id `{name}` is not a valid UUID: {parse_err}"
             )))
         })?;
+        self.get_by_id(id, user_id, Some(session_id)).await
+    }
+
+    /// Look up a document by UUID + user, optionally scoped to a
+    /// session. Kept unscoped for the download handler, which is
+    /// gated by `RequireAuth` but does not enforce a session match.
+    pub async fn get_by_id(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        session_id: Option<Uuid>,
+    ) -> Result<Option<DocumentRow>, DocumentError> {
         match self {
-            Documents::Sqlite(s) => s.get_by_id(id, user_id, Some(session_id)).await,
-            Documents::Postgres(s) => s.get_by_id(id, user_id, Some(session_id)).await,
+            Documents::Sqlite(s) => s.get_by_id(id, user_id, session_id).await,
+            Documents::Postgres(s) => s.get_by_id(id, user_id, session_id).await,
         }
     }
 
+    /// Insert a fresh row. Caller writes the on-disk file before
+    /// calling this so a failed DB write surfaces as `422` without
+    /// leaving an orphaned row behind.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         &self,
@@ -107,51 +145,10 @@ impl Documents {
         }
     }
 
-    pub async fn list_for_session(
-        &self,
-        user_id: Uuid,
-        session_id: Uuid,
-    ) -> Result<Vec<DocumentRow>, DocumentError> {
-        match self {
-            Documents::Sqlite(s) => s.list_for_session(user_id, session_id).await,
-            Documents::Postgres(s) => s.list_for_session(user_id, session_id).await,
-        }
-    }
-
-    pub async fn count_for_session(
-        &self,
-        user_id: Uuid,
-        session_id: Uuid,
-    ) -> Result<u64, DocumentError> {
-        match self {
-            Documents::Sqlite(s) => s.count_for_session(user_id, session_id).await,
-            Documents::Postgres(s) => s.count_for_session(user_id, session_id).await,
-        }
-    }
-
-    pub async fn get_by_id(
-        &self,
-        id: Uuid,
-        user_id: Uuid,
-    ) -> Result<Option<DocumentRow>, DocumentError> {
-        match self {
-            Documents::Sqlite(s) => s.get_by_id(id, user_id, None).await,
-            Documents::Postgres(s) => s.get_by_id(id, user_id, None).await,
-        }
-    }
-
-    pub async fn delete(
-        &self,
-        id: Uuid,
-        user_id: Uuid,
-        session_id: Uuid,
-    ) -> Result<Option<PathBuf>, DocumentError> {
-        match self {
-            Documents::Sqlite(s) => s.delete(id, user_id, session_id).await,
-            Documents::Postgres(s) => s.delete(id, user_id, session_id).await,
-        }
-    }
-
+    /// Sweep every row whose `expires_at` (or `created_at` when
+    /// the row has no explicit expiry) is older than `ttl` ago.
+    /// Used by the background sweep + the `nagent documents purge`
+    /// CLI; the per-user route handlers should NOT use this.
     pub async fn sweep_older_than(&self, ttl: Duration) -> Result<Vec<DocumentRow>, DocumentError> {
         let cutoff = Utc::now() - chrono::Duration::from_std(ttl).unwrap_or_default();
         match self {
@@ -160,6 +157,8 @@ impl Documents {
         }
     }
 
+    /// Delete a row by id without a session or user filter. Used
+    /// by the CLI sweep after the operator has approved the plan.
     pub async fn delete_row_by_id(&self, id: Uuid) -> Result<(), DocumentError> {
         match self {
             Documents::Sqlite(s) => s.delete_row_by_id(id).await,
@@ -167,19 +166,115 @@ impl Documents {
         }
     }
 
+    /// Migration status for the `uploaded_documents` table. Used
+    /// by `boot::ensure_documents_table` to surface a clear error
+    /// when the operator ran a partial boot.
     pub async fn migration_status(&self) -> Result<MigrationStatus, DocumentError> {
         match self {
             Documents::Sqlite(s) => {
-                Ok(migrate_runner::status(&AnyPool::Sqlite(s.pool.clone())).await?)
+                Ok(crate::migrate::status(&AnyPool::Sqlite(s.pool.clone())).await?)
             }
             Documents::Postgres(s) => {
-                Ok(migrate_runner::status(&AnyPool::Postgres(s.pool.clone())).await?)
+                Ok(crate::migrate::status(&AnyPool::Postgres(s.pool.clone())).await?)
             }
         }
     }
 }
 
-pub mod sqlite {
+/// Per-user scoped view over [`Documents`]. The `user_id` is
+/// baked in at construction; per-row methods therefore cannot be
+/// called with the wrong `user_id` by accident (plan 4.A S4).
+#[derive(Debug, Clone)]
+pub struct ScopedDocuments {
+    inner: Documents,
+    user_id: Uuid,
+}
+
+impl ScopedDocuments {
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    /// List every document for `(user, session)`.
+    pub async fn list_for_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<DocumentRow>, DocumentError> {
+        match &self.inner {
+            Documents::Sqlite(s) => s.list_for_session(self.user_id, session_id).await,
+            Documents::Postgres(s) => s.list_for_session(self.user_id, session_id).await,
+        }
+    }
+
+    /// Count documents for `(user, session)`. Used to enforce
+    /// `max_docs_per_session` BEFORE the on-disk write.
+    pub async fn count_for_session(&self, session_id: Uuid) -> Result<u64, DocumentError> {
+        match &self.inner {
+            Documents::Sqlite(s) => s.count_for_session(self.user_id, session_id).await,
+            Documents::Postgres(s) => s.count_for_session(self.user_id, session_id).await,
+        }
+    }
+
+    /// Look up a document by UUID within `(user, session)`.
+    pub async fn get_for_session(
+        &self,
+        id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<DocumentRow>, DocumentError> {
+        self.inner
+            .get_by_id(id, self.user_id, Some(session_id))
+            .await
+    }
+
+    /// Look up a document by UUID + user (download path; no
+    /// session scope).
+    pub async fn get_by_id(&self, id: Uuid) -> Result<Option<DocumentRow>, DocumentError> {
+        self.inner.get_by_id(id, self.user_id, None).await
+    }
+
+    /// Insert a fresh row. `session_id` is the chat-session binding.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert(
+        &self,
+        id: Uuid,
+        session_id: Uuid,
+        original_name: &str,
+        mime: &str,
+        size_bytes: u64,
+        extracted_chars: u64,
+        page_count: Option<u32>,
+        disk_path: &str,
+    ) -> Result<(), DocumentError> {
+        self.inner
+            .insert(
+                id,
+                session_id,
+                self.user_id,
+                original_name,
+                mime,
+                size_bytes,
+                extracted_chars,
+                page_count,
+                disk_path,
+            )
+            .await
+    }
+
+    /// Delete a row scoped by `(user, session)`. Returns the on-disk
+    /// path so the caller can unlink the file.
+    pub async fn delete(
+        &self,
+        id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<PathBuf>, DocumentError> {
+        match &self.inner {
+            Documents::Sqlite(s) => s.delete(id, self.user_id, session_id).await,
+            Documents::Postgres(s) => s.delete(id, self.user_id, session_id).await,
+        }
+    }
+}
+
+pub(crate) mod sqlite {
     use std::path::PathBuf;
 
     use chrono::{DateTime, Utc};
@@ -191,11 +286,11 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct SqliteDocuments {
-        pub(crate) pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqliteDocuments {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -368,7 +463,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     use std::path::PathBuf;
 
     use chrono::{DateTime, Utc};
@@ -380,11 +475,11 @@ pub mod postgres {
 
     #[derive(Clone, Debug)]
     pub struct PgDocuments {
-        pub(crate) pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgDocuments {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

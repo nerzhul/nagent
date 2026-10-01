@@ -23,8 +23,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-# sqlx is built with both drivers always-on; the `db-sqlite` /
-# `db-postgres` cargo features are forwarded from nagent-server
-# so an operator can build a slim binary that only ships the
-# driver their deployment uses (plan 4.G R6).
+# Both drivers are always linked; the `db-sqlite` / `db-postgres`
+# cargo features are forwarded from `nagent-server` as
+# documentation markers (see the `features` table above).
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"] }

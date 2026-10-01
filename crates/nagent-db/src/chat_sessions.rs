@@ -1,4 +1,13 @@
-//! Chat sessions repository — plan 5.D extraction.
+//! Chat sessions repository — plan 4.A scoped per-user view.
+//!
+//! Binds `(user_id, session_id)` rows so the documents + agent
+//! paths can refuse a mismatched `X-Chat-Session-Id` header with
+//! the same shape whether the row is missing OR bound to a
+//! different user (security plan SEV 2).
+//!
+//! Callers that have already resolved a `user_id` should prefer
+//! [`ChatSessions::for_user`] so the `WHERE user_id = ?` filter
+//! cannot be accidentally dropped (plan 4.A S4).
 
 use uuid::Uuid;
 
@@ -36,6 +45,14 @@ impl ChatSessions {
         }
     }
 
+    /// Scope every per-row method to a single `user_id`.
+    pub fn for_user(&self, user_id: Uuid) -> ScopedChatSessions {
+        ScopedChatSessions {
+            inner: self.clone(),
+            user_id,
+        }
+    }
+
     pub async fn bind(&self, session_id: Uuid, user_id: Uuid) -> Result<(), ChatSessionError> {
         match self {
             ChatSessions::Sqlite(s) => s.bind(session_id, user_id).await,
@@ -55,7 +72,31 @@ impl ChatSessions {
     }
 }
 
-pub mod sqlite {
+/// Per-user scoped view over [`ChatSessions`].
+#[derive(Debug, Clone)]
+pub struct ScopedChatSessions {
+    inner: ChatSessions,
+    user_id: Uuid,
+}
+
+impl ScopedChatSessions {
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    /// Bind `session_id` to the scoped `user_id`.
+    pub async fn bind(&self, session_id: Uuid) -> Result<(), ChatSessionError> {
+        self.inner.bind(session_id, self.user_id).await
+    }
+
+    /// Verify `session_id` is bound to the scoped `user_id` AND
+    /// refresh its `last_seen_at`.
+    pub async fn touch_and_verify(&self, session_id: Uuid) -> Result<(), ChatSessionError> {
+        self.inner.touch_and_verify(session_id, self.user_id).await
+    }
+}
+
+pub(crate) mod sqlite {
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
@@ -63,11 +104,11 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct SqliteChatSessions {
-        pub(crate) pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqliteChatSessions {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -105,7 +146,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -113,11 +154,11 @@ pub mod postgres {
 
     #[derive(Clone, Debug)]
     pub struct PgChatSessions {
-        pub(crate) pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgChatSessions {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

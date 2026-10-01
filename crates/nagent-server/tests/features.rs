@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use stt_server::auth::store::AuthStore;
-use stt_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmConfig};
-use stt_server::http::build_router;
-use stt_server::testing::app_state;
-use stt_server::AppState;
+use nagent_server::auth::store::AuthStore;
+use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmConfig};
+use nagent_server::http::build_router;
+use nagent_server::testing::app_state;
+use nagent_server::AppState;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -69,7 +69,7 @@ async fn build_state_with_features(
     builder = builder.with_auth(auth_store.clone());
 
     let documents = if documents_enabled {
-        Some(stt_server::documents::DocumentStore::new(
+        Some(nagent_server::documents::DocumentStore::new(
             auth_store.clone(),
             100_000,
             std::path::PathBuf::from("/tmp/features-test-cache"),
@@ -80,8 +80,8 @@ async fn build_state_with_features(
     if let Some(store) = documents {
         builder = builder.with_documents(store);
     }
-    builder = builder.with_chat_sessions(stt_server::chat::sessions::ChatSessions::new(
-        auth_store.clone(),
+    builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
+        auth_store.db().chat_sessions.clone(),
     ));
     if llm_enabled {
         // Deliberately unreachable so the upstream fetch falls back
@@ -93,9 +93,8 @@ async fn build_state_with_features(
             ..LlmConfig::default()
         };
         Arc::make_mut(&mut builder.config).llm = llm_cfg.clone();
-        builder = builder.with_llm(
-            stt_server::llm::LlmClient::new(Arc::new(llm_cfg)).expect("LLM stub"),
-        );
+        builder = builder
+            .with_llm(nagent_server::llm::LlmClient::new(Arc::new(llm_cfg)).expect("LLM stub"));
     }
     let state = builder.build();
     (state, auth_store)
@@ -326,14 +325,14 @@ async fn features_llm_models_reflects_upstream_list() {
         default_model: "llama3.1".into(),
         api_key: None,
         inbound_auth_key: None,
-        auth_mode: stt_server::config::LlmAuthMode::Forward,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
         request_timeout: Duration::from_secs(120),
         cors_allow_origins: vec![],
         system_prompt: None,
         allow_user_location: true,
         allow_user_timezone: true,
     };
-    let llm_client = stt_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
+    let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");
 
     let mut builder = app_state();
@@ -341,8 +340,8 @@ async fn features_llm_models_reflects_upstream_list() {
     Arc::make_mut(&mut builder.config).llm = llm_cfg;
     builder = builder.with_auth(auth_store.clone());
     builder = builder.with_llm(llm_client);
-    builder = builder.with_chat_sessions(stt_server::chat::sessions::ChatSessions::new(
-        auth_store.clone(),
+    builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
+        auth_store.db().chat_sessions.clone(),
     ));
     let state = builder.build();
 
@@ -419,14 +418,14 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
         default_model: "fallback-model".into(),
         api_key: None,
         inbound_auth_key: None,
-        auth_mode: stt_server::config::LlmAuthMode::Forward,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
         request_timeout: Duration::from_secs(120),
         cors_allow_origins: vec![],
         system_prompt: None,
         allow_user_location: true,
         allow_user_timezone: true,
     };
-    let llm_client = stt_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
+    let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");
 
     let mut builder = app_state();
@@ -434,8 +433,8 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
     Arc::make_mut(&mut builder.config).llm = llm_cfg;
     builder = builder.with_auth(auth_store.clone());
     builder = builder.with_llm(llm_client);
-    builder = builder.with_chat_sessions(stt_server::chat::sessions::ChatSessions::new(
-        auth_store.clone(),
+    builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
+        auth_store.db().chat_sessions.clone(),
     ));
     let state = builder.build();
 

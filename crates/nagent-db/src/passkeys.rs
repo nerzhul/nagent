@@ -45,7 +45,7 @@ impl Passkeys {
     }
 }
 
-pub mod sqlite {
+pub(crate) mod sqlite {
     use chrono::Utc;
     use sqlx::{Row, SqlitePool};
     use uuid::Uuid;
@@ -55,11 +55,11 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct SqlitePasskeys {
-        pub(crate) pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqlitePasskeys {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -126,7 +126,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     use chrono::Utc;
     use sqlx::{PgPool, Row};
     use uuid::Uuid;
@@ -136,11 +136,11 @@ pub mod postgres {
 
     #[derive(Clone, Debug)]
     pub struct PgPasskeys {
-        pub(crate) pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgPasskeys {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

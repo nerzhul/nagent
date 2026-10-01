@@ -34,10 +34,10 @@ use uuid::Uuid;
 use crate::auth::session::AuthUser;
 use crate::config::DocumentsConfig;
 
-use super::db::DocumentError;
 use super::extract::ExtractionError;
 use super::storage::DiskLayout;
 use super::DocumentStore;
+use crate::auth::error::AuthError as DocumentError;
 
 /// Build a tiny router that mounts only `POST /v1/chat/session`
 /// (the SEV 2 server-bound chat session id mint endpoint). This

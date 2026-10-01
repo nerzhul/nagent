@@ -46,7 +46,7 @@ impl Preferences {
     }
 }
 
-pub mod sqlite {
+pub(crate) mod sqlite {
     use chrono::{DateTime, Utc};
     use sqlx::{Row, SqlitePool};
     use uuid::Uuid;
@@ -56,11 +56,11 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct SqlitePreferences {
-        pub(crate) pool: SqlitePool,
+        pub pool: SqlitePool,
     }
 
     impl SqlitePreferences {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub(crate) fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
@@ -123,7 +123,7 @@ pub mod sqlite {
     }
 }
 
-pub mod postgres {
+pub(crate) mod postgres {
     use chrono::{DateTime, Utc};
     use sqlx::{PgPool, Row};
     use uuid::Uuid;
@@ -133,11 +133,11 @@ pub mod postgres {
 
     #[derive(Clone, Debug)]
     pub struct PgPreferences {
-        pub(crate) pool: PgPool,
+        pub pool: PgPool,
     }
 
     impl PgPreferences {
-        pub fn new(pool: PgPool) -> Self {
+        pub(crate) fn new(pool: PgPool) -> Self {
             Self { pool }
         }
 

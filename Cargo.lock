@@ -2185,6 +2185,7 @@ dependencies = [
  "mime_guess",
  "nagent-agents",
  "nagent-db",
+ "nagent-server",
  "nagent-support",
  "openidconnect",
  "pdf-extract",

@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::documents::db::DocumentError;
+use crate::auth::error::AuthError;
 use crate::documents::DocumentStore;
 
 /// Sweep documents whose `created_at + ttl` is older than `ttl`
@@ -30,7 +30,7 @@ pub async fn purge_older_than(
     store: &DocumentStore,
     cache_dir: &Path,
     ttl: Duration,
-) -> Result<usize, DocumentError> {
+) -> Result<usize, AuthError> {
     let rows = store.sweep_older_than(ttl).await?;
     let total = rows.len();
     for row in rows {
