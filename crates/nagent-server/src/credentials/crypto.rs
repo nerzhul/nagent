@@ -8,11 +8,11 @@
 //!
 //! Failure modes:
 //! - Wrong key → `CredentialError::DecryptFailed` (the `aes-gcm`
-//!   crate does not distinguish wrong-key from tampered-ciphertext —
-//!   both raise `aead::Error`).
+//! crate does not distinguish wrong-key from tampered-ciphertext —
+//! both raise `aead::Error`).
 //! - Tampered ciphertext → same `DecryptFailed` variant. The
-//!   audit row's `kind` is set to `"credential_decrypt_failed"` so
-//!   ops can spot the difference in aggregate.
+//! audit row's `kind` is set to `"credential_decrypt_failed"` so
+//! ops can spot the difference in aggregate.
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};

@@ -4,7 +4,7 @@
 //! 1. `bind` then `touch_and_verify` succeeds.
 //! 2. `touch_and_verify` rejects a session id that was never bound.
 //! 3. `touch_and_verify` rejects a session id bound to a different
-//!    user (the cross-user attack the audit flagged).
+//! user (the cross-user attack the audit flagged).
 //! 4. Re-binding the same (session_id, user_id) is idempotent.
 //!
 //! Mirrors the in-memory sqlite harness used by `tests/documents.rs`

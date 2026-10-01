@@ -3,7 +3,7 @@
 //! Supports two MIME families:
 //! - `text/plain` (`.txt`) — read as UTF-8 with lossy fallback.
 //! - `application/pdf` (`.pdf`) — extracted via the `pdf-extract`
-//!   crate, gated behind the `documents` cargo feature.
+//! crate, gated behind the `documents` cargo feature.
 //!
 //! Everything else is rejected at the route layer with
 //! `415 Unsupported Media Type`. The extractor never throws a

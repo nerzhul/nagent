@@ -5,10 +5,10 @@
 //! 1. Two concurrent WebSocket clients (`alice`, `bob`) connect.
 //! 2. Each sends two `AudioFrame` messages through the wire.
 //! 3. Each receives exactly the transcripts that include **its own**
-//!    session ID echoed by the mock backend.
+//! session ID echoed by the mock backend.
 //! 4. No transcript leaks across sessions.
 //! 5. When one client disconnects, the server drops subsequent results
-//!    for it silently, and the other client is not perturbed.
+//! for it silently, and the other client is not perturbed.
 //!
 //! The mock backend echoes `format!("session=<id>")`, so the test can
 //! assert the wire-level identity of every transcript without trusting

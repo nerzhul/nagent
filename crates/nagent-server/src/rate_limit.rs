@@ -140,13 +140,13 @@ impl RateLimiter {
     /// Try to consume one token for `ip`.
     ///
     /// - Loopback addresses bypass the bucket by default; the bypass
-    ///   is gated by `trusted.loopback_bypass` (security plan #5 —
-    ///   an operator exposing the server on a non-loopback bind can
-    ///   set the flag to `false` to remove the carve-out).
+    /// is gated by `trusted.loopback_bypass` (security plan #5 —
+    /// an operator exposing the server on a non-loopback bind can
+    /// set the flag to `false` to remove the carve-out).
     /// - On success returns `Ok(())`.
     /// - On rejection returns [`RateLimitError::Limited`] with a
-    ///   `retry_after_ms` hint based on the time required to refill a
-    ///   single token at the configured rate.
+    /// `retry_after_ms` hint based on the time required to refill a
+    /// single token at the configured rate.
     pub fn check(&self, ip: IpAddr) -> Result<(), RateLimitError> {
         // Loopback bypass is controlled by config; the historical
         // default (`true`) preserves the dev workflow. The resolver

@@ -1,4 +1,4 @@
-//! Passkeys repository — plan 5.D extraction.
+//! Passkeys repository.
 
 use uuid::Uuid;
 

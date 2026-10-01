@@ -7,15 +7,15 @@
 //!
 //! ```json
 //! {
-//!   "name": "read_document",
-//!   "parameters": {
-//!     "type": "object",
-//!     "properties": {
-//!       "name":       { "type": "string" },
-//!       "page_range": { "type": "string" }
-//!     },
-//!     "required": ["name"]
-//!   }
+//! "name": "read_document",
+//! "parameters": {
+//! "type": "object",
+//! "properties": {
+//! "name":       { "type": "string" },
+//! "page_range": { "type": "string" }
+//! },
+//! "required": ["name"]
+//! }
 //! }
 //! ```
 //!
@@ -115,8 +115,8 @@ impl Agent for ReadDocumentAgent {
         // 1. Parse + validate arguments.
         let req = parse_args(&args)?;
         // 2. Resolve the chat session id. Direct invocation (curl)
-        //    carries no session; refuse loudly so the LLM can
-        //    recover rather than getting an empty tool result.
+        // carries no session; refuse loudly so the LLM can
+        // recover rather than getting an empty tool result.
         let session_id = ctx.chat_session_id().ok_or_else(|| {
             AgentError::InvalidArguments(
                 "read_document requires an active chat session id (X-Chat-Session-Id header)"
@@ -143,8 +143,8 @@ impl Agent for ReadDocumentAgent {
                 })?;
         }
         // 3. Fetch the document row, scoped to the user AND the
-        //    session. SEV 2 fix: a user cannot reach another
-        //    user's docs even if they guess the UUID.
+        // session. SEV 2 fix: a user cannot reach another
+        // user's docs even if they guess the UUID.
         let row = self
             .store
             .db()
@@ -159,10 +159,10 @@ impl Agent for ReadDocumentAgent {
             ))
         })?;
         // 4. Read the file from disk. The DB row's `disk_path` is
-        //    operator-supplied / attacker-controlled if auth is
-        //    bypassed; `safe_disk_read` re-canonicalises the path
-        //    and refuses anything outside the cache dir. See
-        //    `storage::safe_disk_read` for the SEV 1 fix.
+        // operator-supplied / attacker-controlled if auth is
+        // bypassed; `safe_disk_read` re-canonicalises the path
+        // and refuses anything outside the cache dir. See
+        // `storage::safe_disk_read` for the SEV 1 fix.
         let cache_dir = self.store.cache_dir();
         let bytes = match super::storage::safe_disk_read(&row.disk_path, cache_dir) {
             Ok(b) => b,
@@ -203,8 +203,8 @@ impl Agent for ReadDocumentAgent {
             }
         };
         // 5. Truncate to the configured cap and emit the result.
-        //    The full file is preserved on disk so a follow-up
-        //    request can target a specific page range.
+        // The full file is preserved on disk so a follow-up
+        // request can target a specific page range.
         let max_chars = self.store.max_extracted_chars();
         let truncated = text.chars().count() > max_chars;
         let (kept, marker) = if truncated {

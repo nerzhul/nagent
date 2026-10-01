@@ -6,49 +6,49 @@
 //!
 //! - [`config`], [`config_file`] — env-var + TOML parsing, layering.
 //! - [`agents`] — server-side chat agents (e.g. `web_fetch`,
-//!   `read_document`) callable from the LLM proxy through OpenAI-style
-//!   tool/function calling. Direct agent HTTP routes live in
-//!   [`crate::agents::routes`].
+//! `read_document`) callable from the LLM proxy through OpenAI-style
+//! tool/function calling. Direct agent HTTP routes live in
+//! [`crate::agents::routes`].
 //! - [`auth`] — multi-user authentication (password / OIDC / passkey)
-//!   plus the cookie + bearer session machinery. Login-attempt
-//!   rate-limit lives at [`crate::auth::login_rate_limit`].
+//! plus the cookie + bearer session machinery. Login-attempt
+//! rate-limit lives at [`crate::auth::login_rate_limit`].
 //! - [`chat`] — server-bound chat-session bookkeeping
-//!   (`(user, session)` SEV 2 binding used by `read_document`).
+//! (`(user, session)` SEV 2 binding used by `read_document`).
 //! - [`cli`] — operator subcommands (`stt-server {auth,migrate,documents}`).
 //! - [`credentials`] — per-user credentials vault (AES-256-GCM at rest,
-//!   decrypted on demand through a per-request `UserContext`).
+//! decrypted on demand through a per-request `UserContext`).
 //! - [`documents`] — Discussion-mode document uploads + the
-//!   `read_document` LLM tool.
+//! `read_document` LLM tool.
 //! - [`http`] — HTTP transport plumbing: security headers, the static
-//!   frontend embedding, the `/api/features` discovery endpoint, the
-//!   LLM-proxy shared envelope middleware, and the `build_router`
-//!   composition root that wires every `/v1/*` and `/api/*` route into
-//!   a single axum `Router`.
+//! frontend embedding, the `/api/features` discovery endpoint, the
+//! LLM-proxy shared envelope middleware, and the `build_router`
+//! composition root that wires every `/v1/*` and `/api/*` route into
+//! a single axum `Router`.
 //! - [`llm`] — optional OpenAI-compatible proxy to a local LLM
-//!   (Ollama). Split into
-//!   [`llm::client`](crate::llm::client) /
-//!   [`llm::proxy`](crate::llm::proxy) /
-//!   [`llm::tool_loop`](crate::llm::tool_loop) /
-//!   [`llm::sse`](crate::llm::sse) /
-//!   [`llm::privacy`](crate::llm::privacy) /
-//!   [`llm::prompt`](crate::llm::prompt) submodules.
+//! (Ollama). Split into
+//! [`llm::client`](crate::llm::client) /
+//! [`llm::proxy`](crate::llm::proxy) /
+//! [`llm::tool_loop`](crate::llm::tool_loop) /
+//! [`llm::sse`](crate::llm::sse) /
+//! [`llm::privacy`](crate::llm::privacy) /
+//! [`llm::prompt`](crate::llm::prompt) submodules.
 //! - [`rate_limit`] — per-source-IP token bucket for STT and LLM
-//!   traffic (the login-attempt limiter lives at
-//!   [`crate::auth::login_rate_limit`]). The shared sweep-clock /
-//!   TTL-map / bounded-blocking primitives now live in the
-//!   `nagent-support` crate.
+//! traffic (the login-attempt limiter lives at
+//! [`crate::auth::login_rate_limit`]). The shared sweep-clock /
+//! TTL-map / bounded-blocking primitives now live in the
+//! `nagent-support` crate.
 //! - [`state`] — the per-subsystem sub-state groups (`SttState`,
-//!   `LlmState`, `AuthState`, `DocumentsState`, `ChatSessionsState`,
-//!   `TtsState`) and the top-level [`state::AppState`] that composes
-//!   them. Built once per process by [`crate::app::build_app`].
+//! `LlmState`, `AuthState`, `DocumentsState`, `ChatSessionsState`,
+//! `TtsState`) and the top-level [`state::AppState`] that composes
+//! them. Built once per process by [`crate::app::build_app`].
 //! - [`stt`] — WebSocket STT pipeline (per-connection upgrade,
-//!   session map, the `ResultRouter`, the watchdog that drops idle
-//!   sessions).
+//! session map, the `ResultRouter`, the watchdog that drops idle
+//! sessions).
 //! - [`testing`] — integration-test builder for `AppState`,
-//!   feature-gated behind `test-util` so production binaries do
-//!   not pay the cost.
+//! feature-gated behind `test-util` so production binaries do
+//! not pay the cost.
 //! - [`tts`] — local Piper text-to-speech engine (split into
-//!   [`tts::engine`](crate::tts::engine) + [`tts::routes`](crate::tts::routes)).
+//! [`tts::engine`](crate::tts::engine) + [`tts::routes`](crate::tts::routes)).
 //!
 //! ## Application boot
 //!

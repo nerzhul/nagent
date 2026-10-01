@@ -6,7 +6,7 @@
 //!
 //! 1. Confirm the `state` matches a recent `/start` request,
 //! 2. Bind the response to the original user session / chat session /
-//    redirect-after-login, and
+// redirect-after-login, and
 //! 3. Drop the entry as soon as the round-trip completes.
 //!
 //! RFC 6749 §10.5 recommends an expiry; we use 10 minutes — well
@@ -14,7 +14,7 @@
 //! most providers enforce.
 //!
 //! The implementation is a DashMap keyed by the random `state`
-//! string. PR2 (and the X agent) will own the per-call payload
+//! string. (and the X agent) will own the per-call payload
 //! schema; the store itself is payload-agnostic.
 
 use std::time::Duration;

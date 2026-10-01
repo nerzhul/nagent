@@ -3,11 +3,11 @@
 //! ## What this test asserts
 //!
 //! 1. `POST /v1/chat/completions` forwards SSE chunks verbatim, in
-//!    order, with the correct content type.
+//! order, with the correct content type.
 //! 2. `Authorization: Bearer <key>` is forwarded when
-//!    `OLLAMA_API_KEY` is set.
+//! `OLLAMA_API_KEY` is set.
 //! 3. `Authorization` is **not** forwarded when `OLLAMA_API_KEY` is
-//!    unset (the server never injects one).
+//! unset (the server never injects one).
 //! 4. Non-2xx upstream surfaces the original status to the client.
 //! 5. `LLM_ENABLED=false` returns 404 on both `/v1/*` routes.
 
@@ -310,9 +310,9 @@ async fn upstream_non_2xx_is_surfaced_verbatim() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_not_found_response_includes_available_models() {
     // Mock upstream that:
-    //  - 404s /v1/chat/completions with the Ollama-style
-    //    model-not-found envelope
-    //  - 200s /v1/models with a list of available model ids
+    // - 404s /v1/chat/completions with the Ollama-style
+    // model-not-found envelope
+    // - 200s /v1/models with a list of available model ids
     // The proxy should reshape the 404 into the friendly form with
     // `error.type == "model_not_found"`, `error.param == <name>` and
     // `error.available == [...]`.

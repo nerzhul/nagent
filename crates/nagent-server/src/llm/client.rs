@@ -172,24 +172,24 @@ impl IntoResponse for LlmError {
 /// We support two shapes:
 ///
 /// 1. Ollama (and most OpenAI-compatible forges that mirror the
-///    Ollama error envelope):
-///    ```json
-///    {"error":{"message":"model 'llama3.1' not found","type":"not_found_error",...}}
-///    ```
-///    Matched by `type == "not_found_error"` AND a `model '…' not
-///    found` substring inside the message — either alone is not
-///    strict enough (the message substring could appear in a tool
-///    prompt; `not_found_error` alone covers other 404s the upstream
-///    emits, e.g. "model not loaded yet").
+/// Ollama error envelope):
+/// ```json
+/// {"error":{"message":"model 'llama3.1' not found","type":"not_found_error",...}}
+/// ```
+/// Matched by `type == "not_found_error"` AND a `model '…' not
+/// found` substring inside the message — either alone is not
+/// strict enough (the message substring could appear in a tool
+/// prompt; `not_found_error` alone covers other 404s the upstream
+/// emits, e.g. "model not loaded yet").
 ///
 /// 2. OpenAI:
-///    ```json
-///    {"error":{"message":"The model `foo` does not exist.","type":"invalid_request_error","code":"model_not_found"}}
-///    ```
-///    Matched by `code == "model_not_found"`. Some OpenAI-compatible
-///    forges flip the location of the code (`param` instead of
-///    `code`) so we also accept `param == "model"` with a
-///    "does not exist" / "not found" substring.
+/// ```json
+/// {"error":{"message":"The model `foo` does not exist.","type":"invalid_request_error","code":"model_not_found"}}
+/// ```
+/// Matched by `code == "model_not_found"`. Some OpenAI-compatible
+/// forges flip the location of the code (`param` instead of
+/// `code`) so we also accept `param == "model"` with a
+/// "does not exist" / "not found" substring.
 ///
 /// The function is pure (no I/O) so it can be unit-tested against
 /// canned bodies.

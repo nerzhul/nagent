@@ -1,22 +1,22 @@
-//! Passkey (WebAuthn) backend (PR1).
+//! Passkey (WebAuthn) backend .
 //!
 //! Implements the two passkey ceremonies:
 //!
 //! - **Login** (`POST /api/auth/login/passkey/start` + `/finish`):
-//!   the start handler returns a challenge JSON the browser turns
-//!   into an assertion, the finish handler verifies it, looks up
-//!   the matching `passkeys.credential_id`, increments the counter,
-//!   and writes a session row.
+//! the start handler returns a challenge JSON the browser turns
+//! into an assertion, the finish handler verifies it, looks up
+//! the matching `passkeys.credential_id`, increments the counter,
+//! and writes a session row.
 //! - **Registration** (`POST /api/auth/login/passkey/register/start`
-//!   + `/finish`): logged-in only (gated by `RequireAuth`); the
-//!     start handler returns a challenge JSON, the finish handler
-//!     validates the attestation and stores the new public key.
+//! + `/finish`): logged-in only (gated by `RequireAuth`); the
+//! start handler returns a challenge JSON, the finish handler
+//! validates the attestation and stores the new public key.
 //!
 //! Ceremony state between the two halves is held entirely
 //! server-side: the start response carries an opaque `state_token`
 //! the browser echoes back to the finish handler, which looks the
-//! state up in an in-process `DashMap` (PR1 keeps the passkey
-//! ceremony state out of the DB to avoid an extra table). PR2 may
+//! state up in an in-process `DashMap` (keeps the passkey ceremony
+//! state out of the DB to avoid an extra table). A follow-up may
 //! move the state to the DB to survive process restarts.
 //!
 //! Per plan D11 the registration ceremony is open to any

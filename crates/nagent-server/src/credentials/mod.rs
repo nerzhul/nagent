@@ -8,12 +8,12 @@
 //!
 //! Module layout:
 //! - [`key`]: `CredentialsKey` — zeroized `Secret<[u8; 32]>` parsed from
-//!   a hex env var.
+//! a hex env var.
 //! - [`crypto`]: `seal`/`open` thin wrappers around `aes-gcm`.
 //! - [`cache`]: `SecretCache` — per-request plaintext cache that
-//!   zeroises on drop.
+//! zeroises on drop.
 //! - [`resolver`]: `CredentialResolver` — async reader that decrypts
-//!   on demand and writes one audit row per call.
+//! on demand and writes one audit row per call.
 //! - [`routes`]: HTTP handlers for the `/api/integrations*` family.
 //!
 //! The trait evolution lives in [`crate::agents`]: every agent takes

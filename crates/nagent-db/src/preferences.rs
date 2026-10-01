@@ -1,4 +1,4 @@
-//! Per-user UI preferences repository — plan 5.D extraction.
+//! Per-user UI preferences repository.
 
 use uuid::Uuid;
 

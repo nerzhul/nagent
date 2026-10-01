@@ -10,7 +10,7 @@
 //!
 //! When `auth.enabled` is false the router does not install this
 //! layer at all, so a server that has not opted in keeps the
-//! pre-PR1 single-user trust boundary.
+//! single-user trust boundary.
 
 use axum::extract::Request;
 use axum::http::{header, HeaderValue, StatusCode};
@@ -529,8 +529,8 @@ mod tests {
             .with_state(state);
 
         // 1. Cookie + bogus "Bearer junk" header, NO CSRF → must 403.
-        //    Pre-fix this returned 200 because the bogus header
-        //    tripped the "any bearer present" branch.
+        // Pre-fix this returned 200 because the bogus header
+        // tripped the "any bearer present" branch.
         let cookie = format!("{}={}", cfg.auth.cookie_name(), session_token);
         let resp = router
             .clone()
@@ -552,8 +552,8 @@ mod tests {
         );
 
         // 2. Cookie + correct Bearer header (different session), NO CSRF.
-        //    The cookie wins (still authenticated as a cookie
-        //    session), so CSRF is still enforced.
+        // The cookie wins (still authenticated as a cookie
+        // session), so CSRF is still enforced.
         let other_session = store
             .sessions
             .create(user_id, std::time::Duration::from_secs(60), None, None)
@@ -607,8 +607,8 @@ mod tests {
         );
 
         // 4. Bare Bearer (no cookie at all) + NO CSRF → 200. This
-        //    is the genuine API client path that the Bearer branch
-        //    is meant to protect.
+        // is the genuine API client path that the Bearer branch
+        // is meant to protect.
         let resp = router
             .oneshot(
                 HttpRequest::builder()

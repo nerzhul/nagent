@@ -1,18 +1,17 @@
-//! OIDC backend (PR1) — minimal stub.
+//! OIDC backend  — minimal stub.
 //!
-//! Implements `GET /api/auth/login/oidc/start` + `/callback`. PR1
-//! takes the lightweight path: the JWT is parsed and the standard
+//! Implements `GET /api/auth/login/oidc/start` + `/callback`.
+//! Takes the lightweight path: the JWT is parsed and the standard
 //! claims (`iss`, `aud`, `exp`, `nonce`) are checked, but the
 //! `RS256` / `PS256` signature is not yet verified against the IdP's
 //! JWKS. This is acceptable for HTTPS deployments where the
 //! transport handles peer authentication; deployments behind a
-//! hostile network should hold off on OIDC until PR2 adds the JWKS
-//! fetch.
+//! hostile network should hold off on OIDC until the JWKS fetch is
+//! added.
 //!
-//! PR1 leaves the wiring to the application router
-//! (`lib::build_router_async`) — the `OidcState::build_state` helper
-//! drives discovery at boot and the handlers here consume the
-//! resolved endpoint URLs.
+//! The wiring to the application router
+//! (`lib::build_router_async`) drives discovery at boot and the
+//! handlers here consume the resolved endpoint URLs.
 
 #![allow(unused_imports, dead_code)]
 
@@ -43,7 +42,7 @@ pub struct OidcConfig {
 
 impl OidcConfig {
     /// Stub: always returns Ok so the file is at least parseable.
-    /// Production wiring is deferred to a follow-up PR.
+    /// Production wiring is deferred to a follow-up.
     pub fn is_valid(&self) -> bool {
         !self.issuer.is_empty() && !self.client_id.is_empty() && !self.redirect_url.is_empty()
     }
@@ -72,12 +71,12 @@ pub struct OidcLoginResponse {
 /// `GET /api/auth/login/oidc/start`
 ///
 /// Stub that returns `501 Not Implemented` — see the module
-/// docstring. PR2 lands the discovery + PKCE flow.
+/// docstring. Discovery + PKCE flow lands in a follow-up.
 pub async fn start_handler(
     axum::extract::State(_state): axum::extract::State<crate::AuthState>,
 ) -> Result<axum::response::Response, AuthError> {
     Err(AuthError::Internal(
-        "OIDC backend is not yet wired in the HTTP router (PR2)".into(),
+        "OIDC backend is not yet wired in the HTTP router ".into(),
     ))
 }
 
@@ -87,13 +86,13 @@ pub async fn callback_handler(
     axum::extract::Query(_q): axum::extract::Query<CallbackQuery>,
 ) -> Result<axum::response::Response, AuthError> {
     Err(AuthError::Internal(
-        "OIDC backend is not yet wired in the HTTP router (PR2)".into(),
+        "OIDC backend is not yet wired in the HTTP router ".into(),
     ))
 }
 
-/// Build an `OidcState` from the runtime config. Stub for PR1 — the
-/// discovery round-trip is not implemented yet (see module-level
-/// note). Returns `Some(OidcState)` when OIDC is enabled so the
+/// Build an `OidcState` from the runtime config. The discovery
+/// round-trip is not implemented yet (see module-level note).
+/// Returns `Some(OidcState)` when OIDC is enabled so the
 /// application router can mount the routes; the handlers return 501.
 pub async fn build_state(
     store: nagent_db::Db,
@@ -123,10 +122,10 @@ pub async fn build_state(
             }),
         });
     }
-    // PR1: we DO build the OidcState but the handlers return 501
-    // until PR2 wires the discovery + PKCE flow. This lets the
-    // router register the routes (so the URL surface is stable)
-    // while the runtime still rejects every OIDC attempt.
+    // We DO build the OidcState but the handlers return 501 until
+    // the discovery + PKCE flow is wired. This lets the router
+    // register the routes (so the URL surface is stable) while
+    // the runtime still rejects every OIDC attempt.
     Ok(OidcState {
         cfg: Arc::new(OidcConfig {
             auto_provision: auth.auto_provision,

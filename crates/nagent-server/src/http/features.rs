@@ -18,14 +18,14 @@
 //!
 //! 200 OK
 //! {
-//!   "documents": true,          // [documents].enabled = true
-//!   "llm": true,                // LLM proxy is wired
-//!   "llm_models": ["qwen2.5:14b", "llama3.1"], // upstream models (or [default_model] fallback)
-//!   "tts": true,                // TTS engine wired
-//!   "agents": true,             // at least one agent registered
-//!   "agent_names": ["get_weather", "read_document", ...],
-//!   "chat_sessions": true,      // X-Chat-Session-Id binding wired
-//!   "tools": ["get_weather", "read_document", ...]
+//! "documents": true,          // [documents].enabled = true
+//! "llm": true,                // LLM proxy is wired
+//! "llm_models": ["qwen2.5:14b", "llama3.1"], // upstream models (or [default_model] fallback)
+//! "tts": true,                // TTS engine wired
+//! "agents": true,             // at least one agent registered
+//! "agent_names": ["get_weather", "read_document", ...],
+//! "chat_sessions": true,      // X-Chat-Session-Id binding wired
+//! "tools": ["get_weather", "read_document", ...]
 //! }
 //! ```
 //!

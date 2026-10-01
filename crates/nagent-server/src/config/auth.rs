@@ -1,10 +1,10 @@
-//! `auth` — `[auth]` section + per-backend sub-configs (PR1).
+//! `auth` — `[auth]` section + per-backend sub-configs .
 //!
 //! Always present in [`crate::config::Config`] so the rest of the
 //! code does not need feature gates. When the runtime config sets
 //! `auth.enabled = false` (the default), `enabled` is `false` and
 //! every other field is the "no auth" default — the server then
-//! behaves exactly as it did before PR1. When the feature is on, the
+//! behaves exactly as it did before . When the feature is on, the
 //! operator enables the subsystem via `NAGENT_AUTH_ENABLED=true` (or
 //! `auth.enabled = true` in the TOML overlay) and picks the per-backend
 //! knobs.
@@ -12,12 +12,11 @@
 use crate::config::file::TomlAuthConfig;
 use crate::config::{env_opt, resolve_csv, resolve_opt_string, resolve_primitive, ConfigError};
 
-/// Authentication & user-identity subsystem (PR1).
+/// Authentication & user-identity subsystem .
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     /// Master switch. When `false`, no auth routes are registered
-    /// and `RequireAuth` stays off — the server keeps the pre-PR1
-    /// single-user trust boundary. Mirrors `NAGENT_AUTH_ENABLED` /
+    /// and `RequireAuth` stays off — the server keeps the pre-/// single-user trust boundary. Mirrors `NAGENT_AUTH_ENABLED` /
     /// `[auth].enabled`.
     pub enabled: bool,
     /// Subset of `"local"`, `"oidc"`, `"passkey"` enabled on this
@@ -190,8 +189,7 @@ pub struct AuthOidcConfig {
     pub scopes: Vec<String>,
     /// Optional allow-list of IdP groups. Empty = no restriction.
     pub required_groups: Vec<String>,
-    /// IdP claim name mapped onto the local `roles` list (forward-
-    /// compat with PR2). Defaults to `groups`.
+    /// IdP claim name mapped onto the local `roles` list. Defaults to `groups`.
     pub role_claim: String,
 }
 

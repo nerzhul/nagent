@@ -57,7 +57,7 @@ impl CredentialsKey {
     ///
     /// - Empty / whitespace-only → [`CredentialsKeyError::Missing`].
     /// - Length not 64 hex chars or non-hex content →
-    ///   [`CredentialsKeyError::InvalidHex`].
+    /// [`CredentialsKeyError::InvalidHex`].
     pub fn from_hex(hex_str: &str) -> Result<Self, CredentialsKeyError> {
         let trimmed = hex_str.trim();
         if trimmed.is_empty() {
@@ -86,7 +86,7 @@ impl CredentialsKey {
     ///
     /// - `None` / empty value → [`CredentialsKeyError::Missing`].
     /// - Length not 64 hex chars or non-hex content →
-    ///   [`CredentialsKeyError::InvalidHex`].
+    /// [`CredentialsKeyError::InvalidHex`].
     pub fn from_env(name: &str) -> Result<Self, CredentialsKeyError> {
         let raw = std::env::var(name)
             .ok()

@@ -3,19 +3,19 @@
 //! Two `tower_http` layers are exposed:
 //!
 //! - [`security_headers_layer`]: applied to every response, including
-//!   the static frontend, the `/healthz` probe, the `/api/version`
-//!   endpoint, and the WebSocket upgrade handshake. It sets a strict
-//!   Content-Security-Policy, a `Referrer-Policy: no-referrer`, and an
-//!   `X-Content-Type-Options: nosniff` marker so the browser applies
-//!   the MIME types we sent (in particular `font/woff2` for KaTeX
-//!   fonts — see [`crate::http::static_assets::mime_for`]).
+//! the static frontend, the `/healthz` probe, the `/api/version`
+//! endpoint, and the WebSocket upgrade handshake. It sets a strict
+//! Content-Security-Policy, a `Referrer-Policy: no-referrer`, and an
+//! `X-Content-Type-Options: nosniff` marker so the browser applies
+//! the MIME types we sent (in particular `font/woff2` for KaTeX
+//! fonts — see [`crate::http::static_assets::mime_for`]).
 //!
 //! - [`cors_layer`]: applied **only** to the `/v1/*` routes. The
-//!   default `LLM_CORS_ALLOW_ORIGINS=""` produces an "allow no
-//!   origins" layer, i.e. every cross-origin preflight gets a 403
-//!   and the browser never even attempts the call. Operators who
-//!   point a third-party OpenAI-compatible client at the server set
-//!   the env var to a comma-separated allow-list.
+//! default `LLM_CORS_ALLOW_ORIGINS=""` produces an "allow no
+//! origins" layer, i.e. every cross-origin preflight gets a 403
+//! and the browser never even attempts the call. Operators who
+//! point a third-party OpenAI-compatible client at the server set
+//! the env var to a comma-separated allow-list.
 //!
 //! The CSP is deliberately strict on `script-src` and `connect-src`
 //! (both `'self'` only) so a compromised dependency cannot pull a

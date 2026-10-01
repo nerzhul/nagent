@@ -66,8 +66,8 @@ pub struct Config {
     /// (mirrors how `[llm]` is treated), so disabling TTS does not
     /// shrink the binary — it just hides the routes.
     pub tts: TtsConfig,
-    /// Optional authentication & user-identity subsystem (PR1). When
-    /// `auth.enabled` is `false` the server keeps the pre-PR1 single
+    /// Optional authentication & user-identity subsystem . When
+    /// `auth.enabled` is `false` the server keeps the single
     /// user trust boundary: no login routes, no `/api/me`, no
     /// `RequireAuth` layer. Compiled only when the `auth` cargo
     /// feature is enabled — when the feature is off, this is an
@@ -246,12 +246,12 @@ impl Config {
     /// File discovery depends on whether `--config` was supplied:
     ///
     /// - `--config <PATH>` — load only that file (operator-chosen,
-    ///   bypasses the layered discovery). Useful for tests, container
-    ///   setups, and debugging.
+    /// bypasses the layered discovery). Useful for tests, container
+    /// setups, and debugging.
     /// - no `--config` — layer the system file (`/etc/nagent/config.toml`)
-    ///   under the XDG user file (`$XDG_CONFIG_HOME/nagent/config.toml`
-    ///   or `~/.config/nagent/config.toml`). Missing files are silently
-    ///   skipped; only parse / read errors are reported.
+    /// under the XDG user file (`$XDG_CONFIG_HOME/nagent/config.toml`
+    /// or `~/.config/nagent/config.toml`). Missing files are silently
+    /// skipped; only parse / read errors are reported.
     ///
     /// In both cases, environment variables (including `.env` values)
     /// still win over whatever the file(s) provided.

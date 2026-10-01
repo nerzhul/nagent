@@ -1,10 +1,10 @@
-//! PKCE (RFC 7636) verifier + S256 challenge generator.
+//! PKCE (RFC 7636) verifier S256 challenge generator.
 //!
 //! Used by the OIDC backend and (in the future) the X-timeline
 //! agent to bind an authorization request to the same client that
-//! redeems the code, so a stolen `code` alone is useless. PR1 only
+//! redeems the code, so a stolen `code` alone is useless. only
 //! needs the primitives — the wire calls in
-//! [`crate::auth::oidc`] land in PR2.
+//! [`crate::auth::oidc`] land in .
 
 use base64::Engine;
 use rand::RngCore;
@@ -48,7 +48,7 @@ impl PkceVerifier {
 }
 
 impl PkcePair {
-    /// Generate a fresh verifier + S256 challenge. Each call
+    /// Generate a fresh verifier S256 challenge. Each call
     /// returns a unique pair backed by OS-RNG bytes
     /// (`rand::rngs::OsRng`).
     pub fn generate() -> Self {
@@ -142,8 +142,8 @@ mod tests {
     fn deterministic_fixtures() {
         // Hard-coded vectors from RFC 7636 §4.6 with S256:
         //
-        //   verifier   = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        //   challenge  = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        // verifier   = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        // challenge  = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         //
         // We reproduce the example so a regression to the encoding
         // surfaces as a unit-test failure rather than as a

@@ -15,21 +15,21 @@
 //! Three layers, tried in order:
 //!
 //! 1. **Company-name shortcut** — a small static table maps common
-//!    European company names to their Stooq tickers. When the user
-//!    types "Atos" we translate to `ATO.PA` directly and skip every
-//!    other round-trip. Covers the "human types the company name, not
-//!    the ticker" case for the few dozen French/European issuers a
-//!    casual chat user is most likely to ask about.
+//! European company names to their Stooq tickers. When the user
+//! types "Atos" we translate to `ATO.PA` directly and skip every
+//! other round-trip. Covers the "human types the company name, not
+//! the ticker" case for the few dozen French/European issuers a
+//! casual chat user is most likely to ask about.
 //! 2. **Ticker normalisation** — uppercase the input and ensure it
-//!    has an exchange suffix. `AAPL` → `AAPL.US`, `ATO.PA` passes
-//!    through. The auto-`.US` reflects Stooq's behaviour of
-//!    returning empty bodies for bare tickers.
+//! has an exchange suffix. `AAPL` → `AAPL.US`, `ATO.PA` passes
+//! through. The auto-`.US` reflects Stooq's behaviour of
+//! returning empty bodies for bare tickers.
 //! 3. **Multi-exchange fallback** — when the user did not pin an
-//!    explicit `.XX` suffix and the primary lookup returns no data,
-//!    try the same root ticker on common European exchanges
-//!    (`.PA`, `.L`, `.DE`, `.MI`) in turn. The first success wins.
-//!    Explicit suffixes are respected (no second-guessing) so a
-//!    user-supplied `XYZ.PA` is never retried on another exchange.
+//! explicit `.XX` suffix and the primary lookup returns no data,
+//! try the same root ticker on common European exchanges
+//! (`.PA`, `.L`, `.DE`, `.MI`) in turn. The first success wins.
+//! Explicit suffixes are respected (no second-guessing) so a
+//! user-supplied `XYZ.PA` is never retried on another exchange.
 //!
 //! ## "No data" handling
 //!

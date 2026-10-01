@@ -1,9 +1,9 @@
-//! Documents repository — plan 4.A scoped per-user view.
+//! Documents repository
 //!
 //! Owns the SQL for the `uploaded_documents` table. Callers that
 //! have already resolved a `user_id` should prefer
 //! [`Documents::for_user`] so the `WHERE user_id = ?` filter
-//! cannot be accidentally dropped (plan 4.A S4). Admin / CLI paths
+//! cannot be accidentally dropped . Admin / CLI paths
 //! (background sweep, `nagent documents purge`) keep using the
 //! unscoped repository directly.
 
@@ -56,7 +56,7 @@ impl Documents {
     /// returned [`ScopedDocuments`] does not take a `user_id`
     /// argument on its per-row methods, so a route handler that
     /// holds a `ScopedDocuments` cannot accidentally drop the
-    /// `WHERE user_id = ?` filter (plan 4.A S4).
+    /// `WHERE user_id = ?` filter .
     pub fn for_user(&self, user_id: Uuid) -> ScopedDocuments {
         ScopedDocuments {
             inner: self.clone(),
@@ -183,7 +183,7 @@ impl Documents {
 
 /// Per-user scoped view over [`Documents`]. The `user_id` is
 /// baked in at construction; per-row methods therefore cannot be
-/// called with the wrong `user_id` by accident (plan 4.A S4).
+/// called with the wrong `user_id` by accident .
 #[derive(Debug, Clone)]
 pub struct ScopedDocuments {
     inner: Documents,

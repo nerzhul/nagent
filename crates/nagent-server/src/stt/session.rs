@@ -4,10 +4,10 @@
 //!
 //! - `session_id` is server-generated and never accepted from the client.
 //! - Each `SessionState` owns an `outbound_tx` whose only receiver is the
-//!   WS task of that session.
+//! WS task of that session.
 //! - `SessionMap` is the *only* shared mutable state across sessions; it
-//!   is a `DashMap<Uuid, Arc<SessionState>>` and we never hand out
-//!   references into other sessions' `SessionState`.
+//! is a `DashMap<Uuid, Arc<SessionState>>` and we never hand out
+//! references into other sessions' `SessionState`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

@@ -211,13 +211,13 @@ device.";
 ///
 /// Rules:
 /// - `None` or whitespace-only → no-op (backwards-compatible
-///   passthrough).
+/// passthrough).
 /// - Missing `messages` array → no-op; the caller is responsible for
-///   rejecting the request upstream (`ChatRequest` deserialisation
-///   already returns 400 when `messages` is absent).
+/// rejecting the request upstream (`ChatRequest` deserialisation
+/// already returns 400 when `messages` is absent).
 /// - Existing `messages[0]` system message (rare but legal per
-///   OpenAI's schema) is preserved *after* the admin's prompt so the
-///   admin's intent stays authoritative.
+/// OpenAI's schema) is preserved *after* the admin's prompt so the
+/// admin's intent stays authoritative.
 ///
 /// Pure function: no `serde_json::from_slice`, no env reads — the
 /// caller hands in the already-parsed `forward_body`. This keeps the

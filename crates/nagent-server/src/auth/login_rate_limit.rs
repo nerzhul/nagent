@@ -5,17 +5,17 @@
 //! spreading attempts across different key axes:
 //!
 //! - **`(email, ip)`** — the historical per-pair bucket. Caps
-//!   the most precise axis (one user, one source IP) at
-//!   `pair_max / pair_window`. The fastest bucket to trip and
-//!   the one with the most surgical denial.
+//! the most precise axis (one user, one source IP) at
+//! `pair_max / pair_window`. The fastest bucket to trip and
+//! the one with the most surgical denial.
 //! - **`email`** — per-email global counter (regardless of
-//!   source IP). Defends against an attacker that rotates IPs
-//!   to grind through one account. `email_max / email_window`,
-//!   with exponential backoff once `email_backoff_after` is hit.
+//! source IP). Defends against an attacker that rotates IPs
+//! to grind through one account. `email_max / email_window`,
+//! with exponential backoff once `email_backoff_after` is hit.
 //! - **`ip`** — per-IP global counter (regardless of email).
-//!   Defends against an attacker that rotates emails to grind
-//!   through one source IP. `ip_max / ip_window`, with
-//!   exponential backoff once `ip_backoff_after` is hit.
+//! Defends against an attacker that rotates emails to grind
+//! through one source IP. `ip_max / ip_window`, with
+//! exponential backoff once `ip_backoff_after` is hit.
 //!
 //! `check` consults all three families; any deny short-circuits
 //! the decision and the longest `retry_after_secs` wins (the

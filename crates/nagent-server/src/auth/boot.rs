@@ -4,13 +4,13 @@
 //!
 //! 1. Connects to the auth DB and runs the migrations.
 //! 2. **SQLite only**: when the `users` table is empty, mints a
-//!    random 24-char password for the first local admin and
-//!    inserts it. The plaintext is logged once at `WARN` level.
-//!    Postgres deployments skip this — admins must be created via
-//!    the CLI to avoid silent privilege grants on a shared cluster.
+//! random 24-char password for the first local admin and
+//! inserts it. The plaintext is logged once at `WARN` level.
+//! Postgres deployments skip this — admins must be created via
+//! the CLI to avoid silent privilege grants on a shared cluster.
 //! 3. Returns the connected `AuthStore` so the rest of the
-//!    application (CLI subcommands running in-process; HTTP routes
-//!    for in-process CLI subcommands or hand it to the HTTP layer).
+//! application (CLI subcommands running in-process; HTTP routes
+//! for in-process CLI subcommands or hand it to the HTTP layer).
 //!
 //! The auto-bootstrap is a deliberate ergonomic for local-dev
 //! sqlite: a fresh `make run` produces a working admin without
@@ -197,17 +197,17 @@ async fn bootstrap_first_admin(store: &nagent_db::Db, cfg: &Config) -> Result<()
     // The password is shown EXACTLY ONCE — on a fresh install with
     // an empty `users` table. Two channels:
     //
-    //   1. `eprintln!` straight to stderr. Bypasses every tracing
-    //      filter / formatter / log aggregator on the way to the
-    //      operator's terminal, journald, docker logs, or systemd
-    //      journal. The multi-line banner is deliberately loud so
-    //      it cannot scroll past unnoticed in a long boot log.
-    //   2. `tracing::warn!` for log aggregators that ingest the
-    //      structured fields. WARN is the right level: it shows up
-    //      on a default `RUST_LOG=info` filter (the most common
-    //      mistake on a fresh install is to set RUST_LOG=warn or
-    //      higher, which would silence the WARN; we keep the
-    //      eprintln! for that case).
+    // 1. `eprintln!` straight to stderr. Bypasses every tracing
+    // filter / formatter / log aggregator on the way to the
+    // operator's terminal, journald, docker logs, or systemd
+    // journal. The multi-line banner is deliberately loud so
+    // it cannot scroll past unnoticed in a long boot log.
+    // 2. `tracing::warn!` for log aggregators that ingest the
+    // structured fields. WARN is the right level: it shows up
+    // on a default `RUST_LOG=info` filter (the most common
+    // mistake on a fresh install is to set RUST_LOG=warn or
+    // higher, which would silence the WARN; we keep the
+    // eprintln! for that case).
     eprintln!(
         "\n\
          ================================================================\n\
@@ -284,7 +284,7 @@ pub fn redact_url(url: &str) -> String {
         return url.to_string();
     }
     // Postgres URLs look like:
-    //   postgres://user:pwd@host:port/dbname?query
+    // postgres://user:pwd@host:port/dbname?query
     // Replace the `pwd` component with `***` while keeping user/host/db
     // visible so the operator can confirm which DB the server is
     // talking to without exposing the secret.

@@ -3,12 +3,12 @@
 //! Two independent buckets are exercised end-to-end:
 //!
 //! - **LLM proxy** (`/v1/chat/completions`, `/v1/models`): when the
-//!   configured `LLM_RATE_PER_MIN` is small, the Nth request from a
-//!   non-loopback client must come back as `429 Too Many Requests`
-//!   with a `Retry-After` header.
+//! configured `LLM_RATE_PER_MIN` is small, the Nth request from a
+//! non-loopback client must come back as `429 Too Many Requests`
+//! with a `Retry-After` header.
 //! - **STT pipeline** (`/ws`): when `STT_RATE_PER_MIN` is small,
-//!   repeated WS upgrades from the same client must eventually be
-//!   rejected at the HTTP layer with `429` rather than a WS upgrade.
+//! repeated WS upgrades from the same client must eventually be
+//! rejected at the HTTP layer with `429` rather than a WS upgrade.
 //!
 //! The HTTP test does not need the upstream Ollama: the rejection
 //! happens in the middleware, *before* the handler runs. We point the

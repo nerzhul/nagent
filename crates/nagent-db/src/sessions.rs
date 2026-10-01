@@ -1,4 +1,4 @@
-//! Sessions repository — plan 5.D extraction.
+//! Sessions repository.
 //!
 //! Owns the SQL for the `sessions` table that previously lived in
 //! [`crate::auth::db_sqlite`] / [`crate::auth::db_postgres`].

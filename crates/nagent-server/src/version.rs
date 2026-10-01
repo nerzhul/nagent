@@ -1,12 +1,12 @@
 //! Build-time version strings.
 //!
 //! - `backend_version()` returns the `CARGO_PKG_VERSION` of this crate
-//!   at compile time. It is what the running server reports about
-//!   itself.
+//! at compile time. It is what the running server reports about
+//! itself.
 //! - `frontend_version()` returns a content hash of every file under
-//!   `src/static/`, computed by `build.rs` and embedded via
-//!   `include_str!`. The same string is also dropped next to the other
-//!   static assets as `version.txt` so the browser can read it.
+//! `src/static/`, computed by `build.rs` and embedded via
+//! `include_str!`. The same string is also dropped next to the other
+//! static assets as `version.txt` so the browser can read it.
 //!
 //! Both strings are `&'static str` so the cost is one `.rodata` lookup
 //! per request — no allocation, no I/O.

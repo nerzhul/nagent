@@ -281,12 +281,12 @@ impl UserContext {
     ///
     /// Returns:
     /// - `Ok(Some(plaintext))` on hit (subsequent calls within the
-    ///   same request hit the cache);
+    /// same request hit the cache);
     /// - `Err(AgentError::CredentialsMissing)` when the field has
-    ///   not been configured OR when no resolver is wired (test
-    ///   contexts);
+    /// not been configured OR when no resolver is wired (test
+    /// contexts);
     /// - `Err(AgentError::CredentialsDecryptFailed)` when AES-GCM
-    ///   authentication fails.
+    /// authentication fails.
     pub async fn secret(
         &self,
         service: &str,

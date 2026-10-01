@@ -1,7 +1,7 @@
-//! `auth/` — multi-user authentication & user identity (PR1).
+//! `auth/` — multi-user authentication & user identity .
 //!
 //! Always compiled in (no cargo feature gate). When the runtime
-//! config sets `auth.enabled = false` the server keeps the pre-PR1
+//! config sets `auth.enabled = false` the server keeps the pre-
 //! single-user trust boundary; the modules in this tree still exist
 //! but the `auth::boot::auto_bootstrap` function short-circuits and
 //! the HTTP routes (registered in `http::build_router`) are guarded
@@ -10,23 +10,23 @@
 //! ## Sub-modules
 //!
 //! - [`mod@boot`] — auto-bootstrap invoked by `main.rs` (migrate +
-//!   optional sqlite first-admin creation).
+//! optional sqlite first-admin creation).
 //! - [`mod@store`] — DB-agnostic data access. The public type is
-//!   [`store::AuthStore`] which is a `match`-dispatched enum over
-//!   the sqlite / postgres engines; each variant now holds the
-//!   per-domain repositories from [`crate::db`] (plan 5.D).
-//! - [`mod@session`] — cookie + bearer parsing, session row type,
-//!   CSRF token generator, `Set-Cookie` builder.
+//! [`store::AuthStore`] which is a `match`-dispatched enum over
+//! the sqlite / postgres engines; each variant now holds the
+//! per-domain repositories from [`crate::db`] .
+//! - [`mod@session`] — cookie bearer parsing, session row type,
+//! CSRF token generator, `Set-Cookie` builder.
 //! - [`mod@middleware`] — `require_auth_middleware` axum middleware
-//!   that resolves a session into an [`AuthUser`] extension.
-//! - [`mod@password`] — argon2id wrapper + the `local` backend
-//!   (`POST /api/auth/login/password`).
+//! that resolves a session into an [`AuthUser`] extension.
+//! - [`mod@password`] — argon2id wrapper the `local` backend
+//! (`POST /api/auth/login/password`).
 //! - [`mod@oidc`] — OIDC backend (`/api/auth/login/oidc/{start,callback}`).
 //! - [`mod@passkey`] — WebAuthn backend (`/api/auth/login/passkey/{start,finish}`).
 //! - [`mod@routes`] — `/api/me`, `/api/auth/logout`, plus the
-//!   registration endpoints guarded by `RequireAuth`.
+//! registration endpoints guarded by `RequireAuth`.
 //! - [`mod@login_rate_limit`] — login-attempt rate-limit
-//!   (DashMap, `(email, ip)` key).
+//! (DashMap, `(email, ip)` key).
 //!
 //! The `stt-server auth {create-admin,list-users,delete-user}` CLI
 //! subcommand lives in [`crate::cli::auth`].
@@ -35,10 +35,10 @@
 //!
 //! ```text
 //! HTTP request ──► require_auth_middleware ──► AuthUser extension
-//!                       │
-//!                       └─► session.rs (cookie/bearer/CSRF)
-//!                              └─► store.rs (AuthStore facade)
-//!                                     └─► crate::db::{users,sessions,passkeys,…}
+//! │
+//! └─► session.rs (cookie/bearer/CSRF)
+//! └─► store.rs (AuthStore facade)
+//! └─► crate::db::{users,sessions,passkeys,…}
 //! ```
 
 pub mod boot;
@@ -66,7 +66,7 @@ pub use session::{AuthUser, SessionRecord};
 /// knows about those.
 impl From<&crate::config::AuthConfig> for nagent_db::DbOptions {
     fn from(cfg: &crate::config::AuthConfig) -> Self {
-        // `connect()` rejects unknown engines with a clear error
+        // `connect` rejects unknown engines with a clear error
         // message, so we fall back to sqlite here purely to keep
         // `DbOptions` constructible for every input (the actual
         // connect call surfaces the real failure).

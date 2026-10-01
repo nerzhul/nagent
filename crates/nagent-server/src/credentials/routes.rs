@@ -9,12 +9,12 @@
 //!
 //! Endpoints:
 //! - `GET    /api/integrations`              — list every service
-//!   with `configured` per service for the caller.
+//! with `configured` per service for the caller.
 //! - `GET    /api/integrations/:id`           — same, single service.
 //! - `PUT    /api/integrations/:id/credentials` — atomic replace of
-//!   all fields. CSRF-protected.
+//! all fields. CSRF-protected.
 //! - `DELETE /api/integrations/:id/credentials` — clear all fields.
-//!   CSRF-protected.
+//! CSRF-protected.
 
 use std::sync::Arc;
 

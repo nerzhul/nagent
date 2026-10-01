@@ -18,27 +18,27 @@
 //! The LLM picks one of three modes by parameter combination:
 //!
 //! - `{"location": "Paris"}` → current + today's forecast (the
-//!   common chat case).
+//! common chat case).
 //! - `{"location": "Paris", "days": 5}` → current + 5-day forecast
-//!   (default 1, max 14).
+//! (default 1, max 14).
 //! - `{"location": "Paris", "date": "2026-09-26"}` → single day,
-//!   either forecast (when in [today, today+14]) or history (when
-//!   in the past, or more than 14 days ahead — WeatherAPI's
-//!   history tier covers dates back to 2010-01-01 on the free
-//!   plan).
+//! either forecast (when in [today, today+14]) or history (when
+//! in the past, or more than 14 days ahead — WeatherAPI's
+//! history tier covers dates back to 2010-01-01 on the free
+//! plan).
 //!
 //! Hourly breakdown for the next 24h is opt-in via `hourly: true`.
 //!
 //! ## Endpoint selection
 //!
 //! - `/v1/forecast.json` for current and forecast (today + up to
-//!   14 days ahead). Pass `dt=YYYY-MM-DD` to fetch a single
-//!   future day.
+//! 14 days ahead). Pass `dt=YYYY-MM-DD` to fetch a single
+//! future day.
 //! - `/v1/history.json` for past days. Returns the day's summary.
 //! - Location lookup is implicit: WeatherAPI's `q` parameter
-//!   accepts city names, `"lat,lon"`, postal codes, and iata
-//!   codes. The agent forwards the LLM's input verbatim; no
-//!   separate geocoding step.
+//! accepts city names, `"lat,lon"`, postal codes, and iata
+//! codes. The agent forwards the LLM's input verbatim; no
+//! separate geocoding step.
 //!
 //! ## Latency
 //!
@@ -207,9 +207,9 @@ impl Agent for WeatherAgent {
 /// precedence is:
 ///
 /// 1. `date` set → [`Mode::SingleDate`]. `days` is ignored (the LLM
-///    asked for a specific day).
+/// asked for a specific day).
 /// 2. `days` set → [`Mode::Current`] with the supplied horizon
-///    (clamped to 1..=14).
+/// (clamped to 1..=14).
 /// 3. Neither → [`Mode::Current`] with the default 1-day horizon.
 fn select_mode(days: Option<u32>, date: Option<&str>) -> Result<Mode, AgentError> {
     if let Some(d) = date {

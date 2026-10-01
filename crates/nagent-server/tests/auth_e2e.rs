@@ -1,4 +1,4 @@
-//! End-to-end test for the auth subsystem (PR1).
+//! End-to-end test for the auth subsystem .
 //!
 //! Exercises the same code paths the CLI + HTTP handlers use, in
 //! one place: connect to a per-test sqlite database, run the

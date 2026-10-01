@@ -4,14 +4,14 @@
 //! Two concerns live here:
 //!
 //! - [`build_rate_limiters`] — build the per-IP STT and LLM token
-//!   buckets from the resolved [`crate::config::Config`].
+//! buckets from the resolved [`crate::config::Config`].
 //! - [`llm_rate_limit_middleware`] — the axum middleware that consumes
-//!   one LLM-bucket token per request, keyed by the peer address from
-//!   `ConnectInfo`.
+//! one LLM-bucket token per request, keyed by the peer address from
+//! `ConnectInfo`.
 //! - [`llm_auth_middleware`] — the bearer-token gate driven by
-//!   [`crate::config::LlmAuthMode`] / [`crate::config::LlmConfig::inbound_auth_key`].
+//! [`crate::config::LlmAuthMode`] / [`crate::config::LlmConfig::inbound_auth_key`].
 //!
-//! Moved out of `lib.rs` as part of phase 1 of the architecture
+//! Moved out of `lib.rs` as part of the architecture restructuring of the architecture
 //! refactor so `build_router` (itself moved to [`crate::http::build_router`])
 //! stays a pure composition function.
 
@@ -81,18 +81,18 @@ pub fn build_rate_limiters(cfg: &Config) -> (RateLimiter, RateLimiter) {
 ///
 /// Behaviour per [`crate::config::LlmAuthMode`]:
 /// - [`LlmAuthMode::Bearer`](crate::config::LlmAuthMode::Bearer) (with
-///   `inbound_auth_key` set): reject requests missing
-///   `Authorization: Bearer <key>` or carrying a different key with
-///   `401 Unauthorized` and a `WWW-Authenticate` hint so curl and SDKs
-///   surface a useful error.
+/// `inbound_auth_key` set): reject requests missing
+/// `Authorization: Bearer <key>` or carrying a different key with
+/// `401 Unauthorized` and a `WWW-Authenticate` hint so curl and SDKs
+/// surface a useful error.
 /// - [`LlmAuthMode::Bearer`](crate::config::LlmAuthMode::Bearer) (no key
-///   set): the auth gate is a no-op and a warning is logged at boot —
-///   the operator enabled the `bearer` mode without providing a key,
-///   so the proxy is effectively public until they fix the config.
+/// set): the auth gate is a no-op and a warning is logged at boot —
+/// the operator enabled the `bearer` mode without providing a key,
+/// so the proxy is effectively public until they fix the config.
 /// - [`LlmAuthMode::Forward`](crate::config::LlmAuthMode::Forward) /
-///   [`LlmAuthMode::Disabled`](crate::config::LlmAuthMode::Disabled):
-///   no inbound inspection. `Disabled` is a deliberate opt-out and
-///   only affects the startup warning emitted by `main`.
+/// [`LlmAuthMode::Disabled`](crate::config::LlmAuthMode::Disabled):
+/// no inbound inspection. `Disabled` is a deliberate opt-out and
+/// only affects the startup warning emitted by `main`.
 pub async fn llm_auth_middleware(
     cfg: Option<Arc<LlmConfig>>,
     req: axum::extract::Request,

@@ -1,10 +1,10 @@
 //! Local text-to-speech (Piper ONNX) subsystem.
 //!
 //! - [`engine`] — the [`Synthesizer`] trait (mock + Piper backends),
-//!   the [`TtsEngine`](engine::TtsEngine) facade, and the 16-bit PCM
-//!   mono WAV encoder.
+//! the [`TtsEngine`](engine::TtsEngine) facade, and the 16-bit PCM
+//! mono WAV encoder.
 //! - [`routes`] — the HTTP handlers `POST /v1/audio/speech` and
-//!   `GET /v1/audio/voices`.
+//! `GET /v1/audio/voices`.
 //!
 //! Phase 1 of the architecture refactor split the original
 //! `tts.rs` into these two files; the public API is unchanged.

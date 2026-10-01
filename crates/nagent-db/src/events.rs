@@ -1,4 +1,4 @@
-//! Auth events repository — plan 5.D extraction.
+//! Auth events repository.
 
 use crate::pool::AnyPool;
 use crate::types::NewAuthEvent;

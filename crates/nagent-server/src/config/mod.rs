@@ -10,8 +10,8 @@
 //! ## Section layout
 //!
 //! - [`server`] — `Config`, `CliArgs`, `ConfigError`, the env/TOML
-//!   merge helpers (`env_opt`, `resolve_primitive`, …) and the
-//!   layered file discovery.
+//! merge helpers (`env_opt`, `resolve_primitive`, …) and the
+//! layered file discovery.
 //! - [`ratelimit`] — per-IP rate-limit knobs (`RateLimitConfig`).
 //! - [`trusted_proxies`] — `[server].trusted_proxies` CIDR list.
 //! - [`limits`] — inbound WebSocket frame limits (`LimitsConfig`).

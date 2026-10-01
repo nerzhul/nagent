@@ -7,7 +7,7 @@
 //! have to think about their SQL.
 //!
 //! The per-engine pool types are only compiled when the matching
-//! `db-sqlite` / `db-postgres` cargo feature is on (plan 4.A R6).
+//! `db-sqlite` / `db-postgres` cargo feature is on .
 //! Trying to construct the wrong variant surfaces a clear compile
 //! error at the call site instead of linking the unused driver.
 

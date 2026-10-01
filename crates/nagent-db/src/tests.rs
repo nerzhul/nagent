@@ -5,7 +5,7 @@
 //! `Db::connect` + `Db::migrate`, so every assertion exercises the
 //! same SQL the production server does.
 //!
-//! Postgres parity tests (plan 4.A S9) live behind a feature + env
+//! Postgres parity tests  live behind a feature + env
 //! var so the local `cargo test` loop stays fast. A CI job with a
 //! `postgres` service container sets `NAGENT_TEST_PG_URL` to a real
 //! URL and runs the parity tests against both engines.
@@ -339,7 +339,7 @@ mod credentials {
 // ---- Postgres parity -----------------------------------------------------
 
 /// Run the full SQLite suite against Postgres when
-/// `NAGENT_TEST_PG_URL` is set (plan 4.A S9). Each test carries
+/// `NAGENT_TEST_PG_URL` is set . Each test carries
 /// `#[ignore]` so the local `cargo test` loop stays fast; the CI
 /// Postgres job runs them via `cargo test -- --include-ignored`.
 #[cfg(feature = "db-postgres")]

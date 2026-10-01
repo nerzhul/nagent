@@ -1,12 +1,12 @@
 //! End-to-end tests for two security/robustness features:
 //!
 //! - **WS frame validation** (sample rate, audio frame size,
-//!   language hint allow-list).
+//! language hint allow-list).
 //! - **Security headers** (CSP, Referrer-Policy, X-Content-Type-Options)
-//!   applied to every response, including the static frontend and the
-//!   `/healthz` probe.
+//! applied to every response, including the static frontend and the
+//! `/healthz` probe.
 //! - **CORS allow-list** on `/v1/*` driven by
-//!   `LLM_CORS_ALLOW_ORIGINS`.
+//! `LLM_CORS_ALLOW_ORIGINS`.
 //!
 //! The tests share the in-process server scaffolding from
 //! `multiuser_isolation.rs` (mock backend, in-memory session map,

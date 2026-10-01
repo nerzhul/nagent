@@ -32,8 +32,8 @@ impl From<DbDocumentError> for AuthError {
 /// ago. For each matched row:
 ///
 /// 1. Unlink the file from disk. Missing files are NOT an error —
-///    a previous partial boot could have removed the file
-///    independently, and we want the DB row gone regardless.
+/// a previous partial boot could have removed the file
+/// independently, and we want the DB row gone regardless.
 /// 2. Delete the DB row.
 ///
 /// Returns the number of rows purged (file + DB). The caller can

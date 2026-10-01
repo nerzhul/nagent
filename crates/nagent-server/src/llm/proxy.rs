@@ -1,15 +1,15 @@
 //! `llm::proxy` — the top-level HTTP handlers for `/v1/*`.
 //!
 //! - [`chat_completions`] is the streaming OpenAI-compatible proxy;
-//!   it owns the SSE response body and hands the upstream byte
-//!   stream to [`crate::llm::tool_loop::run_tool_loop`].
+//! it owns the SSE response body and hands the upstream byte
+//! stream to [`crate::llm::tool_loop::run_tool_loop`].
 //! - [`models_list`] proxies the upstream's `/v1/models` list (or
-//!   returns a single fallback when the upstream is unreachable).
+//! returns a single fallback when the upstream is unreachable).
 //! - [`agents_list`] / [`agent_invoke`] are the direct agent HTTP
-//!   surface. Both moved into [`crate::agents::routes`] as part of
-//!   phase 1; the thin wrappers here re-export them under the
-//!   historical `llm::agents_list` / `llm::agent_invoke` names so
-//!   integration tests keep compiling unchanged.
+//! surface. Both moved into [`crate::agents::routes`] as part of
+//!  the thin wrappers here re-export them under the
+//! historical `llm::agents_list` / `llm::agent_invoke` names so
+//! integration tests keep compiling unchanged.
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -414,7 +414,7 @@ pub async fn models_list(State(llm_state): State<ArcLlmState>) -> Result<Respons
 }
 
 // ---------------------------------------------------------------------------
-// Agents HTTP surface — moved to `crate::agents::routes` (phase 1). The
+// Agents HTTP surface — moved to `crate::agents::routes` . The
 // `llm::agents_list` and `llm::agent_invoke` names are kept here as
 // thin re-exports so existing imports keep compiling.
 // ---------------------------------------------------------------------------

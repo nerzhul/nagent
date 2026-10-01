@@ -451,7 +451,7 @@ async fn delete_user(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyho
         .ok_or_else(|| anyhow::anyhow!("no user with email {email:?}"))?;
 
     // Belt + braces: refuse if it would leave zero local users and
-    // auth is enabled. PR2 adds the role check; for now, a hard
+    // auth is enabled. follow-up the role check; for now, a hard
     // "1 local user minimum" guard is enough to prevent the
     // lockout class.
     if target.provider == "local" && cfg.auth.enabled {

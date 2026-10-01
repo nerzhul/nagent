@@ -1,9 +1,9 @@
-//! Per-user credentials repository — plan 4.A scoped per-user view.
+//! Per-user credentials repository
 //!
 //! The credentials vault stores one row per `(user, service,
 //! field)`. Callers that have already resolved a `user_id` should
 //! prefer [`Credentials::for_user`] so the `WHERE user_id = ?`
-//! filter cannot be accidentally dropped (plan 4.A S4).
+//! filter cannot be accidentally dropped .
 
 use uuid::Uuid;
 
@@ -29,7 +29,7 @@ impl Credentials {
     /// returned [`ScopedCredentials`] does not take a `user_id`
     /// argument on its per-row methods, so a route handler that
     /// holds a `ScopedCredentials` cannot accidentally drop the
-    /// `WHERE user_id = ?` filter (plan 4.A S4).
+    /// `WHERE user_id = ?` filter .
     pub fn for_user(&self, user_id: Uuid) -> ScopedCredentials {
         ScopedCredentials {
             inner: self.clone(),

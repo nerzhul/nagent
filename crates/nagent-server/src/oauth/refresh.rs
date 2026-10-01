@@ -7,10 +7,10 @@
 //! trait lets each backend implement its own refresh call while
 //! keeping the high-level "use this credential" path identical.
 //!
-//! PR1 ships the trait, the [`TokenSet`] / [`RefreshTokenError`]
+//!  ships the trait, the [`TokenSet`] / [`RefreshTokenError`]
 //! types, and unit tests that exercise the dispatch logic without
 //! performing any real HTTP round-trips. The OIDC impl will land
-//! in PR2 alongside the rest of the OIDC backend; the X impl will
+//! in  alongside the rest of the OIDC backend; the X impl will
 //! land with the agent itself.
 
 use std::time::Duration;
@@ -25,7 +25,7 @@ pub struct TokenSet {
     /// refresh tokens (some do not, and the client must re-authorise
     /// instead).
     pub refresh_token: Option<String>,
-    /// Token lifetime. PR1 trusts the provider's value; PR2 will
+    /// Token lifetime. trusts the provider's value;  
     /// subtract a small safety margin so a long-running agent does
     /// not race the expiry.
     pub expires_in: Duration,
@@ -35,10 +35,10 @@ pub struct TokenSet {
 }
 
 impl TokenSet {
-    /// True when the access token's lifetime has elapsed. PR1
+    /// True when the access token's lifetime has elapsed.
     /// callers should re-authorise (or call
     /// [`RefreshTokenClient::refresh`]) rather than rely on this
-    /// signal alone; PR2 will add a safety margin.
+    /// signal alone;   add a safety margin.
     pub fn is_expired(&self, now: Duration) -> bool {
         now >= self.expires_in
     }

@@ -47,8 +47,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // `auto_bootstrap` runs the migrations and (when the auth
     // backend is sqlite) creates the first admin. Errors here are
     // fatal — a half-broken auth DB on a server that expects it
-    // is the worst-case state (silent fallthrough to the pre-PR1
-    // trust boundary would be a security regression).
+    // is the worst-case state (silent fallthrough to the pre-// trust boundary would be a security regression).
     let auth_store: Option<nagent_db::Db> = match crate::auth::boot::auto_bootstrap(&cfg).await {
         Ok(store) => store,
         Err(e) => {

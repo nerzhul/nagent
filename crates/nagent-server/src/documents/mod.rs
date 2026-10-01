@@ -17,16 +17,16 @@
 //! ## Sub-modules
 //!
 //! - [`storage`] — disk layout (UUID + 2-char shard) + the
-//!   `DocumentStore` DB wrapper.
+//! `DocumentStore` DB wrapper.
 //! - [`extract`] — text extraction (`.txt` passthrough, `.pdf` via
-//!   `pdf-extract`). Gated on the `documents` feature.
+//! `pdf-extract`). Gated on the `documents` feature.
 //! - [`agent`] — [`ReadDocumentAgent`], registered in
-//!   [`crate::agents::AgentRegistry::from_config`] when both the
-//!   cargo feature AND `documents.enabled = true` are on.
+//! [`crate::agents::AgentRegistry::from_config`] when both the
+//! cargo feature AND `documents.enabled = true` are on.
 //! - [`routes`] — `POST/GET/DELETE /v1/documents*` HTTP handlers
-//!   + multipart parsing.
+//! + multipart parsing.
 //! - [`purge`] — `purge_older_than(Duration)` helper used by the
-//!   background sweep + the `nagent documents purge` CLI.
+//! background sweep + the `nagent documents purge` CLI.
 //!
 //! ## Feature matrix
 //!
@@ -106,8 +106,7 @@ impl DocumentStore {
     /// Borrow the shared [`nagent_db::Db`]. Routes / CLI / agent
     /// reach per-user repositories through this handle; the
     /// documents domain in particular exposes a scoped per-user
-    /// view via [`nagent_db::documents::Documents::for_user`]
-    /// (plan 4.A S4).
+    /// view via [`nagent_db::documents::Documents::for_user`].
     pub fn db(&self) -> &nagent_db::Db {
         &self.inner.db
     }

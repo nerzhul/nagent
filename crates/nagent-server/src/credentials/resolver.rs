@@ -93,12 +93,12 @@ impl CredentialResolver {
     /// Returns:
     /// - `Ok(Some(plaintext))` on a successful decrypt;
     /// - `Ok(None)` when the field is absent (no audit row; this is
-    ///   the steady-state "user has not configured this" case);
+    /// the steady-state "user has not configured this" case);
     /// - `Err(CredentialError::Missing)` when the calling agent
-    ///   distinguishes "missing" from "absent" (currently the same
-    ///   shape as `Ok(None)` but explicit);
+    /// distinguishes "missing" from "absent" (currently the same
+    /// shape as `Ok(None)` but explicit);
     /// - `Err(CredentialError::DecryptFailed)` when AES-GCM rejected
-    ///   the ciphertext (always audited).
+    /// the ciphertext (always audited).
     pub async fn get(
         &self,
         user_id: Uuid,

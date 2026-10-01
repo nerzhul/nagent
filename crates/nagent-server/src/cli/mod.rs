@@ -8,11 +8,11 @@
 //!
 //! - [`auth`] — `stt-server auth {create-admin,list-users,delete-user}`.
 //! - [`migrate`] — `stt-server migrate {up,down,status,help}`. Drives
-//!   the auth DB migration state machine without booting the HTTP
-//!   server.
+//! the auth DB migration state machine without booting the HTTP
+//! server.
 //! - [`documents`] — `stt-server documents purge ...`. Operates
-//!   against the document cache + DB rows without booting the HTTP
-//!   server.
+//! against the document cache + DB rows without booting the HTTP
+//! server.
 
 pub mod auth;
 pub mod documents;

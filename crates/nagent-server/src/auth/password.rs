@@ -1,4 +1,4 @@
-//! Local password backend (PR1).
+//! Local password backend .
 //!
 //! Implements `POST /api/auth/login/password` and
 //! `POST /api/auth/password/register`. Hashes are argon2id with the
@@ -274,8 +274,8 @@ pub async fn login_handler(
 /// `{ "email": "...", "display_name": "...", "password": "..." }`.
 ///
 /// Requires both an existing session cookie AND
-/// `auth.password.allow_registration = true` (PR2 will gate this
-/// further with a role check). The minimum password length comes
+/// `auth.password.allow_registration = true` (the role check lands
+/// in a follow-up). The minimum password length comes
 /// from `auth.password.min_password_length`.
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {

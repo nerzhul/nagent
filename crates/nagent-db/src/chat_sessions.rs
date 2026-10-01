@@ -1,4 +1,4 @@
-//! Chat sessions repository — plan 4.A scoped per-user view.
+//! Chat sessions repository
 //!
 //! Binds `(user_id, session_id)` rows so the documents + agent
 //! paths can refuse a mismatched `X-Chat-Session-Id` header with
@@ -7,7 +7,7 @@
 //!
 //! Callers that have already resolved a `user_id` should prefer
 //! [`ChatSessions::for_user`] so the `WHERE user_id = ?` filter
-//! cannot be accidentally dropped (plan 4.A S4).
+//! cannot be accidentally dropped .
 
 use uuid::Uuid;
 

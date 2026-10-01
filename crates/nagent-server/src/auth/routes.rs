@@ -1,14 +1,14 @@
 //! HTTP routes for the auth subsystem.
 //!
 //! - `GET  /api/me` — returns the [`AuthUser`] resolved by the
-//!   `RequireAuth` middleware. The browser SPA reads this on boot
-//!   to decide whether to render the login panel or the chat view.
+//! `RequireAuth` middleware. The browser SPA reads this on boot
+//! to decide whether to render the login panel or the chat view.
 //! - `GET  /api/me/preferences` — per-user UI preferences (location /
-//!   timezone sharing toggles, formerly held in `localStorage`).
+//! timezone sharing toggles, formerly held in `localStorage`).
 //! - `PUT  /api/me/preferences` — same shape, CSRF-protected.
 //! - `POST /api/auth/logout` — deletes the current session and
-//!   clears the cookie. Requires both the session cookie AND the
-//!   matching CSRF token (constant-time compared).
+//! clears the cookie. Requires both the session cookie AND the
+//! matching CSRF token (constant-time compared).
 //!
 //! The `/api/auth/login/*` and `/api/auth/password/register`
 //! routes live in [`crate::auth::password`], [`crate::auth::oidc`]
@@ -154,12 +154,12 @@ mod tests {
     //! session stayed valid until expiry.
     //!
     //! The test exercises the full path:
-    //!   1. `extract_auth_user` populates `AuthUser.session_id`
-    //!      from the same row it authenticates against.
-    //!   2. `delete_session(user.session_token_hash)` removes exactly that
-    //!      row.
-    //!   3. Reusing the same cookie on `/api/me` returns `401`.
-    //!   4. Reusing the same bearer on `/api/me` returns `401`.
+    //! 1. `extract_auth_user` populates `AuthUser.session_id`
+    //! from the same row it authenticates against.
+    //! 2. `delete_session(user.session_token_hash)` removes exactly that
+    //! row.
+    //! 3. Reusing the same cookie on `/api/me` returns `401`.
+    //! 4. Reusing the same bearer on `/api/me` returns `401`.
     //!
     //! The tests exercise `extract_auth_user` + `delete_session`
     //! directly (mirroring what `logout_handler` does) rather than
@@ -263,9 +263,9 @@ mod tests {
         );
 
         // 2. Re-resolve via the middleware path and call
-        //    `delete_session(user.session_token_hash)` exactly like
-        //    `logout_handler` does (this is the regression for the
-        //    pre-fix `delete_session(user.id)` bug).
+        // `delete_session(user.session_token_hash)` exactly like
+        // `logout_handler` does (this is the regression for the
+        // pre-fix `delete_session(user.id)` bug).
         let headers = {
             let mut h = axum::http::HeaderMap::new();
             h.insert(axum::http::header::COOKIE, cookie.parse().unwrap());

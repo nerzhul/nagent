@@ -11,14 +11,14 @@
 //! The agent enforces a default-deny network policy:
 //!
 //! - Loopback (`127.0.0.0/8`, `::1`), private (RFC1918), and
-//!   link-local (ULA / `169.254/16`) addresses are **always** blocked
-//!   as SSRF protection, regardless of any allow-list.
+//! link-local (ULA / `169.254/16`) addresses are **always** blocked
+//! as SSRF protection, regardless of any allow-list.
 //! - When `WEB_FETCH_ALLOW_PUBLIC=false` (the default), public IP
-//!   ranges are also blocked — only loopback and private ranges pass.
+//! ranges are also blocked — only loopback and private ranges pass.
 //! - When `WEB_FETCH_ALLOWLIST` is set, suffix matching against the
-//!   hostname is applied **before** DNS resolution: only the listed
-//!   hosts (and their subdomains for `*.foo` entries) may proceed.
-//!   This takes precedence over `WEB_FETCH_ALLOW_PUBLIC`.
+//! hostname is applied **before** DNS resolution: only the listed
+//! hosts (and their subdomains for `*.foo` entries) may proceed.
+//! This takes precedence over `WEB_FETCH_ALLOW_PUBLIC`.
 //!
 //! ## DNS-rebinding mitigation
 //!
@@ -328,7 +328,7 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 // ---- Network policy ------------------------------------------------------
 //
 // `is_addr_allowed` and `host_matches_allowlist` now live in
-// `crate::agents::egress` (plan 5.F) so every network agent shares
+// `crate::agents::egress`  so every network agent shares
 // the same SSRF policy. Re-imported here for the unit tests that
 // exercise the predicates directly.
 

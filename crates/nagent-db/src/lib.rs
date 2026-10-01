@@ -20,7 +20,7 @@
 //! expose a `for_user(user_id)` helper that returns a scoped view.
 //! The scoped view does not have a `user_id` argument on its
 //! per-row methods, so the SQL filter cannot be accidentally
-//! dropped (plan 4.A S4). Admin / CLI paths keep using the
+//! dropped . Admin / CLI paths keep using the
 //! unscoped `Db` repository directly.
 //!
 //! ## SQL policy

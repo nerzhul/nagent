@@ -66,10 +66,10 @@ pub fn extract_session_token(
     cookie_name: &str,
 ) -> Option<ExtractedSession> {
     // 1. Cookie path. We use the `cookie` crate directly rather
-    //    than `Cookie::parse` on the raw header because the request
-    //    may carry several cookies (CSRF cookie + the session cookie
-    //    + analytics cookies on the same domain) and we only care
-    //    about the one with our name.
+    // than `Cookie::parse` on the raw header because the request
+    // may carry several cookies (CSRF cookie + the session cookie
+    // + analytics cookies on the same domain) and we only care
+    // about the one with our name.
     if let Some(raw) = headers.get(axum::http::header::COOKIE) {
         if let Ok(s) = raw.to_str() {
             for c in s.split(';') {

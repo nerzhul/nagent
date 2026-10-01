@@ -3,16 +3,16 @@
 //! ## Coverage
 //!
 //! 1. `GET /v1/agents` returns the registered agents (when enabled)
-//!    and an empty list (when disabled).
+//! and an empty list (when disabled).
 //! 2. `POST /v1/agents/web_fetch/invoke` succeeds against a
-//!    loopback fixture server (the sandbox always allows `127.0.0.1`
-//!    through `WEB_FETCH_ALLOW_PUBLIC=true`), and rejects unknown
-//!    agents / invalid args with the right HTTP status.
+//! loopback fixture server (the sandbox always allows `127.0.0.1`
+//! through `WEB_FETCH_ALLOW_PUBLIC=true`), and rejects unknown
+//! agents / invalid args with the right HTTP status.
 //! 3. `POST /v1/chat/completions` injects the agent's `tools`
-//!    schema into the upstream request, and when the upstream emits
-//!    a `tool_calls` block the proxy runs the agent and emits the
-//!    expected `event: tool_call` / `event: tool_result` SSE frames
-//!    before completing the turn.
+//! schema into the upstream request, and when the upstream emits
+//! a `tool_calls` block the proxy runs the agent and emits the
+//! expected `event: tool_call` / `event: tool_result` SSE frames
+//! before completing the turn.
 //!
 //! The fake upstream simulates Ollama's fragmented `tool_calls`
 //! delta shape (which the LLM proxy must buffer across SSE chunks
@@ -453,12 +453,12 @@ async fn web_fetch_invoke_invalid_args_400s() {
 
 /// Fake upstream that:
 /// - Round 1: streams a fragmented `tool_calls` delta (name, then
-///   arguments split across chunks), then `finish_reason:
-///   "tool_calls"`. Captures the request body so the test can
-///   assert the `tools` field was injected.
+/// arguments split across chunks), then `finish_reason:
+/// "tool_calls"`. Captures the request body so the test can
+/// assert the `tools` field was injected.
 /// - Round 2: returns a normal text reply (no tool calls) with
-///   `finish_reason: "stop"`. The proxy should forward this to the
-///   client verbatim and exit.
+/// `finish_reason: "stop"`. The proxy should forward this to the
+/// client verbatim and exit.
 async fn spawn_tool_call_upstream(
     captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
 ) -> String {

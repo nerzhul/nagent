@@ -3,13 +3,13 @@
 //! Two routes live here:
 //!
 //! - `GET /v1/agents` — list every registered agent (browser UI hint,
-//!   used by `Integrations` to discover tool availability).
+//! used by `Integrations` to discover tool availability).
 //! - `POST /v1/agents/:name/invoke` — direct agent invocation used by
-//!   curl, the integration tests, and any non-streaming consumer. The
-//!   chat UI goes through `/v1/chat/completions` instead so the SSE
-//!   stream stays consistent.
+//! curl, the integration tests, and any non-streaming consumer. The
+//! chat UI goes through `/v1/chat/completions` instead so the SSE
+//! stream stays consistent.
 //!
-//! Both routes moved from `llm::proxy` as part of phase 1 of the
+//! Both routes moved from `llm::proxy` as part of the architecture restructuring of the
 //! architecture refactor; the `llm::agents_list` / `llm::agent_invoke`
 //! names are kept as thin re-exports for backward compatibility.
 

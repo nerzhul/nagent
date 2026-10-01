@@ -80,8 +80,8 @@
 //! noise_w = 0.8
 //! max_input_chars = 2000
 //!
-//! # Authentication (PR1). When `enabled = false` (the default) the
-//! # server keeps the pre-PR1 single-user trust boundary: no login
+//! # Authentication . When `enabled = false` (the default) the
+//! # server keeps the single-user trust boundary: no login
 //! # routes, no /api/me, no RequireAuth layer. Turning this on REQUIRES
 //! # `[auth.db]` to point at a reachable SQL store (sqlite or postgres);
 //! # the server refuses to boot otherwise. See README "Authentication"
@@ -368,7 +368,7 @@ pub struct TomlTtsConfig {
 pub struct TomlAuthConfig {
     /// Master switch. When `false`, the auth routes are not
     /// registered and `RequireAuth` stays off — the server keeps
-    /// the pre-PR1 single-user trust boundary.
+    /// the single-user trust boundary.
     pub enabled: Option<bool>,
     /// Subset of enabled backends (`local`, `oidc`, `passkey`).
     pub backends: Option<Vec<String>>,

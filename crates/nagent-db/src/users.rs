@@ -1,4 +1,4 @@
-//! Users repository — first extraction of plan 5.D.
+//! Users repository — per-domain repository.
 //!
 //! Owns the SQL for the `users` table that used to live in
 //! [`crate::auth::db_sqlite`] / [`crate::auth::db_postgres`]. The

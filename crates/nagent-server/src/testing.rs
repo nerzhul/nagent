@@ -376,9 +376,9 @@ pub fn app_state() -> AppStateBuilder {
 /// `Config` shape used by every integration test that does not
 /// care about any specific subsystem:
 /// - `bind_addr = 127.0.0.1:0` (ephemeral port for tests that
-///   actually bind),
+/// actually bind),
 /// - `whisper_model_path = /tmp/fake-model.bin` (so the no-TOML
-///   config path does not trip on the required model-path knob),
+/// config path does not trip on the required model-path knob),
 /// - everything else defaulted.
 fn default_test_config() -> Config {
     Config {

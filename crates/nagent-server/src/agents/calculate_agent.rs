@@ -12,9 +12,9 @@
 //! `meval` is a small (~50 KB) safe expression evaluator that:
 //!
 //! - Supports a documented grammar (`+ - * / ^ %`, parentheses,
-//!   common functions `sin/cos/sqrt/log`, constants `pi`/`e`).
+//! common functions `sin/cos/sqrt/log`, constants `pi`/`e`).
 //! - Returns a numeric value and refuses unknown identifiers —
-//!   exactly the safety boundary we need.
+//! exactly the safety boundary we need.
 //!
 //! Heavier alternatives (`evalexpr`) are rejected to keep the binary
 //! small and the surface easy to audit.
@@ -26,8 +26,8 @@
 //!
 //! - The expression length is capped at 256 characters.
 //! - Only the characters `[0-9a-zA-Z_+\-*/()., \t\n]` are accepted.
-//!   Any other byte — semicolons, brackets, quotes, control
-//!   characters — fails fast with `InvalidArguments`.
+//! Any other byte — semicolons, brackets, quotes, control
+//! characters — fails fast with `InvalidArguments`.
 //!
 //! These rules guard against accidental typos in the schema validation
 //! and make the failure mode for malformed input obvious.

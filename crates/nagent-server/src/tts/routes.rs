@@ -4,11 +4,11 @@
 //! per-IP rate-limit envelope:
 //!
 //! - `POST /v1/audio/speech` — synthesise a single chunk of text into
-//!   16-bit PCM mono WAV bytes.
+//! 16-bit PCM mono WAV bytes.
 //! - `GET /v1/audio/voices` — list the voices discovered on disk plus
-//!   the per-language defaults.
+//! the per-language defaults.
 //!
-//! Moved out of the original `tts.rs` as part of phase 1 of the
+//! Moved out of the original `tts.rs` as part of the architecture restructuring of the
 //! architecture refactor; the public function names (`audio_speech`,
 //! `audio_voices`) and the wire types (`SpeechRequest`, `VoicesResponse`,
 //! `VoiceMetaJson`) are unchanged.

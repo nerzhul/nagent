@@ -11,17 +11,17 @@
 //! ## How the binding works
 //!
 //! 1. On page load, `chat.js` calls `POST /v1/chat/session` with
-//!    the per-session CSRF token. The handler generates a fresh
-//!    UUID, inserts it into `chat_sessions` bound to the
-//!    authenticated user, and returns `{id}` to the browser.
+//! the per-session CSRF token. The handler generates a fresh
+//! UUID, inserts it into `chat_sessions` bound to the
+//! authenticated user, and returns `{id}` to the browser.
 //! 2. The browser stores the returned id in localStorage (so a
-//!    page reload doesn't mint a new one) and uses it on every
-//!    subsequent `/v1/documents*` and `/v1/chat/completions`
-//!    request via the `X-Chat-Session-Id` header.
+//! page reload doesn't mint a new one) and uses it on every
+//! subsequent `/v1/documents*` and `/v1/chat/completions`
+//! request via the `X-Chat-Session-Id` header.
 //! 3. Every documents route / agent invocation validates
-//!    `(current_user, X-Chat-Session-Id)` against `chat_sessions`
-//!    and rejects mismatches with `403 Forbidden` — a user
-//!    cannot reach docs uploaded in another user's session.
+//! `(current_user, X-Chat-Session-Id)` against `chat_sessions`
+//! and rejects mismatches with `403 Forbidden` — a user
+//! cannot reach docs uploaded in another user's session.
 //!
 //! ## Why not just store the id in the auth cookie?
 //!
@@ -123,7 +123,7 @@ impl ChatSessions {
     /// Return a scoped view of the repository bound to `user_id`.
     /// Route handlers that already hold an `AuthUser` should
     /// prefer this so the `user_id` filter cannot be dropped
-    /// (plan 4.A S4).
+    /// .
     pub fn for_user(&self, user_id: Uuid) -> ScopedChatSessions {
         self.inner.repo.for_user(user_id)
     }
@@ -171,7 +171,7 @@ pub async fn mint_handler(
     // (e.g. logout from another tab).
     let id = uuid::Uuid::new_v4();
     // Use the scoped accessor so the binding cannot target a
-    // different user (plan 4.A S4).
+    // different user .
     state.sessions.for_user(user.id).bind(id).await?;
     Ok(axum::Json(ChatSessionResponse { id }))
 }

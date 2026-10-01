@@ -34,7 +34,7 @@ pub use llm_guards::{build_rate_limiters, llm_auth_middleware, llm_rate_limit_mi
 /// Build the axum router around [`AppState`]. Exposed for tests.
 ///
 /// When `auth.enabled = true` the router applies the [`RequireAuth`]
-/// middleware (PR1) to every endpoint **except** a small set of
+/// middleware  to every endpoint **except** a small set of
 /// public carve-outs: the index page, `/static/*`, `/healthz`,
 /// `/api/version`, and the auth login routes. The carve-out exists
 /// so the browser can fetch the login page and submit credentials
@@ -44,8 +44,7 @@ pub use llm_guards::{build_rate_limiters, llm_auth_middleware, llm_rate_limit_mi
 /// (or `Authorization: Bearer <session-id>`).
 ///
 /// When `auth.enabled = false` the router is unchanged: no
-/// `RequireAuth` layer is installed anywhere and the pre-PR1
-/// single-user trust boundary holds.
+/// `RequireAuth` layer is installed anywhere and the pre-/// single-user trust boundary holds.
 ///
 /// [`RequireAuth`]: crate::auth::middleware::require_auth_middleware
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -110,16 +109,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         protected = protected.merge(mount_tts(state.clone()));
     }
 
-    // ----- Auth subtree (PR1) --------------------------------------------
+    // ----- Auth subtree  --------------------------------------------
     // When `auth.enabled = true`:
-    //   - login routes (`/api/auth/login/*`) live in `public` so they
-    //     are reachable without a session;
-    //   - protected identity routes (`/api/me`, `/api/auth/logout`,
-    //     passkey register start/finish) live in `protected`;
-    //   - `protected` is wrapped with `RequireAuth` so anonymous
-    //     requests get `401 authentication required`.
+    // - login routes (`/api/auth/login/*`) live in `public` so they
+    // are reachable without a session;
+    // - protected identity routes (`/api/me`, `/api/auth/logout`,
+    // passkey register start/finish) live in `protected`;
+    // - `protected` is wrapped with `RequireAuth` so anonymous
+    // requests get `401 authentication required`.
     // When `auth.enabled = false`: nothing is mounted; the server
-    // keeps the pre-PR1 single-user trust boundary.
+    // keeps the single-user trust boundary.
     if state.config.auth.enabled {
         let auth_state = state
             .auth

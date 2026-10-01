@@ -3,15 +3,15 @@
 //! Everything here deals with the wire format of an SSE stream:
 //!
 //! - [`SseStream`] wraps the upstream byte stream with an idle timeout
-//!   and yields parsed [`SseEvent`]s (one event per blank-line split).
+//! and yields parsed [`SseEvent`]s (one event per blank-line split).
 //! - [`drain_upstream_round`] drives the loop, forwarding each event
-//!   to the client byte-for-byte while accumulating `tool_calls`
-//!   deltas internally.
+//! to the client byte-for-byte while accumulating `tool_calls`
+//! deltas internally.
 //! - [`ToolCallAccumulator`] merges SSE deltas into [`PendingToolCall`]
-//!   records keyed by the upstream `index` field.
+//! records keyed by the upstream `index` field.
 //! - [`sse_tool_call_event`] / [`sse_tool_result_event`] /
-//!   [`sse_error_event`] are the synthesised frames the tool loop
-//!   emits in addition to the verbatim upstream bytes.
+//! [`sse_error_event`] are the synthesised frames the tool loop
+//! emits in addition to the verbatim upstream bytes.
 
 use std::time::Duration;
 
