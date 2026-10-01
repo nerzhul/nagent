@@ -670,7 +670,7 @@ impl TtsEngine {
         encode_wav(&output)
     }
 
-/// Async wrapper around [`Self::synth_wav`] that runs the
+    /// Async wrapper around [`Self::synth_wav`] that runs the
     /// synthesis on the bounded blocking pool (plan R4a). Holds
     /// one permit from `synth_semaphore` for the duration of the
     /// call so a burst of `POST /v1/audio/speech` requests cannot
@@ -696,7 +696,8 @@ impl TtsEngine {
         // generic 500.
         nagent_support::cpu::run_bounded(self.synth_semaphore.clone(), move |_permit| {
             let r = engine.synth_wav(&text, voice.as_deref(), lang.as_deref(), speed);
-            r.map_err(|e| tts_error_to_kind(&e)).map_err(|kind| format!("{kind}"))
+            r.map_err(|e| tts_error_to_kind(&e))
+                .map_err(|kind| format!("{kind}"))
         })
         .await
         .map_err(|e| TtsError::Synth(format!("tts blocking pool join: {e}")))?

@@ -20,7 +20,8 @@ Before committing any change:
 
 - Ensure code is properly tested
 - run `cargo fmt`
-- run `cargo clippy` (if applicable)
+- run `cargo build --all-targets` (and `--all-features` when relevant) with **zero warnings** — warnings are treated as errors; do not introduce code that compiles with `warning:` output under any default feature set the touched code is built with. Fix the warning at its source rather than silencing it (`#[allow(...)]` is only acceptable when explicitly justified in a comment and approved during review).
+- run `cargo clippy` (if applicable) and resolve every reported lint
 - run `cargo audit`
 
 Commits must follow a strict format so the history stays readable and usable.

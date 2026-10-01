@@ -9,9 +9,10 @@
 
 use std::sync::Arc;
 
-use nagent_server::agents::{Agent, ServiceRegistry, UserContext};
+use nagent_agents::{Agent, ReadDocumentAgent, ServiceRegistry, UserContext};
+use nagent_server::agents::AgentRegistryNewtype;
 use nagent_server::config::AuthConfig;
-use nagent_server::documents::{DocumentStore, ReadDocumentAgent};
+use nagent_server::documents::DocumentStore;
 use serde_json::json;
 
 use uuid::Uuid;
@@ -90,7 +91,9 @@ async fn read_document_happy_path_returns_extracted_text() {
         .await
         .expect("insert must succeed");
 
-    let agent = ReadDocumentAgent::new(doc_store.clone(), None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     let ctx = ctx_with_session(session_id);
     let result = agent
         .invoke(&ctx, json!({ "name": doc_id.to_string() }))
@@ -109,7 +112,9 @@ async fn read_document_happy_path_returns_extracted_text() {
 async fn read_document_unknown_id_returns_invalid_arguments() {
     let (doc_store, _auth) = fresh_store().await;
     let session_id = Uuid::new_v4();
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     let ctx = ctx_with_session(session_id);
     let err: nagent_server::agents::AgentError = agent
         .invoke(&ctx, json!({ "name": Uuid::new_v4().to_string() }))
@@ -158,7 +163,9 @@ async fn read_document_other_session_scope_is_unknown() {
         .await
         .unwrap();
 
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     // Session B must NOT see session A's doc.
     let err = agent
         .invoke(
@@ -224,7 +231,9 @@ async fn read_document_file_missing_on_disk_returns_agent_failed() {
         .await
         .unwrap();
 
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     let err = agent
         .invoke(
             &ctx_with_session(session_id),
@@ -247,7 +256,9 @@ async fn read_document_file_missing_on_disk_returns_agent_failed() {
 #[tokio::test]
 async fn read_document_without_session_id_returns_invalid_arguments() {
     let (doc_store, _auth) = fresh_store().await;
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     let ctx = ctx_without_session();
     let err = agent
         .invoke(&ctx, json!({ "name": Uuid::new_v4().to_string() }))
@@ -329,7 +340,10 @@ async fn read_document_truncates_long_text() {
         )
         .await
         .unwrap();
-    let agent = ReadDocumentAgent::new(short_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        short_store,
+        None,
+    )));
     let result = agent
         .invoke(
             &ctx_with_session(session_id),
@@ -358,7 +372,9 @@ async fn read_document_invalid_page_range_is_rejected() {
     // implementation can trust the input.
     let (doc_store, _auth) = fresh_store().await;
     let session_id = Uuid::new_v4();
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     let err = agent
         .invoke(
             &ctx_with_session(session_id),
@@ -375,7 +391,9 @@ async fn read_document_invalid_page_range_is_rejected() {
 #[tokio::test]
 async fn read_document_rejects_malformed_uuid() {
     let (doc_store, _auth) = fresh_store().await;
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     let err = agent
         .invoke(
             &ctx_with_session(Uuid::new_v4()),
@@ -428,7 +446,9 @@ async fn read_document_blocks_cross_user_reads() {
         )
         .await
         .unwrap();
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     // user B tries to read user A's doc via the same session.
     let ctx = UserContext::for_chat_session(
         user_b,
@@ -522,7 +542,9 @@ async fn read_document_blocks_disk_path_escape() {
         .await
         .unwrap();
 
-    let agent = ReadDocumentAgent::new(doc_store, None);
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
     let ctx = UserContext::for_chat_session(
         user_id,
         ServiceRegistry::empty().into_arc(),

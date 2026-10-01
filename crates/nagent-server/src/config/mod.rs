@@ -44,8 +44,8 @@ pub use server::{CliArgs, Config, ConfigError};
 // canonical paths resolving unchanged for downstream users (lib,
 /// agents/*, llm/*, …).
 pub use agents::{
-    AgentConfig, DictionaryConfig, UnitConvertConfig, WeatherConfig, WebFetchConfig,
-    WikipediaConfig,
+    AgentConfig, DictionaryConfig, ReadDocumentConfig, StockConfig, UnitConvertConfig,
+    WeatherConfig, WebFetchConfig, WikipediaConfig,
 };
 pub use auth::{
     AuthBackendKind, AuthConfig, AuthCredentialsConfig, AuthDbConfig, AuthOidcConfig,

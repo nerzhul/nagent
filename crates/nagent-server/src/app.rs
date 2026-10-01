@@ -18,7 +18,6 @@ use stt_core::{default_worker_count, WhisperBackend, WorkerPool};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::agents::ServiceRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::config::{AuthBackendKind, Config};
 use crate::credentials::{CredentialResolver, CredentialsKey};
@@ -30,6 +29,7 @@ use crate::state::{
 use crate::stt::{result_router, session, watchdog};
 use crate::tts::TtsEngine;
 use crate::{agents, llm, tts};
+use nagent_agents::ServiceRegistry;
 
 /// Build the full application state from a resolved `Config`.
 ///
@@ -243,9 +243,8 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     let (stt_rate_limiter, _) = build_rate_limiters(&cfg);
 
     // ---- Agent registry ---------------------------------------------------
-    let agents = agents::AgentRegistry::from_config_with_documents(
+    let agents = agents::build_registry(
         &cfg.agents,
-        &cfg.documents,
         documents_state.as_ref().map(|d| d.store.clone()),
         chat_sessions_state.as_ref().map(|c| c.sessions.clone()),
     );

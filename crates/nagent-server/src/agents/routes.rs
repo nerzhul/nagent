@@ -20,7 +20,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use serde_json::{json, Value};
 
-use crate::agents::{AgentError, AgentRegistry};
+use crate::agents::{AgentError, AgentRegistry, AgentRegistryNewtype};
 use crate::llm::client::LlmError;
 use crate::state::ArcServices;
 
@@ -28,7 +28,7 @@ use crate::state::ArcServices;
 ///
 /// Returns an empty array when agents are disabled (so the browser
 /// can render the "no agents" hint without special-casing 404).
-pub async fn agents_list(State(agents): State<AgentRegistry>) -> Result<Response, LlmError> {
+pub async fn agents_list(State(agents): State<AgentRegistryNewtype>) -> Result<Response, LlmError> {
     let body = json!({ "data": agents.list() }).to_string();
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -49,7 +49,7 @@ pub async fn agents_list(State(agents): State<AgentRegistry>) -> Result<Response
 /// `ArcServices` (the newtype wrapper for `Arc<ServiceRegistry>`)
 /// so the per-user catalog is available for `UserContext`.
 pub async fn agent_invoke(
-    State(agents): State<AgentRegistry>,
+    State(agents): State<AgentRegistryNewtype>,
     State(services): State<ArcServices>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     Path(name): Path<String>,

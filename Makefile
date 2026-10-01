@@ -25,37 +25,37 @@ debug: ## cargo build --workspace
 .PHONY: run
 run: ## Run the server locally with the real Whisper backend on CPU, TTS, and chat agents (requires WHISPER_MODEL_PATH + espeak-ng for TTS).
 	cargo run -p nagent-server --release \
-	    --features real-backend,tts,web-agent,datetime-agent,weather-agent,stock-agent,calculate-agent,unit-convert-agent,wikipedia-agent,dictionary-agent,stt-core/whisper-rs-backend
+	    --features real-backend,tts,all-agents,stt-core/whisper-rs-backend
 
 .PHONY: run-vulkan
 run-vulkan: ## Run with the Vulkan GPU backend, TTS, and chat agents (requires libvulkan-dev + espeak-ng for TTS at build time).
 	cargo run -p nagent-server --release \
-	    --features real-backend,tts,web-agent,datetime-agent,weather-agent,stock-agent,calculate-agent,unit-convert-agent,wikipedia-agent,dictionary-agent,stt-core/whisper-rs-vulkan
+	    --features real-backend,tts,all-agents,stt-core/whisper-rs-vulkan
 
 .PHONY: run-hipblas
 run-hipblas: ## Run with the HIP/ROCm GPU backend, TTS, and chat agents (requires ROCm toolchain + espeak-ng for TTS at build time).
 	cargo run -p nagent-server --release \
-	    --features real-backend,tts,web-agent,datetime-agent,weather-agent,stock-agent,calculate-agent,unit-convert-agent,wikipedia-agent,dictionary-agent,stt-core/whisper-rs-hipblas
+	    --features real-backend,tts,all-agents,stt-core/whisper-rs-hipblas
 
 .PHONY: run-cuda
 run-cuda: ## Run with the CUDA GPU backend, TTS, and chat agents (requires CUDA toolkit + espeak-ng for TTS at build time).
 	cargo run -p nagent-server --release \
-	    --features real-backend,tts,web-agent,datetime-agent,weather-agent,stock-agent,calculate-agent,unit-convert-agent,wikipedia-agent,dictionary-agent,stt-core/whisper-rs-cuda
+	    --features real-backend,tts,all-agents,stt-core/whisper-rs-cuda
 
 .PHONY: run-mock
 run-mock: ## Run the server locally with the in-process mock backend, TTS, and chat agents (no Whisper model needed; espeak-ng still required for TTS).
 	cargo run -p nagent-server --release \
-	    --features tts,web-agent,datetime-agent,weather-agent,stock-agent,calculate-agent,unit-convert-agent,wikipedia-agent,dictionary-agent
+	    --features tts,all-agents
 
 .PHONY: run-llm
 run-llm: ## Run with the real Whisper backend on CPU, the LLM proxy, TTS, and chat agents (LLM_ENABLED=true, TTS_ENABLED=true).
 	cargo run -p nagent-server --release \
-	    --features real-backend,tts,web-agent,datetime-agent,weather-agent,stock-agent,calculate-agent,unit-convert-agent,wikipedia-agent,dictionary-agent,stt-core/whisper-rs-backend
+	    --features real-backend,tts,all-agents,stt-core/whisper-rs-backend
 
 .PHONY: run-tts
 run-tts: ## Run with the real Whisper backend on CPU, TTS, and chat agents but no LLM proxy (TTS_ENABLED=true, LLM_ENABLED=false).
 	cargo run -p nagent-server --release \
-	    --features real-backend,tts,web-agent,datetime-agent,weather-agent,stock-agent,calculate-agent,unit-convert-agent,wikipedia-agent,dictionary-agent,stt-core/whisper-rs-backend
+	    --features real-backend,tts,all-agents,stt-core/whisper-rs-backend
 
 .PHONY: smoke-llm
 smoke-llm: ## Smoke-test the LLM proxy: POST a single prompt and check the response stream contains `data:`.

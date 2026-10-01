@@ -244,6 +244,11 @@ pub struct TomlAgentConfig {
     pub wikipedia: Option<TomlWikipediaConfig>,
     #[serde(default)]
     pub dictionary: Option<TomlDictionaryConfig>,
+    #[serde(default)]
+    pub stock: Option<TomlStockConfig>,
+    #[serde(default)]
+    pub read_document: Option<TomlReadDocumentConfig>,
+    pub read_document_enabled: Option<bool>,
 }
 
 /// Sandbox and transfer knobs for the built-in `web_fetch` tool.
@@ -290,6 +295,23 @@ pub struct TomlWikipediaConfig {
 pub struct TomlDictionaryConfig {
     pub timeout_ms: Option<u64>,
     pub base_url: Option<String>,
+}
+
+/// Knobs for the `get_stock` tool (anonymous; no API key). Mirrors
+/// [`crate::config::StockConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlStockConfig {
+    pub timeout_ms: Option<u64>,
+}
+
+/// Knobs for the `read_document` tool. Mirrors
+/// [`crate::config::ReadDocumentConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlReadDocumentConfig {
+    pub timeout_ms: Option<u64>,
+    pub max_extracted_chars: Option<usize>,
 }
 
 /// WebSocket frame-limit knobs. Mirrors [`crate::config::LimitsConfig`].
@@ -698,6 +720,12 @@ fn merge_toml_agents(
             unit_convert: merge_toml_unit_convert(e.unit_convert.as_ref(), l.unit_convert.as_ref()),
             wikipedia: merge_toml_wikipedia(e.wikipedia.as_ref(), l.wikipedia.as_ref()),
             dictionary: merge_toml_dictionary(e.dictionary.as_ref(), l.dictionary.as_ref()),
+            stock: merge_toml_stock(e.stock.as_ref(), l.stock.as_ref()),
+            read_document: merge_toml_read_document(
+                e.read_document.as_ref(),
+                l.read_document.as_ref(),
+            ),
+            read_document_enabled: l.read_document_enabled.or(e.read_document_enabled),
         }),
     }
 }
@@ -776,6 +804,35 @@ fn merge_toml_dictionary(
         (Some(e), Some(l)) => Some(TomlDictionaryConfig {
             timeout_ms: l.timeout_ms.or(e.timeout_ms),
             base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
+        }),
+    }
+}
+
+fn merge_toml_stock(
+    earlier: Option<&TomlStockConfig>,
+    later: Option<&TomlStockConfig>,
+) -> Option<TomlStockConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlStockConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+        }),
+    }
+}
+
+fn merge_toml_read_document(
+    earlier: Option<&TomlReadDocumentConfig>,
+    later: Option<&TomlReadDocumentConfig>,
+) -> Option<TomlReadDocumentConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlReadDocumentConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            max_extracted_chars: l.max_extracted_chars.or(e.max_extracted_chars),
         }),
     }
 }

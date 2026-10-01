@@ -5,19 +5,62 @@ edition.workspace = true
 license.workspace = true
 description = "Server-invoked chat agents (trait, registry, service catalogue)."
 
+[features]
+# Default empty: no agent compiled in. The server / Makefile picks
+# the subset it wants. Plan 4.C: one feature per agent so a slim
+# build drops the heavy machinery (`meval`, `chrono-tz`, the egress
+# client) the build does not need.
+default = []
+datetime-agent = ["dep:chrono-tz"]
+weather-agent = []
+stock-agent = []
+calculate-agent = ["dep:meval"]
+unit-convert-agent = []
+wikipedia-agent = []
+dictionary-agent = []
+web-agent = []
+read-document-agent = []
+# Convenience meta-feature that turns on every agent. The Makefile
+# targets list it once so an operator does not need to enumerate
+# the whole set in CI.
+all-agents = [
+    "datetime-agent",
+    "weather-agent",
+    "stock-agent",
+    "calculate-agent",
+    "unit-convert-agent",
+    "wikipedia-agent",
+    "dictionary-agent",
+    "web-agent",
+    "read-document-agent",
+]
+
 [dependencies]
 nagent-support = { path = "../nagent-support" }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 serde = { workspace = true }
+serde_json = "1"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 secrecy = "0.10"
-serde_json = "1"
+# The agents that don't need reqwest still compile against it
+# through the egress crate, which is unconditional. So the
+# per-agent features only gate the heavy / specialised ones
+# (`meval`, `chrono-tz`). `reqwest` itself stays unconditional so
+# the `egress` module + the agent files that mention `reqwest` in
+# doc-tests keep compiling.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 url = "2"
 bytes = "1"
 futures-util = "0.3"
 ipnet = "2"
 tracing = { workspace = true }
+
+# Per-agent conditional dependencies. Each `dep:` is feature-gated so
+# the heavy / specialised crates (`meval`, `chrono-tz`) are not
+# linked into a slim build.
+chrono = { version = "0.4", features = ["clock", "serde"] }
+chrono-tz = { version = "0.10", optional = true, features = ["serde"] }
+meval = { version = "0.2", optional = true }

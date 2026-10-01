@@ -11,14 +11,19 @@ default = []
 # Real whisper-rs backend; off → in-process mock (tests, CI).
 real-backend = ["stt-core/whisper-rs-backend"]
 # Per-agent gates; off → module not compiled, agent not registered.
-web-agent = []
-datetime-agent = ["dep:chrono-tz"]
-weather-agent = []
-stock-agent = []
-calculate-agent = ["dep:meval"]
-unit-convert-agent = []
-wikipedia-agent = []
-dictionary-agent = []
+# Plan 4.C: forwarded 1:1 to `nagent-agents` so the operator
+# toggles the agent on the server crate only.
+web-agent = ["nagent-agents/web-agent"]
+datetime-agent = ["nagent-agents/datetime-agent", "dep:chrono-tz"]
+weather-agent = ["nagent-agents/weather-agent"]
+stock-agent = ["nagent-agents/stock-agent"]
+calculate-agent = ["nagent-agents/calculate-agent", "dep:meval"]
+unit-convert-agent = ["nagent-agents/unit-convert-agent"]
+wikipedia-agent = ["nagent-agents/wikipedia-agent"]
+dictionary-agent = ["nagent-agents/dictionary-agent"]
+read-document-agent = ["nagent-agents/read-document-agent"]
+# Convenience meta-feature: every agent compiled in.
+all-agents = ["nagent-agents/all-agents"]
 # Piper TTS; pulls piper-rs + ort + espeak-ng FFI.
 tts = ["dep:piper-rs"]
 # Integration-test AppState builder (crate::testing).
@@ -97,7 +102,7 @@ ipnet = "2"
 # compiles the `Db::raw_execute` / `raw_query_*` /
 # `raw_insert_one_str` helpers the integration tests use to
 # assert on schema shape and audit rows (plan S10).
-nagent-server = { path = ".", features = ["test-util"] }
+nagent-server = { path = ".", features = ["test-util", "all-agents"] }
 nagent-db      = { path = "../nagent-db", features = ["test-util"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures = "0.3"

@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tracing::{debug, warn};
 
-use crate::agents::AgentRegistry;
+use crate::agents::{AgentRegistry, AgentRegistryNewtype};
 use crate::config::LlmConfig;
 use crate::llm::client::{parse_chat_session_header, LlmError};
 use crate::llm::privacy::{strip_user_location_if_disabled, strip_user_timezone_if_disabled};
@@ -261,11 +261,13 @@ pub async fn chat_completions(
     let user_id = auth_user
         .map(|axum::Extension(u)| u.id)
         .unwrap_or_else(uuid::Uuid::nil);
-    // Security plan #10: pass the operator-configured web_fetch
-    // allowlist down to the tool loop so the read_document →
-    // web_fetch check can decide whether the URL host is already
-    // pre-authorised.
-    let web_fetch_allowlist = agents_cfg.web_fetch.allowlist.clone();
+    // Plan 4.C: the tool loop is now generic over
+    // `Agent::requires_confirmation`. The cross-agent rule (e.g.
+    // "`read_document` → `web_fetch` needs confirmation") lives
+    // entirely in the `web_fetch` agent's own impl + reads
+    // `cfg.web_fetch.allowlist` directly via its captured
+    // `WebFetchConfig`. No allowlist needs to be threaded through
+    // the tool loop here.
     tokio::spawn(async move {
         run_tool_loop(
             http,
@@ -279,7 +281,6 @@ pub async fn chat_completions(
             first_stream,
             chat_session_id,
             user_id,
-            web_fetch_allowlist,
         )
         .await;
     });
@@ -423,7 +424,7 @@ pub async fn models_list(State(llm_state): State<ArcLlmState>) -> Result<Respons
 ///
 /// Returns an empty array when agents are disabled (so the browser
 /// can render the "no agents" hint without special-casing 404).
-pub async fn agents_list(State(agents): State<AgentRegistry>) -> Result<Response, LlmError> {
+pub async fn agents_list(State(agents): State<AgentRegistryNewtype>) -> Result<Response, LlmError> {
     crate::agents::routes::agents_list(State(agents)).await
 }
 
@@ -431,7 +432,7 @@ pub async fn agents_list(State(agents): State<AgentRegistry>) -> Result<Response
 /// tests and `curl`. The chat UI goes through `/v1/chat/completions`
 /// instead so the SSE stream stays consistent.
 pub async fn agent_invoke(
-    State(agents): State<AgentRegistry>,
+    State(agents): State<AgentRegistryNewtype>,
     State(services): State<ArcServices>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     Path(name): Path<String>,

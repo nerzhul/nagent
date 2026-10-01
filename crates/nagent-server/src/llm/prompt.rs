@@ -50,7 +50,7 @@ pub const USER_INTEGRATIONS_MARKER: &str = "The user has the following integrati
 /// human-readable names come from the static `ServiceRegistry`.
 pub fn build_integrations_block(
     configured: &[String],
-    registry: &crate::agents::ServiceRegistry,
+    registry: &nagent_agents::ServiceRegistry,
 ) -> Option<String> {
     if configured.is_empty() {
         return None;

@@ -34,7 +34,6 @@ use axum::extract::FromRef;
 use stt_core::{PoolDispatch, WhisperBackend};
 use tokio::sync::Semaphore;
 
-use crate::agents::ServiceRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::auth::{OidcState, PasskeyState};
 use crate::config::{AuthConfig, Config};
@@ -42,6 +41,7 @@ use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::rate_limit::RateLimiter;
 use crate::stt::session::SessionMap;
 use crate::{agents, llm, tts};
+use nagent_agents::ServiceRegistry;
 
 /// STT pipeline sub-state. Always present (the WebSocket
 /// `/ws` route is registered unconditionally).
@@ -312,12 +312,14 @@ impl FromRef<Arc<AppState>> for TtsState {
     }
 }
 
-impl FromRef<Arc<AppState>> for agents::AgentRegistry {
+impl FromRef<Arc<AppState>> for agents::AgentRegistryNewtype {
     fn from_ref(state: &Arc<AppState>) -> Self {
-        state
-            .agents
-            .clone()
-            .expect("agents handler reached without an AgentRegistry on AppState")
+        agents::AgentRegistryNewtype(
+            state
+                .agents
+                .clone()
+                .expect("agents handler reached without an AgentRegistry on AppState"),
+        )
     }
 }
 
@@ -467,7 +469,7 @@ impl FromRef<Arc<AppState>> for OptArcAgentRegistry {
 /// `Arc<ServiceRegistry>` wrapper. The agents HTTP routes build a
 /// `UserContext` with this catalog so per-user agents (currently
 /// `read_document`) can resolve configured-only integrations.
-pub struct ArcServices(pub Arc<agents::ServiceRegistry>);
+pub struct ArcServices(pub Arc<nagent_agents::ServiceRegistry>);
 
 impl Clone for ArcServices {
     fn clone(&self) -> Self {
@@ -484,8 +486,8 @@ impl std::fmt::Debug for ArcServices {
 }
 
 impl std::ops::Deref for ArcServices {
-    type Target = agents::ServiceRegistry;
-    fn deref(&self) -> &agents::ServiceRegistry {
+    type Target = nagent_agents::ServiceRegistry;
+    fn deref(&self) -> &nagent_agents::ServiceRegistry {
         &self.0
     }
 }
@@ -503,7 +505,7 @@ impl FromRef<Arc<AppState>> for ArcServices {
             .auth
             .as_ref()
             .map(|a| a.services.clone())
-            .unwrap_or_else(|| agents::ServiceRegistry::empty().into_arc());
+            .unwrap_or_else(|| nagent_agents::ServiceRegistry::empty().into_arc());
         ArcServices(services)
     }
 }

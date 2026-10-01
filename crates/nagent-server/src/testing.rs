@@ -44,7 +44,7 @@ use std::time::Duration;
 use stt_core::{MockBackend, PoolDispatch, WhisperBackend};
 use tokio::sync::mpsc;
 
-use crate::agents::{AgentRegistry, ServiceRegistry};
+use crate::agents::AgentRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::config::{
     AgentConfig, AuthConfig, Config, DocumentsConfig, LimitsConfig, LlmAuthMode, LlmConfig,
@@ -58,6 +58,7 @@ use crate::state::{
 };
 use crate::stt::session::SessionMap;
 use crate::tts::TtsEngine;
+use nagent_agents::ServiceRegistry;
 
 /// Builder for an integration-test [`AppState`].
 ///

@@ -147,6 +147,47 @@ impl CredentialResolver {
         }
     }
 
+    /// Lower-level lookup that bypasses the per-request cache. Used
+    /// by the server-side `SecretSource` impl in `agents::mod`
+    /// because `UserContext` already owns its own per-request cache.
+    pub async fn get_raw(
+        &self,
+        user_id: Uuid,
+        service: &str,
+        field: &str,
+    ) -> Result<Option<secrecy::SecretString>, CredentialError> {
+        let row = self
+            .db
+            .admin()
+            .credentials
+            .fetch(user_id, service, field)
+            .await?;
+        let Some(sealed) = row else {
+            self.audit(user_id, "credential_missing", service);
+            return Err(CredentialError::Missing {
+                service: service.to_string(),
+                field: field.to_string(),
+            });
+        };
+        let sealed = EncryptedSecret {
+            nonce: sealed.nonce,
+            ciphertext: sealed.ciphertext,
+        };
+        match decrypt(&self.key, &sealed) {
+            Ok(plaintext) => {
+                self.audit(user_id, "credential_access", service);
+                Ok(Some(plaintext))
+            }
+            Err(CryptoError::DecryptFailed) => {
+                self.audit(user_id, "credential_decrypt_failed", service);
+                Err(CredentialError::DecryptFailed {
+                    service: service.to_string(),
+                    field: field.to_string(),
+                })
+            }
+        }
+    }
+
     fn audit(&self, user_id: Uuid, kind: &str, target_service: &str) {
         self.db.admin().events.record(NewAuthEvent {
             user_id: Some(user_id),

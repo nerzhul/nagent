@@ -25,9 +25,9 @@ use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::agents::ServiceRegistry;
 use crate::auth::error::{require_auth_store, AuthError};
 use crate::auth::middleware::check_csrf;
+use nagent_agents::ServiceRegistry;
 // Plan 4.A: the `AuthStore` shim is on its way out. The
 // `CredentialState` exposes the shared `nagent_db::Db` directly
 // (its `store: nagent_db::Db` field) and route handlers reach
@@ -75,7 +75,7 @@ pub fn build_protected_credentials_router(
                 .auth
                 .as_ref()
                 .map(|a| a.services.clone())
-                .unwrap_or_else(|| crate::agents::ServiceRegistry::empty().into_arc()),
+                .unwrap_or_else(|| nagent_agents::ServiceRegistry::empty().into_arc()),
             // The resolver owns the `CredentialsKey`; reach in via the
             // AppState's separate stash because the routes need to
             // encrypt on PUT (the resolver only decrypts).

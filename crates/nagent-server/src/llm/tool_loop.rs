@@ -11,8 +11,11 @@
 //! 4. When the LLM emits a final `finish_reason: "stop"` (no tool
 //! calls), close the channel with `data: [DONE]\n\n`.
 //!
-//! Also owns the security plan #10 helper that enforces the
-//! "`read_document` → `web_fetch` requires user confirmation" rule.
+//! Plan 4.C: the cross-agent confirmation rule (e.g.
+//! "`read_document` → `web_fetch` requires user confirmation")
+//! lives entirely in the agent's own
+//! [`crate::agents::Agent::requires_confirmation`] impl; this
+//! module never has to know about a specific agent by name.
 
 use std::time::Duration;
 
@@ -62,19 +65,11 @@ pub(crate) async fn run_tool_loop(
     first_stream: UpstreamByteStream,
     chat_session_id: Option<uuid::Uuid>,
     user_id: uuid::Uuid,
-    web_fetch_allowlist: Vec<String>,
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
     let mut round: u32 = 0;
     let mut current_stream: Option<UpstreamByteStream> = Some(first_stream);
-    // Security plan #10: track the set of agents invoked earlier
-    // in this chat-completions turn so we can enforce the
-    // "read_document → web_fetch requires user confirmation"
-    // rule. The set resets every chat-completions call (each
-    // call is a separate user message → separate "turn").
-    let mut agents_invoked_this_turn: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
     info!("tool loop: starting (max_rounds={max_rounds})");
     loop {
         round += 1;
@@ -236,49 +231,56 @@ pub(crate) async fn run_tool_loop(
                 .await;
 
             let args_value: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
-            // Security plan #10: enforce "read_document → web_fetch
-            // requires user confirmation" at the tool-dispatch
-            // site. The LLM cannot bypass this by ignoring the
-            // system prompt — when the predicate fires, we replace
-            // the tool result with an explanatory error so the
-            // model reformulates ("please confirm") and the user
-            // sees the request in chat. The next turn restarts with
-            // `agents_invoked_this_turn` empty, so a user-confirmed
-            // URL fetches normally.
-            if name == "web_fetch"
-                && agents_invoked_this_turn.contains("read_document")
-                && web_fetch_needs_confirmation(&args_value, &web_fetch_allowlist)
+            // Security plan #10 (now generic via
+            // `Agent::requires_confirmation`, plan 4.C). The tool
+            // loop never knows a specific agent by name — the rule
+            // lives in the agent's `requires_confirmation` impl,
+            // which gets to inspect `ctx.invoked_this_turn` to
+            // enforce cross-agent invariants (e.g. `web_fetch` after
+            // `read_document`). When the predicate fires, we
+            // replace the tool result with the agent's own reason
+            // so the model reformulates ("please confirm") and the
+            // user sees the request in chat. The next turn
+            // restarts with `ctx.invoked_this_turn` empty so a
+            // user-confirmed URL fetches normally.
+            if let Some(decision) =
+                agents
+                    .get(&name)
+                    .and_then(|agent| -> Option<nagent_agents::ConfirmationDecision> {
+                        let services = nagent_agents::ServiceRegistry::empty().into_arc();
+                        let ctx = match chat_session_id {
+                            Some(sid) => {
+                                UserContext::for_chat_session(user_id, services, None, sid)
+                            }
+                            None => UserContext::for_tests(user_id, services),
+                        };
+                        Some(agent.requires_confirmation(&ctx, &args_value))
+                    })
             {
-                let payload = "[error] `web_fetch` was called for a URL whose host is not in \
-                     WEB_FETCH_ALLOWLIST, after `read_document` was invoked earlier in \
-                     this turn. This is the indirect prompt-injection rule: the \
-                     operator has not pre-authorised this host, and the user has not \
-                     explicitly confirmed the fetch in chat. Ask the user to confirm \
-                     by typing the URL in plain text and rephrasing the request; once \
-                     they confirm, call web_fetch again on the next turn.";
-                warn!(
-                    agent = %name,
-                    id = %tc.id,
-                    url = %args_value.get("url").and_then(|v| v.as_str()).unwrap_or("?"),
-                    "tool loop: refusing web_fetch after read_document without allowlist match"
-                );
-                let _ = tx
-                    .send(Ok(Bytes::from(sse_tool_result_event(
-                        &tc.id,
-                        &name,
-                        false,
-                        // clippy: explicit `&` for clarity; `sse_tool_result_event`
-                        // takes `&str` and String auto-derefs.
-                        #[allow(clippy::needless_borrow)]
-                        &payload,
-                    ))))
-                    .await;
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": payload,
-                }));
-                continue;
+                if let nagent_agents::ConfirmationDecision::NeedsConfirmation { reason } = decision
+                {
+                    warn!(
+                        agent = %name,
+                        id = %tc.id,
+                        "tool loop: refusing {} without confirmation",
+                        name
+                    );
+                    let _ = tx
+                        .send(Ok(Bytes::from(sse_tool_result_event(
+                            &tc.id,
+                            &name,
+                            false,
+                            #[allow(clippy::needless_borrow)]
+                            &reason,
+                        ))))
+                        .await;
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": reason,
+                    }));
+                    continue;
+                }
             }
             let result = match agents.get(&name) {
                 Some(agent) => {
@@ -307,11 +309,16 @@ pub(crate) async fn run_tool_loop(
                     // Per-user agents (currently `read_document`)
                     // scope every DB query by `(user_id, session_id)`
                     // so a user cannot read another user's docs.
-                    let services = crate::agents::ServiceRegistry::empty().into_arc();
-                    let ctx = match chat_session_id {
+                    let services = nagent_agents::ServiceRegistry::empty().into_arc();
+                    let mut ctx = match chat_session_id {
                         Some(sid) => UserContext::for_chat_session(user_id, services, None, sid),
                         None => UserContext::for_tests(user_id, services),
                     };
+                    // Plan 4.C: record the invocation so the next
+                    // tool call in this turn can ask the agent's
+                    // `requires_confirmation` impl whether to gate
+                    // (e.g. `web_fetch` after `read_document`).
+                    ctx.record_invocation(&name);
                     match agent.invoke(&ctx, args_value).await {
                         Ok(s) => Ok(s),
                         Err(e) => Err(e.to_string()),
@@ -336,182 +343,15 @@ pub(crate) async fn run_tool_loop(
                 "tool_call_id": tc.id,
                 "content": payload,
             }));
-            // Security plan #10: record this successful agent
-            // invocation so subsequent web_fetch calls can be
-            // checked against the read_document rule. Skipped on
-            // the explicit-deny path above (we never ran the
-            // agent, so it would be wrong to mark it as invoked).
-            if ok {
-                agents_invoked_this_turn.insert(name.clone());
-            }
         }
     }
 }
 
-/// Security plan #10 helper. Returns `true` when `host` matches an
-/// entry in `allowlist` (suffix match for `*.foo` entries, exact
-/// match otherwise; bare `*` matches every host). Mirrors
-/// `agents::web_fetch::host_matches_allowlist` but lives here so
-/// the LLM tool loop does not need a cross-module import (the
-/// web_fetch module keeps the same logic private for its own
-/// invoke path).
-fn host_matches_allowlist_simple(host: &str, allowlist: &[String]) -> bool {
-    let host_lc = host.to_ascii_lowercase();
-    for entry in allowlist {
-        let entry = entry.to_ascii_lowercase();
-        if entry == "*" {
-            return true;
-        }
-        if let Some(suffix) = entry.strip_prefix("*.") {
-            if host_lc == suffix || host_lc.ends_with(&format!(".{suffix}")) {
-                return true;
-            }
-        } else if host_lc == entry {
-            return true;
-        }
-    }
-    false
-}
-
-/// Security plan #10 helper. Decides whether a `web_fetch` call
-/// needs explicit user confirmation based on (a) the
-/// `WEB_FETCH_REQUIRE_CONFIRMATION` escape hatch and (b) whether
-/// the URL's host is already in the operator-configured
-/// `WEB_FETCH_ALLOWLIST`.
-///
-/// Returns `true` when the fetch should be refused (i.e. the LLM
-/// must ask the user to confirm before re-invoking). `true` is
-/// the conservative answer — any malformed URL, unknown scheme,
-/// or empty host defaults to "needs confirmation" because we
-/// cannot prove the host is already pre-authorised.
-fn web_fetch_needs_confirmation(args: &Value, allowlist: &[String]) -> bool {
-    // Escape hatch for self-hosted single-user deployments
-    // where the operator trusts the model entirely.
-    if let Ok(v) = std::env::var("WEB_FETCH_REQUIRE_CONFIRMATION") {
-        if v == "false" || v == "0" {
-            return false;
-        }
-    }
-    let url = match args.get("url").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return true,
-    };
-    let parsed = match url::Url::parse(url) {
-        Ok(u) => u,
-        Err(_) => return true,
-    };
-    // Only web URLs (http / https) are eligible for the
-    // allowlist shortcut — anything else (file://, data:, ftp)
-    // was already rejected by the web_fetch agent itself, but
-    // refuse it here too as defence in depth.
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return true;
-    }
-    let host = match parsed.host_str() {
-        Some(h) if !h.is_empty() => h.to_ascii_lowercase(),
-        _ => return true,
-    };
-    !host_matches_allowlist_simple(&host, allowlist)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn host_matches_allowlist_simple_bare_star() {
-        assert!(host_matches_allowlist_simple(
-            "anywhere.example",
-            &["*".into()]
-        ));
-        assert!(host_matches_allowlist_simple("127.0.0.1", &["*".into()]));
-    }
-
-    #[test]
-    fn host_matches_allowlist_simple_exact() {
-        let allow = vec!["example.com".into()];
-        assert!(host_matches_allowlist_simple("example.com", &allow));
-        assert!(!host_matches_allowlist_simple("foo.example.com", &allow));
-        assert!(!host_matches_allowlist_simple("evil.com", &allow));
-    }
-
-    #[test]
-    fn host_matches_allowlist_simple_wildcard_suffix() {
-        let allow = vec!["*.wikipedia.org".into()];
-        assert!(host_matches_allowlist_simple("wikipedia.org", &allow));
-        assert!(host_matches_allowlist_simple("en.wikipedia.org", &allow));
-        assert!(host_matches_allowlist_simple("a.b.wikipedia.org", &allow));
-        assert!(!host_matches_allowlist_simple("wikipedia.com", &allow));
-        assert!(!host_matches_allowlist_simple("evil.org", &allow));
-    }
-
-    #[test]
-    fn host_matches_allowlist_simple_is_case_insensitive() {
-        let allow = vec!["Example.COM".into()];
-        assert!(host_matches_allowlist_simple("EXAMPLE.com", &allow));
-        assert!(host_matches_allowlist_simple("example.com", &allow));
-    }
-
-    #[test]
-    fn web_fetch_needs_confirmation_no_allowlist() {
-        // Empty allowlist → every URL needs confirmation.
-        let args = json!({"url": "https://example.com/x"});
-        assert!(web_fetch_needs_confirmation(&args, &[]));
-    }
-
-    #[test]
-    fn web_fetch_needs_confirmation_match_in_allowlist() {
-        // Allowlist contains the host → no confirmation needed.
-        let allow = vec!["*.wikipedia.org".into()];
-        let args = json!({"url": "https://en.wikipedia.org/wiki/Foo"});
-        assert!(!web_fetch_needs_confirmation(&args, &allow));
-    }
-
-    #[test]
-    fn web_fetch_needs_confirmation_miss_in_allowlist() {
-        // Allowlist does NOT contain the host → confirmation needed.
-        let allow = vec!["*.wikipedia.org".into()];
-        let args = json!({"url": "https://attacker.example/?d=x"});
-        assert!(web_fetch_needs_confirmation(&args, &allow));
-    }
-
-    #[test]
-    fn web_fetch_needs_confirmation_malformed_url_is_conservative() {
-        // Any malformed URL defaults to "needs confirmation".
-        let args = json!({"url": "not-a-url"});
-        assert!(web_fetch_needs_confirmation(&args, &[]));
-        let args = json!({"url": ""});
-        assert!(web_fetch_needs_confirmation(&args, &[]));
-    }
-
-    #[test]
-    fn web_fetch_needs_confirmation_non_http_scheme_is_conservative() {
-        let allow = vec!["*".into()];
-        let args = json!({"url": "file:///etc/passwd"});
-        assert!(web_fetch_needs_confirmation(&args, &allow));
-    }
-
-    #[test]
-    fn web_fetch_needs_confirmation_missing_url_is_conservative() {
-        let args = json!({});
-        assert!(web_fetch_needs_confirmation(&args, &[]));
-    }
-
-    #[test]
-    fn web_fetch_needs_confirmation_escape_hatch_disables_check() {
-        // WEB_FETCH_REQUIRE_CONFIRMATION=false → always allow,
-        // even for untrusted URLs. Operators opt out explicitly
-        // via the env var.
-        // SAFETY: env-mutating test, unique var name.
-        unsafe {
-            std::env::set_var("WEB_FETCH_REQUIRE_CONFIRMATION", "false");
-        }
-        let args = json!({"url": "https://attacker.example/?d=x"});
-        let allow = vec!["*.wikipedia.org".into()];
-        assert!(!web_fetch_needs_confirmation(&args, &allow));
-        unsafe {
-            std::env::remove_var("WEB_FETCH_REQUIRE_CONFIRMATION");
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// The "needs confirmation" logic + the allowlist host matcher used
+// to live here as private helpers; both moved into
+// `nagent-agents::agents::web_fetch::WebFetchAgent::requires_confirmation`
+// during plan 4.C so the tool loop is generic and does not need to
+// know any agent by name. The unit tests for those helpers are now
+// colocated with the agent impl (see `crates/nagent-agents/src/agents/
+// web_fetch.rs`).

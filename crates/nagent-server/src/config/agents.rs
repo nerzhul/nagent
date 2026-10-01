@@ -41,6 +41,17 @@ pub struct AgentConfig {
     /// Knobs for the `dictionary` agent (no API key — anonymous
     /// Free Dictionary API).
     pub dictionary: DictionaryConfig,
+    /// Knobs for the `get_stock` agent (no API key — anonymous
+    /// Yahoo Finance fallback).
+    pub stock: StockConfig,
+    /// Knobs for the `read_document` agent (server-bound doc
+    /// access via the `DocumentSource` trait).
+    pub read_document: ReadDocumentConfig,
+    /// Whether the `read_document` agent is wired in. Mirrors the
+    /// historical `from_config_with_documents` guard so enabling
+    /// docs alone (without a registered document store) does not
+    /// silently drop the agent.
+    pub read_document_enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -53,6 +64,9 @@ impl Default for AgentConfig {
             unit_convert: UnitConvertConfig::default(),
             wikipedia: WikipediaConfig::default(),
             dictionary: DictionaryConfig::default(),
+            stock: StockConfig::default(),
+            read_document: ReadDocumentConfig::default(),
+            read_document_enabled: false,
         }
     }
 }
@@ -80,6 +94,14 @@ impl AgentConfig {
             unit_convert: UnitConvertConfig::from_env_with_toml(toml.unit_convert.as_ref())?,
             wikipedia: WikipediaConfig::from_env_with_toml(toml.wikipedia.as_ref())?,
             dictionary: DictionaryConfig::from_env_with_toml(toml.dictionary.as_ref())?,
+            stock: StockConfig::from_env_with_toml(toml.stock.as_ref())?,
+            read_document: ReadDocumentConfig::from_env_with_toml(toml.read_document.as_ref())?,
+            read_document_enabled: resolve_primitive(
+                env_opt("READ_DOCUMENT_AGENT_ENABLED").as_deref(),
+                toml.read_document_enabled,
+                defaults.read_document_enabled,
+                "READ_DOCUMENT_AGENT_ENABLED",
+            )?,
         })
     }
 }
@@ -341,6 +363,80 @@ impl DictionaryConfig {
                 toml.base_url.as_deref(),
             )
             .unwrap_or_else(|| defaults.base_url.clone()),
+        })
+    }
+}
+
+/// Knobs for the `get_stock` agent. No external API key — anonymous
+/// Yahoo Finance fallback.
+#[derive(Debug, Clone)]
+pub struct StockConfig {
+    /// Per-request timeout in milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for StockConfig {
+    fn default() -> Self {
+        Self { timeout_ms: 8_000 }
+    }
+}
+
+impl StockConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlStockConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("STOCK_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "STOCK_TIMEOUT_MS",
+            )?,
+        })
+    }
+}
+
+/// Knobs for the `read_document` agent (server-bound doc access via
+/// the `DocumentSource` trait).
+#[derive(Debug, Clone)]
+pub struct ReadDocumentConfig {
+    /// Per-request timeout in milliseconds for the underlying
+    /// document fetch.
+    pub timeout_ms: u64,
+    /// Maximum characters the agent returns to the LLM per call.
+    pub max_extracted_chars: usize,
+}
+
+impl Default for ReadDocumentConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 5_000,
+            max_extracted_chars: 100_000,
+        }
+    }
+}
+
+impl ReadDocumentConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlReadDocumentConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("READ_DOCUMENT_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "READ_DOCUMENT_TIMEOUT_MS",
+            )?,
+            max_extracted_chars: resolve_primitive(
+                env_opt("READ_DOCUMENT_MAX_CHARS").as_deref(),
+                toml.max_extracted_chars,
+                defaults.max_extracted_chars,
+                "READ_DOCUMENT_MAX_CHARS",
+            )?,
         })
     }
 }

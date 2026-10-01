@@ -467,6 +467,7 @@ checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
 dependencies = [
  "chrono",
  "phf",
+ "serde",
 ]
 
 [[package]]
@@ -2126,9 +2127,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
+ "chrono-tz",
  "dashmap",
  "futures-util",
  "ipnet",
+ "meval",
  "nagent-support",
  "reqwest",
  "secrecy",

@@ -41,7 +41,9 @@
 //! shared DB handle so routes / CLI / agent can reach per-user
 //! repositories without an intermediate facade.
 
-pub mod agent;
+// `read_document` agent now lives in `nagent-agents` (plan 4.C).
+// The server-side glue that implements `DocumentSource` on top of
+// `DocumentStore` + `ChatSessions` is in `crate::agents::mod`.
 pub mod db;
 pub mod extract;
 pub mod purge;
@@ -173,4 +175,8 @@ pub use storage::{path_for_uuid, DiskLayout, DEFAULT_EXTENSION};
 
 /// Re-export so the integration tests can wire the agent without
 /// reaching into the `agent` submodule.
-pub use agent::ReadDocumentAgent;
+// `ReadDocumentAgent` lives in `nagent-agents` (plan 4.C). Re-export
+// here so any code that previously imported it via `crate::documents::`
+// keeps compiling. Gated on the cargo feature.
+#[cfg(feature = "read-document-agent")]
+pub use nagent_agents::ReadDocumentAgent as ReadDocumentAgentExport;
