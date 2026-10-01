@@ -2,6 +2,17 @@
 
 This document defines the working rules that every agent (human or AI) must follow when contributing to this repository.
 
+## 0. Required reading
+
+Before working on this codebase, read the architecture reference at
+[`docs/architecture.md`](docs/architecture.md). It describes the
+workspace layout and the three primary subsystems — **API** (HTTP/WS
+transport), **agents** (`nagent-agents` crate), and **tools** (LLM
+function-calling integration) — so the rest of `AGENTS.md` lands in
+context. If a change touches the architectural breakdown of any
+subsystem, update the relevant section in `docs/architecture.md` in
+the same commit (see §5 — Documentation Sync).
+
 ## 1. Language
 
 All content produced in this repository must be written **in English**, including but not limited to:
