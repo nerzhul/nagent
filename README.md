@@ -67,19 +67,30 @@ through the `make` targets and the Dockerfile `BACKEND` arg.
 
 | Feature                         | Effect                                                                                   |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
-| `nagent-server/real-backend`       | Use the `whisper-rs` backend. Without it the server falls back to the in-process mock.   |
-| `nagent-server/web-agent`          | Register the server-side `web_fetch` chat agent.                                         |
-| `nagent-server/datetime-agent`     | Register the `get_datetime` chat agent (pulls `chrono` + `chrono-tz`).                   |
-| `nagent-server/weather-agent`      | Register the `get_weather` chat agent (WeatherAPI.com, free API key required).            |
-| `nagent-server/stock-agent`        | Register the `get_stock_quote` chat agent (Stooq CSV, no API key).                       |
-| `nagent-server/calculate-agent`    | Register the `calculate` chat agent (local `meval`-backed expression evaluator).         |
-| `nagent-server/unit-convert-agent` | Register the `unit_convert` chat agent (pure-local conversion tables).                  |
-| `nagent-server/wikipedia-agent`    | Register the `wikipedia` chat agent (REST `wikipedia.org`, no API key, `User-Agent` set).|
-| `nagent-server/dictionary-agent`   | Register the `dictionary` chat agent (Free Dictionary REST API, no API key).             |
+| `real-backend`                  | Use the `whisper-rs` backend. Without it the server falls back to the in-process mock.   |
+| `web-agent`                     | Register the server-side `web_fetch` chat agent.                                         |
+| `datetime-agent`                | Register the `get_datetime` chat agent (pulls `chrono` + `chrono-tz`).                   |
+| `weather-agent`                 | Register the `get_weather` chat agent (WeatherAPI.com, free API key required).            |
+| `stock-agent`                   | Register the `get_stock_quote` chat agent (Stooq CSV, no API key).                       |
+| `calculate-agent`               | Register the `calculate` chat agent (local `meval`-backed expression evaluator).         |
+| `unit-convert-agent`            | Register the `unit_convert` chat agent (pure-local conversion tables).                  |
+| `wikipedia-agent`               | Register the `wikipedia` chat agent (REST `wikipedia.org`, no API key, `User-Agent` set).|
+| `dictionary-agent`              | Register the `dictionary` chat agent (Free Dictionary REST API, no API key).             |
 | `stt-core/whisper-rs-backend`   | Pulls in `whisper-rs` (CPU). Always required, even when a GPU backend is also selected.  |
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
 | `stt-core/whisper-rs-hipblas`   | Enable the ROCm/HIP GPU backend (needs ROCm toolchain at build time).                   |
+
+> **Important:** the `nagent-server/...` prefix you may see in older
+> docs, release notes, or local branches is a **silent no-op** when the
+> server itself is the build target (`-p nagent-server`). Cargo
+> ignores it without a warning, so the binary ships with `default`
+> features only and the runtime logs e.g. `backend ready backend=mock`
+> or `agent registry empty (no agents compiled in)` — even though the
+> Makefile/Dockerfile *appears* to enable everything. Address the
+> server's own features by bare name (`real-backend`, `web-agent`,
+> `tts`, …) and keep the `stt-core/...` prefix for the GPU features
+> (they live on a dependency).
 
 The three GPU features are mutually exclusive — enabling more than one
 wastes build time and can fight over system libraries. The seven
@@ -646,7 +657,7 @@ server" notice.
    ```
    make run-llm
    # equivalent to: LLM_ENABLED=true cargo run -p nagent-server --release \
-   #     --features nagent-server/real-backend,nagent-server/web-agent,stt-core/whisper-rs-backend
+   #     --features real-backend,web-agent,stt-core/whisper-rs-backend
    ```
 
 3. Open <http://localhost:8080>, click **Discussion**, type a message.

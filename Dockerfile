@@ -62,11 +62,18 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 # Translate the BACKEND arg into the matching Cargo feature set.
+# Note: the `nagent-server/...` prefix is only needed when activating a
+# feature on a *transitive dependency* from outside its crate. The
+# server's own features (`real-backend`) are addressed by bare name
+# because the server is the build target (`-p nagent-server`); cargo
+# silently ignores a `package/feature` prefix that matches the
+# target, which is why older builds of this image fell back to the
+# mock Whisper backend despite the BACKEND arg.
 RUN case "$BACKEND" in \
-        cpu)     FEATURES="nagent-server/real-backend,stt-core/whisper-rs-backend" ;; \
-        vulkan)  FEATURES="nagent-server/real-backend,stt-core/whisper-rs-vulkan" ;; \
-        cuda)    FEATURES="nagent-server/real-backend,stt-core/whisper-rs-cuda" ;; \
-        hipblas) FEATURES="nagent-server/real-backend,stt-core/whisper-rs-hipblas" ;; \
+        cpu)     FEATURES="real-backend,stt-core/whisper-rs-backend" ;; \
+        vulkan)  FEATURES="real-backend,stt-core/whisper-rs-vulkan" ;; \
+        cuda)    FEATURES="real-backend,stt-core/whisper-rs-cuda" ;; \
+        hipblas) FEATURES="real-backend,stt-core/whisper-rs-hipblas" ;; \
         *) echo "unknown BACKEND=$BACKEND (expected cpu|vulkan|cuda|hipblas)" && exit 1 ;; \
     esac && \
     cargo build --release --features "$FEATURES" -p nagent-server
