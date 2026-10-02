@@ -477,58 +477,38 @@ impl AgentRegistry {
         Self::default()
     }
 
-    /// Build a registry from the plain per-agent configs. Each
-    /// per-agent feature gates the corresponding `Self::push` call
-    /// so a slim build drops the heavy machinery (plan 4.C: one
-    /// feature per agent).
+    /// Build a registry from the plain per-agent configs. The
+    /// static [`AGENT_DESCRIPTORS`] table is walked per descriptor,
+    /// each gated by its own cargo feature so a slim build drops
+    /// the heavy machinery (plan 4.C: one feature per agent).
     ///
     /// `enabled` is the operator-controlled master switch; when
     /// `false` the function returns `Self::empty()` so the LLM
     /// proxy injects no `tools` field.
+    ///
+    /// A descriptor that returns `Err` from its `build` closure
+    /// is logged at `warn` and skipped — the rest of the registry
+    /// still loads. Today every descriptor is infallible; the
+    /// branch exists so a future agent can validate its config
+    /// without breaking the others.
     pub fn from_config(cfgs: &crate::config::AgentConfigs, enabled: bool) -> Self {
         if !enabled {
             return Self::empty();
         }
-        let inner = AgentRegistryInner::default();
-        let mut registry = Self {
-            inner: Arc::new(inner),
-        };
-        #[cfg(feature = "web-agent")]
-        registry.push_agent(web_fetch::WebFetchAgent::new(cfgs.web_fetch.clone()));
-        #[cfg(feature = "datetime-agent")]
-        registry.push_agent(datetime_agent::DateTimeAgent::from_config(
-            cfgs.datetime.clone(),
-        ));
-        #[cfg(feature = "weather-agent")]
-        registry.push_agent(weather_agent::WeatherAgent::new(cfgs.weather.clone()));
-        #[cfg(feature = "stock-agent")]
-        registry.push_agent(stock_agent::StockAgent::from_config(cfgs.stock.clone()));
-        #[cfg(feature = "calculate-agent")]
-        registry.push_agent(calculate_agent::CalculateAgent::from_config(
-            cfgs.calculate.clone(),
-        ));
-        #[cfg(feature = "unit-convert-agent")]
-        registry.push_agent(unit_convert_agent::UnitConvertAgent::new(
-            cfgs.unit_convert.clone(),
-        ));
-        #[cfg(feature = "wikipedia-agent")]
-        registry.push_agent(wikipedia_agent::WikipediaAgent::new(cfgs.wikipedia.clone()));
-        #[cfg(feature = "dictionary-agent")]
-        registry.push_agent(dictionary_agent::DictionaryAgent::new(
-            cfgs.dictionary.clone(),
-        ));
-        #[cfg(not(any(
-            feature = "web-agent",
-            feature = "datetime-agent",
-            feature = "weather-agent",
-            feature = "stock-agent",
-            feature = "calculate-agent",
-            feature = "unit-convert-agent",
-            feature = "wikipedia-agent",
-            feature = "dictionary-agent",
-            feature = "read-document-agent",
-        )))]
-        let _ = cfgs; // // keep the `unused` lint happy when nothing is compiled in
+        let mut registry = Self::empty();
+        for descriptor in AGENT_DESCRIPTORS {
+            match (descriptor.build)(cfgs) {
+                Ok(agent) => registry.push_agent_boxed(agent),
+                Err(e) => {
+                    tracing::warn!(
+                        agent = descriptor.id,
+                        feature = descriptor.feature,
+                        error = %e,
+                        "skipping agent descriptor: build failed"
+                    );
+                }
+            }
+        }
         registry
     }
 
@@ -639,6 +619,206 @@ pub struct AgentSummary {
     pub description: String,
     pub untrusted_output: bool,
     pub requires_confirmation_by_default: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Static agent descriptor table
+// ---------------------------------------------------------------------------
+//
+// One line per agent (plan 4.C). Adding a new agent is:
+//
+// 1. create `crates/nagent-agents/src/agents/<name>.rs`,
+// 2. add the agent's per-feature config to `crate::config::AgentConfigs`,
+// 3. add the agent's `mod <name>;` declaration (cargo-feature gated)
+//    to the sub-modules section below,
+// 4. add one `AgentDescriptor` entry to [`AGENT_DESCRIPTORS`],
+// 5. add the new agent's feature to the crate's `[features]` section
+//    in `Cargo.toml` and to the `all-agents` meta-feature.
+//
+// The descriptor's `build` closure is invoked by
+// [`AgentRegistry::from_config`] under the same `enabled`
+// master switch as the historical hand-rolled `if cfg!(...)`
+// chain, so a slim build that drops a feature compiles
+// straight through the remaining descriptors.
+
+/// Boxed error returned by an [`AgentDescriptor::build`] when the
+/// agent's config is invalid. Lives as a type alias so the
+/// signature of [`AgentDescriptor::build`] stays readable.
+pub type AgentBuildError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Factory + identity for one agent. Constructed inline by
+/// [`AGENT_DESCRIPTORS`] so the entry has no allocation cost.
+pub struct AgentDescriptor {
+    /// Agent id. Must match the `Agent::name()` of the
+    /// constructed instance — the LLM tool loop uses it as the
+    /// `function.name` in the OpenAI `tools` payload.
+    pub id: &'static str,
+    /// Cargo feature that must be on for this agent to compile.
+    /// Surfaced for the `get_log` debug helper; not enforced
+    /// at runtime because the table itself is `cfg`-gated.
+    pub feature: &'static str,
+    /// Build a boxed instance from the global agent configs.
+    /// Returning `Err` is reserved for agents whose config is
+    /// invalid (a missing API key, an unparseable base URL); the
+    /// registry will skip the agent and log a warning. Today
+    /// every entry is infallible; the `Result` exists so a
+    /// future agent can fail gracefully without breaking the
+    /// other descriptors.
+    pub build: fn(&crate::config::AgentConfigs) -> Result<Box<dyn Agent>, AgentBuildError>,
+}
+
+/// Static factory table. Walked by
+/// [`AgentRegistry::from_config`]; every entry is gated by its
+/// own cargo feature so a slim build drops the heavy machinery
+/// (plan 4.C: one feature per agent).
+pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
+    #[cfg(feature = "web-agent")]
+    AgentDescriptor {
+        id: "web_fetch",
+        feature: "web-agent",
+        build: |cfgs| {
+            Ok(Box::new(web_fetch::WebFetchAgent::new(
+                cfgs.web_fetch.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "datetime-agent")]
+    AgentDescriptor {
+        id: "get_datetime",
+        feature: "datetime-agent",
+        build: |cfgs| {
+            Ok(Box::new(datetime_agent::DateTimeAgent::from_config(
+                cfgs.datetime.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "weather-agent")]
+    AgentDescriptor {
+        id: "get_weather",
+        feature: "weather-agent",
+        build: |cfgs| {
+            Ok(Box::new(weather_agent::WeatherAgent::new(
+                cfgs.weather.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "stock-agent")]
+    AgentDescriptor {
+        id: "get_stock_quote",
+        feature: "stock-agent",
+        build: |cfgs| {
+            Ok(Box::new(stock_agent::StockAgent::from_config(
+                cfgs.stock.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "calculate-agent")]
+    AgentDescriptor {
+        id: "calculate",
+        feature: "calculate-agent",
+        build: |cfgs| {
+            Ok(Box::new(calculate_agent::CalculateAgent::from_config(
+                cfgs.calculate.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "unit-convert-agent")]
+    AgentDescriptor {
+        id: "unit_convert",
+        feature: "unit-convert-agent",
+        build: |cfgs| {
+            Ok(Box::new(unit_convert_agent::UnitConvertAgent::new(
+                cfgs.unit_convert.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "wikipedia-agent")]
+    AgentDescriptor {
+        id: "wikipedia",
+        feature: "wikipedia-agent",
+        build: |cfgs| {
+            Ok(Box::new(wikipedia_agent::WikipediaAgent::new(
+                cfgs.wikipedia.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "dictionary-agent")]
+    AgentDescriptor {
+        id: "dictionary",
+        feature: "dictionary-agent",
+        build: |cfgs| {
+            Ok(Box::new(dictionary_agent::DictionaryAgent::new(
+                cfgs.dictionary.clone(),
+            )))
+        },
+    },
+];
+
+#[cfg(test)]
+mod descriptor_table_tests {
+    use super::*;
+    use crate::config::AgentConfigs;
+
+    #[test]
+    fn every_descriptor_id_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for d in AGENT_DESCRIPTORS {
+            assert!(seen.insert(d.id), "duplicate AgentDescriptor id: {}", d.id);
+            assert!(!d.id.is_empty(), "AgentDescriptor id must be non-empty");
+            assert!(
+                !d.feature.is_empty(),
+                "AgentDescriptor feature must be non-empty"
+            );
+        }
+    }
+
+    #[test]
+    fn every_descriptor_builds_an_agent_with_matching_id() {
+        // End-to-end check: every descriptor in the table
+        // produces an agent whose `name()` matches the
+        // descriptor's `id`. Guards against a future
+        // copy-paste typo in either field.
+        let cfgs = AgentConfigs::default();
+        for d in AGENT_DESCRIPTORS {
+            let agent = (d.build)(&cfgs)
+                .unwrap_or_else(|e| panic!("descriptor {} build() failed: {e}", d.id));
+            assert_eq!(
+                agent.name(),
+                d.id,
+                "descriptor {} built an agent with name() = {}",
+                d.id,
+                agent.name()
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_table_is_nonempty_when_any_feature_is_on() {
+        // The `all-agents` meta-feature turns every per-agent
+        // feature on. The CI default build runs with
+        // --features all-agents,test/,so AGENT_DESCRIPTORS must
+        // be non-empty there. If the meta-feature is dropped
+        // (e.g. a contributor built only `--features agent` for
+        // a faster check), the assertion is best-effort and
+        // stays harmless.
+        #[cfg(all(
+            feature = "all-agents",
+            any(
+                feature = "web-agent",
+                feature = "datetime-agent",
+                feature = "weather-agent",
+                feature = "stock-agent",
+                feature = "calculate-agent",
+                feature = "unit-convert-agent",
+                feature = "wikipedia-agent",
+                feature = "dictionary-agent",
+            )
+        ))]
+        assert!(
+            !AGENT_DESCRIPTORS.is_empty(),
+            "AGENT_DESCRIPTORS must list at least one agent when all-agents is on"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
