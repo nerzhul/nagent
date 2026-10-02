@@ -34,7 +34,7 @@ test-util = []
 [dependencies]
 nagent-support = { path = "../nagent-support" }
 async-trait = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 hex = "0.4"
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom"] }

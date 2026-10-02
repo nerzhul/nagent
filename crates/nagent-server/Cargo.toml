@@ -88,7 +88,7 @@ rand = { version = "0.8", default-features = false, features = ["std", "getrando
 # We drop `time` — session expiry lives in the DB row, not the cookie.
 cookie = { version = "0.18", features = ["percent-encode"] }
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
 # WAV encoder for /v1/audio/speech. Always on so MockSynthesizer works without the `tts` feature.
 hound = "3.5"

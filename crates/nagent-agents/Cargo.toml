@@ -77,4 +77,4 @@ icalendar = { version = "0.7", optional = true }
 # Random hex suffix for VEVENT UIDs (CalDAV create_event).
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom", "std_rng"] }
 # Base64 for the HTTP Basic Authorization header.
-base64 = "0.22"
+base64 = "0.23"
