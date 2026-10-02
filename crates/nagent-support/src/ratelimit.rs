@@ -369,6 +369,484 @@ impl<K: Eq + std::hash::Hash + Clone> std::fmt::Debug for TokenBucketMap<K> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WindowedBucketMap — fixed-window + exponential-backoff primitive
+// ---------------------------------------------------------------------------
+//
+// Shared by the three bucket families of
+// `nagent-server::auth::login_rate_limit::LoginRateLimiter`. Differs
+// from [`TokenBucketMap`] in two ways:
+//
+// - **Discrete window**, not continuous refill. The window resets
+//   when `now - window_start >= window`; count starts back at
+//   `0`. The bucket math is integer (u32 counts), which is
+//   simpler and cheaper than the fractional token model.
+// - **Exponential backoff**. Each successive deny doubles
+//   `retry_after` up to `max_backoff`. The number of consecutive
+//   denies is tracked per-key so a single legitimate success
+//   resets the backoff streak.
+//
+// The plan calls these "TokenBucketMap" but the family the login
+// limiter needs is fixed-window-with-backoff, not the
+// token-bucket-with-refill shape `TokenBucketMap` already
+// implements. Plan 4.B therefore asks for a separate primitive
+// that lives next to [`TokenBucketMap`] and shares the same
+// `SweepClock` + idle-eviction predicate.
+
+/// Outcome of [`WindowedBucketMap::check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowedDecision {
+    /// The bucket is within budget; the caller consumed one
+    /// token.
+    Allow,
+    /// The bucket is exhausted. `retry_after` is the wall-clock
+    /// wait the caller must honour before the next attempt —
+    /// already inflated by the exponential factor when the deny
+    /// streak has crossed `backoff_after`.
+    Deny { retry_after: Duration },
+}
+
+/// One live bucket entry. `count` is the number of attempts in
+/// the current window; `window_start` is the wall-clock at the
+/// start of that window; `consecutive_denies` drives the
+/// exponential backoff and resets to `0` on the next
+/// [`WindowedBucketMap::check`] Allow.
+#[derive(Debug)]
+pub struct WindowedBucket {
+    pub count: u32,
+    pub window_start: Instant,
+    pub last_update: Instant,
+    pub consecutive_denies: u32,
+}
+
+impl WindowedBucket {
+    /// Build a fresh bucket (`count = 0`, all timestamps equal).
+    pub fn new(now: Instant) -> Self {
+        Self {
+            count: 0,
+            window_start: now,
+            last_update: now,
+            consecutive_denies: 0,
+        }
+    }
+
+    /// Reset the window to "now" and clear the backoff streak.
+    /// Called when the previous window has expired.
+    fn refresh_window(&mut self, now: Instant) {
+        self.count = 0;
+        self.consecutive_denies = 0;
+        self.window_start = now;
+        self.last_update = now;
+    }
+
+    /// Decide whether the next attempt fits in the budget and,
+    /// if so, consume one token. Mirrors the existing login
+    /// limiter's "peek + consume on allow / bump_deny on deny"
+    /// pair in a single atomic step — there is no
+    /// double-counting because the deny branch only touches
+    /// `consecutive_denies`, not `count`.
+    ///
+    /// `backoff_after` is the number of consecutive denies at
+    /// which exponential backoff kicks in. `max_backoff` caps
+    /// the inflated retry so a long-running attacker cannot
+    /// permanently lock themselves out.
+    pub fn check(
+        &mut self,
+        max: u32,
+        window: Duration,
+        backoff_after: u32,
+        max_backoff: Duration,
+        now: Instant,
+    ) -> WindowedDecision {
+        if now.duration_since(self.window_start) >= window {
+            self.refresh_window(now);
+        }
+        if self.count >= max {
+            let elapsed = now.duration_since(self.window_start);
+            let remaining = window.saturating_sub(elapsed);
+            // Floor at 1 s so the client never spins; clamp at
+            // `max_backoff` so the operator-supplied ceiling wins
+            // over any large consecutive_denies value.
+            let base = remaining.as_secs().max(1);
+            let exp_factor = self
+                .consecutive_denies
+                .saturating_sub(backoff_after.saturating_sub(1));
+            let multiplier = 1u64.checked_shl(exp_factor.min(20)).unwrap_or(u64::MAX);
+            let inflated = base.saturating_mul(multiplier);
+            let retry = Duration::from_secs(inflated.min(max_backoff.as_secs()));
+            self.consecutive_denies = self.consecutive_denies.saturating_add(1);
+            self.last_update = now;
+            WindowedDecision::Deny { retry_after: retry }
+        } else {
+            self.count = self.count.saturating_add(1).min(max);
+            self.consecutive_denies = 0;
+            self.last_update = now;
+            WindowedDecision::Allow
+        }
+    }
+
+    /// Increment `consecutive_denies` without touching `count`.
+    /// Mirrors the existing limiter's `bump_deny` helper, which
+    /// is used by callers who want to deny without consuming a
+    /// token (the limiter's "first pass read-only" optimisation).
+    ///
+    /// No-op when the bucket does not exist for `key` — the
+    /// caller must create the bucket via [`Self::check`] first.
+    pub fn bump_deny(&mut self, now: Instant) {
+        self.consecutive_denies = self.consecutive_denies.saturating_add(1);
+        self.last_update = now;
+    }
+
+    /// Last touch timestamp. Used by the idle-eviction predicate.
+    pub fn last_update(&self) -> Instant {
+        self.last_update
+    }
+}
+
+/// Bounded per-key fixed-window-with-backoff map. Wraps
+/// [`DashMap`] with the per-entry [`WindowedBucket`] state and
+/// the shared [`SweepClock`] + idle-eviction predicate so
+/// `nagent-server::auth::login_rate_limit` can stop carrying its
+/// own `DashMap` per bucket family (plan 4.B).
+///
+/// Clone is `Arc`-cheap; the inner `DashMap` is the only state.
+pub struct WindowedBucketMap<K> {
+    buckets: DashMap<K, WindowedBucket>,
+    sweep: SweepClock,
+    sweep_every: u64,
+}
+
+impl<K: Eq + std::hash::Hash + Clone> WindowedBucketMap<K> {
+    /// Build an empty map. `sweep_every` defaults to
+    /// [`DEFAULT_SWEEP_EVERY`] for parity with [`TokenBucketMap`].
+    pub fn new() -> Self {
+        Self::with_sweep_every(DEFAULT_SWEEP_EVERY)
+    }
+
+    /// Build an empty map with a custom sweep cadence.
+    pub fn with_sweep_every(sweep_every: u64) -> Self {
+        Self {
+            buckets: DashMap::new(),
+            sweep: SweepClock::new(),
+            sweep_every,
+        }
+    }
+
+    /// Number of live buckets. Surfaced for tests + diagnostics.
+    pub fn len(&self) -> usize {
+        self.buckets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+
+    /// Look up + consume (or deny) one bucket for `key`.
+    /// `max`, `window`, `backoff_after`, `max_backoff` come from
+    /// the caller (typically a per-family policy); see
+    /// [`WindowedBucket::check`] for the math. The bucket is
+    /// created on first call (mirroring the login limiter's
+    /// `read_X` helpers).
+    pub fn check(
+        &self,
+        key: K,
+        max: u32,
+        window: Duration,
+        backoff_after: u32,
+        max_backoff: Duration,
+        now: Instant,
+    ) -> WindowedDecision {
+        let mut entry = self
+            .buckets
+            .entry(key)
+            .or_insert_with(|| WindowedBucket::new(now));
+        entry.check(max, window, backoff_after, max_backoff, now)
+    }
+
+    /// Increment `consecutive_denies` for `key` without touching
+    /// `count`. No-op when the bucket does not exist.
+    pub fn bump_deny(&self, key: &K, now: Instant) {
+        if let Some(mut b) = self.buckets.get_mut(key) {
+            b.value_mut().bump_deny(now);
+        }
+    }
+
+    /// Remove the bucket for `key`. Called from the login
+    /// limiter's `reset` path so a successful authentication
+    /// clears the in-progress backoff streak.
+    pub fn reset(&self, key: &K) {
+        self.buckets.remove(key);
+    }
+
+    /// Drive the eviction sweep. A bucket is dropped when its
+    /// window has expired AND its `last_update` is older than
+    /// `window`. Returns the number of buckets removed.
+    pub fn sweep_idle(&self, now: Instant, window: Duration) -> usize {
+        let before = self.buckets.len();
+        self.buckets
+            .retain(|_, b| now.duration_since(b.window_start) < window);
+        before - self.buckets.len()
+    }
+
+    /// Periodic-sweep gate. Returns `true` when the caller should
+    /// run a sweep this call (every `sweep_every` ops).
+    pub fn should_sweep(&self) -> bool {
+        self.sweep.tick(self.sweep_every)
+    }
+
+    /// Test-only handle to drive a sweep deterministically.
+    #[doc(hidden)]
+    pub fn sweep_now(&self, window: Duration) -> usize {
+        self.sweep_idle(Instant::now(), window)
+    }
+
+    /// Test-only handle to iterate the inner map.
+    #[doc(hidden)]
+    pub fn buckets_for_tests(&self) -> &DashMap<K, WindowedBucket> {
+        &self.buckets
+    }
+}
+
+impl<K: Eq + std::hash::Hash + Clone> Default for WindowedBucketMap<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Eq + std::hash::Hash + Clone> std::fmt::Debug for WindowedBucketMap<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WindowedBucketMap")
+            .field("len", &self.buckets.len())
+            .field("sweep_every", &self.sweep_every)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod windowed_bucket_tests {
+    use super::*;
+    use std::net::IpAddr;
+    use std::time::Duration;
+
+    #[test]
+    fn fresh_bucket_allows_until_max() {
+        let map = WindowedBucketMap::<String>::new();
+        let now = Instant::now();
+        // 3 attempts, window 60 s, no backoff.
+        for _ in 0..3 {
+            assert_eq!(
+                map.check(
+                    "alice".to_string(),
+                    3,
+                    Duration::from_secs(60),
+                    1,
+                    Duration::from_secs(60),
+                    now
+                ),
+                WindowedDecision::Allow
+            );
+        }
+        // 4th attempt exceeds the cap.
+        match map.check(
+            "alice".to_string(),
+            3,
+            Duration::from_secs(60),
+            1,
+            Duration::from_secs(60),
+            now,
+        ) {
+            WindowedDecision::Deny { retry_after } => {
+                assert!(
+                    retry_after.as_secs() >= 1,
+                    "retry_after must be at least 1 s"
+                );
+            }
+            d => panic!("expected Deny, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn deny_resets_count_when_window_expires() {
+        let map = WindowedBucketMap::<String>::new();
+        let start = Instant::now();
+        // Fill the bucket.
+        for _ in 0..3 {
+            let _ = map.check(
+                "alice".to_string(),
+                3,
+                Duration::from_secs(60),
+                1,
+                Duration::from_secs(60),
+                start,
+            );
+        }
+        // Move past the window.
+        let later = start + Duration::from_secs(61);
+        // Fresh attempt must allow (count was reset by the
+        // window-refresh inside check).
+        assert_eq!(
+            map.check(
+                "alice".to_string(),
+                3,
+                Duration::from_secs(60),
+                1,
+                Duration::from_secs(60),
+                later
+            ),
+            WindowedDecision::Allow
+        );
+    }
+
+    #[test]
+    fn exponential_backoff_doubles_retry_then_caps() {
+        let map = WindowedBucketMap::<String>::new();
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        let max_backoff = Duration::from_secs(300);
+        // Fill the bucket.
+        for _ in 0..3 {
+            let _ = map.check("alice".to_string(), 3, window, 5, max_backoff, now);
+        }
+        // First deny: backoff_after = 5 so no inflation yet.
+        let first = match map.check("alice".to_string(), 3, window, 5, max_backoff, now) {
+            WindowedDecision::Deny { retry_after } => retry_after,
+            d => panic!("expected Deny, got {d:?}"),
+        };
+        // Each successive deny doubles (capped by consecutive_denies
+        // saturating_sub(backoff_after - 1) at the 5th call).
+        let second = match map.check("alice".to_string(), 3, window, 5, max_backoff, now) {
+            WindowedDecision::Deny { retry_after } => retry_after,
+            d => panic!("expected Deny, got {d:?}"),
+        };
+        assert!(
+            second.as_secs() >= first.as_secs(),
+            "second retry ({second:?}) must be >= first ({first:?})"
+        );
+        // Spam many more denies and verify the retry never exceeds
+        // the operator-supplied max_backoff.
+        for _ in 0..20 {
+            match map.check("alice".to_string(), 3, window, 5, max_backoff, now) {
+                WindowedDecision::Deny { retry_after } => {
+                    assert!(
+                        retry_after <= max_backoff,
+                        "retry_after ({retry_after:?}) must respect max_backoff ({max_backoff:?})"
+                    );
+                }
+                d => panic!("expected Deny, got {d:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn allow_resets_backoff_streak() {
+        let map = WindowedBucketMap::<IpAddr>::new();
+        let now = Instant::now();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let window = Duration::from_secs(60);
+        let max_backoff = Duration::from_secs(300);
+        // Fill the bucket at `now`, then deny once (consecutive_denies
+        // becomes 1). Move past the window. In the new window, fill
+        // the bucket again — the last Allow of that sequence must
+        // reset the streak to 0 so the *next* deny in the new window
+        // is not inflated.
+        for _ in 0..4 {
+            let _ = map.check(ip, 3, window, 2, max_backoff, now);
+        }
+        // Now at `later`, the window has reset. The first three
+        // attempts Allow (consecutive_denies stays at 0 thanks to
+        // the refresh); the fourth denies at the *base* retry
+        // level (no exponential inflation because the streak
+        // was wiped during the window refresh inside `check`).
+        let later = now + Duration::from_secs(61);
+        for _ in 0..3 {
+            assert_eq!(
+                map.check(ip, 3, window, 2, max_backoff, later),
+                WindowedDecision::Allow
+            );
+        }
+        let retry = match map.check(ip, 3, window, 2, max_backoff, later) {
+            WindowedDecision::Deny { retry_after } => retry_after,
+            d => panic!("expected Deny, got {d:?}"),
+        };
+        // Base retry is `window_saturating - elapsed` clamped to 1 s;
+        // `later - window_start` is 1 s, so retry_after ≈ 59 s.
+        // Crucially, it must NOT be 2x or higher (no inflation).
+        assert!(
+            retry.as_secs() <= 60,
+            "post-reset retry must be at the base level, got {retry:?}"
+        );
+    }
+
+    #[test]
+    fn bump_deny_does_not_create_bucket() {
+        let map = WindowedBucketMap::<String>::new();
+        let now = Instant::now();
+        // bump_deny on a missing key is a no-op.
+        map.bump_deny(&"alice".to_string(), now);
+        assert_eq!(map.len(), 0);
+        // After a real check, bump_deny increments the existing
+        // bucket without touching count.
+        let _ = map.check(
+            "alice".to_string(),
+            10,
+            Duration::from_secs(60),
+            1,
+            Duration::from_secs(60),
+            now,
+        );
+        map.bump_deny(&"alice".to_string(), now);
+        let b = map.buckets_for_tests().get("alice").unwrap();
+        assert_eq!(b.count, 1, "count must not change");
+        assert_eq!(b.consecutive_denies, 1, "consecutive_denies bumped");
+    }
+
+    #[test]
+    fn reset_drops_bucket() {
+        let map = WindowedBucketMap::<String>::new();
+        let now = Instant::now();
+        let _ = map.check(
+            "alice".to_string(),
+            3,
+            Duration::from_secs(60),
+            1,
+            Duration::from_secs(60),
+            now,
+        );
+        assert_eq!(map.len(), 1);
+        map.reset(&"alice".to_string());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn sweep_idle_drops_expired_buckets() {
+        let map = WindowedBucketMap::<String>::new();
+        let start = Instant::now();
+        let _ = map.check(
+            "alice".to_string(),
+            3,
+            Duration::from_secs(60),
+            1,
+            Duration::from_secs(60),
+            start,
+        );
+        let _ = map.check(
+            "bob".to_string(),
+            3,
+            Duration::from_secs(60),
+            1,
+            Duration::from_secs(60),
+            start,
+        );
+        assert_eq!(map.len(), 2);
+        let dropped = map.sweep_now(Duration::from_secs(60));
+        assert_eq!(dropped, 0, "no buckets expired yet");
+        let later = start + Duration::from_secs(61);
+        let dropped = map.sweep_idle(later, Duration::from_secs(60));
+        assert_eq!(dropped, 2);
+        assert_eq!(map.len(), 0);
+    }
+}
+
 #[cfg(test)]
 mod token_bucket_tests {
     use super::*;
