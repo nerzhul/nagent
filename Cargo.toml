@@ -38,7 +38,7 @@ dotenvy = "0.15"
 # `toml` powers the optional TOML configuration file (`--config <path>`).
 # Pulled with default features; serde integration is enabled transitively
 # via the existing `serde` workspace dep.
-toml = "0.8"
+toml = "1.1"
 
 [profile.release]
 opt-level = 3
