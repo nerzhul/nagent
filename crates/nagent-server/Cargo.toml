@@ -97,7 +97,7 @@ aes-gcm = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 # PDF parsing for read_document; runtime-gated by `[documents].enabled`.
-pdf-extract = "0.7"
+pdf-extract = "0.12"
 mime_guess = "2"
 # Trusted-proxy CIDR parser for security plan #5.
 ipnet = "2"
