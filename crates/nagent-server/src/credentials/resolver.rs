@@ -17,7 +17,6 @@ use std::sync::Arc;
 use secrecy::SecretString;
 use uuid::Uuid;
 
-use crate::credentials::cache::SecretCache;
 use crate::credentials::crypto::{decrypt, CryptoError, EncryptedSecret};
 use crate::credentials::key::CredentialsKey;
 use nagent_db::NewAuthEvent;
@@ -99,57 +98,12 @@ impl CredentialResolver {
     /// shape as `Ok(None)` but explicit);
     /// - `Err(CredentialError::DecryptFailed)` when AES-GCM rejected
     /// the ciphertext (always audited).
-    pub async fn get(
-        &self,
-        user_id: Uuid,
-        service: &str,
-        field: &str,
-        cache: &SecretCache,
-    ) -> Result<Option<SecretString>, CredentialError> {
-        // Cache hit short-circuits everything — no DB read, no
-        // decrypt, no audit row (the first lookup already wrote one).
-        if let Some(hit) = cache.get(service, field) {
-            return Ok(Some(hit));
-        }
-        let row = self
-            .db
-            .admin()
-            .credentials
-            .fetch(user_id, service, field)
-            .await?;
-        let Some(sealed) = row else {
-            // Missing: audit + return Ok(None) so the calling agent
-            // can decide whether to fall through or surface a
-            // user-facing error.
-            self.audit(user_id, "credential_missing", service);
-            return Err(CredentialError::Missing {
-                service: service.to_string(),
-                field: field.to_string(),
-            });
-        };
-        let sealed = EncryptedSecret {
-            nonce: sealed.nonce,
-            ciphertext: sealed.ciphertext,
-        };
-        match decrypt(&self.key, &sealed) {
-            Ok(plaintext) => {
-                self.audit(user_id, "credential_access", service);
-                cache.insert(service, field, plaintext.clone());
-                Ok(Some(plaintext))
-            }
-            Err(CryptoError::DecryptFailed) => {
-                self.audit(user_id, "credential_decrypt_failed", service);
-                Err(CredentialError::DecryptFailed {
-                    service: service.to_string(),
-                    field: field.to_string(),
-                })
-            }
-        }
-    }
-
-    /// Lower-level lookup that bypasses the per-request cache. Used
-    /// by the server-side `SecretSource` impl in `agents::mod`
-    /// because `UserContext` already owns its own per-request cache.
+    ///
+    /// The previous cached variant (`get(..., &SecretCache)`) was
+    /// removed in plan 4.C.2 / R2: the per-request cache lives in
+    /// `nagent_agents::credential_cache::SecretCache` (now backed
+    /// by a `TtlMap`), so the server-side resolver stays cache-free
+    /// and the caller decides whether to consult the cache.
     pub async fn get_raw(
         &self,
         user_id: Uuid,

@@ -190,8 +190,13 @@ async fn resolver_audit_row_records_target_service() {
         .expect("user");
     let key = Arc::new(CredentialsKey::from_bytes([9u8; 32]));
     let resolver = CredentialResolver::new(store.clone(), key, None, None);
-    let cache = nagent_server::credentials::SecretCache::new();
-    let err = resolver.get(user_id, "test_svc", "host", &cache).await;
+    // Cache lives in `nagent-agents` now (plan 4.C.2 / R2); the
+    // cached-and-uncached variants of `resolver.get()` collapsed
+    // into `resolver.get_raw()` because no one was actually
+    // calling the cached variant outside this single integration
+    // test. The audit-row behaviour under test is independent of
+    // the cache.
+    let err = resolver.get_raw(user_id, "test_svc", "host").await;
     // Missing is expected; the audit row is the assertion.
     assert!(matches!(
         err,

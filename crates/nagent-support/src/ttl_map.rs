@@ -174,6 +174,16 @@ where
         self.inner.is_empty()
     }
 
+    /// Drop every entry, running each value through its `Drop`
+    /// impl (which zeroises the backing buffer when the value
+    /// type participates in `zeroize`). The intended caller is a
+    /// `Drop` impl on an outer type holding sensitive values —
+    /// e.g. the per-request `SecretCache` in `nagent-agents`.
+    /// O(n) over the live set.
+    pub fn clear(&self) {
+        self.inner.clear();
+    }
+
     /// Remove every entry whose TTL has elapsed. Returns the number
     /// of entries removed. Cheap to call from a periodic background
     /// task; the cost is `O(n)` over the live set.
@@ -304,6 +314,20 @@ mod tests {
         map.insert(2, 20);
         assert_eq!(map.sweep_expired(), 0);
         assert_eq!(map.get(&2), Some(20));
+    }
+
+    #[test]
+    fn clear_drops_every_entry_immediately() {
+        let map = TtlMap::<u32, &str>::new(ttl(), 4);
+        map.insert(1, "a");
+        map.insert(2, "b");
+        map.insert(3, "c");
+        assert_eq!(map.len(), 3);
+        map.clear();
+        assert!(map.is_empty());
+        // The map is reusable after a clear.
+        map.insert(4, "d");
+        assert_eq!(map.get(&4), Some("d"));
     }
 
     #[test]
