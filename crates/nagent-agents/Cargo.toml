@@ -3,6 +3,7 @@ name = "nagent-agents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Server-invoked chat agents (trait, registry, service catalogue)."
 
 [features]

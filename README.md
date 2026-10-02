@@ -631,6 +631,31 @@ The multiuser isolation test (Phase 6) lives in
 `crates/nagent-server/tests/multiuser_isolation.rs` and uses a mock backend so
 it runs without any GPU.
 
+## Supply chain hygiene (S2a)
+
+```
+cargo install cargo-deny --locked        # bans / sources / licenses / advisories
+cargo install cargo-cyclonedx --locked   # CycloneDX SBOM from Cargo.lock
+```
+
+Three independent checks plus a weekly Dependabot scan
+keep the dependency tree auditable:
+
+- `cargo deny check` — driven by [`deny.toml`](deny.toml).
+  Bans cover `chrono <0.4.20` (Y2K38), `webauthn-rs <0.6.1-dev`
+  (must be the audited dev build), and any future supply-chain
+  addition; licenses allow the standard permissive family plus
+  the project's `LicenseRef-OpenCore-Source-Available-1.0`;
+  sources pin `crates-io`. CI runs `cargo deny check bans
+  licenses sources` so CVEs (separate `cargo audit` run) do not
+  hide the other categories.
+- `cargo cyclonedx` — emits `target/sbom.cargo.json`, uploaded
+  as a build artefact for downstream consumers.
+- Syft (`anchore/sbom-action`) — emits a CycloneDX manifest of
+  the runtime Docker image, uploaded alongside the cargo one.
+  Together the two SBOMs cover the source tree and the shipped
+  image.
+
 ## Chat (Ollama)
 
 The web UI has two modes, switched at the top of the page:

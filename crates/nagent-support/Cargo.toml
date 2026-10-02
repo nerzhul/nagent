@@ -3,6 +3,7 @@ name = "nagent-support"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Shared building blocks (sweep clock, TTL map, bounded blocking helper)."
 
 [dependencies]

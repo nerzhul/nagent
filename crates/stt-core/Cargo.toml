@@ -3,6 +3,7 @@ name = "stt-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Whisper backend abstraction, inference worker and queue."
 
 [features]

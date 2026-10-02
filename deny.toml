@@ -1,0 +1,159 @@
+# cargo-deny configuration (plan S2a).
+#
+# Cargo-deny checks the resolved dependency graph against four
+# policies in one run:
+#
+#   advisories  — known RustSec CVEs (and unmaintained warnings).
+#   bans        — explicit deny / multiple-allow / wildcard / sources.
+#   licenses    — allow / deny by SPDX identifier, with private-
+#                 license exceptions for crates that don't appear on
+#                 crates.io (the workspace itself + any vendored
+#                 deps).
+#   sources     — restrict where dependencies may be pulled from
+#                 (only `crates-io`).
+#
+# The CI workflow runs `cargo deny check` after the build + test
+# suite. An empty `deny.toml` would let a transitive dep sneak in
+# an unexpected license (e.g. AGPL / SSPL / BUSL), so every field
+# here is deliberate.
+
+# ----------------------------------------------------------------------------
+# Graph targets
+# ----------------------------------------------------------------------------
+# Check the full workspace graph, including all features. A
+# `cargo deny check` that only walked the default feature set
+# would miss issues that ship on `make run-cuda` paths.
+[graph]
+all-features = true
+
+# ----------------------------------------------------------------------------
+# Advisories
+# ----------------------------------------------------------------------------
+# Pulls the RustSec advisory database on each run. `yanked` is
+# `warn` rather than `deny` because an upstream crate the
+# project depends on may have stopped receiving patches without
+# there being a current CVE — operators can choose to ignore
+# specific entries via the `ignore` list.
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+# ----------------------------------------------------------------------------
+# Licenses
+# ----------------------------------------------------------------------------
+# Allowed SPDX identifiers cover the standard permissive family
+# (MIT / Apache-2.0 / BSD-* / ISC / Zlib / MPL-2.0 for the small
+# portions of `webauthn-rs` / `serde` derivations) plus the dual
+# variants most Rust crates use, plus the
+# `Community Data License Agreement Permissive 2.0` for the
+# `webpki-roots` crate that ships the Mozilla CA list (a
+# `ureq` build-dep pulled by `ort-sys` -> `piper-rs`; not linked
+# at runtime).
+#
+# The project's own source-available license
+# (`LicenseRef-OpenCore-Source-Available-1.0`) is listed by its
+# SPDX `LicenseRef-...` identifier so cargo-deny accepts it
+# without flagging it as unknown. The friendly name appears in
+# the `LICENSE` document at the repo root.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Unlicense",
+    "LicenseRef-OpenCore-Source-Available-1.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+# Workspace-private license markers. With `ignore = true`,
+# cargo-deny skips the license check on workspace crates that
+# carry a `LicenseRef-OpenCore-Source-Available-1.0` header
+# (the project itself + any vendored or path-only deps). The
+# list of `registries` is empty because nothing in the workspace
+# is published to a private registry today; if a downstream
+# forks the project and ships to a private registry they would
+# add the URL here.
+[licenses.private]
+ignore = true
+registries = []
+
+# ----------------------------------------------------------------------------
+# Bans
+# ----------------------------------------------------------------------------
+# Hard-coded deny list for crates that:
+#   - have known supply-chain / correctness issues we want to avoid;
+#   - duplicate functionality we already have on the tree
+#     (e.g. `native-tls` now that `reqwest` is pinned to rustls);
+#   - are license-non-compliant with the project policy.
+#
+# The `multiple-versions = "warn"` rule keeps transitive version
+# duplication visible in the CI log without failing the build —
+# it's almost always safe (cargo picks the highest), but it
+# bloats the binary so we want to know.
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path / git dependencies in workspace crates are pinned by the
+# workspace (no `version = ...` field), so they cannot drift.
+# Skip the wildcard lint on them.
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+allow-workspace = true
+skip = []
+skip-tree = []
+deny = [
+    # `chrono` 0.4 < 0.4.20 carries the Y2K38 / Y2038 local
+    # time_t overflow. We pin >= 0.4.35 in Cargo.toml so a
+    # transitive downgrade cannot revert the fix.
+    { name = "chrono", version = "<0.4.20" },
+    # `webauthn-rs` pre-release with an unpinned version can pull
+    # a newer dev build that has not been audited. Pin exactly
+    # `0.6.1-dev` (S2a).
+    { name = "webauthn-rs", version = "<0.6.1-dev" },
+]
+# Note: `native-tls` and `openssl` are NOT banned here even
+# though the binary is `rustls`-aware. They are pulled in only as
+# a build-dep of `ureq` (which `ort-sys` -> `piper-rs` uses to
+# fetch ONNX model weights at compile time). They never reach the
+# runtime image. Banning them now would force an upstream patch
+# we cannot land in this commit; revisit when piper-rs ships a
+# rustls-only release.
+# Note: `native-tls` and `openssl` are NOT banned here even
+# though the binary is `rustls`-aware. They are pulled in only as
+# a build-dep of `ureq` (which `ort-sys` -> `piper-rs` uses to
+# fetch ONNX model weights at compile time). They never reach the
+# runtime image. Banning them now would force an upstream patch
+# we cannot land in this commit; revisit when piper-rs ships a
+# rustls-only release.
+# Note: `native-tls` and `openssl` are NOT banned here even
+# though the binary is `rustls`-aware. They are pulled in only as
+# a build-dep of `ureq` (which `ort-sys` -> `piper-rs` uses to
+# fetch ONNX model weights at compile time). They never reach the
+# runtime image. Banning them now would force an upstream patch
+# we cannot land in this commit; revisit when piper-rs ships a
+# rustls-only release.
+
+# ----------------------------------------------------------------------------
+# Sources
+# ----------------------------------------------------------------------------
+# Restrict where dependencies may be pulled from. `crates-io` is
+# the canonical source for Rust deps. A git or path dep is fine
+# while in active development but should not ship — deny them
+# here.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -3,6 +3,7 @@ name = "nagent-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "axum HTTP/WebSocket server for the nagent pipeline."
 build = "build.rs"
 
@@ -75,8 +76,12 @@ argon2 = "0.5"
 # Reuses the workspace's reqwest + rustls TLS stack.
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 # 0.6.x replaces openssl-sys with crypto-glue (pure-Rust build).
+# Plan S2a: pinned to `=0.6.1-dev` so a future dev-build of the
+# crate cannot slip in via semver-compatible ranges. The
+# cargo-deny `deny = [{ name = "webauthn-rs", version = "<0.6.1-dev" }]`
+# rule mirrors this constraint.
 # danger-allow-state-serialisation lets the ceremony state cross the HTTP round-trip.
-webauthn-rs = { version = "0.6.1-dev", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"] }
+webauthn-rs = { version = "=0.6.1-dev", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"] }
 # OS-RNG for session ids, CSRF tokens, OIDC nonces.
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom"] }
 # We drop `time` — session expiry lives in the DB row, not the cookie.

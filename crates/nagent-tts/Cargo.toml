@@ -3,6 +3,7 @@ name = "nagent-tts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Local Piper ONNX text-to-speech engine, isolated behind a small trait so the inference split (plan H) can move it to a separate tier later."
 
 [features]

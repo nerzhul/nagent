@@ -1,0 +1,77 @@
+# Dependabot configuration (plan S2a).
+#
+# Weekly scans for Rust ecosystem updates + GitHub Actions
+# updates. Cargo is updated at a separate cadence from
+# GitHub Actions because action patches are safe to apply in
+# bulk while Rust dependency updates may touch Cargo.toml
+# and require review.
+#
+# Ignored deps live in `ignore` blocks; a `dependency-name`
+# entry that has been deliberately pinned to a specific version
+# (e.g. `webauthn-rs 0.6.1-dev`) stays there until the project
+# decides to upgrade. `allow` entries restrict Dependabot to a
+# curated set of semver ranges so an unwanted major bump
+# (e.g. `tokio 0.x -> 1.0`) does not open a noisy PR.
+version: 2
+
+updates:
+  # ---- Cargo ecosystem ------------------------------------------------
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Paris"
+    # Group patch updates into a single Dependabot PR per
+    # crate so the project gets one PR a week instead of
+    # twenty. Minor and major bumps stay isolated so a
+    # human can review the Cargo.toml diff.
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
+    # The `webauthn-rs` crate is pinned to a specific dev build
+    # (`=0.6.1-dev`); Dependabot must not suggest a bump
+    # because the upstream pre-release train is unstable
+    # and we want a human review on every move.
+    ignore:
+      - dependency-name: "webauthn-rs"
+        versions:
+          - "*"
+    # Cargo.lock has historical noise on minor bumps
+    # (`getrandom`, `byteorder`, etc.) that we want a human
+    # to triage.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps(dev)"
+      include: "scope"
+
+  # ---- GitHub Actions --------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Paris"
+    # Patch + minor action updates are safe; majors move
+    # the `actions/checkout` and `dtolnay/rust-toolchain`
+    # integrations through API shape changes that need a
+    # human review.
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"

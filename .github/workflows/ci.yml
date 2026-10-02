@@ -31,6 +31,7 @@ jobs:
             crates/nagent-support
             crates/nagent-db
             crates/nagent-agents
+            crates/nagent-tts
             crates/nagent-server
 
       - name: cargo fmt --check
@@ -63,12 +64,78 @@ jobs:
         # advisory database, refreshed on each run.
         run: cargo audit
 
-  # Plan 4.A S9: Postgres parity tests. The `nagent-db` suite ships
-  # `#[ignore]` parity tests that run only when `NAGENT_TEST_PG_URL`
-  # is set; this job spins up a Postgres service container and runs
-  # them via `cargo test -- --include-ignored`. Without this job a
-  # sqlite-only build would silently diverge from Postgres behaviour
-  # (per-user isolation, audit rows, `for_user` scoping).
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check (bans / licenses / sources)
+        run: |
+          cargo deny check bans licenses sources
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+
+      - name: Generate CycloneDX SBOM (cargo-cyclonedx)
+        run: |
+          cargo cyclonedx --format json \
+            --override-filename target/sbom.cargo \
+            --target-crate nagent-server
+
+      - name: Upload CycloneDX SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cargo-cyclonedx
+          path: target/sbom.cargo.json
+          retention-days: 30
+          if-no-files-found: error
+
+  image-sbom:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the runtime image but DO NOT push it — the build
+      # cache is enough for Syft to inspect the resulting image.
+      # `load: true` exports it to the local Docker daemon so
+      # Syft can read layers directly.
+      - name: Build runtime image (cpu backend, no push)
+        uses: docker/buildx-action@v3
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: Dockerfile
+          build-args: BACKEND=cpu
+          load: true
+          tags: nagent/nagent-server:sbom
+          cache-from: type=gha
+
+      - name: Install Syft
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json@1.5
+          artifact-name: nagent-server.sbom.cdx.json
+          image: nagent/nagent-server:sbom
+          output-file: syft-sbom.cdx.json
+
+      - name: Upload Syft SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-syft
+          path: syft-sbom.cdx.json
+          retention-days: 30
+          if-no-files-found: error
+
   test-postgres:
     runs-on: ubuntu-latest
     services:
