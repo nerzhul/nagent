@@ -266,6 +266,7 @@ pub fn build_registry(
         calculate: Default::default(),
         datetime: Default::default(),
         read_document: cfg.read_document.clone().into(),
+        caldav: cfg.caldav.clone().into(),
     };
     // Plan 4.C (C): one shared `EgressPool` is built per process
     // and passed to every agent. Strict-class agents
@@ -357,6 +358,17 @@ impl From<crate::config::ReadDocumentConfig> for nagent_agents::ReadDocumentAgen
         Self {
             timeout_ms: c.timeout_ms,
             max_extracted_chars: c.max_extracted_chars,
+        }
+    }
+}
+
+impl From<crate::config::agents::CalDavConfig> for nagent_agents::CalDavAgentConfig {
+    fn from(c: crate::config::agents::CalDavConfig) -> Self {
+        Self {
+            timeout_ms: c.timeout_ms,
+            allowlist: c.allowlist,
+            max_events: c.max_events,
+            max_body_bytes: c.max_body_bytes,
         }
     }
 }

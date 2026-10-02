@@ -198,9 +198,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         let identity = crate::auth::router::build_protected_auth_router(state.clone());
         let credentials_routes =
             crate::credentials::routes::build_protected_credentials_router(state.clone());
+        // Plan 1790963194218: the CalDAV setup-only probe
+        // endpoint is mounted in its own router so the
+        // generic `ProbeState<CalDavConfig>` newtype does
+        // not have to live inside the credentials router's
+        // `CredentialState` (a per-feature field on a
+        // shared struct would be a code smell — see
+        // `crate::probe` for the abstraction). The probe
+        // router is feature-gated on `caldav-agent`.
+        #[cfg(feature = "caldav-agent")]
+        let caldav_probe_routes =
+            crate::credentials::caldav_probe::build_caldav_probe_router(state.clone());
+        #[cfg(not(feature = "caldav-agent"))]
+        let caldav_probe_routes = axum::Router::new();
         let protected_with_auth = protected
             .merge(identity)
             .merge(credentials_routes)
+            .merge(caldav_probe_routes)
             .layer(auth_layer);
         // Layer order is applied bottom-up; the LAST `.layer()`
         // becomes the OUTERMOST. The access log is the outermost

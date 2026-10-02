@@ -27,6 +27,9 @@ pub mod key;
 pub mod resolver;
 pub mod routes;
 
+#[cfg(feature = "caldav-agent")]
+pub mod caldav_probe;
+
 pub use crypto::{decrypt, encrypt, EncryptedSecret};
 pub use key::{CredentialsKey, CredentialsKeyError};
 pub use resolver::{CredentialError, CredentialResolver};

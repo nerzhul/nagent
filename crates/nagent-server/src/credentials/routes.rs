@@ -104,6 +104,13 @@ fn auth_db(state: Arc<crate::AppState>) -> nagent_db::Db {
         .clone()
 }
 
+/// Public re-export of [`auth_db`] for sibling modules that need
+/// the same `nagent_db::Db` (the CalDAV probe handler reads it
+/// to write `auth_events` rows).
+pub fn credential_state_db(state: &Arc<crate::AppState>) -> nagent_db::Db {
+    auth_db(state.clone())
+}
+
 /// `GET /api/integrations` — list every service with `configured`
 /// flags per service for the caller.
 pub async fn list_integrations(

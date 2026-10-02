@@ -273,6 +273,8 @@ pub struct TomlAgentConfig {
     #[serde(default)]
     pub read_document: Option<TomlReadDocumentConfig>,
     pub read_document_enabled: Option<bool>,
+    #[serde(default)]
+    pub caldav: Option<TomlCalDavConfig>,
 }
 
 /// Sandbox and transfer knobs for the built-in `web_fetch` tool.
@@ -336,6 +338,21 @@ pub struct TomlStockConfig {
 pub struct TomlReadDocumentConfig {
     pub timeout_ms: Option<u64>,
     pub max_extracted_chars: Option<usize>,
+}
+
+/// Knobs for the CalDAV plugin. Mirrors
+/// [`crate::config::CalDavConfig`]. The agents are only
+/// registered when the `caldav-agent` cargo feature is on;
+/// this struct is parsed unconditionally so a TOML typo
+/// surfaces at boot rather than silently dropping the
+/// section.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlCalDavConfig {
+    pub timeout_ms: Option<u64>,
+    pub allowlist: Option<Vec<String>>,
+    pub max_events: Option<usize>,
+    pub max_body_bytes: Option<usize>,
 }
 
 /// WebSocket frame-limit knobs and HTTP transport guardrails (S-1).
@@ -809,6 +826,7 @@ fn merge_toml_agents(
                 l.read_document.as_ref(),
             ),
             read_document_enabled: l.read_document_enabled.or(e.read_document_enabled),
+            caldav: merge_toml_caldav(e.caldav.as_ref(), l.caldav.as_ref()),
         }),
     }
 }
@@ -916,6 +934,23 @@ fn merge_toml_read_document(
         (Some(e), Some(l)) => Some(TomlReadDocumentConfig {
             timeout_ms: l.timeout_ms.or(e.timeout_ms),
             max_extracted_chars: l.max_extracted_chars.or(e.max_extracted_chars),
+        }),
+    }
+}
+
+fn merge_toml_caldav(
+    earlier: Option<&TomlCalDavConfig>,
+    later: Option<&TomlCalDavConfig>,
+) -> Option<TomlCalDavConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlCalDavConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            allowlist: l.allowlist.clone().or_else(|| e.allowlist.clone()),
+            max_events: l.max_events.or(e.max_events),
+            max_body_bytes: l.max_body_bytes.or(e.max_body_bytes),
         }),
     }
 }

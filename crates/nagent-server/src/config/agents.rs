@@ -48,6 +48,13 @@ pub struct AgentConfig {
     /// docs alone (without a registered document store) does not
     /// silently drop the agent.
     pub read_document_enabled: bool,
+    /// Knobs for the CalDAV plugin (plan 1790963194218). v1
+    /// exposes three LLM tools (`caldav_list_events`,
+    /// `caldav_get_event`, `caldav_create_event`) and a
+    /// setup-only HTTP probe endpoint; the field is always
+    /// parsed; the actual agents are only registered when the
+    /// `caldav-agent` cargo feature is on.
+    pub caldav: CalDavConfig,
 }
 
 impl Default for AgentConfig {
@@ -62,6 +69,7 @@ impl Default for AgentConfig {
             stock: StockConfig::default(),
             read_document: ReadDocumentConfig::default(),
             read_document_enabled: false,
+            caldav: CalDavConfig::default(),
         }
     }
 }
@@ -90,6 +98,7 @@ impl AgentConfig {
                 defaults.read_document_enabled,
                 "READ_DOCUMENT_AGENT_ENABLED",
             )?,
+            caldav: CalDavConfig::from_env_with_toml(toml.caldav.as_ref())?,
         })
     }
 }
@@ -424,6 +433,76 @@ impl ReadDocumentConfig {
                 toml.max_extracted_chars,
                 defaults.max_extracted_chars,
                 "READ_DOCUMENT_MAX_CHARS",
+            )?,
+        })
+    }
+}
+
+/// Knobs for the CalDAV plugin (plan 1790963194218).
+///
+/// v1 ships three LLM tools — `caldav_list_events`,
+/// `caldav_get_event`, `caldav_create_event` — and a
+/// setup-only `caldav_list_calendars` HTTP endpoint. The
+/// `allowlist` is mandatory for any deployment that talks to
+/// a public CalDAV server: when empty, the default-deny SSRF
+/// policy of the egress layer rejects every public host.
+#[derive(Debug, Clone)]
+pub struct CalDavConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Hostname allow-list (suffix match, case-insensitive).
+    /// When non-empty, only the listed hosts (or their
+    /// subdomains, for `*.foo` entries) may be reached.
+    pub allowlist: Vec<String>,
+    /// Hard cap on the number of events `caldav_list_events`
+    /// returns per call.
+    pub max_events: usize,
+    /// Cap on the iCalendar body the client will accept
+    /// (bytes). Caps memory per `caldav_get_event` /
+    /// `caldav_create_event` round-trip.
+    pub max_body_bytes: usize,
+}
+
+impl Default for CalDavConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 15_000,
+            allowlist: Vec::new(),
+            max_events: 250,
+            max_body_bytes: 2 * 1024 * 1024,
+        }
+    }
+}
+
+impl CalDavConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlCalDavConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("CALDAV_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "CALDAV_TIMEOUT_MS",
+            )?,
+            allowlist: resolve_csv(
+                env_opt("CALDAV_ALLOWLIST").as_deref(),
+                toml.allowlist,
+                defaults.allowlist,
+            ),
+            max_events: resolve_primitive(
+                env_opt("CALDAV_MAX_EVENTS").as_deref(),
+                toml.max_events,
+                defaults.max_events,
+                "CALDAV_MAX_EVENTS",
+            )?,
+            max_body_bytes: resolve_primitive(
+                env_opt("CALDAV_MAX_BODY_BYTES").as_deref(),
+                toml.max_body_bytes,
+                defaults.max_body_bytes,
+                "CALDAV_MAX_BODY_BYTES",
             )?,
         })
     }

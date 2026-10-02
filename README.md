@@ -641,10 +641,16 @@ The `0002_credentials.sql` migration adds:
 - **Server-wide fallback credentials** are not in v1. The
   framework is per-user only; shared agents (e.g. weather) keep
   their global config (`[agents.get_weather].api_key`).
-- **Concrete integrations** (IMAP, CalDAV, GitHub, Home Assistant,
-  …) land in their own follow-up PRs. Adding one is a single
-  `ServiceDef` to `crates/nagent-server/src/agents/services.rs` plus
-  an agent that reads creds via `ctx.secret(...)`.
+ - **Concrete integrations** (IMAP, CalDAV, GitHub, Home Assistant,
+   …) land in their own follow-up PRs. Adding one is a single
+   `ServiceDef` to `crates/nagent-agents/src/services.rs` plus
+   an agent that reads creds via `ctx.secret(...)`. The CalDAV
+   plugin is the first such concrete integration: build with
+   `--features nagent-server/caldav-agent` to enable
+   `caldav_list_events` / `caldav_get_event` / `caldav_create_event`
+   plus the setup-only `POST /api/integrations/caldav/probe-calendars`
+   endpoint (see [`docs/integrations/caldav.md`](docs/integrations/caldav.md)
+   and [`examples/caldav.toml`](examples/caldav.toml)).
 
 ### Kubernetes overlays
 

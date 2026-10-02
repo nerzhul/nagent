@@ -771,6 +771,43 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
             ))
         },
     },
+    // Plan 1790963194218: CalDAV plugin (read + add only). The
+    // three agents share the same `CalDavAgentConfig` and the
+    // same per-call `CalDavClient` shape — built inside `invoke`
+    // because credentials must be fresh per request. v1 does NOT
+    // register `caldav_list_calendars`, `caldav_update_event`, or
+    // `caldav_delete_event`; the LLM tool loop returns "unknown
+    // tool" if it tries.
+    #[cfg(feature = "caldav-agent")]
+    AgentDescriptor {
+        id: "caldav_list_events",
+        feature: "caldav-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(caldav::list_events::ListEventsAgent::new(
+                cfgs.caldav.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "caldav-agent")]
+    AgentDescriptor {
+        id: "caldav_get_event",
+        feature: "caldav-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(caldav::get_event::GetEventAgent::new(
+                cfgs.caldav.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "caldav-agent")]
+    AgentDescriptor {
+        id: "caldav_create_event",
+        feature: "caldav-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(caldav::create_event::CreateEventAgent::new(
+                cfgs.caldav.clone(),
+            )))
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -787,6 +824,32 @@ mod descriptor_table_tests {
             assert!(
                 !d.feature.is_empty(),
                 "AgentDescriptor feature must be non-empty"
+            );
+        }
+    }
+
+    /// Plan 1790963194218: v1 ships **read + add only** for
+    /// CalDAV. `caldav_update_event`, `caldav_delete_event`, and
+    /// `caldav_list_calendars` must NOT be registered in
+    /// `AGENT_DESCRIPTORS` — a model that tries to call them
+    /// would receive `"unknown tool"`. The setup-only probe
+    /// endpoint is the only path to calendar discovery.
+    #[cfg(feature = "caldav-agent")]
+    #[test]
+    fn caldav_forbidden_tools_are_not_in_descriptor_table() {
+        let forbidden = [
+            "caldav_update_event",
+            "caldav_delete_event",
+            "caldav_list_calendars",
+        ];
+        let registered: std::collections::HashSet<&str> =
+            AGENT_DESCRIPTORS.iter().map(|d| d.id).collect();
+        for name in forbidden {
+            assert!(
+                !registered.contains(name),
+                "`{name}` must not be registered as an LLM tool in v1 (read+add only); \
+                 update/delete are forbidden and `caldav_list_calendars` is a setup-only \
+                 HTTP endpoint, not a chat tool"
             );
         }
     }
@@ -852,6 +915,9 @@ pub mod credential_cache;
 /// Plain per-agent *Config structs (defaults only).
 pub mod config_doc;
 pub mod web_fetch;
+
+#[cfg(feature = "caldav-agent")]
+pub mod caldav;
 
 #[cfg(feature = "calculate-agent")]
 pub mod calculate_agent;

@@ -21,6 +21,10 @@ wikipedia-agent = []
 dictionary-agent = []
 web-agent = []
 read-document-agent = []
+# Plan 1790963194218: CalDAV plugin. v1 ships read + add only (no
+# update / delete). The heavy dependency is the `icalendar` crate
+# for VEVENT parsing; `reqwest` is already pulled in by `egress`.
+caldav-agent = ["dep:icalendar"]
 # Convenience meta-feature that turns on every agent. The Makefile
 # targets list it once so an operator does not need to enumerate
 # the whole set in CI.
@@ -34,6 +38,7 @@ all-agents = [
     "dictionary-agent",
     "web-agent",
     "read-document-agent",
+    "caldav-agent",
 ]
 
 [dependencies]
@@ -65,3 +70,11 @@ tracing = { workspace = true }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 chrono-tz = { version = "0.10", optional = true, features = ["serde"] }
 meval = { version = "0.2", optional = true }
+# iCalendar (RFC 5545) parser for VEVENT bodies. Gated on the
+# `caldav-agent` cargo feature so a slim build that drops CalDAV
+# does not pay the dep cost.
+icalendar = { version = "0.7", optional = true }
+# Random hex suffix for VEVENT UIDs (CalDAV create_event).
+rand = { version = "0.8", default-features = false, features = ["std", "getrandom", "std_rng"] }
+# Base64 for the HTTP Basic Authorization header.
+base64 = "0.22"

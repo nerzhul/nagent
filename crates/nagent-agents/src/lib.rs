@@ -18,6 +18,8 @@
 //!   validate URLs and fetch remote resources.
 
 pub mod agents;
+#[cfg(feature = "caldav-agent")]
+pub mod caldav_service;
 pub mod config;
 pub mod egress;
 pub mod services;
@@ -27,9 +29,9 @@ pub use agents::{
     DocumentSource, SecretSource, UserContext,
 };
 pub use config::{
-    AgentConfigs, CalculateAgentConfig, DateTimeAgentConfig, DictionaryAgentConfig,
-    ReadDocumentAgentConfig, StockAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig,
-    WebFetchAgentConfig, WikipediaAgentConfig,
+    AgentConfigs, CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig,
+    DictionaryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig, UnitConvertAgentConfig,
+    WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig,
 };
 
 // Re-export the `read_document` agent unconditionally so the

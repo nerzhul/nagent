@@ -177,3 +177,45 @@ impl Default for ReadDocumentAgentConfig {
         }
     }
 }
+
+/// Knobs for the CalDAV agent family (plan 1790963194218).
+///
+/// v1 ships three agents — `caldav_list_events`,
+/// `caldav_get_event`, `caldav_create_event` — and a setup-only
+/// `caldav_list_calendars` HTTP endpoint. Edit / delete are
+/// explicitly out of scope; the per-user credentials live in the
+/// existing AES-GCM vault under the `caldav` service id
+/// (`url`, `username`, `password`).
+#[derive(Debug, Clone)]
+pub struct CalDavAgentConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Hostname allow-list applied by the egress client to the
+    /// CalDAV server URL and every per-user `url` value read from
+    /// the vault. When non-empty, only the listed hosts (or
+    /// their subdomains, for `*.foo` entries) may be reached.
+    /// When empty, only loopback / private IPs pass the SSRF
+    /// guard; public CalDAV servers (the common case) are
+    /// rejected.
+    pub allowlist: Vec<String>,
+    /// Hard cap on the number of `VEVENT`s the `list_events`
+    /// agent returns per call. CalDAV's `REPORT calendar-query`
+    /// can return a large slice of the calendar; this caps the
+    /// payload the LLM tool loop has to digest in one round.
+    pub max_events: usize,
+    /// Cap on the size of an iCalendar body the client will
+    /// accept (bytes). Caps memory per `get_event` and
+    /// `create_event` (PUT response).
+    pub max_body_bytes: usize,
+}
+
+impl Default for CalDavAgentConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 15_000,
+            allowlist: Vec::new(),
+            max_events: 250,
+            max_body_bytes: 2 * 1024 * 1024,
+        }
+    }
+}

@@ -23,6 +23,7 @@ unit-convert-agent = ["nagent-agents/unit-convert-agent"]
 wikipedia-agent = ["nagent-agents/wikipedia-agent"]
 dictionary-agent = ["nagent-agents/dictionary-agent"]
 read-document-agent = ["nagent-agents/read-document-agent"]
+caldav-agent = ["nagent-agents/caldav-agent"]
 # Convenience meta-feature: every agent compiled in.
 all-agents = ["nagent-agents/all-agents"]
 # Piper TTS; pulls piper-rs + ort + espeak-ng FFI through the

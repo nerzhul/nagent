@@ -1,0 +1,57 @@
+# Example `[agents.caldav]` config for the CalDAV plugin
+# (plan 1790963194218). Copy into your `--config` TOML file
+# and adjust `allowlist` to match the CalDAV servers your
+# users can reach. The default `allowlist = []` is fail-closed:
+# the chat agents AND the probe endpoint refuse every call
+# until the operator sets at least one entry.
+#
+# v1 ships read + add only:
+#   * `caldav_list_events`  — list VEVENTs in a time range
+#   * `caldav_get_event`    — fetch a single VEVENT by UID
+#   * `caldav_create_event` — append a new VEVENT (confirm-on-write)
+#
+# Edit / delete tools are explicitly out of scope for v1.
+# `caldav_list_calendars` is a setup-only HTTP endpoint, not
+# an LLM tool.
+
+[agents]
+enabled = true
+
+[agents.caldav]
+# Per-request connect+read timeout in milliseconds. The default
+# (15 s) is generous for a single PROPFIND / REPORT / PUT round
+# trip; bump it if your CalDAV server sits behind a slow proxy.
+timeout_ms = 15_000
+
+# Hostname allow-list. When non-empty, only the listed hosts (or
+# their subdomains, for `*.foo` entries) may be reached. The
+# default `allow_public = true` on the egress side is irrelevant
+# when an allow-list is set: a hostname match takes precedence.
+#
+# `cloud.nextcloud.example` is the most common case (a single
+# self-hosted Nextcloud or Radicale box). Add an entry per host
+# your users are allowed to talk to.
+allowlist = ["cloud.nextcloud.example", "*.fastmail.com"]
+
+# Hard cap on the number of events `caldav_list_events` returns
+# per call. The chat agent truncates beyond this.
+max_events = 250
+
+# Cap on the iCalendar body the client will accept (bytes).
+# Caps memory per `caldav_get_event` / `caldav_create_event`
+# round-trip; bump it if you regularly sync 1 MB+ `.ics` files.
+max_body_bytes = 2097152
+
+# ----------------------------------------------------------------------------
+# Per-user credentials (the chat agents read these at request time).
+# The user pastes them through the Integrations page; the server
+# encrypts them with `[auth.credentials].key` (AES-256-GCM) and
+# never logs the plaintext.
+#
+# Field shape (see `ServiceDef` in `nagent-agents/src/caldav_service.rs`):
+#   * `url`       — HTTPS URL of the calendar collection chosen during setup.
+#                   Use the Integrations page's "Discover" button to pick it.
+#   * `username`  — CalDAV principal or basic-auth username.
+#   * `password`  — App password / token (Nextcloud → Settings → Security
+#                   → App passwords is recommended).
+# ----------------------------------------------------------------------------

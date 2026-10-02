@@ -280,6 +280,18 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // to decrypt per-user credentials. The encryption key comes
     // from `[auth.credentials].key` in the resolved config
     // (TOML-only, no env-var indirection).
+    //
+    // Plan 1790963194218: the `caldav` `ServiceDef` is appended
+    // to the registry when the `caldav-agent` cargo feature is
+    // on. The chat agents that consume the per-user vault
+    // (`caldav_list_events` / `caldav_get_event` /
+    // `caldav_create_event`) are feature-gated the same way; a
+    // build without the feature has no CalDAV surface and the
+    // registry stays empty (the historical default).
+    #[cfg(feature = "caldav-agent")]
+    let services =
+        ServiceRegistry::new(&[nagent_agents::caldav_service::CALDAV_SERVICE]).into_arc();
+    #[cfg(not(feature = "caldav-agent"))]
     let services = ServiceRegistry::empty().into_arc();
     let has_credentials = auth_store.is_some() && agents.as_ref().is_some_and(|a| !a.is_empty());
     let (credential_resolver, credentials_key) = if has_credentials {

@@ -195,10 +195,21 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `wikipedia` | `wikipedia-agent` | `wikipedia.org` REST, no API key, `User-Agent` set. |
 | `dictionary` | `dictionary-agent` | Free Dictionary REST API, no API key. |
 | `get_stock_quote` | `stock-agent` | Stooq CSV, no API key. |
+| `caldav_list_events` | `caldav-agent` | Per-user CalDAV calendar: list `VEVENT`s in a time range. Read-only. |
+| `caldav_get_event` | `caldav-agent` | Per-user CalDAV calendar: fetch a single `VEVENT` by `UID`. Read-only. |
+| `caldav_create_event` | `caldav-agent` | Per-user CalDAV calendar: append a new `VEVENT` (confirm-on-write). |
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:
 pure-local agents return `false`, every other agent returns `true`.
+
+The CalDAV plugin (plan 1790963194218) ships **read + add only** in
+v1 — `caldav_update_event` and `caldav_delete_event` are explicitly
+forbidden (the `CalDavClient` does not expose `update()` / `delete()`
+methods and no such agent is registered in `AGENT_DESCRIPTORS`).
+`caldav_list_calendars` is a setup-only HTTP endpoint
+(`POST /api/integrations/caldav/probe-calendars`), not an LLM tool.
+See `docs/integrations/caldav.md` for the operator-facing guide.
 
 ### 2.5 Direct HTTP routes
 
@@ -224,6 +235,43 @@ Agents consume services through `UserContext::secret(service,
 field)`. The catalogue is plain data — no I/O — so it lives in
 `nagent-agents` for the same reason the rest of the agents
 subsystem does.
+
+When the `caldav-agent` cargo feature is on, the registry
+contains the `caldav` `ServiceDef` (id `"caldav"`, fields `url`,
+`username`, `password`). The runtime probe endpoint
+(`POST /api/integrations/caldav/probe-calendars`) lets the
+integrations UI discover the user's calendar collection
+before saving it; the chat agents read the saved `url` as
+the calendar collection URL.
+
+#### 2.7 Setup-only helpers
+
+The CalDAV connector is the first feature that ships a
+*setup-only* HTTP helper — an endpoint reachable from the
+integrations UI but not from the LLM tool loop. The pattern:
+
+- A `ServiceDef` describes the per-user fields the user
+  must supply (`url`, `username`, `password`).
+- A `POST` endpoint accepts credentials **in the request
+  body**, validates the principal host against the same
+  allowlist the chat agents use, and returns a list of
+  selectable resources (here: PROPFIND results filtered to
+  `<C:calendar/>`).
+- The UI lets the user pick one, then PUTs the chosen
+  resource's href as the saved `url` field through the
+  existing `PUT /api/integrations/:id/credentials` flow.
+- A `caldav_probe_<outcome>` audit row records the probe
+  attempt (host + outcome); the password never lands on
+  the audit row.
+
+Setup-only helpers are intentionally **not** registered in
+`AGENT_DESCRIPTORS` — the LLM tool loop returns
+`"unknown tool"` if a model tries to call them. The
+hardening posture is the same as the chat agents
+(operator-set allowlist, fail-closed default), but the
+endpoint runs on the **server** with the supplied
+credentials (not from the vault — the user is choosing
+what to put in the vault).
 
 ## 3. Tools (LLM function-calling integration)
 
