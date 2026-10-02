@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use secrecy::SecretString;
 use uuid::Uuid;
 
 use crate::credentials::crypto::{decrypt, CryptoError, EncryptedSecret};
