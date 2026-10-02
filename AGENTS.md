@@ -86,6 +86,8 @@ On the contrary, avoid comments that:
 - Comment on code that has been removed or disabled for a long time.
 - Serve as a personal journal ("TODO: redo later" without context).
 
+Zero comments must be present in HTML, CSS or JS files.
+
 ## 5. Documentation Sync for Build, Runtime, and Environment Changes
 
 Any change that affects how the project is **built**, **run**, or **configured** at runtime must be reflected in the documentation in the **same commit**. Documentation that drifts from the actual behavior is treated as a bug.
