@@ -227,13 +227,19 @@ mod preferences {
         let prefs = scoped.get().await.expect("default prefs");
         assert!(!prefs.share_location_enabled);
         assert!(!prefs.share_timezone_enabled);
+        assert!(
+            prefs.reply_language.is_none(),
+            "default reply_language is None (Auto)"
+        );
         // Scoped upsert writes only the bound user's row.
-        let updated = scoped.upsert(true, false).await.expect("upsert");
+        let updated = scoped.upsert(true, false, None).await.unwrap();
         assert!(updated.share_location_enabled);
         assert!(!updated.share_timezone_enabled);
+        assert!(updated.reply_language.is_none());
         let reread = scoped.get().await.expect("reread");
         assert!(reread.share_location_enabled);
         assert!(!reread.share_timezone_enabled);
+        assert!(reread.reply_language.is_none());
     }
 
     #[cfg(feature = "db-sqlite")]
@@ -254,20 +260,93 @@ mod preferences {
             .unwrap();
         db.for_user(alice)
             .preferences()
-            .upsert(true, false)
+            .upsert(true, false, Some("fr".into()))
             .await
             .unwrap();
         db.for_user(bob)
             .preferences()
-            .upsert(false, true)
+            .upsert(false, true, None)
             .await
             .unwrap();
         let alice_prefs = db.for_user(alice).preferences().get().await.unwrap();
         let bob_prefs = db.for_user(bob).preferences().get().await.unwrap();
         assert!(alice_prefs.share_location_enabled);
         assert!(!alice_prefs.share_timezone_enabled);
+        assert_eq!(alice_prefs.reply_language.as_deref(), Some("fr"));
         assert!(!bob_prefs.share_location_enabled);
         assert!(bob_prefs.share_timezone_enabled);
+        assert!(bob_prefs.reply_language.is_none());
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn reply_language_round_trips_some_then_none() {
+        // Confirms the new column (added in migration 0007) round-trips
+        // both `Some(...)` and `None` so a user can switch between
+        // "Auto" and an explicit language without losing the boolean
+        // opt-ins. The HTTP handler (`PutPreferencesBody`) enforces the
+        // same full-triple contract; this test pins the storage side.
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("lang@example.com", "Lang", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let scoped = db.for_user(user).preferences();
+
+        let updated = scoped
+            .upsert(false, false, Some("es".into()))
+            .await
+            .expect("upsert with Some");
+        assert_eq!(updated.reply_language.as_deref(), Some("es"));
+
+        let reread = scoped.get().await.expect("reread Some");
+        assert_eq!(reread.reply_language.as_deref(), Some("es"));
+        assert!(!reread.share_location_enabled);
+        assert!(!reread.share_timezone_enabled);
+
+        // Clearing the language (PUT with `null`) must NOT touch the
+        // boolean opt-ins — the row is a strict atomic replace of the
+        // triple, not a partial update.
+        let cleared = scoped
+            .upsert(true, true, None)
+            .await
+            .expect("upsert with None");
+        assert!(cleared.reply_language.is_none());
+        assert!(cleared.share_location_enabled);
+        assert!(cleared.share_timezone_enabled);
+        let reread = scoped.get().await.expect("reread None");
+        assert!(reread.reply_language.is_none());
+        assert!(reread.share_location_enabled);
+        assert!(reread.share_timezone_enabled);
+    }
+
+    #[cfg(feature = "db-postgres")]
+    #[tokio::test]
+    #[ignore = "requires NAGENT_TEST_PG_URL; run with --include-ignored in CI"]
+    async fn postgres_parity_reply_language_round_trip() {
+        // Same round-trip as the SQLite test above, against a live
+        // Postgres to confirm the SQL shape (`$N` placeholders, the
+        // `EXCLUDED.` references, the nullable TEXT cast) all agree.
+        let db = pg_or_skip!();
+        let user = db
+            .admin()
+            .users
+            .create("pg-lang@example.com", "PG", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let scoped = db.for_user(user).preferences();
+        let updated = scoped
+            .upsert(false, false, Some("ja".into()))
+            .await
+            .expect("pg upsert Some");
+        assert_eq!(updated.reply_language.as_deref(), Some("ja"));
+        let cleared = scoped
+            .upsert(false, false, None)
+            .await
+            .expect("pg upsert None");
+        assert!(cleared.reply_language.is_none());
     }
 }
 

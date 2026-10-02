@@ -221,6 +221,14 @@ pub struct TomlLlmConfig {
     /// Independent from `allow_user_location`: an operator may
     /// forbid one without touching the other.
     pub allow_user_timezone: Option<bool>,
+    /// Whether the proxy is allowed to inject the per-user reply-
+    /// language system message (`USER_REPLY_LANGUAGE_MARKER`) when
+    /// the authenticated user has set a non-default reply language.
+    /// Mirrors the `LLM_ALLOW_USER_REPLY_LANGUAGE` env var; env
+    /// wins when both are set. Defaults to `true`. Independent from
+    /// the other two kill-switches: an operator may forbid one
+    /// without touching the others.
+    pub allow_user_reply_language: Option<bool>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -706,6 +714,7 @@ fn merge_toml_llm(
             system_prompt: l.system_prompt.clone().or_else(|| e.system_prompt.clone()),
             allow_user_location: l.allow_user_location.or(e.allow_user_location),
             allow_user_timezone: l.allow_user_timezone.or(e.allow_user_timezone),
+            allow_user_reply_language: l.allow_user_reply_language.or(e.allow_user_reply_language),
         }),
     }
 }

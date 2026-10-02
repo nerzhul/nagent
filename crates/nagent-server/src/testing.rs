@@ -408,6 +408,7 @@ fn default_test_config() -> Config {
             system_prompt: None,
             allow_user_location: true,
             allow_user_timezone: true,
+            allow_user_reply_language: true,
         },
         agents: AgentConfig::default(),
         tts: TtsConfig::default(),

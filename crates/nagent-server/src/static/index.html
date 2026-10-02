@@ -413,6 +413,33 @@
         <p id="chat-timezone-status" class="chat-timezone-status">…</p>
       </div>
       <!--
+        Reply-language picker. Decoupled from the chat-audio header
+        `#chat-lang-select` (which is the STT *input* language — Whisper
+        transcription). The picker here drives two things: the LLM
+        reply language (server-side system-block injection, gated by
+        `LLM_ALLOW_USER_REPLY_LANGUAGE`) and the TTS voice choice
+        (`chat.js::resolveTtsVoice` reads from this preference, not from
+        the STT picker). "Auto" maps to a wire-level `null` so the LLM
+        falls back to "match the user's input language"; any non-`""`
+        value is sent as a JSON string. List mirrors
+        `#chat-lang-select` so users see the same codes in both
+        pickers.
+      -->
+      <label class="chat-reply-language-label">
+        <span>Reply language</span>
+        <select id="chat-reply-language">
+          <option value="">Auto (user input)</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="de">Deutsch</option>
+          <option value="it">Italiano</option>
+          <option value="pt">Português</option>
+          <option value="ja">日本語</option>
+          <option value="zh">中文</option>
+        </select>
+      </label>
+      <!--
         Per-user credentials drawer. Hidden until `chat.js` boots
         and confirms the user is authenticated (the routes require
         `RequireAuth` so an anonymous GET would 401 and the section

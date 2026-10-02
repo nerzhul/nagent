@@ -180,6 +180,15 @@ pub struct UserCredentialRow {
 pub struct UserPreferences {
     pub share_location_enabled: bool,
     pub share_timezone_enabled: bool,
+    /// Language the assistant should reply in (`None` = "Auto", i.e.
+    /// match the user's input language). Drives both the LLM
+    /// system-message injection in `llm::proxy::chat_completions`
+    /// (server-side, via the `USER_REPLY_LANGUAGE_MARKER` block) and
+    /// the TTS voice selection in `chat.js::resolveTtsVoice`
+    /// (browser-side). Stored as a BCP-47 primary subtag (e.g.
+    /// `"fr"`, `"en"`, `"es"`) so the supported list can grow without
+    /// another migration.
+    pub reply_language: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 

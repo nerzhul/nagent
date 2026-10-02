@@ -66,7 +66,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // version probes) keep working. The auth login routes are
     // merged into `public` further down.
     let public = Router::new()
+        // `/` and `/index.html` both serve the same shell; the
+        // explicit alias catches crawlers / link-checkers that
+        // probe `/index.html` directly.
         .route("/", get(crate::stt::ws_handler::index_handler))
+        .route("/index.html", get(crate::stt::ws_handler::index_handler))
         .route("/healthz", get(crate::stt::ws_handler::healthz))
         .route("/api/version", get(crate::stt::ws_handler::version_handler))
         .route(

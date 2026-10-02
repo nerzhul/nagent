@@ -56,6 +56,7 @@ async fn start_test_server_with(
         system_prompt: None,
         allow_user_location: true,
         allow_user_timezone: true,
+        allow_user_reply_language: true,
     };
     builder = builder
         .with_stt_rate_per_min(rate_limit.stt_per_min)

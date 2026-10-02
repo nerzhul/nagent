@@ -75,6 +75,7 @@ import {
 } from "/static/geolocation.js";
 import {
   currentFlags as acquireCurrentPreferenceFlags,
+  getReplyLanguage,
   loadFromServer as loadPreferencesFromServer,
   saveToServer as savePreferencesToServer,
 } from "/static/preferences.js";
@@ -2280,7 +2281,11 @@ function renderTimezoneUi() {
 /// not resolved yet.
 function handleTimezoneToggleChange() {
   const flags = acquireCurrentPreferenceFlags();
-  savePreferencesToServer(flags.location, !!timezoneToggleEl?.checked);
+  savePreferencesToServer(
+    flags.location,
+    !!timezoneToggleEl?.checked,
+    flags.reply_language,
+  );
 }
 
 /// Update every geolocation control from the current cache + toggle.
@@ -2349,7 +2354,7 @@ async function handleShareLocationClick() {
     const loc = await getLocation();
     saveCachedLocation(loc);
     const flags = acquireCurrentPreferenceFlags();
-    savePreferencesToServer(true, flags.timezone);
+    savePreferencesToServer(true, flags.timezone, flags.reply_language);
     renderLocationUi();
   } catch (err) {
     // GeolocationPositionError codes map cleanly to user-facing text;
@@ -2374,7 +2379,11 @@ async function handleShareLocationClick() {
 /// reset (the previous localStorage-only storage lost all three).
 function handleLocationToggleChange() {
   const flags = acquireCurrentPreferenceFlags();
-  savePreferencesToServer(!!locationToggleEl?.checked, flags.timezone);
+  savePreferencesToServer(
+    !!locationToggleEl?.checked,
+    flags.timezone,
+    flags.reply_language,
+  );
   renderLocationUi();
 }
 
@@ -2385,7 +2394,7 @@ async function handleLocationRefreshClick() {
     const loc = await getLocation();
     saveCachedLocation(loc);
     const flags = acquireCurrentPreferenceFlags();
-    savePreferencesToServer(true, flags.timezone);
+    savePreferencesToServer(true, flags.timezone, flags.reply_language);
     if (locationToggleEl) locationToggleEl.checked = true;
     renderLocationUi();
   } catch (err) {
@@ -2401,7 +2410,7 @@ async function handleLocationRefreshClick() {
 function handleLocationForgetClick() {
   clearCachedLocation();
   const flags = acquireCurrentPreferenceFlags();
-  savePreferencesToServer(false, flags.timezone);
+  savePreferencesToServer(false, flags.timezone, flags.reply_language);
   if (locationToggleEl) locationToggleEl.checked = false;
   renderLocationUi();
 }
@@ -2430,7 +2439,7 @@ async function refreshLocationOnBoot() {
     // `renderLocationUi` hide the controls.
     clearCachedLocation();
     const flags = acquireCurrentPreferenceFlags();
-    savePreferencesToServer(false, flags.timezone);
+    savePreferencesToServer(false, flags.timezone, flags.reply_language);
   }
   renderLocationUi();
 }
@@ -2608,6 +2617,20 @@ async function streamReply(sessionId, userText) {
     // lines until a blank line, then dispatches the event named by
     // the most recent `event:` line (or `message` if absent).
     let currentEventName = "";
+    // Reasoning vs content (R8 follow-up): the bubble displays the
+    // model's *answer* in `delta.content` and the model's *thinking*
+    // in `delta.reasoning` (qwen3.5 with reasoning, DeepSeek-R1, etc.).
+    // Mixing the two streams produces the "stuck on reasoning" bug:
+    // when every chunk has `content: ""` and only `reasoning` is
+    // populated, the bubble fills with internal monologue and the
+    // user never sees the actual answer (which may arrive later or
+    // may have been truncated by a length cap).
+    //
+    // Reasoning goes into a collapsible `<details>` block above the
+    // main answer; the visible reply is `delta.content` only. TTS
+    // also reads only the answer so the user is not subjected to
+    // out-loud chain-of-thought.
+    let accumulatedReasoning = "";
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -2678,46 +2701,117 @@ async function streamReply(sessionId, userText) {
         if (payload === "[DONE]") { reader.cancel(); break; }
         try {
           const evt = JSON.parse(payload);
-          const delta = evt?.choices?.[0]?.delta?.content;
-           if (typeof delta === "string" && delta.length > 0) {
-             if (!streamingStarted) {
-               streamingStarted = true;
-               setStreamState({ text: "Streaming…", cls: "connecting" });
-               // Strip the inline loader before writing real text so
-               // the bubble transitions cleanly into the reply.
-               //
-               // The `innerHTML = ""` would normally also wipe the
-               // replay button attached by `appendBubble`, but we
-               // re-attach it below via `ensureReplayButton`.
-               const loaderEl = assistantEl.querySelector(".chat-loader");
-               if (loaderEl) loaderEl.remove();
-               ensureReplayButton(assistantEl);
-             }
-            accumulated += delta;
+          // Reasoning vs content (R8 follow-up):
+          // - `delta.content` is the visible answer the user wants
+          //   to read.
+          // - `delta.reasoning` is the model's chain-of-thought,
+          //   surfaced by qwen3.5 (with reasoning on) and DeepSeek-R1.
+          //
+          // We deliberately do NOT treat reasoning as a fallback
+          // for content: doing so displayed the model's internal
+          // monologue as the reply and, when the answer was
+          // truncated by a length cap, left the user staring at a
+          // half-rendered bubble with no visible answer. Reasoning
+          // is now routed to a collapsible `<details>` block above
+          // the main bubble content.
+          const deltaObj = evt?.choices?.[0]?.delta || {};
+          const contentDelta = typeof deltaObj.content === "string"
+            ? deltaObj.content
+            : "";
+          const reasoningDelta = typeof deltaObj.reasoning === "string"
+            ? deltaObj.reasoning
+            : "";
+          if (reasoningDelta.length > 0) {
+            accumulatedReasoning += reasoningDelta;
+            // Lazily create the reasoning `<details>` block on the
+            // first reasoning token. Collapsed by default so the
+            // user sees only what the model actually answered; one
+            // click expands it for the curious / for debugging
+            // tool-call traces.
+            if (!assistantEl.querySelector(".chat-message__reasoning")) {
+              const details = document.createElement("details");
+              details.className = "chat-message__reasoning";
+              const summary = document.createElement("summary");
+              summary.textContent = "Reasoning";
+              details.appendChild(summary);
+              const pre = document.createElement("pre");
+              pre.className = "chat-message__reasoning-body";
+              details.appendChild(pre);
+              // Insert before the existing markdown body so the
+              // user reads the answer, not the trace, by default.
+              const md = assistantEl.querySelector(".chat-message--markdown") || null;
+              assistantEl.insertBefore(details, md);
+            }
+            const reasoningEl = assistantEl.querySelector(".chat-message__reasoning-body");
+            if (reasoningEl) reasoningEl.textContent = accumulatedReasoning;
+            // While only reasoning is flowing, show "Reasoning…"
+            // so the user gets live feedback. The pill switches to
+            // "Streaming…" the first time a content token arrives.
+            if (!streamingStarted) {
+              streamingStarted = true;
+              setStreamState({ text: "Reasoning…", cls: "connecting" });
+              const loaderEl = assistantEl.querySelector(".chat-loader");
+              if (loaderEl) loaderEl.remove();
+              ensureReplayButton(assistantEl);
+            }
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+          if (contentDelta.length > 0) {
+            // First content token: switch the pill from
+            // "Reasoning…" to "Streaming…" if it was already on.
+            // The reasoning block is already in place by this point
+            // so we only mutate the pill text here.
+            if (!streamingStarted) {
+              streamingStarted = true;
+              setStreamState({ text: "Streaming…", cls: "connecting" });
+              // Strip the inline loader before writing real text so
+              // the bubble transitions cleanly into the reply.
+              //
+              // The `innerHTML = ""` would normally also wipe the
+              // replay button attached by `appendBubble`, but we
+              // re-attach it below via `ensureReplayButton`.
+              const loaderEl = assistantEl.querySelector(".chat-loader");
+              if (loaderEl) loaderEl.remove();
+              ensureReplayButton(assistantEl);
+            } else if (reasoningDelta.length === 0) {
+              // Reasoning arrived earlier; first content token now.
+              setStreamState({ text: "Streaming…", cls: "connecting" });
+            }
+            accumulated += contentDelta;
             // Re-render the accumulated text as sanitized markdown.
             // We coalesce updates via requestAnimationFrame so a
             // burst of small tokens only triggers one parse per
             // animation frame, keeping the streaming path cheap.
             scheduleMarkdownRender(assistantEl, () => accumulated);
             messagesEl.scrollTop = messagesEl.scrollHeight;
-            // Feed the raw `delta` (NOT the markdown-rendered HTML)
-            // to TTS so it doesn't read out `**bold**`, code fences,
-            // etc. The accumulated stream's verbatim text is what
-            // we want spoken. `feed` is a no-op when TTS is
-            // disabled or autoplay is off; the player keeps a
-            // sentence buffer and emits on terminators.
-            //
-            // `sanitizeForTts` strips markdown markers so espeak-ng
-            // doesn't phonemise `*` as "astérisque", ` as "accent
-            // grave", etc. The visible bubble still renders the
-            // original markdown via `marked.parse` + `DOMPurify`,
-            // only the TTS path gets the plain-text variant.
-            if (tts) tts.feed(sanitizeForTts(delta));
+            // Feed the raw `contentDelta` (NOT the markdown-rendered
+            // HTML) to TTS so it doesn't read out `**bold**`, code
+            // fences, etc. Reasoning is intentionally NOT fed —
+            // TTS would otherwise speak the model's internal
+            // monologue out loud.
+            if (tts) tts.feed(sanitizeForTts(contentDelta));
           }
         } catch (_e) { /* skip malformed line */ }
       }
     }
     finalSource = accumulated;
+    // Reasoning-without-content fallback: the model produced only
+    // chain-of-thought and never emitted a `content` reply (typical
+    // for a reasoning model truncated by a length cap). Without
+    // this the user would see an empty bubble above the collapsible
+    // reasoning block, which looks broken. Drop a short note so the
+    // bubble is never silently empty.
+    if (finalSource.length === 0 && accumulatedReasoning.length > 0) {
+      finalSource = "[reasoning only — no answer received]";
+      const note = document.createElement("p");
+      note.className = "chat-message__reasoning-only-note";
+      note.textContent = finalSource;
+      // Insert before the reasoning `<details>` so the note reads
+      // as the assistant's "answer" placeholder and the reasoning
+      // stays below as supporting material.
+      const reasoningEl = assistantEl.querySelector(".chat-message__reasoning");
+      assistantEl.insertBefore(note, reasoningEl);
+    }
     // Flush the TTS sentence buffer so the trailing partial sentence
     // (no terminator) is also synthesised and played. No-op when TTS
     // is disabled.
@@ -3310,14 +3404,17 @@ function getTtsSettings() {
 }
 
 /**
- * Voice resolver used by `tts.js`. Reads the active language hint and
- * returns the corresponding voice id from the saved settings. Defaults
- * to English when the hint is empty / unknown — mirrors
- * `TtsEngine::default_voice_for` server-side.
+ * Voice resolver used by `tts.js`. Reads the per-user *reply*
+ * language preference (NOT the STT input language picker — the
+ * two are decoupled so a user transcribing in one language but
+ * asking for replies in another gets replies spoken in the right
+ * voice). Returns the corresponding voice id from the saved
+ * settings. Defaults to English when the hint is empty / unknown
+ * — mirrors `TtsEngine::default_voice_for` server-side.
  */
 function resolveTtsVoice() {
   const s = getTtsSettings();
-  const lang = ($("chat-lang-select")?.value || "").toLowerCase();
+  const lang = (getReplyLanguage() || "").toLowerCase();
   if (lang === "fr" || lang.startsWith("fr-")) return s.voiceFr;
   return s.voiceEn;
 }
@@ -3608,9 +3705,12 @@ async function probeTtsVoices() {
 probeTtsVoices();
 wireTtsControls();
 
-// Locale-aware defaults: preselect the discussion-mode language from
-// the browser locale if it matches one of the options; otherwise keep
-// "Auto-detect" (empty value).
+// Locale-aware defaults: preselect the discussion-mode STT input
+// language from the browser locale if it matches one of the
+// options; otherwise keep "Auto-detect" (empty value). The
+// reply-language picker gets the same treatment inside
+// `wireLocationControlsOnce` so the server-side state still wins
+// after the preferences fetch resolves.
 preselectFromBrowser($("chat-lang-select"));
 
 // ---- Session management ---------------------------------------------------
@@ -3761,6 +3861,25 @@ wireChatSidebarOnce();
 // `app-shell-mounted` (e.g. if `auth.js` ever dispatches twice) does
 // not stack two `click` listeners on the same button.
 
+/**
+ * Reply-language picker change. Persists through the server-side
+ * preferences row (the localStorage mirror is updated by
+ * `savePreferencesToServer` so a slow PUT never blocks the picker
+ * paint). Mirrors the timezone handler — the PUT body always
+ * carries the *current* location/timezone flags alongside the new
+ * language so the row stays in lockstep (see
+ * `auth::routes::PutPreferencesBody`).
+ */
+function handleReplyLanguageChange() {
+  const flags = acquireCurrentPreferenceFlags();
+  const next = $("chat-reply-language")?.value || "";
+  savePreferencesToServer(
+    flags.location,
+    flags.timezone,
+    next || null,
+  );
+}
+
 let _locationWired = false;
 function wireLocationControlsOnce() {
   if (_locationWired) return;
@@ -3783,6 +3902,8 @@ function wireLocationControlsOnce() {
     ?.addEventListener("click", handleLocationForgetClick);
   document.getElementById("chat-timezone-toggle")
     ?.addEventListener("change", handleTimezoneToggleChange);
+  document.getElementById("chat-reply-language")
+    ?.addEventListener("change", handleReplyLanguageChange);
   // Elements are now live — paint the cached state and kick off the
   // boot-time position refresh. Both are no-ops on a fresh visit (no
   // cached fix, toggle off).
@@ -3792,14 +3913,49 @@ function wireLocationControlsOnce() {
   // localStorage keys the render functions below read from. When
   // it resolves we re-render the toggles so the user sees the
   // server-side choice immediately, not the (possibly stale)
-  // localStorage copy from a different device / browser.
+  // localStorage copy from a different device / browser. The
+  // reply-language picker is synced the same way so a fresh tab on
+  // a device that never visited this account picks up the
+  // server-side choice instead of falling back to "Auto".
   loadPreferencesFromServer().then(() => {
     renderLocationUi();
     renderTimezoneUi();
+    renderReplyLanguageUi();
   });
+  // Reply-language picker bootstrap: seed from the localStorage
+  // mirror first (synchronous, runs before the server fetch so
+  // there is no "Auto" flash for a returning user on this device),
+  // then let `preselectFromBrowser` set it from the browser locale
+  // on a fresh visit. `preselectFromBrowser` is a no-op when the
+  // picker already has a non-empty value, so the localStorage seed
+  // wins on returning visits and the locale sniff wins on first
+  // visits. The server fetch (which may differ from either) wins
+  // when it resolves — see the `.then()` handler above.
+  renderReplyLanguageUi();
+  preselectFromBrowser($("chat-reply-language"));
   renderLocationUi();
   renderTimezoneUi();
   refreshLocationOnBoot();
+}
+
+/**
+ * Paint the reply-language picker from the cached preference.
+ * Called on boot and after every successful fetch; mirrors
+ * `renderLocationUi` / `renderTimezoneUi`. The picker keeps its
+ * locale-preselected default until the server fetch (or a user
+ * click) overwrites it.
+ */
+function renderReplyLanguageUi() {
+  const sel = $("chat-reply-language");
+  if (!sel) return;
+  const cached = getReplyLanguage();
+  // Set the select only if the cached value matches an option —
+  // an unknown / unsupported code is left untouched so the user
+  // sees their last valid choice and a future code addition
+  // re-uses it without a forced migration.
+  if (cached && Array.from(sel.options).some((o) => o.value === cached)) {
+    sel.value = cached;
+  }
 }
 
 window.addEventListener("app-shell-mounted", wireLocationControlsOnce);

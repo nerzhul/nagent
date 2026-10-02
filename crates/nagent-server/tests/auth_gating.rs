@@ -296,5 +296,6 @@ fn _suppress_unused_warnings() {
         system_prompt: None,
         allow_user_location: false,
         allow_user_timezone: true,
+        allow_user_reply_language: true,
     };
 }

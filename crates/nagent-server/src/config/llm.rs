@@ -135,6 +135,19 @@ pub struct LlmConfig {
     /// `allow_user_location`: an operator may forbid one without
     /// touching the other.
     pub allow_user_timezone: bool,
+    /// Whether the proxy is allowed to inject the per-user reply-
+    /// language system message (`USER_REPLY_LANGUAGE_MARKER`) when the
+    /// authenticated user has set a non-default reply language in
+    /// the Advanced drawer. The kill-switch exists for symmetry with
+    /// `allow_user_location` / `allow_user_timezone` so operators
+    /// handling sensitive deployments can forbid the language hint
+    /// from reaching the upstream model regardless of what the user
+    /// picked. Env var `LLM_ALLOW_USER_REPLY_LANGUAGE`, TOML key
+    /// `[llm].allow_user_reply_language`. Defaults to `true` — the
+    /// user's preference in the UI is the primary gate. Independent
+    /// from the other two flags: an operator may forbid one without
+    /// touching the others.
+    pub allow_user_reply_language: bool,
 }
 
 impl Default for LlmConfig {
@@ -151,6 +164,7 @@ impl Default for LlmConfig {
             system_prompt: None,
             allow_user_location: true,
             allow_user_timezone: true,
+            allow_user_reply_language: true,
         }
     }
 }
@@ -215,6 +229,12 @@ impl LlmConfig {
             defaults.allow_user_timezone,
             "LLM_ALLOW_USER_TIMEZONE",
         )?;
+        let allow_user_reply_language = resolve_primitive(
+            env_opt("LLM_ALLOW_USER_REPLY_LANGUAGE").as_deref(),
+            toml.allow_user_reply_language,
+            defaults.allow_user_reply_language,
+            "LLM_ALLOW_USER_REPLY_LANGUAGE",
+        )?;
 
         Ok(Self {
             enabled,
@@ -228,6 +248,7 @@ impl LlmConfig {
             system_prompt,
             allow_user_location,
             allow_user_timezone,
+            allow_user_reply_language,
         })
     }
 }
@@ -333,6 +354,33 @@ mod tests {
         assert!(!from_toml, "TOML value must apply when env is unset");
         let from_default =
             resolve_primitive::<bool>(None, None, default, "LLM_ALLOW_USER_TIMEZONE")
+                .expect("default must parse");
+        assert!(from_default, "default must win when neither is set");
+    }
+
+    #[test]
+    fn llm_allow_user_reply_language_env_overrides_toml_and_default() {
+        // Mirror of the two existing kill-switch precedence tests for
+        // the new reply-language flag. Kept structurally identical so
+        // a future refactor that shares the resolve call between the
+        // three flags would silently couple the behaviour and this
+        // test would catch it.
+        let default = LlmConfig::default().allow_user_reply_language;
+        assert!(default, "allow_user_reply_language must default to true");
+        let from_env = resolve_primitive(
+            Some("false"),
+            Some(true),
+            default,
+            "LLM_ALLOW_USER_REPLY_LANGUAGE",
+        )
+        .expect("env 'false' must parse");
+        assert!(!from_env, "env var must beat TOML when both are set");
+        let from_toml =
+            resolve_primitive(None, Some(false), default, "LLM_ALLOW_USER_REPLY_LANGUAGE")
+                .expect("toml bool must parse");
+        assert!(!from_toml, "TOML value must apply when env is unset");
+        let from_default =
+            resolve_primitive::<bool>(None, None, default, "LLM_ALLOW_USER_REPLY_LANGUAGE")
                 .expect("default must parse");
         assert!(from_default, "default must win when neither is set");
     }

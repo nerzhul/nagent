@@ -337,6 +337,7 @@ async fn features_llm_models_reflects_upstream_list() {
         system_prompt: None,
         allow_user_location: true,
         allow_user_timezone: true,
+        allow_user_reply_language: true,
     };
     let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");
@@ -430,6 +431,7 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
         system_prompt: None,
         allow_user_location: true,
         allow_user_timezone: true,
+        allow_user_reply_language: true,
     };
     let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");

@@ -466,6 +466,34 @@ impl FromRef<Arc<AppState>> for OptArcAgentRegistry {
     }
 }
 
+/// `Option<Arc<AuthState>>` — the LLM proxy handler threads this
+/// through so it can look up the authenticated user's per-row
+/// preferences (today: reply language) when `auth.enabled = true`.
+/// `None` is the expected value when auth is disabled (the
+/// anonymous trust boundary) so the proxy must check before
+/// dereferencing.
+pub struct OptArcAuthState(pub Option<Arc<AuthState>>);
+
+impl Clone for OptArcAuthState {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for OptArcAuthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OptArcAuthState")
+            .field("state", &self.0.as_ref().map(|_| "<AuthState>"))
+            .finish()
+    }
+}
+
+impl FromRef<Arc<AppState>> for OptArcAuthState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        OptArcAuthState(state.auth.clone().map(Arc::new))
+    }
+}
+
 /// `Arc<ServiceRegistry>` wrapper. The agents HTTP routes build a
 /// `UserContext` with this catalog so per-user agents (currently
 /// `read_document`) can resolve configured-only integrations.

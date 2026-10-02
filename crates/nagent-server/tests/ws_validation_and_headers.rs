@@ -74,6 +74,7 @@ async fn start_test_server_with_rate_limit(
         system_prompt: None,
         allow_user_location: true,
         allow_user_timezone: true,
+        allow_user_reply_language: true,
     };
     let stt_limiter = RateLimiter::new(RateLimitPolicy::stt(rate_limit.stt_per_min));
     let llm_limiter = RateLimiter::new(RateLimitPolicy::llm(rate_limit.llm_per_min));

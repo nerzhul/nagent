@@ -22,7 +22,8 @@ use uuid::Uuid;
 use stt_core::{InferRequest, InferenceJob};
 use stt_proto::{decode_frame, encode_frame, BackendInfo, ErrorMessage, Payload};
 
-use crate::http::static_assets::{mime_for, StaticAssets};
+// Static asset serving is handled by `crate::http::static_assets::serve`
+// (plan R8a: zero-copy + ETag + Cache-Control + If-None-Match -> 304).
 use crate::rate_limit::RateLimitError;
 use crate::stt::result_router::send_to_session;
 use crate::stt::session::{register, unregister, OutboundMessage};
@@ -347,9 +348,6 @@ enum InboundError {
     Validation(#[from] FrameError),
 }
 
-/// Static handler for `/` and `/index.html`. Injects a
-/// `window.nagentConfig` block so the JS can hide UI panels for
-/// server-side features that are runtime-disabled (currently just
 /// Static handler for `/` and `/index.html`. Feature flags
 /// (e.g. documents enabled) are now served via `GET /api/features`
 /// instead of being inlined into the HTML — the browser fetches
@@ -359,58 +357,21 @@ enum InboundError {
 /// required a per-request string copy of the index HTML; the
 /// endpoint approach is cleaner and survives the same cached
 /// `index.html` for every state.
-pub async fn index_handler() -> impl IntoResponse {
-    serve_static("index.html")
+///
+/// Plan R8a: respects `If-None-Match` against the per-file ETag so
+/// repeat visits land on a `304 Not Modified` instead of a full
+/// re-download. The `index_handler` does NOT inject the
+/// `nagentConfig` block — that lives in [`index_with_config_handler`].
+pub async fn index_handler(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    crate::http::static_assets::serve("index.html", headers.get(axum::http::header::IF_NONE_MATCH))
 }
 
 /// Static handler for `/static/*`. Path is the remainder after `/static/`.
 pub async fn static_path_handler(
     axum::extract::Path(path): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    serve_static(&path)
-}
-
-fn serve_static(path: &str) -> axum::response::Response {
-    use axum::body::Body;
-    use axum::http::{header, StatusCode};
-    use axum::response::Response;
-    let Some(file) = StaticAssets::get(path) else {
-        // Return a real 404 (not "200 OK" + an empty body). Firefox's
-        // source-map resolver, the browser's preload scanner, and
-        // service-worker caches all key off the status code: a 200
-        // with zero bytes is treated as "the asset exists and is
-        // broken", which surfaces as a `JSON.parse: unexpected end
-        // of data` console error every time the user opens DevTools.
-        // `.map` files in particular are fetched opportunistically
-        // by Firefox for every minified vendor script — `ort.min.js`,
-        // `purify.min.js`, `marked.min.js`, the KaTeX bundle — and
-        // we deliberately do NOT ship those `.map` files in the
-        // binary (the devtools UX in production is not worth the
-        // extra megabytes).
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(Body::from(format!("not found: {path}")))
-            .expect("static 404 builder is valid");
-    };
-    let bytes = file.data.into_owned();
-    let mut response = Response::new(Body::from(bytes));
-    let h = response.headers_mut();
-    h.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static(mime_for(path)),
-    );
-    // Force the browser to revalidate on every request. The frontend
-    // is small (a few hundred KB including vendor/ and worker/) and
-    // `/static/version.txt` is the single source of truth for the
-    // `fetchServerVersion()` drift check. A stale JS bundle would
-    // mean the auth pill and the chat-pill code paths diverge, so
-    // we explicitly tell the browser not to cache.
-    h.insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
-    response
+    crate::http::static_assets::serve(&path, headers.get(axum::http::header::IF_NONE_MATCH))
 }
 
 /// Like `serve_static("index.html")`, but injects a

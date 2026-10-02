@@ -2454,3 +2454,76 @@ kbd {
   background: rgba(88, 166, 255, 0.06);
   border-radius: 6px;
 }
+
+/* --- Reasoning trace (R8 follow-up) ---------------------------------------
+ * `delta.reasoning` chunks from reasoning-capable models (qwen3.5 with
+ * reasoning, DeepSeek-R1, …) used to be merged into the assistant
+ * bubble as if they were the visible answer. That left the user
+ * staring at the model's internal monologue — and, when the answer was
+ * truncated by a length cap, at an empty bubble. We now route
+ * reasoning to a collapsible `<details>` block above the answer.
+ *
+ * The collapsed `<summary>` is a compact pill so the bubble still
+ * reads as "assistant just answered" at a glance, with one click
+ * expanding into the full chain-of-thought.
+ */
+.chat-message__reasoning {
+  margin: 0 0 0.5rem 0;
+  display: block;
+}
+.chat-message__reasoning > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg-mute);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  user-select: none;
+}
+.chat-message__reasoning > summary::-webkit-details-marker {
+  display: none;
+}
+.chat-message__reasoning > summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  color: var(--fg-mute);
+  transition: transform 120ms ease;
+}
+.chat-message__reasoning[open] > summary::before {
+  transform: rotate(90deg);
+}
+.chat-message__reasoning > summary:hover {
+  border-color: var(--fg-mute);
+}
+.chat-message__reasoning-body {
+  margin: 0.4rem 0 0 0;
+  padding: 0.6rem 0.8rem;
+  border-left: 3px solid var(--border);
+  background: var(--bg-alt, rgba(0, 0, 0, 0.03));
+  border-radius: 0 4px 4px 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--fg-mute);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+/* Reasoning-only fallback marker — emitted when the model produced
+ * only chain-of-thought and never emitted a `content` reply
+ * (typical for a reasoning model truncated by a length cap).
+ */
+.chat-message__reasoning-only-note {
+  margin: 0;
+  color: var(--fg-mute);
+  font-style: italic;
+  font-size: 0.9rem;
+}

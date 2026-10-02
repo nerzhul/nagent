@@ -230,6 +230,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             system_prompt: None,
             allow_user_location: true,
             allow_user_timezone: true,
+            allow_user_reply_language: true,
         },
         agents: AgentConfig::default(),
         tts: nagent_server::config::TtsConfig::default(),

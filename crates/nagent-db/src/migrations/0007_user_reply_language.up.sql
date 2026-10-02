@@ -1,0 +1,42 @@
+-- 0007_user_reply_language.up.sql — per-user reply-language preference.
+--
+-- The Discussion-mode `share_location_enabled` and
+-- `share_timezone_enabled` columns (0006) control whether the
+-- browser sends two ephemeral system blocks (location,
+-- timezone). This migration adds a third user-controlled
+-- preference: the language the assistant should reply in.
+--
+-- When the value is NULL ("Auto"), the proxy injects no extra
+-- block and the LLM falls back to its default "reply in the
+-- language the user wrote in" behaviour. When non-NULL, the
+-- proxy prepends an ephemeral system message whose content
+-- begins with USER_REPLY_LANGUAGE_MARKER, instructing the model
+-- to always reply in that language unless the user explicitly
+-- asks for another in the same turn.
+--
+-- The same user-controlled toggle also drives the TTS voice
+-- selection: `chat.js::resolveTtsVoice` now reads the reply
+-- language instead of the STT input language so the spoken
+-- reply tracks the written reply.
+--
+-- Storage shape:
+--   reply_language  TEXT NULL DEFAULT NULL — BCP-47 primary
+--                    subtag (e.g. "fr", "en", "es"). NULL means
+--                    "auto / match the user's input language".
+--                    Kept as TEXT (not ENUM) so the supported
+--                    language list can grow without another
+--                    migration; the server-side marker helper
+--                    (llm::prompt::USER_REPLY_LANGUAGE_MARKER)
+--                    is the only contract that matters for the
+--                    defensive kill-switch.
+--
+-- Column position: appended after `share_timezone_enabled`
+-- and before `updated_at`, matching the order of fields on the
+-- Rust `UserPreferences` struct.
+--
+-- Nullable so no existing user row needs a value: a user who
+-- never picked a preference keeps the default "Auto" behaviour
+-- unchanged.
+
+ALTER TABLE user_preferences
+  ADD COLUMN reply_language TEXT NULL DEFAULT NULL;

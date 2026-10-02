@@ -4,7 +4,8 @@
 //! `RequireAuth` middleware. The browser SPA reads this on boot
 //! to decide whether to render the login panel or the chat view.
 //! - `GET  /api/me/preferences` — per-user UI preferences (location /
-//! timezone sharing toggles, formerly held in `localStorage`).
+//! timezone sharing toggles + reply-language picker, formerly held in
+//! `localStorage`).
 //! - `PUT  /api/me/preferences` — same shape, CSRF-protected.
 //! - `POST /api/auth/logout` — deletes the current session and
 //! clears the cookie. Requires both the session cookie AND the
@@ -36,7 +37,10 @@ pub async fn me_handler(axum::Extension(user): axum::Extension<AuthUser>) -> Jso
 /// preferences. The shape mirrors the localStorage flags the
 /// frontend used to manage client-side, so the migration is a
 /// drop-in replacement for `loadLocationEnabled` /
-/// `loadTimezoneEnabled`.
+/// `loadTimezoneEnabled`. `reply_language` is serialised as JSON
+/// `null` when unset (the "Auto" / match-the-user-input default) so
+/// the browser can use a single ternary to distinguish "explicit
+/// choice" from "fall back to input language".
 pub async fn get_preferences_handler(
     State(state): State<crate::AuthState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -46,24 +50,35 @@ pub async fn get_preferences_handler(
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
         "share_timezone_enabled": prefs.share_timezone_enabled,
+        "reply_language": prefs.reply_language,
         "updated_at": prefs.updated_at.to_rfc3339(),
     }))
     .into_response())
 }
 
-/// Body shape for `PUT /api/me/preferences`. Both flags are
-/// required so a PUT always represents the full desired state —
-/// a UI that wants to flip just `share_location_enabled` reads
-/// the current value, flips the bit, and writes both back. This
-/// avoids the partial-update ambiguity the original localStorage
-/// flags had (one write per flag, no atomicity, possible drift
-/// between two browser tabs).
+/// Body shape for `PUT /api/me/preferences`. All three fields
+/// are required so a PUT always represents the full desired
+/// state — a UI that wants to flip just `share_location_enabled`
+/// reads the current value, flips the bit, and writes all three
+/// back. This avoids the partial-update ambiguity the original
+/// localStorage flags had (one write per flag, no atomicity,
+/// possible drift between two browser tabs).
+///
+/// `reply_language` is `Option<String>` because the "Auto" entry
+/// on the picker serialises to JSON `null` by design; the handler
+/// treats `null`, missing, and `""` all as "no explicit
+/// preference" (the Auto / match-the-user-input default). The
+/// booleans stay strict — `null` is rejected with 400 — so the
+/// opt-in toggles don't drift the way they did in the original
+/// implementation.
 #[derive(Debug, Deserialize)]
 pub struct PutPreferencesBody {
     #[serde(default)]
     pub share_location_enabled: Option<bool>,
     #[serde(default)]
     pub share_timezone_enabled: Option<bool>,
+    #[serde(default)]
+    pub reply_language: Option<String>,
 }
 
 /// `PUT /api/me/preferences` — atomic replace of the per-user
@@ -87,15 +102,30 @@ pub async fn put_preferences_handler(
             "share_timezone_enabled is required".into(),
         ));
     };
+    // Treat `null`, a missing key, and `""` (the All flag for
+    // the Auto entry on the picker) all as "no explicit
+    // preference". The booleans stay strict (their `null` is
+    // rejected with 400 above) because the wire shape for them
+    // is unambiguous; for `reply_language` the picker's `<option
+    // value="">` makes `""`/`null` the legitimate Auto signal.
+    let reply_language = body.reply_language.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
     let store = require_auth_store_from_auth(&state)?;
     let prefs = store
         .for_user(user.id)
         .preferences()
-        .upsert(loc, tz)
+        .upsert(loc, tz, reply_language)
         .await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
         "share_timezone_enabled": prefs.share_timezone_enabled,
+        "reply_language": prefs.reply_language,
         "updated_at": prefs.updated_at.to_rfc3339(),
     }))
     .into_response())

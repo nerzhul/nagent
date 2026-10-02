@@ -42,6 +42,18 @@ pub const USER_TIMEZONE_MARKER: &str = "The user's local timezone is";
 /// model.
 pub const USER_INTEGRATIONS_MARKER: &str = "The user has the following integrations configured:";
 
+/// Prefix that the server-prepended per-user reply-language block
+/// always carries. The proxy emits the block when the authenticated
+/// user has set a non-`None` reply language on the
+/// `user_preferences` row; the defensive kill-switch in
+/// `llm::privacy::strip_user_reply_language_if_disabled` matches on
+/// this prefix so the admin can drop the block before it reaches the
+/// upstream model via `LLM_ALLOW_USER_REPLY_LANGUAGE=false`. Kept
+/// distinct from `USER_LOCATION_MARKER` / `USER_TIMEZONE_MARKER` so
+/// the three kill-switches are independent — an operator may forbid
+/// one without touching the others.
+pub const USER_REPLY_LANGUAGE_MARKER: &str = "The user's preferred reply language is";
+
 /// Build the "configured integrations" system block for the calling
 /// user. Returns `None` when the user has no configured integrations
 /// (saves a useless system message).
@@ -69,6 +81,30 @@ pub fn build_integrations_block(
         ));
     }
     Some(lines.join("\n"))
+}
+
+/// Build the per-user reply-language system block for the calling
+/// user. Returns `None` when the user has no explicit preference
+/// (`None`/`""`) so the caller can skip the prepend — the LLM then
+/// keeps its default "reply in the user's input language" behaviour
+/// without any block.
+///
+/// `lang` is the BCP-47 primary subtag the user picked on the
+/// Advanced drawer (e.g. `"fr"`, `"en"`, `"es"`). The returned
+/// block begins with [`USER_REPLY_LANGUAGE_MARKER`] so the defensive
+/// kill-switch
+/// (`llm::privacy::strip_user_reply_language_if_disabled`) can drop
+/// it before it reaches the upstream model when
+/// `LLM_ALLOW_USER_REPLY_LANGUAGE=false`.
+pub fn build_reply_language_block(lang: Option<&str>) -> Option<String> {
+    let lang = lang?.trim();
+    if lang.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{USER_REPLY_LANGUAGE_MARKER} {lang}. Always reply in this language unless \
+         the user explicitly asks for another language in the same turn."
+    ))
 }
 
 /// Built-in default system prompt. English by `AGENTS.md` rule #1;
@@ -205,7 +241,17 @@ message-build time. Treat the snapshot as a hint, not a guarantee — \
 when an authoritative answer matters (scheduling, countdown, exact \
 \"now\"), call `get_datetime` with `timezone=\"<IANA name>\"` so the \
 tool's answer is fresh and matches what the user sees on their \
-device.";
+device.
+
+User reply language (opt-in, ephemeral):
+- When the user has set a non-default reply language in the \
+Advanced drawer, the request also carries an ephemeral system \
+message that starts with the marker \"The user's preferred \
+reply language is\". Reply in that language for the entire turn \
+unless the user explicitly asks for another language in the same \
+message. The block is request-scoped — it is not persisted in the \
+browser session history, so it appears only on the request that \
+triggered it.";
 
 /// Prepend the admin's system prompt as `messages[0]`.
 ///
@@ -235,6 +281,35 @@ pub fn inject_default_system_prompt(forward_body: &mut Value, prompt: Option<&st
         return;
     };
     messages.insert(0, json!({ "role": "system", "content": trimmed }));
+}
+
+/// Insert the per-user reply-language block at `messages[1]` — after
+/// the admin's system prompt at `messages[0]` (the admin's intent
+/// stays authoritative) and before every other turn. Mirrors the
+/// semantics of [`inject_default_system_prompt`]: a no-op when the
+/// `messages` array is missing or the body is not a JSON object, and
+/// idempotent on re-entry (the kill-switch [`crate::llm::privacy::strip_user_reply_language_if_disabled`]
+/// is what removes the block when the operator has switched off the
+/// feature).
+///
+/// `block` is the system-prompt-shaped string built by
+/// [`build_reply_language_block`]. It MUST begin with
+/// [`USER_REPLY_LANGUAGE_MARKER`] so the defensive kill-switch can
+/// recognise it on a strict prefix match — the caller is responsible
+/// for that invariant (the builder enforces it).
+pub fn inject_reply_language_block(forward_body: &mut Value, block: &str) {
+    let Some(obj) = forward_body.as_object_mut() else {
+        return;
+    };
+    let Some(messages) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    // Insert at index 1 so the admin's prompt stays at index 0. If
+    // the admin prompt is absent (a stack-injected block from a
+    // future operator override), the reply-language block still
+    // lands before every user turn, which is what matters.
+    let insert_at = if messages.is_empty() { 0 } else { 1 };
+    messages.insert(insert_at, json!({ "role": "system", "content": block }));
 }
 
 #[cfg(test)]
@@ -345,6 +420,66 @@ mod tests {
         assert_eq!(body, original);
     }
 
+    fn block() -> String {
+        // Shared helper used by the `inject_reply_language_block`
+        // tests below so each test exercises a single concern.
+        build_reply_language_block(Some("fr")).expect("block must be Some")
+    }
+
+    #[test]
+    fn reply_language_inject_inserts_after_admin_prompt() {
+        // The admin prompt (already at index 0 from
+        // `inject_default_system_prompt`) must stay at index 0;
+        // the reply-language block lands at index 1 so the
+        // admin's instructions stay authoritative. Existing
+        // user/assistant turns shift to indices 2+.
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": "admin prompt" },
+                { "role": "user", "content": "hi" },
+            ]
+        });
+        inject_reply_language_block(&mut body, &block());
+        let messages = body["messages"].as_array().expect("array");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["content"], "admin prompt");
+        assert_eq!(messages[1]["role"], "system");
+        assert!(messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with(USER_REPLY_LANGUAGE_MARKER));
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "hi");
+    }
+
+    #[test]
+    fn reply_language_inject_is_no_op_without_messages_array() {
+        // Defensive: callers validate `messages` upstream, but a
+        // body without the array must NOT panic — the helper
+        // silently leaves it alone (the strip helper relies on
+        // the same defensive stance so the kill-switches
+        // compose cleanly).
+        let mut body = json!({});
+        let original = body.clone();
+        inject_reply_language_block(&mut body, &block());
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn reply_language_inject_into_empty_messages() {
+        // When the request happens to carry no user messages yet
+        // (e.g. a system-only test payload), the block lands at
+        // index 0 so the kill-switch can still find it.
+        let mut body = json!({ "messages": [] });
+        inject_reply_language_block(&mut body, &block());
+        let messages = body["messages"].as_array().expect("array");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with(USER_REPLY_LANGUAGE_MARKER));
+    }
+
     #[test]
     fn default_prompt_nudges_short_weather_reply() {
         // The chat UI renders a structured weather card for
@@ -432,6 +567,56 @@ mod tests {
         assert!(
             prompt.contains("ephemeral") || prompt.contains("never persisted"),
             "DEFAULT_SYSTEM_PROMPT must make clear the timezone block is ephemeral and not persisted, so the model treats it as request-scoped context."
+        );
+    }
+
+    #[test]
+    fn default_prompt_documents_user_reply_language_block() {
+        // Mirror of the two location/timezone guard tests for the new
+        // per-user reply-language opt-in. The prompt must mention the
+        // marker (so a future prompt rewrite cannot quietly desync
+        // the defensive filter in `privacy.rs`) and must spell out the
+        // block's request-scoped / ephemeral nature so the model
+        // treats it as context that does NOT bleed into the next
+        // turn's history.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains(USER_REPLY_LANGUAGE_MARKER),
+            "DEFAULT_SYSTEM_PROMPT must mention the '{USER_REPLY_LANGUAGE_MARKER}' marker so the model knows it can rely on the block for reply-language steering."
+        );
+        assert!(
+            prompt.contains("ephemeral") || prompt.contains("request-scoped"),
+            "DEFAULT_SYSTEM_PROMPT must make clear the reply-language block is request-scoped and not persisted, so the model treats it as turn-scoped context."
+        );
+    }
+
+    #[test]
+    fn build_reply_language_block_returns_none_for_none_and_empty() {
+        // The proxy only injects a block when the user has set an
+        // explicit preference; the helper must collapse `None` and
+        // whitespace-only strings (legacy `""` from the Auto entry on
+        // the picker) into `None` so the proxy can gate on a single
+        // `is_some()`.
+        assert!(build_reply_language_block(None).is_none());
+        assert!(build_reply_language_block(Some("")).is_none());
+        assert!(build_reply_language_block(Some("   ")).is_none());
+    }
+
+    #[test]
+    fn build_reply_language_block_emits_marker_prefix() {
+        // The defensive kill-switch in `privacy.rs` matches on the
+        // exact marker prefix; the helper must produce a block that
+        // starts with it so a future refactor cannot silently
+        // desync the two strings.
+        let block = build_reply_language_block(Some("fr"))
+            .expect("block must be Some for an explicit language");
+        assert!(
+            block.starts_with(USER_REPLY_LANGUAGE_MARKER),
+            "reply-language block must start with USER_REPLY_LANGUAGE_MARKER so the kill-switch can match it; got: {block:?}"
+        );
+        assert!(
+            block.contains("fr"),
+            "block must echo the requested language code"
         );
     }
 

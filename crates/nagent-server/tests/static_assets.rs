@@ -1435,3 +1435,160 @@ async fn state_changing_fetches_carry_csrf_header() {
         "auth.js is missing the `csrfHeaders` helper. Protected POSTs have no way to read the per-session CSRF token."
     );
 }
+// --- Plan R8a: serving contract ----------------------------------------
+//
+// The static handler now returns zero-copy bodies (rust-embed
+// `Cow<'static, [u8]>`), a per-file `ETag` (SHA-256, 16 hex chars,
+// weak), `If-None-Match` round-trip semantics, and a split
+// `Cache-Control` policy (`no-cache` for first-party HTML/JS/CSS,
+// `public, max-age=300` for `vendor/` placeholders until package I
+// wires content-hashed vendor URLs).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_party_assets_carry_etag_and_no_cache() {
+    let base = serve_once().await;
+    for path in ["/index.html", "/static/app.js", "/static/style.css"] {
+        let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "{path} regressed");
+        let etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            etag.starts_with("W/\"") && etag.ends_with('"') && etag.len() == 20,
+            "{path} ETag malformed (expected W/<16 hex>): {etag}"
+        );
+        let cc = resp
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            cc, "no-cache",
+            "{path} first-party asset must use Cache-Control: no-cache (was {cc})"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vendor_assets_carry_short_max_age_placeholder() {
+    let base = serve_once().await;
+    for path in [
+        "/static/vendor/ort/ort.min.js",
+        "/static/vendor/marked/marked.min.js",
+        "/static/vendor/katex/katex.min.css",
+    ] {
+        let resp = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let cc = resp
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            cc, "public, max-age=300",
+            "{path} vendor asset must use the short max-age cache (was {cc})"
+        );
+        // Vendor files still get an ETag so the browser will revalidate
+        // before the 300 s window expires.
+        let etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            etag.starts_with("W/\"") && etag.len() == 20,
+            "{path} vendor ETag malformed: {etag}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn if_none_match_round_trips_to_304() {
+    let base = serve_once().await;
+    // Fetch once to grab the ETag, then refetch with `If-None-Match`.
+    // Plan R8a: the second response must be `304 Not Modified` and
+    // must NOT carry a body, so the browser uses its cached copy
+    // verbatim.
+    let first = reqwest::get(format!("{base}/static/app.js")).await.unwrap();
+    let etag = first
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    let second = reqwest::Client::new()
+        .get(format!("{base}/static/app.js"))
+        .header(reqwest::header::IF_NONE_MATCH, etag.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status(),
+        reqwest::StatusCode::NOT_MODIFIED,
+        "If-None-Match with the right ETag must yield 304 (was {}); ETag was {etag}",
+        second.status(),
+    );
+    // Capture the ETag echo BEFORE consuming the body — `bytes()`
+    // takes `self` and would move the response.
+    let echo = second
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = second.bytes().await.unwrap();
+    assert!(
+        body.is_empty(),
+        "304 must not carry a body (was {} bytes)",
+        body.len()
+    );
+    // The 304 still carries the ETag so the client knows which
+    // version it now holds.
+    assert_eq!(echo, etag, "304 must echo the matched ETag");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn if_none_match_with_wrong_tag_returns_200_with_body() {
+    let base = serve_once().await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/static/app.js"))
+        .header(reqwest::header::IF_NONE_MATCH, "W/\"deadbeefdeadbeef\"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.bytes().await.unwrap();
+    assert!(
+        !body.is_empty(),
+        "non-matching ETag must return the full body"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn if_none_match_with_wildcard_returns_304_for_existing_assets() {
+    // RFC 9110 §13.1.2: `If-None-Match: *` matches any current
+    // representation. The server must answer 304 when the asset
+    // exists (even if the client has never seen the body), and
+    // 404 when it does not.
+    let base = serve_once().await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/static/app.js"))
+        .header(reqwest::header::IF_NONE_MATCH, "*")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_MODIFIED);
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/static/does-not-exist.js"))
+        .header(reqwest::header::IF_NONE_MATCH, "*")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}

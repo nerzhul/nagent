@@ -25,10 +25,17 @@ use tracing::{debug, warn};
 use crate::agents::{AgentRegistry, AgentRegistryNewtype};
 use crate::config::LlmConfig;
 use crate::llm::client::{parse_chat_session_header, LlmError};
-use crate::llm::privacy::{strip_user_location_if_disabled, strip_user_timezone_if_disabled};
-use crate::llm::prompt::inject_default_system_prompt;
+use crate::llm::privacy::{
+    strip_user_location_if_disabled, strip_user_reply_language_if_disabled,
+    strip_user_timezone_if_disabled,
+};
+use crate::llm::prompt::{
+    build_reply_language_block, inject_default_system_prompt, inject_reply_language_block,
+};
 use crate::llm::tool_loop::run_tool_loop;
-use crate::state::{ArcAgentsConfig, ArcLlmState, ArcServices, OptArcAgentRegistry};
+use crate::state::{
+    ArcAgentsConfig, ArcLlmState, ArcServices, OptArcAgentRegistry, OptArcAuthState,
+};
 
 /// Subset of the OpenAI chat request we care about.
 ///
@@ -65,6 +72,7 @@ pub async fn chat_completions(
     State(agents): State<OptArcAgentRegistry>,
     State(agents_cfg): State<ArcAgentsConfig>,
     State(services): State<ArcServices>,
+    State(auth_state): State<OptArcAuthState>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     headers: HeaderMap,
     body: Bytes,
@@ -143,6 +151,40 @@ pub async fn chat_completions(
     // here; the tool loop below reuses the same `forward_body` for
     // every round, so the prepend propagates automatically.
     inject_default_system_prompt(&mut forward_body, llm.cfg.system_prompt.as_deref());
+    // Inject the per-user reply-language block (after the admin
+    // prompt so the admin's instructions stay authoritative at
+    // `messages[0]`). The block is server-prepended because the
+    // user's preference lives in the `user_preferences` row and the
+    // browser intentionally does NOT send it on every request —
+    // sending it server-side keeps the wire shape minimal and lets
+    // the admin kill-switch (`LLM_ALLOW_USER_REPLY_LANGUAGE`)
+    // decide whether to keep or drop the hint before it reaches the
+    // upstream model. Skipped on the anonymous / `auth.enabled =
+    // false` path (no AuthUser, no AuthState) — falls back to the
+    // default "match the user's input language" behaviour.
+    if let (Some(axum::Extension(user)), Some(auth_arc)) =
+        (auth_user.as_ref(), auth_state.0.as_ref())
+    {
+        match auth_arc.store.for_user(user.id).preferences().get().await {
+            Ok(prefs) => {
+                if let Some(block) = build_reply_language_block(prefs.reply_language.as_deref()) {
+                    inject_reply_language_block(&mut forward_body, &block);
+                }
+            }
+            Err(e) => {
+                // A read failure on the per-user preferences row must
+                // never break the chat: log and continue without the
+                // hint. The default prompt-tail covers the case where the
+                // user hasn't set a preference, so the LLM still gets
+                // sensible guidance.
+                warn!(
+                    user_id = %user.id,
+                    error = %e,
+                    "failed to read user_preferences for reply-language injection; skipping"
+                );
+            }
+        }
+    }
     // Admin kill-switch: when the operator has set
     // `LLM_ALLOW_USER_LOCATION=false`, strip the browser-injected
     // location block (matched on the exact `User's approximate
@@ -157,6 +199,13 @@ pub async fn chat_completions(
     // prefix. The two kill-switches are independent so operators can
     // forbid one without touching the other.
     strip_user_timezone_if_disabled(&mut forward_body, llm.cfg.allow_user_timezone);
+    // Same kill-switch treatment for the per-user reply-language
+    // block: when `LLM_ALLOW_USER_REPLY_LANGUAGE=false`, strip the
+    // server-injected block matched on the exact `The user's
+    // preferred reply language is` prefix. The three kill-switches
+    // are independent so operators can forbid one without touching
+    // the others.
+    strip_user_reply_language_if_disabled(&mut forward_body, llm.cfg.allow_user_reply_language);
 
     // Forward a few well-known request headers. `Authorization` is
     // handled separately so we never leak the server-side key when it

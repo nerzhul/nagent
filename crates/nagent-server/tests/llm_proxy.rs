@@ -114,6 +114,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         system_prompt,
         allow_user_location: true,
         allow_user_timezone: true,
+        allow_user_reply_language: true,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -565,6 +566,7 @@ async fn start_test_server_with_llm_auth(
         system_prompt: None,
         allow_user_location: true,
         allow_user_timezone: true,
+        allow_user_reply_language: true,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");

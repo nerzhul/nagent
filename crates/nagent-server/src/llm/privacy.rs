@@ -6,11 +6,17 @@
 //! - `User's approximate location: …` ([`USER_LOCATION_MARKER`])
 //! - `The user's local timezone is …` ([`USER_TIMEZONE_MARKER`])
 //!
+//! The proxy itself prepends one more when the user has set a
+//! non-default reply language on the `user_preferences` row:
+//!
+//! - `The user's preferred reply language is …`
+//!   ([`USER_REPLY_LANGUAGE_MARKER`])
+//!
 //! An operator can turn each one off independently via
-//! `LLM_ALLOW_USER_LOCATION=false` / `LLM_ALLOW_USER_TIMEZONE=false`.
-//! The helpers below are defence-in-depth filters that run AFTER the
-//! admin system prompt has been injected, so the admin block always
-//! survives.
+//! `LLM_ALLOW_USER_LOCATION=false` / `LLM_ALLOW_USER_TIMEZONE=false`
+//! / `LLM_ALLOW_USER_REPLY_LANGUAGE=false`. The helpers below are
+//! defence-in-depth filters that run AFTER the admin system prompt
+//! has been injected, so the admin block always survives.
 //!
 //! Re-exported from the parent module as
 //! `strip_user_location_if_disabled` / `strip_user_timezone_if_disabled`
@@ -18,7 +24,7 @@
 
 use serde_json::Value;
 
-use crate::llm::prompt::{USER_LOCATION_MARKER, USER_TIMEZONE_MARKER};
+use crate::llm::prompt::{USER_LOCATION_MARKER, USER_REPLY_LANGUAGE_MARKER, USER_TIMEZONE_MARKER};
 
 /// Drop the ephemeral `User's approximate location:` system message
 /// the browser prepends when the admin has switched the feature off.
@@ -94,6 +100,42 @@ pub fn strip_user_timezone_if_disabled(forward_body: &mut Value, allow: bool) {
         }
         match m.get("content").and_then(|v| v.as_str()) {
             Some(text) => !text.starts_with(USER_TIMEZONE_MARKER),
+            None => true,
+        }
+    });
+}
+
+/// Drop the ephemeral `The user's preferred reply language is`
+/// system message the server prepends when the admin has switched the
+/// feature off.
+///
+/// Behaviour mirrors [`strip_user_location_if_disabled`]: defaults
+/// to `true`, runs after [`crate::llm::prompt::inject_default_system_prompt`],
+/// strict prefix match, and only inspects string-typed `content`
+/// so a future multimodal prompt isn't accidentally dropped. The
+/// three strip helpers stay independent — an admin who wants
+/// location but not timezone (or the reply language) gets exactly
+/// that.
+pub fn strip_user_reply_language_if_disabled(forward_body: &mut Value, allow: bool) {
+    if allow {
+        return;
+    }
+    let Some(messages) = forward_body
+        .as_object_mut()
+        .and_then(|o| o.get_mut("messages"))
+        .and_then(|m| m.as_array_mut())
+    else {
+        return;
+    };
+    messages.retain(|m| {
+        let Some(role) = m.get("role").and_then(|v| v.as_str()) else {
+            return true;
+        };
+        if role != "system" {
+            return true;
+        }
+        match m.get("content").and_then(|v| v.as_str()) {
+            Some(text) => !text.starts_with(USER_REPLY_LANGUAGE_MARKER),
             None => true,
         }
     });
@@ -311,5 +353,125 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with(USER_LOCATION_MARKER));
+    }
+
+    fn body_with_reply_language_marker() -> Value {
+        // Hand-built payload matching what the proxy emits when the
+        // authenticated user has set `reply_language = "fr"` on the
+        // `user_preferences` row: admin system prompt (already
+        // prepended by `inject_default_system_prompt`), followed by
+        // the proxy-injected reply-language block, then the user's
+        // actual turn. The location + timezone blocks are omitted so
+        // this test exercises the reply-language helper in isolation.
+        json!({
+            "messages": [
+                { "role": "system", "content": "admin prompt" },
+                {
+                    "role": "system",
+                    "content": format!(
+                        "{USER_REPLY_LANGUAGE_MARKER} fr. Always reply in this \
+                         language unless the user explicitly asks for another \
+                         language in the same turn."
+                    )
+                },
+                { "role": "user", "content": "bonjour" },
+            ]
+        })
+    }
+
+    #[test]
+    fn strip_user_reply_language_keeps_block_when_allowed() {
+        let mut body = body_with_reply_language_marker();
+        let snapshot = body.clone();
+        strip_user_reply_language_if_disabled(&mut body, true);
+        assert_eq!(body, snapshot, "allow=true must be a pure no-op");
+    }
+
+    #[test]
+    fn strip_user_reply_language_drops_only_the_marker_block_when_disabled() {
+        let mut body = body_with_reply_language_marker();
+        strip_user_reply_language_if_disabled(&mut body, false);
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2, "reply-language block must be removed");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "admin prompt");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn strip_user_reply_language_is_a_noop_without_marker_block() {
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": "admin" },
+                { "role": "user", "content": "hi" },
+            ]
+        });
+        let snapshot = body.clone();
+        strip_user_reply_language_if_disabled(&mut body, false);
+        assert_eq!(body, snapshot);
+    }
+
+    #[test]
+    fn strip_user_reply_language_does_not_touch_non_system_or_multimodal_messages() {
+        // Defensive: a non-string `content` (OpenAI multimodal parts)
+        // is left alone, and only `role: system` messages are
+        // inspected. Mirrors the location / timezone guards so a
+        // future multimodal prompt isn't accidentally dropped by the
+        // kill-switch.
+        let mut body = json!({
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        { "type": "text", "text": format!("{USER_REPLY_LANGUAGE_MARKER} multimodal") }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": format!("{USER_REPLY_LANGUAGE_MARKER} user-side") }
+                    ]
+                }
+            ]
+        });
+        let snapshot = body.clone();
+        strip_user_reply_language_if_disabled(&mut body, false);
+        assert_eq!(
+            body, snapshot,
+            "non-string content must never be stripped by the reply-language kill-switch"
+        );
+    }
+
+    #[test]
+    fn strip_user_reply_language_does_not_drop_other_marker_blocks() {
+        // The three strip helpers are independent: a kill-switch on
+        // the reply language must NEVER delete the location or
+        // timezone blocks (different marker prefixes), and vice
+        // versa. This guards against a future refactor that
+        // accidentally shares a prefix-match constant between the
+        // three helpers.
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": format!("{USER_LOCATION_MARKER} lat=48.85, lon=2.35") },
+                { "role": "system", "content": format!("{USER_TIMEZONE_MARKER} \"Europe/Paris\"") },
+                { "role": "system", "content": format!("{USER_REPLY_LANGUAGE_MARKER} fr") },
+            ]
+        });
+        strip_user_reply_language_if_disabled(&mut body, false);
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(
+            messages.len(),
+            2,
+            "reply-language strip must NOT touch the location or timezone marker blocks"
+        );
+        let contents: Vec<&str> = messages
+            .iter()
+            .map(|m| m["content"].as_str().expect("content is string"))
+            .collect();
+        assert!(contents.iter().any(|c| c.starts_with(USER_LOCATION_MARKER)));
+        assert!(contents.iter().any(|c| c.starts_with(USER_TIMEZONE_MARKER)));
+        assert!(!contents
+            .iter()
+            .any(|c| c.starts_with(USER_REPLY_LANGUAGE_MARKER)));
     }
 }
