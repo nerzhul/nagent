@@ -76,8 +76,11 @@ import {
 import {
   currentFlags as acquireCurrentPreferenceFlags,
   getReplyLanguage,
+  getSystem as acquireSystemPreference,
+  getTemperature as acquireTemperaturePreference,
   loadFromServer as loadPreferencesFromServer,
   saveToServer as savePreferencesToServer,
+  defaults as preferenceDefaults,
 } from "/static/preferences.js";
 
 // ---- Chat session id (server-minted) ---------------------------------------
@@ -2285,6 +2288,8 @@ function handleTimezoneToggleChange() {
     flags.location,
     !!timezoneToggleEl?.checked,
     flags.reply_language,
+    flags.additional_instructions,
+    flags.temperature,
   );
 }
 
@@ -2354,7 +2359,10 @@ async function handleShareLocationClick() {
     const loc = await getLocation();
     saveCachedLocation(loc);
     const flags = acquireCurrentPreferenceFlags();
-    savePreferencesToServer(true, flags.timezone, flags.reply_language);
+    savePreferencesToServer(
+      true, flags.timezone, flags.reply_language,
+      flags.additional_instructions, flags.temperature,
+    );
     renderLocationUi();
   } catch (err) {
     // GeolocationPositionError codes map cleanly to user-facing text;
@@ -2383,6 +2391,8 @@ function handleLocationToggleChange() {
     !!locationToggleEl?.checked,
     flags.timezone,
     flags.reply_language,
+    flags.additional_instructions,
+    flags.temperature,
   );
   renderLocationUi();
 }
@@ -2394,7 +2404,10 @@ async function handleLocationRefreshClick() {
     const loc = await getLocation();
     saveCachedLocation(loc);
     const flags = acquireCurrentPreferenceFlags();
-    savePreferencesToServer(true, flags.timezone, flags.reply_language);
+    savePreferencesToServer(
+      true, flags.timezone, flags.reply_language,
+      flags.additional_instructions, flags.temperature,
+    );
     if (locationToggleEl) locationToggleEl.checked = true;
     renderLocationUi();
   } catch (err) {
@@ -2410,7 +2423,10 @@ async function handleLocationRefreshClick() {
 function handleLocationForgetClick() {
   clearCachedLocation();
   const flags = acquireCurrentPreferenceFlags();
-  savePreferencesToServer(false, flags.timezone, flags.reply_language);
+  savePreferencesToServer(
+    false, flags.timezone, flags.reply_language,
+    flags.additional_instructions, flags.temperature,
+  );
   if (locationToggleEl) locationToggleEl.checked = false;
   renderLocationUi();
 }
@@ -2439,19 +2455,27 @@ async function refreshLocationOnBoot() {
     // `renderLocationUi` hide the controls.
     clearCachedLocation();
     const flags = acquireCurrentPreferenceFlags();
-    savePreferencesToServer(false, flags.timezone, flags.reply_language);
+    savePreferencesToServer(
+      false, flags.timezone, flags.reply_language,
+      flags.additional_instructions, flags.temperature,
+    );
   }
   renderLocationUi();
 }
 
-/// Open the Advanced `<details>` if it's collapsed so the user lands
-/// directly on the location controls. Called from the header pill.
+/// Navigate from the header `#chat-location-pill` to the Settings tab's
+/// "Privacy & context" section. Used to be an `Advanced`-disclosure
+/// open + scroll; since the Settings tab rework, the location controls
+/// live under `#settings-privacy` (plan: settings-tab-rework), so the
+/// pill becomes a shortcut to that section. We dispatch a synthetic
+/// `modechange` so any listener that gates on Discussion-tab-only
+/// behaviour (e.g. the `AudioCapture` re-bind) tears down cleanly
+/// when the user jumps out of Discussion.
 function openAdvancedForLocation() {
-  const adv = document.querySelector(".chat-advanced");
-  if (adv && !adv.open) adv.open = true;
-  if (locationAdvBox) {
-    locationAdvBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }
+  const settingsBtn = document.getElementById("mode-settings-btn");
+  if (settingsBtn) settingsBtn.click();
+  const privacy = document.getElementById("settings-privacy");
+  if (privacy) privacy.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
 // `streamReply(sessionId, userText)` runs the LLM request bound to a
@@ -3866,9 +3890,9 @@ wireChatSidebarOnce();
  * preferences row (the localStorage mirror is updated by
  * `savePreferencesToServer` so a slow PUT never blocks the picker
  * paint). Mirrors the timezone handler — the PUT body always
- * carries the *current* location/timezone flags alongside the new
- * language so the row stays in lockstep (see
- * `auth::routes::PutPreferencesBody`).
+ * carries the *current* location/timezone/additional_instructions/
+ * temperature flags alongside the new language so the row stays in
+ * lockstep (see `auth::routes::PutPreferencesBody`).
  */
 function handleReplyLanguageChange() {
   const flags = acquireCurrentPreferenceFlags();
@@ -3877,6 +3901,72 @@ function handleReplyLanguageChange() {
     flags.location,
     flags.timezone,
     next || null,
+    flags.additional_instructions,
+    flags.temperature,
+  );
+}
+
+/**
+ * Settings-tab "Additional instructions" textarea input handler.
+ * Persists the new value to `user_preferences.additional_instructions`
+ * (debounced by the browser's input-event cadence, which is already
+ * friendly for slow typers) and mirrors it to localStorage via
+ * `savePreferencesToServer`. Sends the *full* quintuple so the
+ * server-side atomic-replace contract is preserved.
+ */
+function handleSystemInput() {
+  const flags = acquireCurrentPreferenceFlags();
+  const next = (systemEl?.value ?? "").trim();
+  savePreferencesToServer(
+    flags.location,
+    flags.timezone,
+    flags.reply_language,
+    next || null,
+    flags.temperature,
+  );
+}
+
+/**
+ * Settings-tab "Temperature" number input handler. Reads the parsed
+ * `parseFloat` so we don't store the raw `"0.8000000000000001"`
+ * rounding artefact the browser can produce after edits, and so
+ * an empty / non-finite value clears the preference (the
+ * `additional_instructions: null` analogue for the number type).
+ */
+function handleTemperatureInput() {
+  const flags = acquireCurrentPreferenceFlags();
+  const raw = tempEl?.value ?? "";
+  const n = Number.parseFloat(raw);
+  const next = (raw.trim() !== "" && Number.isFinite(n)) ? n : null;
+  savePreferencesToServer(
+    flags.location,
+    flags.timezone,
+    flags.reply_language,
+    flags.additional_instructions,
+    next,
+  );
+}
+
+/**
+ * Settings-tab "Reset to defaults" button. Restores the two LLM
+ * inputs to their UI baseline (`""` for instructions, `0.8` for
+ * temperature) and writes `null` on the wire so the server keeps
+ * SQL `NULL` and the LLM proxy falls back to the upstream model
+ * default sampling. Mirrors the destructive-action pattern used
+ * elsewhere (Forget my location, Remove integration): explicit
+ * user gesture, no surprise wipe.
+ */
+function handleLlmResetClick() {
+  const { system, temperature } = preferenceDefaults();
+  if (systemEl) systemEl.value = system;
+  if (tempEl) tempEl.value = String(temperature);
+  const flags = acquireCurrentPreferenceFlags();
+  savePreferencesToServer(
+    flags.location,
+    flags.timezone,
+    flags.reply_language,
+    null,
+    temperature,
   );
 }
 
@@ -3904,6 +3994,19 @@ function wireLocationControlsOnce() {
     ?.addEventListener("change", handleTimezoneToggleChange);
   document.getElementById("chat-reply-language")
     ?.addEventListener("change", handleReplyLanguageChange);
+  // Settings-tab LLM inputs. Use the `input` event (not `change`) so
+  // every keystroke persists — the server-side row is the source of
+  // truth for cross-device sync, and the user expects the value
+  // they typed to survive a reload even if they never blur the
+  // textarea. The PUT body always carries the full quintuple
+  // (`savePreferencesToServer` reads the cached flags), so this
+  // does not regress the other four fields.
+  document.getElementById("chat-system")
+    ?.addEventListener("input", handleSystemInput);
+  document.getElementById("chat-temperature")
+    ?.addEventListener("input", handleTemperatureInput);
+  document.getElementById("settings-llm-reset")
+    ?.addEventListener("click", handleLlmResetClick);
   // Elements are now live — paint the cached state and kick off the
   // boot-time position refresh. Both are no-ops on a fresh visit (no
   // cached fix, toggle off).
@@ -3921,6 +4024,7 @@ function wireLocationControlsOnce() {
     renderLocationUi();
     renderTimezoneUi();
     renderReplyLanguageUi();
+    renderLlmSettingsUi();
   });
   // Reply-language picker bootstrap: seed from the localStorage
   // mirror first (synchronous, runs before the server fetch so
@@ -3932,6 +4036,7 @@ function wireLocationControlsOnce() {
   // visits. The server fetch (which may differ from either) wins
   // when it resolves — see the `.then()` handler above.
   renderReplyLanguageUi();
+  renderLlmSettingsUi();
   preselectFromBrowser($("chat-reply-language"));
   renderLocationUi();
   renderTimezoneUi();
@@ -3955,6 +4060,33 @@ function renderReplyLanguageUi() {
   // re-uses it without a forced migration.
   if (cached && Array.from(sel.options).some((o) => o.value === cached)) {
     sel.value = cached;
+  }
+}
+
+/// Hydrate the two Settings-tab LLM inputs from the cached
+/// preference. Mirrors `renderReplyLanguageUi`'s contract: seed
+/// from the localStorage mirror synchronously on boot so the user
+/// never sees an empty textarea / a 0.8 default after they've
+/// already typed something, then let the boot-time
+/// `loadPreferencesFromServer()` fetch overwrite the values from
+/// the server-side row (the source of truth for cross-device
+/// sync). The request-build path (`streamReply` at lines
+/// 2538–2540 / 2563–2564) reads `systemEl.value` and
+/// `tempEl.value` synchronously on every turn, so a missing
+/// hydration would silently drop the user's instructions and
+/// reset temperature to the `<input>` HTML default.
+function renderLlmSettingsUi() {
+  if (systemEl) {
+    const sys = acquireSystemPreference();
+    // Only overwrite the textarea if it is still at its HTML
+    // default (empty), so a hydration race never wipes a value
+    // the user just typed between `renderLlmSettingsUi` being
+    // scheduled and the server fetch resolving.
+    if (sys && !systemEl.value) systemEl.value = sys;
+  }
+  if (tempEl) {
+    const temp = acquireTemperaturePreference();
+    if (temp !== null && !tempEl.value) tempEl.value = String(temp);
   }
 }
 

@@ -56,6 +56,19 @@ h1 {
   font-size: 0.85rem;
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* Tab-bar icon (Settings tab only — Transcript / Discussion stay
+ * text-only per the plan's "no risk on working tabs" rationale).
+ * Sized in `em` so the icon scales with the button's font-size and
+ * the tab-bar height is unchanged by adding it. */
+.mode-icon {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
 }
 
 #mode-toggle button:hover {
@@ -2526,4 +2539,81 @@ kbd {
   color: var(--fg-mute);
   font-style: italic;
   font-size: 0.9rem;
+}
+
+/* ---- Settings tab ------------------------------------------------------
+ *
+ * Top-level view reachable via the gear-icon tab in `#mode-toggle`.
+ * Two sections: "Privacy & context" (DB-backed opt-ins) and "LLM"
+ * (additional instructions + temperature). Section dividers reuse
+ * the `--border` variable already used by `.chat-advanced` /
+ * `.chat-location-advanced` so the visual rhythm stays consistent.
+ */
+.settings-header {
+  margin: 0.25rem 0 1rem;
+}
+
+.settings-header h2 {
+  margin: 0 0 0.5rem;
+}
+
+.settings-section {
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-section:last-of-type {
+  border-bottom: none;
+}
+
+/* Section heading + help line. Title mirrors the `.chat-tts-settings-title`
+ * pattern (uppercase, muted) so the visual rhythm matches the
+ * Advanced disclosure it replaced. Help line keeps the same
+ * `--fg-mute` colour as the rest of the app.
+ */
+.settings-section-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted, var(--fg-mute));
+}
+
+.settings-section-help {
+  margin: 0 0 0.75rem;
+  font-size: 0.82rem;
+  color: var(--fg-mute);
+}
+
+/* Per-row wrapper inside a `.settings-section`. Provides vertical
+ * rhythm and matches the row-spacing used by the .chat-advanced
+ * disclosure rows. The `settings-row` class is applied to each
+ * previously-nested Advanced disclosure row (language picker,
+ * timezone, location, system prompt, temperature) so they all
+ * sit on the same vertical rhythm without each one redefining its
+ * own margins.
+ */
+.settings-row {
+  display: block;
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--fg-mute);
+}
+
+.settings-row:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* Reset-to-defaults button sits below the LLM rows so it does not
+ * break the row rhythm. Uses the existing `.ghost` button class so
+ * it inherits the same look-and-feel as the other "destructive"
+ * actions (Refresh my location, Forget my location).
+ */
+#settings-llm-reset {
+  margin-top: 1rem;
 }

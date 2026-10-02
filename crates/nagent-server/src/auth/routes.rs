@@ -40,7 +40,9 @@ pub async fn me_handler(axum::Extension(user): axum::Extension<AuthUser>) -> Jso
 /// `loadTimezoneEnabled`. `reply_language` is serialised as JSON
 /// `null` when unset (the "Auto" / match-the-user-input default) so
 /// the browser can use a single ternary to distinguish "explicit
-/// choice" from "fall back to input language".
+/// choice" from "fall back to input language". `additional_instructions`
+/// and `temperature` follow the same `null` convention: `null` means
+/// "no user-supplied value" / "fall back to the proxy default".
 pub async fn get_preferences_handler(
     State(state): State<crate::AuthState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -51,15 +53,17 @@ pub async fn get_preferences_handler(
         "share_location_enabled": prefs.share_location_enabled,
         "share_timezone_enabled": prefs.share_timezone_enabled,
         "reply_language": prefs.reply_language,
+        "additional_instructions": prefs.additional_instructions,
+        "temperature": prefs.temperature,
         "updated_at": prefs.updated_at.to_rfc3339(),
     }))
     .into_response())
 }
 
-/// Body shape for `PUT /api/me/preferences`. All three fields
+/// Body shape for `PUT /api/me/preferences`. All five fields
 /// are required so a PUT always represents the full desired
 /// state — a UI that wants to flip just `share_location_enabled`
-/// reads the current value, flips the bit, and writes all three
+/// reads the current value, flips the bit, and writes all five
 /// back. This avoids the partial-update ambiguity the original
 /// localStorage flags had (one write per flag, no atomicity,
 /// possible drift between two browser tabs).
@@ -70,7 +74,11 @@ pub async fn get_preferences_handler(
 /// preference" (the Auto / match-the-user-input default). The
 /// booleans stay strict — `null` is rejected with 400 — so the
 /// opt-in toggles don't drift the way they did in the original
-/// implementation.
+/// implementation. `additional_instructions` and `temperature`
+/// follow the same `Option<...>` convention as `reply_language`:
+/// `null` means "no user-supplied value", which the LLM proxy
+/// translates into "fall back to the default system prompt / the
+/// upstream model default sampling".
 #[derive(Debug, Deserialize)]
 pub struct PutPreferencesBody {
     #[serde(default)]
@@ -79,6 +87,10 @@ pub struct PutPreferencesBody {
     pub share_timezone_enabled: Option<bool>,
     #[serde(default)]
     pub reply_language: Option<String>,
+    #[serde(default)]
+    pub additional_instructions: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
 }
 
 /// `PUT /api/me/preferences` — atomic replace of the per-user
@@ -106,8 +118,12 @@ pub async fn put_preferences_handler(
     // the Auto entry on the picker) all as "no explicit
     // preference". The booleans stay strict (their `null` is
     // rejected with 400 above) because the wire shape for them
-    // is unambiguous; for `reply_language` the picker's `<option
-    // value="">` makes `""`/`null` the legitimate Auto signal.
+    // is unambiguous; for the three `Option<...>` fields the
+    // picker's `<option value="">` (or a cleared Settings tab
+    // textarea) makes `""`/`null` the legitimate "unset"
+    // signal. The trailing JSON `null` therefore collapses to
+    // SQL `NULL`, which the LLM proxy interprets as "fall back
+    // to the default".
     let reply_language = body.reply_language.and_then(|s| {
         let trimmed = s.trim();
         if trimmed.is_empty() {
@@ -116,16 +132,41 @@ pub async fn put_preferences_handler(
             Some(trimmed.to_string())
         }
     });
+    let additional_instructions = body.additional_instructions.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    // Out-of-range temperatures (e.g. negative, > 2.0) are NOT
+    // re-validated server-side: the `<input type="number" min="0"
+    // max="2" step="0.1">` already enforces the contract
+    // client-side, and the LLM proxy treats the value as a
+    // pass-through hint anyway (see `docs/ui_features.md` §4.4a
+    // "Risks & mitigations"). Clamping here would silently
+    // rewrite user input; surfacing it via the proxy's response
+    // (out of scope) is the right fix.
+    let temperature = body.temperature;
     let store = require_auth_store_from_auth(&state)?;
     let prefs = store
         .for_user(user.id)
         .preferences()
-        .upsert(loc, tz, reply_language)
+        .upsert(
+            loc,
+            tz,
+            reply_language,
+            additional_instructions,
+            temperature,
+        )
         .await?;
     Ok(Json(json!({
         "share_location_enabled": prefs.share_location_enabled,
         "share_timezone_enabled": prefs.share_timezone_enabled,
         "reply_language": prefs.reply_language,
+        "additional_instructions": prefs.additional_instructions,
+        "temperature": prefs.temperature,
         "updated_at": prefs.updated_at.to_rfc3339(),
     }))
     .into_response())

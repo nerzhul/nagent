@@ -102,7 +102,7 @@ The subsystems it stitches together:
 | LLM proxy | `llm/` | Optional OpenAI-compatible proxy to a local LLM. Hosts the tool loop (§3). |
 | Agents | `agents/` + `nagent-agents` | Chat-agent subsystem (§2). |
 | Documents | `documents/` | Discussion-mode document uploads, extraction, the `read_document` tool. |
-| Auth | `auth/`, `credentials/`, `oauth/` | Multi-user auth (password / OIDC / passkey) + per-user credentials vault + per-user UI preferences row (location / timezone sharing opt-ins + reply-language picker, migration `0007`). |
+| Auth | `auth/`, `credentials/`, `oauth/` | Multi-user auth (password / OIDC / passkey) + per-user credentials vault + per-user UI preferences row (location / timezone sharing opt-ins + reply-language picker, migration `0007`; additional-instructions textarea + per-turn temperature via migration `0008`). |
 | TTS | `tts/` | Local Piper text-to-speech engine. |
 | Static frontend | `static/`, `static_assets.rs` | Vendored UI served by the static handler. |
 

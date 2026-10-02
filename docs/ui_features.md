@@ -190,7 +190,8 @@ fronted by a chat sidebar and a chat-main area.
 - `#chat-clear` wipes the current session.
 - `#chat-status` mirrors the same status-pill semantics as Transcript.
 - `#chat-location-pill` (hidden until geolocation is granted and a
-  position cached): opens the Advanced panel for location management.
+  position cached): navigates to the Settings tab → Privacy &
+  context section for location management (see §4.4a).
 
 ### 4.3 Audio controls (Discussion-specific)
 
@@ -214,6 +215,15 @@ unusable list. A reachable upstream that returns no models still
 keeps the panel visible — the server falls back to
 `[default_model]` and the user sees at least the configured model.
 
+After the Settings tab rework (plan: settings-tab-rework) this
+panel wraps **only** the two surfaces that need to stay close to
+the chat composer: TTS voice configuration (chat-coupled, never
+synced to the server) and the per-user Integrations drawer
+(auth-protected credentials). Everything that used to live here —
+additional instructions, temperature, geolocation controls,
+timezone opt-in, reply-language picker — moved to the new
+Settings tab (§4.4a) where it gets proper DB-backed persistence.
+
 - **TTS sub-panel** (`#chat-tts-settings`, hidden when read-aloud is
   off):
   - `#chat-tts-voice-en` and `#chat-tts-voice-fr` populated dynamically
@@ -228,8 +238,6 @@ keeps the panel visible — the server falls back to
   - `#chat-tts-test`: synthesises a fixed sample phrase and plays it
     through the same Web Audio queue the LLM replies use, without
     involving the LLM proxy.
-- **Agents banner** (`#chat-agents-banner`): shown when the server
-  advertises tools, naming the agents the model can call.
 - **Integrations drawer** (`#chat-integrations`, hidden until
   `auth.enabled = true` AND the user is logged in): one row per
   registered service with an icon, label, "Configured" /
@@ -242,16 +250,72 @@ keeps the panel visible — the server falls back to
   with an empty registry so the drawer shows "No integrations
   available yet" until follow-up PRs add concrete `ServiceDef`
   entries — the HTTP surface is fully wired in advance.
-- **System prompt** (`#chat-system` textarea): appended to the server's
-  default system prompt.
-- **Temperature** (`#chat-temperature`, `0…2`, step `0.1`, default `0.8`):
-  sent in the request body when finite.
-- **Geolocation advanced controls** (`#chat-location-advanced`, hidden
-  until a position is cached):
-  - `#chat-location-toggle`: include my location in LLM context.
-  - `#chat-location-refresh` / `#chat-location-forget`: re-acquire or
-    drop the cached fix.
-  - `#chat-location-status`: compact "captured Xs ago" status line.
+
+### 4.4a Settings tab (`<main id="view-settings">`)
+
+Top-level view reachable via the gear-icon `<button
+role="tab" id="mode-settings-btn">` in `#mode-toggle` (Transcript
+and Discussion stay text-only — the Settings tab is the only one
+with an icon, to minimise diff on the working tabs). Owns every
+per-user preference migrated to the server-side `user_preferences`
+row. The tab is its own `<main id="view-settings" hidden>`
+sibling of `#view-transcript` / `#view-discussion`; the existing
+`modechange` event already supports a third value (`"settings"`),
+so no event-bus change was needed.
+
+Two sections, in vertical rhythm with the rest of the UI
+(`border-bottom: 1px solid var(--border)` dividers):
+
+- **Privacy & context** (`#settings-privacy`):
+  - `#chat-reply-language` — the same picker that used to live in
+    the Advanced disclosure. Drives the LLM reply language
+    (server-side system-block injection, gated by
+    `LLM_ALLOW_USER_REPLY_LANGUAGE`) and the TTS voice choice
+    (`chat.js::resolveTtsVoice` reads from this preference, not
+    from the STT picker). "Auto" maps to wire-level `null`.
+  - `#chat-timezone-toggle` + `#chat-timezone-status` — opt-in for
+    forwarding the browser's IANA timezone to the LLM context.
+  - `#chat-location-advanced` (hidden until a position is cached):
+    `#chat-location-toggle` (include my location in LLM context),
+    `#chat-location-refresh` / `#chat-location-forget`,
+    `#chat-location-status` (compact "captured Xs ago" status line).
+- **LLM** (`#settings-llm`):
+  - `#chat-system` textarea — free-form additional instructions
+    appended to the server's default system prompt (env
+    `LLM_SYSTEM_PROMPT` / TOML `[llm].system_prompt`). Persisted to
+    `user_preferences.additional_instructions` via the
+    `additional_instructions` field on `PutPreferencesBody`. The
+    request-build code (`chat.js::streamReply`) reads `systemEl.value`
+    synchronously on every turn — keeping the `id` identical to the
+    previous Advanced disclosure meant no chat.js selector change.
+  - `#chat-temperature` number input (`0…2`, step `0.1`, UI
+    default `0.8`). Persisted to `user_preferences.temperature`
+    via the `temperature` field on `PutPreferencesBody`. Empty
+    input collapses to wire-level `null` so the LLM proxy falls
+    back to the upstream model default sampling.
+  - `#settings-llm-reset` — "Reset to defaults" button. Restores
+    the two LLM inputs to their UI baseline and writes `null` on
+    the wire for `additional_instructions` so the server keeps
+    SQL `NULL`.
+
+Header also hosts the **Agents banner** (`#chat-agents-banner`,
+moved here from the old Advanced disclosure): shown when the
+server advertises tools, naming the agents the model can call.
+
+Persistence: every input persists to `user_preferences` via
+`PUT /api/me/preferences` (CSRF-protected, atomic full-row
+replace of all five fields: location, timezone, reply_language,
+additional_instructions, temperature). The localStorage mirrors
+under `nagent.chat.*` (`nagent.chat.locationEnabled`,
+`nagent.chat.timezoneEnabled`, `nagent.chat.replyLanguage`,
+`nagent.chat.system`, `nagent.chat.temperature`) are written by
+`savePreferencesToServer` first so a slow PUT never blocks the UI;
+they are the source of truth for the synchronous request-build
+path on anonymous / `auth.enabled = false` servers where the DB
+row does not exist. `loadPreferencesFromServer()` re-hydrates
+both the localStorage mirror and the Settings tab inputs on boot
+so a fresh device login picks up the server-side choice instead of
+falling back to defaults.
 
 ### 4.5 Chat input form
 
@@ -262,9 +326,9 @@ keeps the panel visible — the server falls back to
   - **Ctrl+Shift+D**: toggle voice recording.
 - `#chat-location-share`: opt-in button that calls
   `navigator.geolocation.getCurrentPosition` on first click. Hidden
-  once a position is cached (the header pill + Advanced controls take
-  over); hidden outright when `window.isSecureContext === false`
-  (e.g. plain-HTTP LAN deploy).
+  once a position is cached (the header pill + Settings-tab
+  controls take over, see §4.4a); hidden outright when
+  `window.isSecureContext === false` (e.g. plain-HTTP LAN deploy).
 - `#chat-record-btn` (mic toggle): shared `AudioCapture` instance
   routed to chat. The mic closes (`audioCapture.stop()`) as soon as
   the FinalTranscript triggers the LLM request; the user can re-click
@@ -431,8 +495,8 @@ with a tool that has no widget renderer has no widget inset, and so on.
   - Clicking a *different* bubble's button while another is playing
     → stop the previous one, start the new one.
   - The button auto-enables the master `#chat-tts-check` if it was
-    off, so a first-time user does not need to open the Advanced
-    panel first.
+    off, so a first-time user does not need to open the
+    Discussion-view Advanced disclosure first.
 - Clicking the button re-synthesises the bubble's prose through the
   same Piper-backed audio queue as live replies (see §4.9). The
   button is hidden again if the user starts a new turn while the
@@ -568,7 +632,8 @@ Behaviour:
   short.
 - The initial opt-in path is the `#chat-location-share` button in the
   form footer; once granted, the header pill becomes the visible
-  affordance and the Advanced controls expose toggle / refresh / forget.
+  affordance and the Settings-tab Privacy controls (see §4.4a)
+  expose toggle / refresh / forget.
 
 ## 6. Vendored assets
 

@@ -189,6 +189,19 @@ pub struct UserPreferences {
     /// `"fr"`, `"en"`, `"es"`) so the supported list can grow without
     /// another migration.
     pub reply_language: Option<String>,
+    /// Free-form additional system prompt the user appended to the
+    /// server's default. `chat.js` reads it from the Settings tab
+    /// textarea and prepends it after the admin-controlled
+    /// `LLM_SYSTEM_PROMPT`. `None` (NULL) means "user has not
+    /// customised the LLM" — the proxy still applies the default
+    /// system prompt.
+    pub additional_instructions: Option<String>,
+    /// Per-turn sampling temperature (`Some(v)` means "use this
+    /// value"; `None` means "fall back to the upstream model
+    /// default"). Range is not enforced at the DB layer; the
+    /// Settings-tab `<input type="number" min="0" max="2">`
+    /// contract does the client-side clamp.
+    pub temperature: Option<f32>,
     pub updated_at: DateTime<Utc>,
 }
 

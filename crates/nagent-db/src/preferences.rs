@@ -45,6 +45,8 @@ impl Preferences {
         share_location_enabled: bool,
         share_timezone_enabled: bool,
         reply_language: Option<String>,
+        additional_instructions: Option<String>,
+        temperature: Option<f32>,
     ) -> Result<UserPreferences, Error> {
         match self {
             Preferences::Sqlite(s) => {
@@ -53,6 +55,8 @@ impl Preferences {
                     share_location_enabled,
                     share_timezone_enabled,
                     reply_language,
+                    additional_instructions,
+                    temperature,
                 )
                 .await
             }
@@ -62,6 +66,8 @@ impl Preferences {
                     share_location_enabled,
                     share_timezone_enabled,
                     reply_language,
+                    additional_instructions,
+                    temperature,
                 )
                 .await
             }
@@ -94,18 +100,22 @@ impl ScopedPreferences {
 
     /// Replace the preferences row for the scoped user.
     ///
-    /// The full triple must be supplied — partial PUTs are rejected
-    /// at the HTTP boundary so we can treat this signature as a
-    /// strict atomic replace (matches the `share_location_enabled` /
+    /// All five fields must be supplied — partial PUTs are
+    /// rejected at the HTTP boundary so we can treat this signature
+    /// as a strict atomic replace (matches the `share_location_enabled` /
     /// `share_timezone_enabled` "all fields required" contract
     /// documented in `auth::routes::PutPreferencesBody`). Pass
     /// `None` for `reply_language` to clear the preference ("Auto"
-    /// mode — fall back to the user's input language).
+    /// mode — fall back to the user's input language); same for
+    /// `additional_instructions` (no user-supplied suffix) and
+    /// `temperature` (fall back to the upstream model default).
     pub async fn upsert(
         &self,
         share_location_enabled: bool,
         share_timezone_enabled: bool,
         reply_language: Option<String>,
+        additional_instructions: Option<String>,
+        temperature: Option<f32>,
     ) -> Result<UserPreferences, Error> {
         self.inner
             .upsert(
@@ -113,6 +123,8 @@ impl ScopedPreferences {
                 share_location_enabled,
                 share_timezone_enabled,
                 reply_language,
+                additional_instructions,
+                temperature,
             )
             .await
     }
@@ -138,7 +150,8 @@ pub(crate) mod sqlite {
 
         pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
             let row = sqlx::query(
-                "SELECT share_location_enabled, share_timezone_enabled, reply_language, updated_at \
+                "SELECT share_location_enabled, share_timezone_enabled, reply_language, \
+                        additional_instructions, temperature, updated_at \
                  FROM user_preferences WHERE user_id = ?",
             )
             .bind(user_id.to_string())
@@ -149,6 +162,8 @@ pub(crate) mod sqlite {
                     share_location_enabled: false,
                     share_timezone_enabled: false,
                     reply_language: None,
+                    additional_instructions: None,
+                    temperature: None,
                     updated_at: Utc::now(),
                 });
             };
@@ -156,6 +171,9 @@ pub(crate) mod sqlite {
                 share_location_enabled: row_to_bool(&r, "share_location_enabled")?,
                 share_timezone_enabled: row_to_bool(&r, "share_timezone_enabled")?,
                 reply_language: r.try_get::<Option<String>, _>("reply_language")?,
+                additional_instructions: r
+                    .try_get::<Option<String>, _>("additional_instructions")?,
+                temperature: r.try_get::<Option<f32>, _>("temperature")?,
                 updated_at: parse_rfc3339(&r.try_get::<String, _>("updated_at")?),
             })
         }
@@ -166,23 +184,29 @@ pub(crate) mod sqlite {
             share_location_enabled: bool,
             share_timezone_enabled: bool,
             reply_language: Option<String>,
+            additional_instructions: Option<String>,
+            temperature: Option<f32>,
         ) -> Result<UserPreferences, Error> {
             let user_id_str = user_id.to_string();
             sqlx::query(
                 "INSERT INTO user_preferences \
                     (user_id, share_location_enabled, share_timezone_enabled, \
-                     reply_language, updated_at) \
-                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) \
+                     reply_language, additional_instructions, temperature, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
                  ON CONFLICT(user_id) DO UPDATE SET \
                      share_location_enabled = excluded.share_location_enabled, \
                      share_timezone_enabled = excluded.share_timezone_enabled, \
                      reply_language = excluded.reply_language, \
+                     additional_instructions = excluded.additional_instructions, \
+                     temperature = excluded.temperature, \
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(&user_id_str)
             .bind(if share_location_enabled { 1_i64 } else { 0_i64 })
             .bind(if share_timezone_enabled { 1_i64 } else { 0_i64 })
             .bind(reply_language)
+            .bind(additional_instructions)
+            .bind(temperature)
             .execute(&self.pool)
             .await?;
             self.get(user_id).await
@@ -221,7 +245,8 @@ pub(crate) mod postgres {
 
         pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
             let row = sqlx::query(
-                "SELECT share_location_enabled, share_timezone_enabled, reply_language, updated_at \
+                "SELECT share_location_enabled, share_timezone_enabled, reply_language, \
+                        additional_instructions, temperature, updated_at \
                  FROM user_preferences WHERE user_id = $1",
             )
             .bind(user_id)
@@ -232,6 +257,8 @@ pub(crate) mod postgres {
                     share_location_enabled: false,
                     share_timezone_enabled: false,
                     reply_language: None,
+                    additional_instructions: None,
+                    temperature: None,
                     updated_at: Utc::now(),
                 });
             };
@@ -239,6 +266,9 @@ pub(crate) mod postgres {
                 share_location_enabled: row_to_bool(&r, "share_location_enabled")?,
                 share_timezone_enabled: row_to_bool(&r, "share_timezone_enabled")?,
                 reply_language: r.try_get::<Option<String>, _>("reply_language")?,
+                additional_instructions: r
+                    .try_get::<Option<String>, _>("additional_instructions")?,
+                temperature: r.try_get::<Option<f32>, _>("temperature")?,
                 updated_at: parse_rfc3339(&r.try_get::<String, _>("updated_at")?),
             })
         }
@@ -249,22 +279,28 @@ pub(crate) mod postgres {
             share_location_enabled: bool,
             share_timezone_enabled: bool,
             reply_language: Option<String>,
+            additional_instructions: Option<String>,
+            temperature: Option<f32>,
         ) -> Result<UserPreferences, Error> {
             sqlx::query(
                 "INSERT INTO user_preferences \
                     (user_id, share_location_enabled, share_timezone_enabled, \
-                     reply_language, updated_at) \
-                 VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP) \
+                     reply_language, additional_instructions, temperature, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP) \
                  ON CONFLICT (user_id) DO UPDATE SET \
                      share_location_enabled = EXCLUDED.share_location_enabled, \
                      share_timezone_enabled = EXCLUDED.share_timezone_enabled, \
                      reply_language = EXCLUDED.reply_language, \
+                     additional_instructions = EXCLUDED.additional_instructions, \
+                     temperature = EXCLUDED.temperature, \
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(user_id)
             .bind(if share_location_enabled { 1_i64 } else { 0_i64 })
             .bind(if share_timezone_enabled { 1_i64 } else { 0_i64 })
             .bind(reply_language)
+            .bind(additional_instructions)
+            .bind(temperature)
             .execute(&self.pool)
             .await?;
             self.get(user_id).await

@@ -114,6 +114,13 @@
               data-mode="transcript">Transcript</button>
       <button role="tab" id="mode-discussion-btn" aria-selected="false"
               data-mode="discussion">Discussion</button>
+      <button role="tab" id="mode-settings-btn" aria-selected="false"
+              data-mode="settings">
+        <svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="currentColor" d="M19.14 12.94a7.5 7.5 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.5 7.5 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.55-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.65 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.5 7.5 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.14.24.44.34.7.22l2.39-.96c.5.4 1.04.7 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54a7.5 7.5 0 0 0 1.63-.94l2.39.96c.26.12.56.02.7-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/>
+        </svg>
+        <span>Settings</span>
+      </button>
     </nav>
   </header>
 
@@ -312,6 +319,18 @@
     <details class="chat-advanced">
       <summary>Advanced</summary>
       <!--
+        Advanced disclosure inside the Discussion view. After the
+        Settings tab rework (plan: settings-tab-rework) this panel
+        wraps **only** the two surfaces that need to stay close to the
+        chat composer: TTS voice configuration (chat-coupled, never
+        synced to the server) and the per-user Integrations drawer
+        (auth-protected credentials). Everything that used to live
+        here — additional instructions, temperature, geolocation
+        controls, timezone opt-in, reply-language picker — moved to
+        the new Settings tab (§4.4a) where it gets proper DB-backed
+        persistence.
+      -->
+      <!--
         TTS sub-panel, folded into the main Advanced disclosure
         instead of having its own nested `<details>`. Hidden when
         `#chat-tts-check` is off (chat.js toggles the `[hidden]`
@@ -361,84 +380,6 @@
           Test voice
         </button>
       </div>
-      <p id="chat-agents-banner" class="chat-agents-banner" hidden>
-        Agents available: <strong id="chat-agents-banner-names"></strong>
-        — ask the model to fetch a URL.
-      </p>
-      <label class="chat-system-label">
-        Additional instructions
-        <textarea id="chat-system" rows="2"
-                  placeholder="Optional. Appended to the server's default system prompt."></textarea>
-      </label>
-      <label class="chat-temperature-label">
-        Temperature
-        <input id="chat-temperature" type="number" min="0"
-               max="2" step="0.1" value="0.8">
-      </label>
-      <!--
-        Geolocation controls. Hidden until a position has been cached
-        in `localStorage`; the initial opt-in is the
-        `#chat-location-share` button in the form footer. The status
-        text + manual refresh / forget buttons live here so the user
-        can re-audit the choice without leaving Advanced.
-      -->
-      <div id="chat-location-advanced" class="chat-location-advanced" hidden>
-        <label class="chat-location-toggle-label">
-          <input id="chat-location-toggle" type="checkbox">
-          Include my location in LLM context
-        </label>
-        <div class="chat-location-actions">
-          <button id="chat-location-refresh" type="button" class="ghost">
-            Refresh my location
-          </button>
-          <button id="chat-location-forget" type="button" class="ghost">
-            Forget my location
-          </button>
-        </div>
-        <p id="chat-location-status" class="chat-location-status">…</p>
-      </div>
-      <!--
-        Browser timezone opt-in. Always available (unlike location,
-        which requires HTTPS + a cached fix), so it lives at the top
-        level of Advanced rather than being gated behind a cache check.
-        The status line surfaces the detected IANA name so the user can
-        spot a wrong value (e.g. a VPN tunneling into a different
-        region) before they trust the LLM's clock to be theirs.
-      -->
-      <div class="chat-timezone-advanced">
-        <label class="chat-timezone-toggle-label">
-          <input id="chat-timezone-toggle" type="checkbox">
-          Use browser timezone in LLM context
-        </label>
-        <p id="chat-timezone-status" class="chat-timezone-status">…</p>
-      </div>
-      <!--
-        Reply-language picker. Decoupled from the chat-audio header
-        `#chat-lang-select` (which is the STT *input* language — Whisper
-        transcription). The picker here drives two things: the LLM
-        reply language (server-side system-block injection, gated by
-        `LLM_ALLOW_USER_REPLY_LANGUAGE`) and the TTS voice choice
-        (`chat.js::resolveTtsVoice` reads from this preference, not from
-        the STT picker). "Auto" maps to a wire-level `null` so the LLM
-        falls back to "match the user's input language"; any non-`""`
-        value is sent as a JSON string. List mirrors
-        `#chat-lang-select` so users see the same codes in both
-        pickers.
-      -->
-      <label class="chat-reply-language-label">
-        <span>Reply language</span>
-        <select id="chat-reply-language">
-          <option value="">Auto (user input)</option>
-          <option value="en">English</option>
-          <option value="fr">Français</option>
-          <option value="es">Español</option>
-          <option value="de">Deutsch</option>
-          <option value="it">Italiano</option>
-          <option value="pt">Português</option>
-          <option value="ja">日本語</option>
-          <option value="zh">中文</option>
-        </select>
-      </label>
       <!--
         Per-user credentials drawer. Hidden until `chat.js` boots
         and confirms the user is authenticated (the routes require
@@ -504,6 +445,151 @@
       Chat disabled on this server.
     </p>
     </div>
+  </main>
+
+  <main id="view-settings" class="view" hidden>
+    <!--
+      Settings tab. Top-level view reachable via the gear-icon tab in
+      `#mode-toggle`. Owns every per-user preference that has been
+      promoted to the server-side `user_preferences` row (migrations
+      0006, 0007, 0008), so changes survive a logout, a browser
+      switch, or a fresh device login. The TTS sub-panel stays in the
+      Discussion view's Advanced disclosure — it is chat-coupled and
+      local-only by intent (see §4.4 above).
+    -->
+    <header class="settings-header">
+      <h2>Settings</h2>
+      <!--
+        Agents banner. Mirrored from the old Advanced disclosure so
+        users still see "Agents available: …" when the server
+        advertises tools. Hidden by default; chat.js unhides it when
+        `GET /v1/agents` returns at least one entry.
+      -->
+      <p id="chat-agents-banner" class="chat-agents-banner" hidden>
+        Agents available: <strong id="chat-agents-banner-names"></strong>
+        — ask the model to fetch a URL.
+      </p>
+    </header>
+
+    <section class="settings-section" id="settings-privacy" aria-labelledby="settings-privacy-title">
+      <h3 id="settings-privacy-title" class="settings-section-title">
+        Privacy &amp; context
+      </h3>
+      <p class="settings-section-help">
+        Controls which contextual information the assistant may include
+        in its replies. Changes are saved on input.
+      </p>
+      <!--
+        Reply-language picker. Same wire contract as the previous
+        Advanced location: "Auto" maps to JSON `null` / SQL `NULL` so
+        the LLM proxy falls back to "match the user's input language".
+        List mirrors `#chat-lang-select` so users see the same codes
+        in both pickers.
+      -->
+      <label class="chat-reply-language-label settings-row">
+        <span>Reply language</span>
+        <select id="chat-reply-language">
+          <option value="">Auto (user input)</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="de">Deutsch</option>
+          <option value="it">Italiano</option>
+          <option value="pt">Português</option>
+          <option value="ja">日本語</option>
+          <option value="zh">中文</option>
+        </select>
+      </label>
+      <!--
+        Browser timezone opt-in. Always available (unlike location,
+        which requires HTTPS + a cached fix), so it is exposed
+        unconditionally. The status line surfaces the detected IANA
+        name so the user can spot a wrong value (e.g. a VPN tunneling
+        into a different region) before they trust the LLM's clock to
+        be theirs.
+      -->
+      <div class="chat-timezone-advanced settings-row">
+        <label class="chat-timezone-toggle-label">
+          <input id="chat-timezone-toggle" type="checkbox">
+          Use browser timezone in LLM context
+        </label>
+        <p id="chat-timezone-status" class="chat-timezone-status">…</p>
+      </div>
+      <!--
+        Geolocation controls. Hidden until a position has been cached
+        in `localStorage`; the initial opt-in is the
+        `#chat-location-share` button in the Discussion-view form
+        footer. The status text + manual refresh / forget buttons
+        live here so the user can re-audit the choice without
+        leaving the Settings tab.
+      -->
+      <div id="chat-location-advanced" class="chat-location-advanced settings-row" hidden>
+        <label class="chat-location-toggle-label">
+          <input id="chat-location-toggle" type="checkbox">
+          Include my location in LLM context
+        </label>
+        <div class="chat-location-actions">
+          <button id="chat-location-refresh" type="button" class="ghost">
+            Refresh my location
+          </button>
+          <button id="chat-location-forget" type="button" class="ghost">
+            Forget my location
+          </button>
+        </div>
+        <p id="chat-location-status" class="chat-location-status">…</p>
+      </div>
+    </section>
+
+    <section class="settings-section" id="settings-llm" aria-labelledby="settings-llm-title">
+      <h3 id="settings-llm-title" class="settings-section-title">
+        LLM
+      </h3>
+      <p class="settings-section-help">
+        Tunable parameters for the local language model. Changes are
+        saved on input.
+      </p>
+      <!--
+        Additional-instructions textarea. `systemEl.value` is an
+        *extension* appended after the server's default system
+        prompt (env `LLM_SYSTEM_PROMPT` / TOML `[llm].system_prompt`);
+        the proxy prepends the admin's prompt as `messages[0]`, our
+        value goes second so the admin's intent stays authoritative.
+        `id="chat-system"` is preserved so the request-build code in
+        `chat.js` (lines 2538–2540) keeps working unchanged after the
+        move out of the Advanced disclosure.
+      -->
+      <label class="chat-system-label settings-row">
+        Additional instructions
+        <textarea id="chat-system" rows="2"
+                  placeholder="Optional. Appended to the server's default system prompt."></textarea>
+      </label>
+      <!--
+        Temperature input. `min="0" max="2" step="0.1"` matches the
+        LLM proxy contract. `value="0.8"` is the UI default; the
+        server stores `NULL` until the field has been touched, then
+        re-saves the parsed `parseFloat(tempEl.value)` on every
+        edit. `id="chat-temperature"` is preserved for the same
+        reason as `#chat-system` (chat.js reads it when the user
+        sends a message).
+      -->
+      <label class="chat-temperature-label settings-row">
+        Temperature
+        <input id="chat-temperature" type="number" min="0"
+               max="2" step="0.1" value="0.8">
+      </label>
+      <!--
+        Reset-to-defaults button. Clears the two LLM inputs back to
+        their UI defaults (`""` for instructions, `0.8` for
+        temperature) and persists the cleared state — `null` /
+        `None` on the wire so the server keeps the NULL storage and
+        the LLM proxy falls back to the upstream model default
+        sampling. Same as the "Reset" pattern used elsewhere in the
+        UI: explicit user action required, no surprise wipe.
+      -->
+      <button id="settings-llm-reset" type="button" class="ghost">
+        Reset to defaults
+      </button>
+    </section>
   </main>
 
   <!-- Mode toggle is a plain script (no imports) so it can run as a

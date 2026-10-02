@@ -232,14 +232,18 @@ mod preferences {
             "default reply_language is None (Auto)"
         );
         // Scoped upsert writes only the bound user's row.
-        let updated = scoped.upsert(true, false, None).await.unwrap();
+        let updated = scoped.upsert(true, false, None, None, None).await.unwrap();
         assert!(updated.share_location_enabled);
         assert!(!updated.share_timezone_enabled);
         assert!(updated.reply_language.is_none());
+        assert!(updated.additional_instructions.is_none());
+        assert!(updated.temperature.is_none());
         let reread = scoped.get().await.expect("reread");
         assert!(reread.share_location_enabled);
         assert!(!reread.share_timezone_enabled);
         assert!(reread.reply_language.is_none());
+        assert!(reread.additional_instructions.is_none());
+        assert!(reread.temperature.is_none());
     }
 
     #[cfg(feature = "db-sqlite")]
@@ -260,12 +264,12 @@ mod preferences {
             .unwrap();
         db.for_user(alice)
             .preferences()
-            .upsert(true, false, Some("fr".into()))
+            .upsert(true, false, Some("fr".into()), None, None)
             .await
             .unwrap();
         db.for_user(bob)
             .preferences()
-            .upsert(false, true, None)
+            .upsert(false, true, None, None, None)
             .await
             .unwrap();
         let alice_prefs = db.for_user(alice).preferences().get().await.unwrap();
@@ -296,7 +300,7 @@ mod preferences {
         let scoped = db.for_user(user).preferences();
 
         let updated = scoped
-            .upsert(false, false, Some("es".into()))
+            .upsert(false, false, Some("es".into()), None, None)
             .await
             .expect("upsert with Some");
         assert_eq!(updated.reply_language.as_deref(), Some("es"));
@@ -310,7 +314,7 @@ mod preferences {
         // boolean opt-ins — the row is a strict atomic replace of the
         // triple, not a partial update.
         let cleared = scoped
-            .upsert(true, true, None)
+            .upsert(true, true, None, None, None)
             .await
             .expect("upsert with None");
         assert!(cleared.reply_language.is_none());
@@ -338,15 +342,118 @@ mod preferences {
             .unwrap();
         let scoped = db.for_user(user).preferences();
         let updated = scoped
-            .upsert(false, false, Some("ja".into()))
+            .upsert(false, false, Some("ja".into()), None, None)
             .await
             .expect("pg upsert Some");
         assert_eq!(updated.reply_language.as_deref(), Some("ja"));
         let cleared = scoped
-            .upsert(false, false, None)
+            .upsert(false, false, None, None, None)
             .await
             .expect("pg upsert None");
         assert!(cleared.reply_language.is_none());
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn llm_settings_round_trip_some_then_none() {
+        // Confirms the migration-0008 columns (`additional_instructions`,
+        // `temperature`) round-trip both `Some(...)` and `None`. The HTTP
+        // handler (`PutPreferencesBody`) treats both as legitimate wire
+        // values — `null` JSON is the "use the proxy default" signal,
+        // a non-empty string / finite number is the explicit user choice.
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("llm@example.com", "LLM", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let scoped = db.for_user(user).preferences();
+
+        // Initial write: explicit instructions + explicit temperature.
+        let updated = scoped
+            .upsert(
+                false,
+                false,
+                None,
+                Some("Reply concisely.".to_string()),
+                Some(0.5),
+            )
+            .await
+            .expect("upsert with Some");
+        assert_eq!(
+            updated.additional_instructions.as_deref(),
+            Some("Reply concisely.")
+        );
+        assert_eq!(updated.temperature, Some(0.5));
+
+        let reread = scoped.get().await.expect("reread Some");
+        assert_eq!(
+            reread.additional_instructions.as_deref(),
+            Some("Reply concisely.")
+        );
+        assert_eq!(reread.temperature, Some(0.5));
+        // Booleans untouched.
+        assert!(!reread.share_location_enabled);
+        assert!(!reread.share_timezone_enabled);
+
+        // Clearing both (PUT with `null`) must NOT touch the boolean
+        // opt-ins or the reply language — the row is a strict atomic
+        // replace of the quintuple, not a partial update.
+        let cleared = scoped
+            .upsert(true, true, Some("fr".into()), None, None)
+            .await
+            .expect("upsert with None");
+        assert!(cleared.additional_instructions.is_none());
+        assert!(cleared.temperature.is_none());
+        assert!(cleared.share_location_enabled);
+        assert!(cleared.share_timezone_enabled);
+        assert_eq!(cleared.reply_language.as_deref(), Some("fr"));
+
+        let reread = scoped.get().await.expect("reread None");
+        assert!(reread.additional_instructions.is_none());
+        assert!(reread.temperature.is_none());
+        assert!(reread.share_location_enabled);
+        assert!(reread.share_timezone_enabled);
+        assert_eq!(reread.reply_language.as_deref(), Some("fr"));
+    }
+
+    #[cfg(feature = "db-postgres")]
+    #[tokio::test]
+    #[ignore = "requires NAGENT_TEST_PG_URL; run with --include-ignored in CI"]
+    async fn postgres_parity_llm_settings_round_trip() {
+        // Same round-trip as the SQLite test above, against a live
+        // Postgres to confirm the SQL shape (`$N` placeholders, the
+        // `EXCLUDED.` references, the nullable TEXT + REAL casts) all
+        // agree on the two columns added in migration 0008.
+        let db = pg_or_skip!();
+        let user = db
+            .admin()
+            .users
+            .create("pg-llm@example.com", "PG-LLM", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let scoped = db.for_user(user).preferences();
+        let updated = scoped
+            .upsert(false, false, None, Some("Be terse.".to_string()), Some(0.3))
+            .await
+            .expect("pg upsert Some");
+        assert_eq!(
+            updated.additional_instructions.as_deref(),
+            Some("Be terse.")
+        );
+        // Floating-point equality is fragile across encodings; we
+        // assert on the bit-pattern via `(v - target).abs() < eps`
+        // instead so a future change to `f64` doesn't break the
+        // parity check.
+        let t = updated.temperature.expect("temperature round-trip");
+        assert!((t - 0.3_f32).abs() < 1e-5);
+        let cleared = scoped
+            .upsert(false, false, None, None, None)
+            .await
+            .expect("pg upsert None");
+        assert!(cleared.additional_instructions.is_none());
+        assert!(cleared.temperature.is_none());
     }
 }
 

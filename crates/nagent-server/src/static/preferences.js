@@ -12,28 +12,31 @@
 //     `localStorage` — an anonymous user on an `auth.enabled =
 //     false` server gets the pre-existing localStorage behaviour
 //     unchanged.
-//   * On toggle, `saveToServer(loc, tz, reply_language)` PUTs the
-//     new flags to `/api/me/preferences` (CSRF-protected) and
-//     mirrors them to `localStorage`. The PUT is fire-and-forget so
-//     a slow network does not block the UI: the localStorage write
-//     happens first so the next request the UI builds already
-//     reflects the user's choice, and the server catches up
-//     asynchronously. A 401 / 404 / network failure is logged but
-//     does NOT roll back the local change — the user explicitly
-//     asked for the toggle to flip.
+//   * On toggle, `saveToServer(loc, tz, reply_language, sys, temp)`
+//     PUTs the new flags to `/api/me/preferences` (CSRF-protected)
+//     and mirrors them to `localStorage`. The PUT is
+//     fire-and-forget so a slow network does not block the UI: the
+//     localStorage write happens first so the next request the UI
+//     builds already reflects the user's choice, and the server
+//     catches up asynchronously. A 401 / 404 / network failure is
+//     logged but does NOT roll back the local change — the user
+//     explicitly asked for the toggle to flip.
 //
 // The wire shape mirrors the auth_preferences migration: each
 // boolean flag is a JSON bool, `reply_language` is a JSON string
-// or `null`. The row is updated atomically by the server (all
-// three fields required in the body). Sending every field on
-// every PUT means the localStorage writes always match the
-// server-side state for a single user — no drift between a laptop
-// that has the location toggle ON and a phone that has the
-// timezone toggle ON.
+// or `null`, `additional_instructions` is a JSON string or
+// `null`, `temperature` is a JSON number or `null`. The row is
+// updated atomically by the server (all five fields required in
+// the body). Sending every field on every PUT means the
+// localStorage writes always match the server-side state for a
+// single user — no drift between a laptop that has the location
+// toggle ON and a phone that has the temperature slider at 0.3.
 
 import {
   LOCATION_ENABLED_KEY,
   TIMEZONE_ENABLED_KEY,
+  SYSTEM_KEY,
+  TEMPERATURE_KEY,
 } from "/static/chat-sessions.js";
 
 /// `localStorage` key that mirrors the per-user reply-language
@@ -42,18 +45,37 @@ import {
 /// `localStorage.clear()` wipes everything together.
 export const REPLY_LANGUAGE_LS_KEY = "nagent.chat.replyLanguage";
 
+/// UI defaults for the two LLM preferences. Mirrored here (rather
+/// than read from `chat.js`) so the localStorage fall-back path
+/// uses the same baseline the server-side default (`0.8` for
+/// temperature, `""` for additional instructions) — see the
+/// discussion in the Settings tab reset-to-defaults code in
+/// `chat.js`. Changing the defaults in one place without the
+/// other would silently revert a user's last explicit choice.
+const DEFAULT_SYSTEM = "";
+const DEFAULT_TEMPERATURE = 0.8;
+
 /// Cache of the latest server-side preferences. Lets the toggle
 /// handlers PUT the *current* full state (location + timezone +
-/// reply_language) without re-reading localStorage at toggle time —
-/// keeping the three flags in lockstep so a PUT always reflects
-/// the user's current intent for *every* preference, not just the
-/// one that was just clicked.
+/// reply_language + additional_instructions + temperature)
+/// without re-reading localStorage at toggle time — keeping all
+/// five flags in lockstep so a PUT always reflects the user's
+/// current intent for *every* preference, not just the one that
+/// was just clicked.
 ///
-/// `reply_language` is `null` (not `""`) for the "Auto" / unset
-/// case so the wire payload and the cached state agree on a single
-/// "no explicit preference" value — empty strings from the
-/// `<select>` are normalised to `null` at read time.
-let _cachedPrefs = { location: null, timezone: null, reply_language: null };
+/// `reply_language`, `additional_instructions`, and `temperature`
+/// use `null` (not `""` / `0`) for the "Auto" / unset case so the
+/// wire payload and the cached state agree on a single "no
+/// explicit preference" value — empty strings from the
+/// `<select>` and the empty textarea are normalised to `null` at
+/// read time.
+let _cachedPrefs = {
+  location: null,
+  timezone: null,
+  reply_language: null,
+  additional_instructions: null,
+  temperature: null,
+};
 
 function csrfHeaders() {
   return window.nagentAuth?.csrfHeaders?.() || undefined;
@@ -63,17 +85,28 @@ function csrfHeaders() {
 /// the fallback when the server fetch fails AND as the source of
 /// truth for the synchronous render path (`renderLocationUi`,
 /// `renderTimezoneUi`, the reply-language picker, the per-request
-/// `maybeBuildLocationBlock` / `maybeBuildTimezoneBlock`). The boot
+/// `maybeBuildLocationBlock` / `maybeBuildTimezoneBlock`, the LLM
+/// system + temperature inputs in the Settings tab). The boot
 /// path overwrites this with the server-side value when the fetch
 /// succeeds.
 function _readLocal() {
   const ls = (typeof globalThis !== "undefined" && globalThis.localStorage)
     ? globalThis.localStorage
     : null;
-  if (!ls) return { location: false, timezone: false, reply_language: null };
+  if (!ls) {
+    return {
+      location: false,
+      timezone: false,
+      reply_language: null,
+      additional_instructions: null,
+      temperature: null,
+    };
+  }
   let location = false;
   let timezone = false;
   let reply_language = null;
+  let additional_instructions = null;
+  let temperature = null;
   try { location = ls.getItem(LOCATION_ENABLED_KEY) === "true"; } catch (_) {}
   try { timezone = ls.getItem(TIMEZONE_ENABLED_KEY) === "true"; } catch (_) {}
   try {
@@ -84,10 +117,33 @@ function _readLocal() {
     // "no preference" representation.
     if (v != null && v.trim() !== "") reply_language = v;
   } catch (_) {}
-  return { location, timezone, reply_language };
+  try {
+    const v = ls.getItem(SYSTEM_KEY);
+    // Empty / unset = "no user-supplied instructions". The local
+    // mirror stores the textarea verbatim, so an empty string and a
+    // missing key both collapse to `null` (matches the wire shape).
+    if (v != null && v.trim() !== "") additional_instructions = v;
+  } catch (_) {}
+  try {
+    const v = ls.getItem(TEMPERATURE_KEY);
+    // Stored as a string (localStorage can only hold strings); we
+    // parse back to a number here. Anything non-finite collapses to
+    // `null` so the request builder (`chat.js::streamReply`) sees a
+    // single "use the proxy default" sentinel.
+    if (v != null && v.trim() !== "") {
+      const n = Number.parseFloat(v);
+      if (Number.isFinite(n)) temperature = n;
+    }
+  } catch (_) {}
+  return {
+    location, timezone, reply_language, additional_instructions, temperature,
+  };
 }
 
-function _writeLocal(location, timezone, reply_language) {
+function _writeLocal(
+  location, timezone, reply_language,
+  additional_instructions, temperature,
+) {
   const ls = (typeof globalThis !== "undefined" && globalThis.localStorage)
     ? globalThis.localStorage
     : null;
@@ -109,16 +165,40 @@ function _writeLocal(location, timezone, reply_language) {
     if (reply_language) ls.setItem(REPLY_LANGUAGE_LS_KEY, reply_language);
     else ls.removeItem(REPLY_LANGUAGE_LS_KEY);
   } catch (_) { /* quota or disabled storage */ }
+  try {
+    // Additional instructions: store the raw user text so the
+    // textarea on next load shows exactly what they typed. `null`
+    // / empty string collapses to "no mirror" so the LLM proxy
+    // falls back to the admin-supplied default system prompt.
+    if (additional_instructions != null) {
+      ls.setItem(SYSTEM_KEY, additional_instructions);
+    } else {
+      ls.removeItem(SYSTEM_KEY);
+    }
+  } catch (_) { /* quota or disabled storage */ }
+  try {
+    // Temperature: store the canonical float as a string so the
+    // next session hydrates to the same value. `null` / NaN
+    // collapses to "no mirror" — the request builder then sees
+    // `null` and the LLM proxy falls back to the upstream model
+    // default sampling.
+    if (temperature != null && Number.isFinite(temperature)) {
+      ls.setItem(TEMPERATURE_KEY, String(temperature));
+    } else {
+      ls.removeItem(TEMPERATURE_KEY);
+    }
+  } catch (_) { /* quota or disabled storage */ }
 }
 
 /// Fetch the server-side preferences and mirror them into
-/// localStorage. Returns the resolved triple so callers (the boot
-/// path) can re-render the toggles without a localStorage read.
-/// `findLastPath` is intentionally silent on network failure: the
-/// localStorage copy stays, and the user sees the last value they
-/// picked on this device. Auth-related errors (401 = anonymous on
-/// an auth-enabled server, 404 = `/api/me/preferences` not mounted)
-/// are also silently swallowed for the same reason.
+/// localStorage. Returns the resolved quintuple so callers (the
+/// boot path) can re-render the toggles without a localStorage
+/// read. The function is intentionally silent on network failure:
+/// the localStorage copy stays, and the user sees the last value
+/// they picked on this device. Auth-related errors (401 =
+/// anonymous on an auth-enabled server, 404 =
+/// `/api/me/preferences` not mounted) are also silently swallowed
+/// for the same reason.
 export async function loadFromServer() {
   try {
     const resp = await fetch("/api/me/preferences", {
@@ -145,26 +225,48 @@ export async function loadFromServer() {
       && body.reply_language.trim() !== "")
       ? body.reply_language
       : null;
-    _cachedPrefs = { location, timezone, reply_language };
-    _writeLocal(location, timezone, reply_language);
-    return { location, timezone, reply_language };
+    const additional_instructions = (typeof body?.additional_instructions === "string"
+      && body.additional_instructions.trim() !== "")
+      ? body.additional_instructions
+      : null;
+    // Server returns a finite `number` for an explicit temperature
+    // choice and `null` for "use the proxy default". Anything else
+    // (string, NaN, missing) collapses to `null` so the request
+    // builder only sees two states.
+    const temperature = (typeof body?.temperature === "number"
+      && Number.isFinite(body.temperature))
+      ? body.temperature
+      : null;
+    _cachedPrefs = {
+      location, timezone, reply_language,
+      additional_instructions, temperature,
+    };
+    _writeLocal(
+      location, timezone, reply_language,
+      additional_instructions, temperature,
+    );
+    return _cachedPrefs;
   } catch (e) {
     console.warn("preferences fetch error:", e);
     return _readLocal();
   }
 }
 
-/// Persist the supplied triple to the server and mirror them into
-/// localStorage. The localStorage write happens *first* so a slow
-/// PUT never blocks the UI; the PUT is fire-and-forget and any
-/// server-side error is logged but does NOT roll back the local
-/// state.
+/// Persist the supplied quintuple to the server and mirror them
+/// into localStorage. The localStorage write happens *first* so a
+/// slow PUT never blocks the UI; the PUT is fire-and-forget and
+/// any server-side error is logged but does NOT roll back the
+/// local state.
 ///
-/// Pass the *full* triple (location + timezone + reply_language),
-/// not just the one the user just clicked: the server treats a PUT
-/// as an atomic replace of the row, so a partial body would
-/// silently flip the other flags off.
-export function saveToServer(location, timezone, reply_language) {
+/// Pass the *full* quintuple (location + timezone + reply_language
+/// + additional_instructions + temperature), not just the one the
+/// user just clicked: the server treats a PUT as an atomic
+/// replace of the row, so a partial body would silently flip the
+/// other flags off.
+export function saveToServer(
+  location, timezone, reply_language,
+  additional_instructions, temperature,
+) {
   // Normalise the reply_language argument: empty / whitespace /
   // explicit `null` all collapse to `null` (Auto) so every
   // downstream caller only ever sees one "no preference"
@@ -173,8 +275,25 @@ export function saveToServer(location, timezone, reply_language) {
     && reply_language.trim() !== "")
     ? reply_language.trim()
     : null;
-  _cachedPrefs = { location, timezone, reply_language: normalisedLang };
-  _writeLocal(location, timezone, normalisedLang);
+  const normalisedInstructions = (typeof additional_instructions === "string"
+    && additional_instructions.trim() !== "")
+    ? additional_instructions
+    : null;
+  const normalisedTemp = (typeof temperature === "number"
+    && Number.isFinite(temperature))
+    ? temperature
+    : null;
+  _cachedPrefs = {
+    location,
+    timezone,
+    reply_language: normalisedLang,
+    additional_instructions: normalisedInstructions,
+    temperature: normalisedTemp,
+  };
+  _writeLocal(
+    location, timezone, normalisedLang,
+    normalisedInstructions, normalisedTemp,
+  );
   // Fire-and-forget: the localStorage mirror above already
   // satisfies the user's intent on this device, the PUT just
   // syncs to the server so a different device / browser picks up
@@ -195,6 +314,8 @@ export function saveToServer(location, timezone, reply_language) {
           // the same as a missing key (see the route handler
           // comment for the rationale).
           reply_language: normalisedLang,
+          additional_instructions: normalisedInstructions,
+          temperature: normalisedTemp,
         }),
       });
       if (!resp.ok) {
@@ -208,13 +329,15 @@ export function saveToServer(location, timezone, reply_language) {
   })();
 }
 
-/// Return the latest cached triple. Used by the toggle handlers
+/// Return the latest cached quintuple. Used by the toggle handlers
 /// so a `PUT` body always reflects the *current* full state, never
 /// just the flag the user just clicked.
 export function currentFlags() {
   if (_cachedPrefs.location !== null
       && _cachedPrefs.timezone !== null
-      && _cachedPrefs.reply_language !== undefined) {
+      && _cachedPrefs.reply_language !== undefined
+      && _cachedPrefs.additional_instructions !== undefined
+      && _cachedPrefs.temperature !== undefined) {
     return { ..._cachedPrefs };
   }
   // First call before `loadFromServer` resolved — read from
@@ -252,4 +375,36 @@ export function getReplyLanguageLabel() {
     zh: "中文",
   };
   return labels[code] || code;
+}
+
+/// Return the cached additional-instructions string (the same
+/// value `#chat-system` is hydrated from on boot), or `""` when
+/// the user has not supplied any. Mirrors `getReplyLanguage()`'s
+/// empty-string sentinel so `systemEl.value || ""` continues to
+/// work without an explicit null check in the request builder.
+export function getSystem() {
+  return currentFlags().additional_instructions || "";
+}
+
+/// Return the cached temperature (a finite `number`) or `null`
+/// when the user has not set one — matches the wire shape the LLM
+/// proxy understands (`number | null`, never `""`). The request
+/// builder checks `Number.isFinite(...)` so a `null` return value
+/// simply omits the field from the request body and the proxy
+/// falls back to the upstream model default sampling.
+export function getTemperature() {
+  const v = currentFlags().temperature;
+  return (typeof v === "number" && Number.isFinite(v)) ? v : null;
+}
+
+/// UI defaults exposed so the Settings-tab "Reset to defaults"
+/// button can restore the same baseline without duplicating the
+/// magic numbers. The values are also used as the boot-time
+/// fallback when neither the server nor localStorage have a value
+/// (anonymous first load on an `auth.enabled = false` server).
+export function defaults() {
+  return {
+    system: DEFAULT_SYSTEM,
+    temperature: DEFAULT_TEMPERATURE,
+  };
 }

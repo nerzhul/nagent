@@ -50,6 +50,19 @@ export const TIMEZONE_ENABLED_KEY = "nagent.chat.timezoneEnabled";
 // option whenever the saved id is missing from that list.
 export const CHAT_MODEL_KEY = "nagent.chat.model";
 
+// Local-storage mirror keys for the two LLM preferences migrated
+// to `user_preferences` in migration 0008 (plan:
+// settings-tab-rework). The DB row is the source of truth for
+// authenticated users; these mirrors are read on first paint so
+// the Settings tab does not flash empty defaults, and on
+// anonymous / auth-disabled servers where the DB row does not
+// exist. `preferences.js` owns the read / write / save-to-server
+// contract; the constants are exported here so the key names
+// live in exactly one place (same convention as
+// `LOCATION_ENABLED_KEY` / `TIMEZONE_ENABLED_KEY`).
+export const SYSTEM_KEY = "nagent.chat.system";
+export const TEMPERATURE_KEY = "nagent.chat.temperature";
+
 export function historyKey(id) {
   return HISTORY_PREFIX + id;
 }
