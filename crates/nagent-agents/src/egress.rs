@@ -210,8 +210,8 @@ impl EgressClient {
         Self { cfg, http }
     }
 
-    /// Build a client that shares an existing `reqwest::Client` pool
-    /// (plan 4.C / R5). Use this when two agents share the same
+    /// Build a client that shares an existing `reqwest::Client` pool.
+    /// Use this when two agents share the same
     /// policy class so they don't each own a separate connection
     /// pool: construct one `reqwest::Client` with the policy class'
     /// timeouts / TLS roots, wrap it in N [`EgressClient`]s with

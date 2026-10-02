@@ -8,8 +8,9 @@
 //! [`SecretCache`]; `UserContext::drop` runs through
 //! [`SecretCache::zeroize`] so the plaintext still never outlives
 //! the request, but the TTL is the load-bearing mechanism
-//! (plan 4.B / R2: every map reachable from low-privilege
-//! requests must be bounded and expiring).
+//! (every map reachable from low-privilege requests must be
+//! bounded and expiring; `TtlMap` is the only sanctioned way to
+//! build one).
 //!
 //! There is no long-lived plaintext cache anywhere in the process
 //! — the `SecretCache` is created inside `UserContext::new` and
@@ -80,8 +81,7 @@ impl SecretCache {
     /// `String` behind a guard). [`TtlMap::get`] already returns
     /// an owned `V`, so no extra `.map(|v| v.clone())` is needed.
     pub fn get(&self, service: &str, field: &str) -> Option<SecretString> {
-        self.entries
-            .get(&(service.to_string(), field.to_string()))
+        self.entries.get(&(service.to_string(), field.to_string()))
     }
 
     /// Wipe every cached plaintext. Called from

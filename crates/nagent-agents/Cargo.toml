@@ -7,7 +7,7 @@ description = "Server-invoked chat agents (trait, registry, service catalogue)."
 
 [features]
 # Default empty: no agent compiled in. The server / Makefile picks
-# the subset it wants. Plan 4.C: one feature per agent so a slim
+# the subset it wants. One cargo feature per agent so a slim
 # build drops the heavy machinery (`meval`, `chrono-tz`, the egress
 # client) the build does not need.
 default = []

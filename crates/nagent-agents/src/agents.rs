@@ -480,7 +480,7 @@ impl AgentRegistry {
     /// Build a registry from the plain per-agent configs. The
     /// static [`AGENT_DESCRIPTORS`] table is walked per descriptor,
     /// each gated by its own cargo feature so a slim build drops
-    /// the heavy machinery (plan 4.C: one feature per agent).
+    /// the heavy machinery (one cargo feature per agent).
     ///
     /// `enabled` is the operator-controlled master switch; when
     /// `false` the function returns `Self::empty()` so the LLM
@@ -625,7 +625,7 @@ pub struct AgentSummary {
 // Static agent descriptor table
 // ---------------------------------------------------------------------------
 //
-// One line per agent (plan 4.C). Adding a new agent is:
+// One line per agent. Adding a new agent is:
 //
 // 1. create `crates/nagent-agents/src/agents/<name>.rs`,
 // 2. add the agent's per-feature config to `crate::config::AgentConfigs`,
@@ -670,7 +670,7 @@ pub struct AgentDescriptor {
 /// Static factory table. Walked by
 /// [`AgentRegistry::from_config`]; every entry is gated by its
 /// own cargo feature so a slim build drops the heavy machinery
-/// (plan 4.C: one feature per agent).
+/// (one cargo feature per agent).
 pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     #[cfg(feature = "web-agent")]
     AgentDescriptor {

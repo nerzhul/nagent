@@ -208,7 +208,7 @@ impl StockAgent {
 
     /// Build the agent on top of a shared `reqwest::Client` so
     /// multiple agents of the same policy class drain the same
-    /// pool (plan 4.C / R5).
+    /// pool.
     pub fn with_shared_pool(http: reqwest::Client, cfg: StockAgentConfig) -> Self {
         let egress = EgressClient::from_shared_client(http, egress_config_for(&cfg));
         Self { egress }

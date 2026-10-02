@@ -1,4 +1,4 @@
-//! `read_document` agent (plan 4.C).
+//! `read_document` agent.
 //!
 //! Lives in `nagent-agents` so adding a new agent is one directory,
 //! one feature line, docs. Talks to the documents subsystem through

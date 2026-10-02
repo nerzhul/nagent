@@ -1,4 +1,4 @@
-//! Plain per-agent `*Config` structs (plan 4.C).
+//! Plain per-agent `*Config` structs.
 //!
 //! Each config struct is "plain" — only a `Default` impl and the
 //! fields the agent reads. TOML / env parsing lives in

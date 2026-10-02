@@ -1,6 +1,6 @@
 //! `nagent-agents` — shared building blocks for the chat-agent subsystem.
 //!
-//! Plan 4.C completes the crate split started by 4.G:
+//! Crate layout:
 //!
 //! - [`agents`] — the `Agent` trait, `AgentError`, `UserContext`,
 //!   `AgentRegistry` and every built-in agent implementation.
