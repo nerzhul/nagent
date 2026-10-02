@@ -364,9 +364,11 @@ mod tests {
                 max_queue = 8
                 whisper_model_path = "/tmp/from-toml.bin"
 
+                [llm]
+                llm_max_tool_rounds = 2
+
                 [agents]
                 enabled = false
-                llm_max_tool_rounds = 2
 
                 [agents.web_fetch]
                 allow_public = true
@@ -387,7 +389,10 @@ mod tests {
             "model path from TOML"
         );
         assert!(!cfg.agents.enabled, "agents.enabled from TOML");
-        assert_eq!(cfg.agents.llm_max_tool_rounds, 2);
+        assert_eq!(
+            cfg.llm.llm_max_tool_rounds, 2,
+            "llm_max_tool_rounds from TOML [llm] section"
+        );
         assert!(cfg.agents.web_fetch.allow_public);
         assert_eq!(cfg.agents.web_fetch.allowlist, vec!["example.com"]);
         assert_eq!(cfg.agents.web_fetch.max_bytes, 1024);

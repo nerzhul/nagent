@@ -141,7 +141,8 @@ without a default and is required.
 | `LLM_ALLOW_USER_TIMEZONE`    | `true`                                        | LLM proxy      | Defence-in-depth kill-switch for the browser-injected timezone block. When `false`, the server strips any `{role:"system"}` message whose content starts with `The user's local timezone is` before forwarding to the upstream model. Independent of `LLM_ALLOW_USER_LOCATION` — an operator may forbid one without touching the other. The browser still requires explicit consent in the Advanced drawer. |
 | `LLM_ALLOW_USER_REPLY_LANGUAGE` | `true`                                     | LLM proxy      | Defence-in-depth kill-switch for the server-injected reply-language block. When `false`, the server strips any `{role:"system"}` message whose content starts with `The user's preferred reply language is` before forwarding to the upstream model. The block is emitted only when the authenticated user has set a non-default reply language on the Advanced drawer picker. Independent of the two flags above. |
 | `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (`web_fetch`, `get_datetime`, `get_weather`, `get_stock_quote`, `calculate`, `unit_convert`, `wikipedia`, `dictionary`). When `false` the registry is empty. |
-| `LLM_MAX_TOOL_ROUNDS`        | `4`                                           | Chat agents    | Maximum tool-call rounds per user turn before the proxy aborts.                                               |
+| `LLM_MAX_TOOL_ROUNDS`        | `4`                                           | LLM proxy      | Maximum tool-call rounds per user turn before the proxy aborts.                                                 |
+| `LLM_MAX_AUTO_CONTINUES`      | `1`                                           | LLM proxy      | Max number of auto-continue rounds when the upstream reasoning model hits `finish_reason: "length"` mid-reasoning (qwen3.5 with reasoning on, DeepSeek-R1). Set to `0` to disable. |
 | `WEB_FETCH_ALLOW_PUBLIC`     | `false`                                       | `web_fetch`    | When `true`, the agent may reach public IP ranges (SSRF defence still blocks loopback/RFC1918).               |
 | `WEB_FETCH_ALLOWLIST`        | _(empty)_                                     | `web_fetch`    | Comma-separated hostname allow-list (suffix match; `*.foo` wildcards). Takes precedence over `WEB_FETCH_ALLOW_PUBLIC`. |
 | `WEB_FETCH_MAX_BYTES`        | `2097152`                                     | `web_fetch`    | Maximum response size the agent will read (server cap). The LLM-callable `max_bytes` parameter starts the first fetch; if the page is larger the agent transparently doubles the budget and retries until the page fits or this cap is hit. |
@@ -230,8 +231,11 @@ for per-source-IP rate limits:
 | `[auth.credentials].key`          | _(none)_                    | AES-256-GCM encryption key for the per-user credentials vault, in plaintext inside the TOML file (64 hex chars / 32 bytes). REQUIRED when `auth.enabled = true` AND at least one agent is registered; the server refuses to boot otherwise. See "Per-user credentials" below for the key-generation recipe and the secret-handling caveat. |
 
 The `[agents]` section is a general block for chat-agent settings: it
-carries the master switches (`enabled`, `llm_max_tool_rounds`) plus
-one sub-table per tool, keyed by the agent's name:
+carries the master switch (`enabled`) plus one sub-table per tool,
+keyed by the agent's name. The tool-loop knobs
+(`llm_max_tool_rounds`, `llm_max_auto_continues`) live on the
+`[llm]` section because they gate the proxy's tool loop, not the
+agent registry.
 
 ```toml
 [server]
@@ -251,9 +255,12 @@ llm_per_min = 30
 cidr = "10.0.0.0/8,192.168.0.0/16"
 loopback_bypass = true
 
+[llm]
+llm_max_tool_rounds = 4
+llm_max_auto_continues = 1
+
 [agents]
 enabled = true
-llm_max_tool_rounds = 4
 
 [agents.web_fetch]
 allow_public = false

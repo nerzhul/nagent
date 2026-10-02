@@ -148,6 +148,28 @@ pub struct LlmConfig {
     /// from the other two flags: an operator may forbid one without
     /// touching the others.
     pub allow_user_reply_language: bool,
+    /// Maximum number of tool-call rounds a single user turn may
+    /// trigger before the proxy bails out and surfaces an error
+    /// bubble. Defends against models that loop on a tool call.
+    /// Env var `LLM_MAX_TOOL_ROUNDS`, TOML key
+    /// `[llm].llm_max_tool_rounds`. Previously mis-housed on
+    /// `AgentConfig`; moved here because it gates the proxy's tool
+    /// loop, not the agent registry.
+    pub llm_max_tool_rounds: u32,
+    /// Maximum number of auto-continue rounds appended when the
+    /// upstream emits `finish_reason: "length"` while still in the
+    /// reasoning phase of a reasoning-capable model (qwen3.5 with
+    /// reasoning on, DeepSeek-R1, …). Each round asks the model to
+    /// produce the visible answer rather than re-running the
+    /// reasoning that already filled the token budget. Set to `0`
+    /// to disable the heuristic; raising past `1` is generally
+    /// useless because the same reasoning-style truncation repeats
+    /// on the continuation round. Counted separately from
+    /// `llm_max_tool_rounds` so the auto-continue path cannot
+    /// accidentally eat into the tool budget. Env var
+    /// `LLM_MAX_AUTO_CONTINUES`, TOML key
+    /// `[llm].llm_max_auto_continues`.
+    pub llm_max_auto_continues: u32,
 }
 
 impl Default for LlmConfig {
@@ -165,6 +187,8 @@ impl Default for LlmConfig {
             allow_user_location: true,
             allow_user_timezone: true,
             allow_user_reply_language: true,
+            llm_max_tool_rounds: 4,
+            llm_max_auto_continues: 1,
         }
     }
 }
@@ -235,6 +259,20 @@ impl LlmConfig {
             defaults.allow_user_reply_language,
             "LLM_ALLOW_USER_REPLY_LANGUAGE",
         )?;
+        let llm_max_tool_rounds = resolve_primitive(
+            env_opt("LLM_MAX_TOOL_ROUNDS").as_deref(),
+            toml.llm_max_tool_rounds,
+            defaults.llm_max_tool_rounds,
+            "LLM_MAX_TOOL_ROUNDS",
+        )?
+        .clamp(1, 32);
+        let llm_max_auto_continues = resolve_primitive(
+            env_opt("LLM_MAX_AUTO_CONTINUES").as_deref(),
+            toml.llm_max_auto_continues,
+            defaults.llm_max_auto_continues,
+            "LLM_MAX_AUTO_CONTINUES",
+        )?
+        .clamp(0, 4);
 
         Ok(Self {
             enabled,
@@ -249,6 +287,8 @@ impl LlmConfig {
             allow_user_location,
             allow_user_timezone,
             allow_user_reply_language,
+            llm_max_tool_rounds,
+            llm_max_auto_continues,
         })
     }
 }

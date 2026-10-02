@@ -231,6 +231,8 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             allow_user_location: true,
             allow_user_timezone: true,
             allow_user_reply_language: true,
+            llm_max_tool_rounds: 4,
+            llm_max_auto_continues: 1,
         },
         agents: AgentConfig::default(),
         tts: nagent_server::config::TtsConfig::default(),
@@ -654,7 +656,7 @@ async fn tool_loop_aborts_after_max_rounds() {
     let upstream_url = spawn_router(app).await;
 
     let mut server_cfg = make_server_cfg(upstream_url);
-    server_cfg.agents.llm_max_tool_rounds = 2;
+    server_cfg.llm.llm_max_tool_rounds = 2;
     let cfg = Arc::new(server_cfg);
     let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());

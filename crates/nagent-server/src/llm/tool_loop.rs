@@ -169,13 +169,10 @@ pub(crate) async fn run_tool_loop(
             // `delta.content` they were waiting for. Limited to
             // `max_auto_continues` so a truly runaway model cannot
             // burn the upstream's token budget.
-            let is_reasoning_truncation = outcome.finish_reason.as_deref()
-                    == Some("length")
+            let is_reasoning_truncation = outcome.finish_reason.as_deref() == Some("length")
                 && outcome.assistant_text.is_empty()
                 && !outcome.reasoning_text.is_empty();
-            if is_reasoning_truncation
-                && auto_continue_count < max_auto_continues
-            {
+            if is_reasoning_truncation && auto_continue_count < max_auto_continues {
                 auto_continue_count += 1;
                 info!(
                     auto_continue_count,

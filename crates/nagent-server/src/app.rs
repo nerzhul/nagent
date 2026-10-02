@@ -233,6 +233,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         Some(LlmState {
             client,
             rate_limiter: llm_limiter,
+            cfg: cfg.llm.clone(),
         })
     } else {
         info!("LLM proxy disabled (set LLM_ENABLED=true to enable)");

@@ -70,7 +70,7 @@ struct ChatRequest {
 pub async fn chat_completions(
     State(llm_state): State<ArcLlmState>,
     State(agents): State<OptArcAgentRegistry>,
-    State(agents_cfg): State<ArcAgentsConfig>,
+    State(_agents_cfg): State<ArcAgentsConfig>,
     State(services): State<ArcServices>,
     State(auth_state): State<OptArcAuthState>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
@@ -287,11 +287,11 @@ pub async fn chat_completions(
     }
 
     let timeout = llm.cfg.request_timeout;
-    let max_rounds = agents_cfg.llm_max_tool_rounds;
+    let max_rounds = llm_state.cfg.llm_max_tool_rounds;
     // Plan R8 follow-up: max number of auto-continue rounds when the
     // reasoning stream hits `finish_reason: "length"` with no visible
     // answer yet. See `tool_loop::run_tool_loop` for the heuristic.
-    let max_auto_continues = agents_cfg.llm_max_auto_continues;
+    let max_auto_continues = llm_state.cfg.llm_max_auto_continues;
     let agents = agents.0.clone().map(|arc| (*arc).clone());
 
     // Channel that drives the response body. The tool-loop coroutine

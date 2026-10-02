@@ -36,7 +36,7 @@ use tokio::sync::Semaphore;
 
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::auth::{OidcState, PasskeyState};
-use crate::config::{AuthConfig, Config};
+use crate::config::{AuthConfig, Config, LlmConfig};
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::rate_limit::RateLimiter;
 use crate::stt::session::SessionMap;
@@ -71,6 +71,14 @@ impl std::fmt::Debug for SttState {
 pub struct LlmState {
     pub client: llm::LlmClient,
     pub rate_limiter: RateLimiter,
+    /// Owning clone of the [`LlmConfig`] the proxy was wired
+    /// from. Carrying the config on the state (rather than just
+    /// `Arc<Config>`) keeps the proxy's signature narrow: the
+    /// per-tool-loop knobs (`llm_max_tool_rounds`,
+    /// `llm_max_auto_continues`) live on the LLM subtree, not
+    /// on `AgentConfig`, and the proxy needs both the runtime
+    /// state (client + rate limiter) and the config (knobs).
+    pub cfg: LlmConfig,
 }
 
 impl std::fmt::Debug for LlmState {

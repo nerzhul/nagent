@@ -229,6 +229,17 @@ pub struct TomlLlmConfig {
     /// the other two kill-switches: an operator may forbid one
     /// without touching the others.
     pub allow_user_reply_language: Option<bool>,
+    /// Maximum number of tool-call rounds a single user turn may
+    /// trigger before the proxy bails out and surfaces an error
+    /// bubble. Mirrors the `LLM_MAX_TOOL_ROUNDS` env var; env wins
+    /// when both are set. Defaults to `4`. Defends against models
+    /// that loop on a tool call.
+    pub llm_max_tool_rounds: Option<u32>,
+    /// Max number of auto-continue rounds when the upstream reasoning
+    /// model hits `finish_reason: "length"` mid-reasoning. Mirrors
+    /// the `LLM_MAX_AUTO_CONTINUES` env var; env wins when both are
+    /// set. Defaults to `1`; set to `0` to disable.
+    pub llm_max_auto_continues: Option<u32>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -241,11 +252,6 @@ pub struct TomlLlmConfig {
 #[serde(deny_unknown_fields)]
 pub struct TomlAgentConfig {
     pub enabled: Option<bool>,
-    pub llm_max_tool_rounds: Option<u32>,
-    /// Max number of auto-continue rounds when the upstream
-    /// reasoning model hits `finish_reason: "length"` mid-reasoning
-    /// (default `1`; set to `0` to disable).
-    pub llm_max_auto_continues: Option<u32>,
     #[serde(default)]
     pub web_fetch: Option<TomlWebFetchConfig>,
     #[serde(default)]
@@ -719,6 +725,8 @@ fn merge_toml_llm(
             allow_user_location: l.allow_user_location.or(e.allow_user_location),
             allow_user_timezone: l.allow_user_timezone.or(e.allow_user_timezone),
             allow_user_reply_language: l.allow_user_reply_language.or(e.allow_user_reply_language),
+            llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
+            llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
         }),
     }
 }
@@ -733,8 +741,6 @@ fn merge_toml_agents(
         (None, Some(l)) => Some(l.clone()),
         (Some(e), Some(l)) => Some(TomlAgentConfig {
             enabled: l.enabled.or(e.enabled),
-            llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
-            llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
             web_fetch: merge_toml_web_fetch(e.web_fetch.as_ref(), l.web_fetch.as_ref()),
             get_weather: merge_toml_weather(e.get_weather.as_ref(), l.get_weather.as_ref()),
             unit_convert: merge_toml_unit_convert(e.unit_convert.as_ref(), l.unit_convert.as_ref()),
@@ -1034,10 +1040,11 @@ mod tests {
             request_timeout_secs = 30
             cors_allow_origins = ["https://example.com"]
             system_prompt = "from-toml"
+            llm_max_tool_rounds = 2
+            llm_max_auto_continues = 1
 
             [agents]
             enabled = true
-            llm_max_tool_rounds = 2
 
             [agents.web_fetch]
             allow_public = true
@@ -1073,7 +1080,8 @@ mod tests {
 
         let agents = cfg.agents.expect("agents section parsed");
         assert_eq!(agents.enabled, Some(true));
-        assert_eq!(agents.llm_max_tool_rounds, Some(2));
+        let llm = cfg.llm.expect("llm section parsed");
+        assert_eq!(llm.llm_max_tool_rounds, Some(2));
 
         let wf = agents.web_fetch.expect("agents.web_fetch parsed");
         assert_eq!(wf.allow_public, Some(true));
@@ -1239,8 +1247,9 @@ mod tests {
                 [server.rate_limits]
                 llm_per_min = 30
 
-                [agents]
+                [llm]
                 llm_max_tool_rounds = 7
+                llm_max_auto_continues = 0
 
                 [agents.web_fetch]
                 allow_public = true
@@ -1266,8 +1275,9 @@ mod tests {
         let agents = merged.agents.expect("agents section present after merge");
         // enabled only in earlier → kept.
         assert_eq!(agents.enabled, Some(true));
+        let llm = merged.llm.expect("llm section present after merge");
         // llm_max_tool_rounds only in later → taken from later.
-        assert_eq!(agents.llm_max_tool_rounds, Some(7));
+        assert_eq!(llm.llm_max_tool_rounds, Some(7));
 
         let wf = agents
             .web_fetch

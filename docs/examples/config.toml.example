@@ -88,7 +88,10 @@
 
 # [agents]
 # enabled = true
+
+# [llm]
 # llm_max_tool_rounds = 4                   # hard cap, defended against loops
+# llm_max_auto_continues = 1               # max reasoning-truncation auto-continue rounds (set 0 to disable)
 
 # `web_fetch` agent — sandbox + transfer knobs
 # [agents.web_fetch]
