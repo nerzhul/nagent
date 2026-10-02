@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::agents::AgentConfig;
+use crate::config::allowed_origins::AllowedOriginsConfig;
 use crate::config::auth::AuthConfig;
 use crate::config::documents::DocumentsConfig;
 use crate::config::file::{merge_toml_configs, TomlConfig};
@@ -80,6 +81,11 @@ pub struct Config {
     /// whether the `/v1/documents*` routes are mounted and the
     /// `read_document` agent is registered.
     pub documents: DocumentsConfig,
+    /// `[server].allowed_origins` — operator-supplied allow-list
+    /// for the `Origin` / `Host` header checks (plan S-2). When
+    /// empty, the allow-list is derived from `bind_addr` so the
+    /// historical dev workflow keeps working on loopback binds.
+    pub allowed_origins: AllowedOriginsConfig,
 }
 
 /// CLI flags parsed before config loading.
@@ -220,6 +226,9 @@ impl Config {
         let auth = AuthConfig::from_env_with_toml(toml.and_then(|t| t.auth.as_ref()))?;
         let documents =
             DocumentsConfig::from_env_with_toml(toml.and_then(|t| t.documents.as_ref()))?;
+        let allowed_origins = AllowedOriginsConfig::from_env_with_toml(
+            server.and_then(|s| s.allowed_origins.as_ref()),
+        )?;
 
         Ok(Self {
             bind_addr,
@@ -236,6 +245,7 @@ impl Config {
             tts,
             auth,
             documents,
+            allowed_origins,
         })
     }
 

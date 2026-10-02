@@ -31,13 +31,32 @@
 # infer_timeout_ms = 30_000
 
 # ---------------------------------------------------------------------------
-# WebSocket frame limits
+# WebSocket frame limits + HTTP transport guardrails (plan S-1)
 # ---------------------------------------------------------------------------
 
 # [server.limits]
 # max_audio_frame_samples = 480_000        # 30 s × 16 kHz Float32
 # required_sample_rate = 16_000
 # max_language_hint_bytes = 16
+# request_timeout_ms = 30_000              # TimeoutLayer on non-streaming routes
+# body_limit_bytes = 2_097_152             # DefaultBodyLimit on /v1/* and /api/*
+# ws_max_concurrent = 1024                 # global WS upgrade cap
+# ws_max_per_ip = 16                       # per-IP WS upgrade cap
+
+# ---------------------------------------------------------------------------
+# Origin / Host allow-list (plan S-2)
+# ---------------------------------------------------------------------------
+# Every state-changing route (POST/PUT/PATCH/DELETE) and WebSocket
+# upgrade must carry an `Origin` header matching this allow-list, AND a
+# `Host` header matching the host parts it contains (plus the bind
+# host). With no operator override, the allow-list is derived from
+# `[server].bind_addr` so the historical dev workflow (loopback bind,
+# no override) keeps working. Operators exposing the server on a
+# non-loopback address MUST populate this section (or
+# `NAGENT_ALLOWED_ORIGINS`) with the publicly-reachable scheme + host.
+
+# [server.allowed_origins]
+# origins = ["https://nagent.example.com"]
 
 # ---------------------------------------------------------------------------
 # Per-source-IP rate limits

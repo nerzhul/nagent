@@ -10,8 +10,9 @@
 //! ## Section layout
 //!
 //! - [`server`] — `Config`, `CliArgs`, `ConfigError`, the env/TOML
-//! merge helpers (`env_opt`, `resolve_primitive`, …) and the
-//! layered file discovery.
+//!  merge helpers (`env_opt`, `resolve_primitive`, …) and the
+//!  layered file discovery.
+//! - [`allowed_origins`] — `[server].allowed_origins` (plan S-2).
 //! - [`ratelimit`] — per-IP rate-limit knobs (`RateLimitConfig`).
 //! - [`trusted_proxies`] — `[server].trusted_proxies` CIDR list.
 //! - [`limits`] — inbound WebSocket frame limits (`LimitsConfig`).
@@ -22,6 +23,7 @@
 //! - [`documents`] — `[documents]` section.
 
 pub mod agents;
+pub mod allowed_origins;
 pub mod auth;
 pub mod documents;
 pub mod limits;
@@ -47,6 +49,7 @@ pub use agents::{
     AgentConfig, DictionaryConfig, ReadDocumentConfig, StockConfig, UnitConvertConfig,
     WeatherConfig, WebFetchConfig, WikipediaConfig,
 };
+pub use allowed_origins::AllowedOriginsConfig;
 pub use auth::{
     AuthBackendKind, AuthConfig, AuthCredentialsConfig, AuthDbConfig, AuthOidcConfig,
     AuthPasskeyConfig, AuthPasswordConfig,

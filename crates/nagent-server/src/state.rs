@@ -40,6 +40,7 @@ use crate::config::{AuthConfig, Config, LlmConfig};
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::rate_limit::RateLimiter;
 use crate::stt::session::SessionMap;
+use crate::stt::ws_concurrency::WsConcurrency;
 use crate::{agents, llm, tts};
 use nagent_agents::ServiceRegistry;
 
@@ -52,6 +53,10 @@ pub struct SttState {
     pub job_tx: PoolDispatch,
     pub ready: Arc<AtomicBool>,
     pub rate_limiter: RateLimiter,
+    /// Global + per-IP WebSocket concurrency counter (plan S-1).
+    /// Lives next to `sessions` because the two are decremented
+    /// together when the per-connection task exits.
+    pub ws_concurrency: WsConcurrency,
 }
 
 impl std::fmt::Debug for SttState {
@@ -62,6 +67,7 @@ impl std::fmt::Debug for SttState {
             .field("job_tx", &self.job_tx)
             .field("ready", &self.ready)
             .field("rate_limiter", &self.rate_limiter)
+            .field("ws_concurrency", &self.ws_concurrency)
             .finish()
     }
 }

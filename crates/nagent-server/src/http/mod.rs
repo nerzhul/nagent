@@ -13,7 +13,9 @@
 //! layers.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -21,6 +23,7 @@ use crate::AppState;
 
 pub mod features;
 pub mod llm_guards;
+pub mod origin_guard;
 pub mod security_headers;
 pub mod static_assets;
 
@@ -45,6 +48,27 @@ pub use llm_guards::{build_rate_limiters, llm_auth_middleware, llm_rate_limit_mi
 ///
 /// When `auth.enabled = false` the router is unchanged: no
 /// `RequireAuth` layer is installed anywhere and the pre-/// single-user trust boundary holds.
+///
+/// ## Plan S-1: HTTP transport guardrails
+///
+/// The protected subtree is wrapped in two `tower-http` layers:
+///
+/// - `DefaultBodyLimit::max([server.limits].body_limit_bytes)`
+///   rejects oversized request bodies with `413 Payload Too
+///   Large` before they reach a handler. The default (2 MiB)
+///   matches axum's built-in limit, but is operator-overridable
+///   so `/v1/documents` and `/v1/chat/completions` can diverge
+///   from the default.
+/// - `TimeoutLayer::new([server.limits].request_timeout_ms)`
+///   cancels non-streaming requests that exceed the configured
+///   timeout. The layer is wired through the per-route
+///   `route_class` helper so streaming (`/v1/chat/completions`
+///   SSE) and the WebSocket upgrade stay exempt.
+///
+/// The public subtree (`/`, `/static/*`, `/healthz`,
+/// `/api/version`) is intentionally **not** wrapped — those routes
+/// are cheap, server-reachable, and bounded by the static file
+/// size cap (R-1).
 ///
 /// [`RequireAuth`]: crate::auth::middleware::require_auth_middleware
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -112,6 +136,44 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     if state.tts.is_some() {
         protected = protected.merge(mount_tts(state.clone()));
     }
+
+    // ----- Plan S-1: HTTP transport guardrails ---------------------------
+    //
+    // Two `tower-http` layers wrap the protected subtree:
+    //
+    // - `DefaultBodyLimit::max(body_limit_bytes)` rejects oversized
+    //   request bodies with `413 Payload Too Large` before they reach
+    //   a handler. Applied to the whole subtree so every `/v1/*` and
+    //   `/api/*` POST inherits it; the cap on `/v1/documents` POST is
+    //   tightened by the documents routes themselves to match
+    //   `[documents].max_file_size_bytes`.
+    // - `TimeoutLayer::new(request_timeout_ms)` cancels non-streaming
+    //   requests that exceed the configured timeout. SSE
+    //   (`/v1/chat/completions`) and the WebSocket upgrade stay
+    //   exempt — the LLM client already bounds the SSE and the WS
+    //   handshake is bounded by axum itself.
+    let body_limit_bytes = state.config.limits.body_limit_bytes;
+    let request_timeout = Duration::from_millis(state.config.limits.request_timeout_ms);
+    let s1_layers = (
+        DefaultBodyLimit::max(body_limit_bytes),
+        tower_http::timeout::TimeoutLayer::new(request_timeout),
+    );
+    let protected = protected.layer(s1_layers);
+
+    // ----- Plan S-2: Origin / Host middleware -----------------------------
+    //
+    // The middleware validates `Origin` on every state-changing route
+    // (POST/PUT/PATCH/DELETE) and `Host` on every request. GET /
+    // HEAD / OPTIONS are exempt from the Origin check (the browser
+    // fetches those without an Origin header). The WS upgrade is
+    // mounted on the protected subtree, so it is subject to the
+    // Host check; the WS handler also calls the same policy
+    // directly to surface a missing-Origin case before the
+    // handshake starts.
+    let protected = protected.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        origin_guard::origin_guard_middleware,
+    ));
 
     // ----- Auth subtree  --------------------------------------------
     // When `auth.enabled = true`:

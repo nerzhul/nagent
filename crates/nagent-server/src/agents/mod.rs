@@ -267,7 +267,14 @@ pub fn build_registry(
         datetime: Default::default(),
         read_document: cfg.read_document.clone().into(),
     };
-    let registry = AgentRegistry::from_config(&cfgs, cfg.enabled);
+    // Plan 4.C (C): one shared `EgressPool` is built per process
+    // and passed to every agent. Strict-class agents
+    // (`web_fetch`) drain the strict client; public-class agents
+    // (`weather`, `dictionary`, `stock`, `wikipedia`) drain the
+    // public client. Connection reuse + warm DNS / TLS roots are
+    // the gains; per-agent SSRF policy still applies.
+    let pool = nagent_agents::egress::EgressPool::new();
+    let registry = AgentRegistry::from_config(&cfgs, cfg.enabled, &pool);
     if let (true, Some(store), true) = (cfg.enabled, document_store, cfg.read_document_enabled) {
         #[cfg(feature = "read-document-agent")]
         registry.push_agent_boxed(Box::new(nagent_agents::ReadDocumentAgent::new(Arc::new(

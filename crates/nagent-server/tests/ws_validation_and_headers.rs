@@ -54,12 +54,31 @@ async fn start_test_server_with_rate_limit(
     cors_allow_origins: Vec<String>,
     rate_limit: RateLimitConfig,
 ) -> (String, RateLimiter, RateLimiter) {
-    let limits = LimitsConfig {
+    start_test_server_with_overrides(llm_enabled, cors_allow_origins, rate_limit, None, None).await
+}
+
+/// Lowest-level helper. `ws_max_concurrent` / `ws_max_per_ip`
+/// default to `LimitsConfig::default()` when `None`; pass explicit
+/// values to test the S-1 concurrency caps.
+async fn start_test_server_with_overrides(
+    llm_enabled: bool,
+    cors_allow_origins: Vec<String>,
+    rate_limit: RateLimitConfig,
+    ws_max_concurrent: Option<usize>,
+    ws_max_per_ip: Option<usize>,
+) -> (String, RateLimiter, RateLimiter) {
+    let mut limits = LimitsConfig {
         // Make the audio cap easy to exceed in tests without needing
         // a multi-megabyte buffer.
         max_audio_frame_samples: 64,
         ..LimitsConfig::default()
     };
+    if let Some(n) = ws_max_concurrent {
+        limits.ws_max_concurrent = n;
+    }
+    if let Some(n) = ws_max_per_ip {
+        limits.ws_max_per_ip = n;
+    }
     let mut builder = app_state();
     Arc::make_mut(&mut builder.config).limits = limits;
     Arc::make_mut(&mut builder.config).llm = LlmConfig {
@@ -489,5 +508,203 @@ async fn cors_invalid_origin_in_allow_list_is_skipped() {
     assert!(
         allow_origin.is_none() || allow_origin.as_deref() == Some(""),
         "invalid origin in env leaked into CORS response: {allow_origin:?}"
+    );
+}
+
+// ====================================================================
+// Plan S-1: WebSocket concurrency caps + body limits
+// ====================================================================
+
+/// Cap the WS concurrency at 1 global / 1 per IP and confirm a
+/// second upgrade from the same loopback IP is rejected. The
+/// global cap and per-IP cap happen to be equal, so this also covers
+/// the "global full" branch — both reject with the same `503 +
+/// Retry-After: 1` shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ws_upgrade_rejected_when_concurrency_cap_reached() {
+    let (base, _stt, _llm) = start_test_server_with_overrides(
+        false,
+        vec![],
+        RateLimitConfig::default(),
+        Some(1),
+        Some(1),
+    )
+    .await;
+
+    // First connection succeeds: the WS handshake completes and we
+    // receive the BackendInfo frame.
+    let _first = connect(&base).await;
+
+    // Second connection from the same loopback peer (the test only
+    // binds 127.0.0.1) hits the per-IP cap. The HTTP upgrade must
+    // be rejected with 503 + Retry-After BEFORE the WS handshake
+    // starts — otherwise the rejection would only be visible as a
+    // WS close frame that operators would have to decode.
+    let ws_url = base.replacen("http://", "ws://", 1) + "/ws";
+    let outcome = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect_err("second WS upgrade must be rejected");
+    let tokio_tungstenite::tungstenite::Error::Http(resp) = &outcome else {
+        panic!("expected tungstenite Http error, got {outcome:?}");
+    };
+    let status = resp.status().as_u16();
+    assert_eq!(
+        status, 503,
+        "concurrency-saturated upgrade must return 503 (got {status})"
+    );
+    // axum rejects the upgrade at the HTTP layer; tokio-tungstenite
+    // surfaces the status. The `Retry-After: 1` header is also set
+    // by the handler — verified separately via the raw HTTP path
+    // below because the WS client does not surface response headers.
+    let raw = reqwest::Client::new()
+        .get(format!("{base}/ws"))
+        .header(header::UPGRADE, "websocket")
+        .header(header::CONNECTION, "Upgrade")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .expect("raw ws upgrade");
+    assert_eq!(
+        raw.status().as_u16(),
+        503,
+        "second raw upgrade must also return 503"
+    );
+    assert_eq!(
+        raw.headers()
+            .get(header::RETRY_AFTER)
+            .map(|v| v.to_str().unwrap_or("")),
+        Some("1"),
+        "saturated WS upgrade must carry Retry-After: 1"
+    );
+}
+
+/// Bodies larger than `[server.limits].body_limit_bytes` are
+/// rejected by `DefaultBodyLimit` before they reach a handler. The
+/// LLM proxy is mounted on the protected subtree, so a POST with a
+/// 4 MiB JSON body (against an 8 KiB cap) must come back as
+/// `413 Payload Too Large`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_body_limit_rejects_oversized_upload() {
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).limits = LimitsConfig {
+        body_limit_bytes: 8 * 1024, // 8 KiB — easy to exceed
+        ..LimitsConfig::default()
+    };
+    Arc::make_mut(&mut builder.config).llm.enabled = true;
+    Arc::make_mut(&mut builder.config).llm.inbound_auth_key = None;
+    Arc::make_mut(&mut builder.config).llm.base_url = "http://localhost:11434".into();
+    let cfg = Arc::new(builder.config.llm.clone());
+    let state = builder
+        .with_llm(LlmClient::new(cfg).expect("LlmClient::new"))
+        .build();
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let (tx, rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+
+    // 4 MiB of JSON — should hit the 8 KiB cap.
+    let big_body = "x".repeat(4 * 1024 * 1024);
+    let payload =
+        format!(r#"{{"model":"llama3.1","messages":[{{"role":"user","content":"{big_body}"}}]}}"#);
+    // The server may close the connection mid-upload (axum's
+    // `DefaultBodyLimit` over hyper sometimes does that for very
+    // large bodies); tolerate either a clean `413` response or a
+    // `BrokenPipe` transport error from reqwest. Both mean "the
+    // transport guardrail fired" which is the contract under test.
+    let send_result = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(payload)
+        .send()
+        .await;
+    match send_result {
+        Ok(resp) => assert_eq!(
+            resp.status().as_u16(),
+            413,
+            "oversized body must be rejected at the transport (got {})",
+            resp.status()
+        ),
+        Err(e) => {
+            let is_broken_pipe = e.is_connect() || e.is_timeout() || e.is_body() || e.is_request();
+            assert!(
+                is_broken_pipe,
+                "unexpected transport error from oversized body: {e:?}"
+            );
+        }
+    }
+}
+
+// ====================================================================
+// Plan S-2: Origin / Host validation on /ws and state-changing routes
+// ====================================================================
+
+/// `POST /v1/chat/completions` from a cross-origin attacker must
+/// be rejected with `403 Forbidden`. With auth enabled and a
+/// cross-origin Origin, the request never reaches the auth gate —
+/// the S-2 origin middleware short-circuits first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_without_matching_origin_is_forbidden() {
+    let base = start_test_server(true, vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .header(header::ORIGIN, "https://attacker.example")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"model":"llama3.1","messages":[]}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "cross-origin POST must be rejected by Origin guard (got {})",
+        resp.status()
+    );
+}
+
+/// WebSocket upgrade from a cross-origin attacker must be
+/// rejected with `403 Forbidden` at the HTTP layer — before the
+/// handshake starts — so the rejection is visible in plain HTTP
+/// logs without decoding a WS close frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ws_upgrade_with_cross_origin_origin_is_rejected() {
+    let base = start_test_server(false, vec![]).await;
+    // The WS handler rejects the upgrade with `403 Forbidden` when the
+    // `Origin` header points at an attacker-controlled site. The
+    // `tokio-tungstenite` client does not expose a builder for raw
+    // headers, so we use the raw HTTP path via `reqwest` and
+    // assert the 403 status + Vary header.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/ws"))
+        .header(header::UPGRADE, "websocket")
+        .header(header::CONNECTION, "Upgrade")
+        .header(header::HOST, "127.0.0.1:0")
+        .header(header::ORIGIN, "https://attacker.example")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .expect("raw ws upgrade");
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "cross-origin WS upgrade must return 403 (got {})",
+        resp.status().as_u16()
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::VARY)
+            .map(|v| v.to_str().unwrap_or("")),
+        Some("Origin"),
+        "cross-origin rejection must carry `Vary: Origin`"
     );
 }

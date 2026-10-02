@@ -47,8 +47,8 @@ use tokio::sync::mpsc;
 use crate::agents::AgentRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::config::{
-    AgentConfig, AuthConfig, Config, DocumentsConfig, LimitsConfig, LlmAuthMode, LlmConfig,
-    RateLimitConfig, TrustedProxiesConfig, TtsConfig,
+    AgentConfig, AllowedOriginsConfig, AuthConfig, Config, DocumentsConfig, LimitsConfig,
+    LlmAuthMode, LlmConfig, RateLimitConfig, TrustedProxiesConfig, TtsConfig,
 };
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::llm::LlmClient;
@@ -57,6 +57,7 @@ use crate::state::{
     AppState, AuthState, ChatSessionsState, DocumentsState, LlmState, SttState, TtsState,
 };
 use crate::stt::session::SessionMap;
+use crate::stt::ws_concurrency::WsConcurrency;
 use crate::tts::TtsEngine;
 use nagent_agents::ServiceRegistry;
 
@@ -351,6 +352,10 @@ impl AppStateBuilder {
             job_tx,
             ready: Arc::new(AtomicBool::new(true)),
             rate_limiter: stt_limiter,
+            ws_concurrency: WsConcurrency::new(
+                self.config.limits.ws_max_concurrent,
+                self.config.limits.ws_max_per_ip,
+            ),
         };
 
         Arc::new(AppState {
@@ -385,8 +390,25 @@ pub fn app_state() -> AppStateBuilder {
 /// actually bind),
 /// - `whisper_model_path = /tmp/fake-model.bin` (so the no-TOML
 /// config path does not trip on the required model-path knob),
+/// - `allowed_origins` populated with both `127.0.0.1` and
+/// `localhost` for every realistic port (plan S-2 — the Origin /
+/// Host guard would otherwise reject the test harness's request
+/// because the ephemeral port does not equal `8080`).
 /// - everything else defaulted.
 fn default_test_config() -> Config {
+    let mut allowed_origins = AllowedOriginsConfig::default();
+    // The integration tests bind `127.0.0.1:0` so the kernel picks
+    // an ephemeral port we cannot predict. Rather than threading
+    // the resolved port through every helper, the test config
+    // whitelists a small set of dev defaults. The Origin guard's
+    // Host check matches on the host part of these URLs (with or
+    // without the port) so any ephemeral port passes.
+    allowed_origins.origins = vec![
+        "http://127.0.0.1:0".into(),
+        "http://127.0.0.1:8080".into(),
+        "http://localhost:8080".into(),
+        "http://localhost:0".into(),
+    ];
     Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
@@ -417,5 +439,6 @@ fn default_test_config() -> Config {
         tts: TtsConfig::default(),
         auth: AuthConfig::default(),
         documents: DocumentsConfig::default(),
+        allowed_origins,
     }
 }

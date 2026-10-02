@@ -80,16 +80,33 @@ impl WebFetchAgent {
     /// `Arc`-shared so cloning the agent for `AppState` keeps the
     /// connection pool warm.
     pub fn new(cfg: WebFetchAgentConfig) -> Self {
-        let egress = EgressClient::new(EgressConfig {
-            timeout_ms: cfg.timeout_ms,
-            allow_public: cfg.allow_public,
-            allowlist: cfg.allowlist.clone(),
-            max_bytes: cfg.max_bytes,
-            // Match the historical User-Agent string so HTTP server
-            // logs / access policies keep recognising the agent.
-            user_agent: "nagent-web-fetch/0.1 (+https://github.com/nagent/nagent)".into(),
-        });
+        let egress = EgressClient::new(egress_config_for(&cfg));
         Self { cfg, egress }
+    }
+
+    /// Construct the agent on top of a shared `reqwest::Client`
+    /// from the [`EgressPool`] (plan 4.C — every network agent
+    /// drains the same connection pool instead of building its
+    /// own). The SSRF pre-flight check still runs on every call;
+    /// only the underlying HTTP client is shared.
+    pub fn with_pool(http: reqwest::Client, cfg: WebFetchAgentConfig) -> Self {
+        let egress = EgressClient::from_shared_client(http, egress_config_for(&cfg));
+        Self { cfg, egress }
+    }
+}
+
+/// Build the [`EgressConfig`] from the agent's runtime config.
+/// Extracted so [`WebFetchAgent::new`] and
+/// [`WebFetchAgent::with_pool`] share the same knob projection.
+fn egress_config_for(cfg: &WebFetchAgentConfig) -> EgressConfig {
+    EgressConfig {
+        timeout_ms: cfg.timeout_ms,
+        allow_public: cfg.allow_public,
+        allowlist: cfg.allowlist.clone(),
+        max_bytes: cfg.max_bytes,
+        // Match the historical User-Agent string so HTTP server
+        // logs / access policies keep recognising the agent.
+        user_agent: "nagent-web-fetch/0.1 (+https://github.com/nagent/nagent)".into(),
     }
 }
 

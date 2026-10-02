@@ -28,6 +28,7 @@ use crate::rate_limit::RateLimitError;
 use crate::stt::result_router::send_to_session;
 use crate::stt::session::{register, unregister, OutboundMessage};
 use crate::stt::validation::FrameError;
+use crate::stt::ws_concurrency::AdmitDecision;
 use crate::version::VersionInfo;
 use crate::SttState;
 
@@ -44,6 +45,57 @@ pub async fn ws_upgrade(
     headers: HeaderMap,
     peer: Option<ConnectInfo<SocketAddr>>,
 ) -> impl IntoResponse {
+    // Plan S-2: validate `Origin` / `Host` before any token is
+    // consumed, so a cross-site WebSocket hijack attempt is
+    // rejected at the HTTP layer (plain 403 / 421) instead of
+    // being silently admitted and then aborted later. The same
+    // policy is also applied via the HTTP middleware to the
+    // rest of the protected subtree; we duplicate the call here
+    // because the WS upgrade is GET-with-Upgrade, which the
+    // middleware does not gate on Origin — the WS branch needs
+    // the explicit pre-check.
+    //
+    // The Host check needs the configured bind address, not the
+    // peer's ephemeral source port. When the peer is absent
+    // (in-process test) we fall back to the bind address as a
+    // placeholder so the comparison still has a value to test.
+    let bind_host = format!(
+        "{}:{}",
+        bundle.config.bind_addr.ip(),
+        bundle.config.bind_addr.port()
+    );
+    if let Err(resp) =
+        crate::http::origin_guard::check_ws_upgrade(&headers, &bind_host, &bundle.config)
+    {
+        // `check_ws_upgrade` has already produced a 403/421; the
+        // middleware-side duplicate will log `http.origin_guard.*`
+        // for cross-origin POSTs, but the WS branch logs here
+        // too because the middleware does not run on the WS
+        // upgrade path (a GET with `Upgrade: websocket` is
+        // exempt from the middleware's Origin check on purpose,
+        // and the explicit pre-check produces the actual
+        // rejection).
+        let status = resp.status();
+        let reason = match status {
+            StatusCode::FORBIDDEN => "forbidden_origin",
+            StatusCode::MISDIRECTED_REQUEST => "misdirected_host",
+            other => other.canonical_reason().unwrap_or("origin_guard_rejected"),
+        };
+        let origin = headers
+            .get(axum::http::header::ORIGIN)
+            .and_then(|v| v.to_str().ok());
+        warn!(
+            event = "ws.upgrade.rejected",
+            reason = reason,
+            status = status.as_u16(),
+            host = %bind_host,
+            origin = ?origin,
+            peer_ip = ?peer.as_ref().map(|p| p.0.ip()),
+            "ws upgrade rejected by origin / host guard"
+        );
+        return resp;
+    }
+
     let peer_ip = peer.map(|ConnectInfo(addr)| addr.ip());
     // Security plan #5: resolve the source IP through
     // `X-Forwarded-For` when the TCP peer is a trusted proxy.
@@ -54,6 +106,7 @@ pub async fn ws_upgrade(
         crate::rate_limit::resolve_client_ip(&headers, peer_ip, &bundle.config.trusted_proxies)
     });
     let limiter = bundle.stt.rate_limiter.clone();
+    let ws_concurrency = bundle.stt.ws_concurrency.clone();
     let stt_for_conn = Arc::clone(&bundle.stt);
     let config_for_conn = bundle.config.clone();
 
@@ -61,13 +114,51 @@ pub async fn ws_upgrade(
     // this way a rejection is a plain 429 (no WS handshake started).
     match client_ip {
         Some(ip) => match limiter.check(ip) {
-            Ok(()) => ws
-                .on_upgrade(move |socket| {
-                    ws_connection(socket, stt_for_conn, config_for_conn, Some(ip))
-                })
-                .into_response(),
+            Ok(()) => {
+                // Reserve one WebSocket concurrency slot (global +
+                // per-IP) before starting the handshake; a saturated
+                // cap is reported as `503 + Retry-After` so the
+                // rejection is visible in normal HTTP logs without
+                // having to decode a WS close frame (plan S-1).
+                match ws_concurrency.try_admit(Some(ip)) {
+                    AdmitDecision::Admitted => ws
+                        .on_upgrade(move |socket| {
+                            ws_connection(socket, stt_for_conn, config_for_conn, Some(ip))
+                        })
+                        .into_response(),
+                    AdmitDecision::GlobalFull => {
+                        warn!(
+                            event = "ws.upgrade.rejected",
+                            reason = "global_concurrency_cap",
+                            global_in_use = ws_concurrency.global_in_use(),
+                            global_cap = ws_concurrency.global_cap(),
+                            peer_ip = %ip,
+                            "ws upgrade rejected: global concurrency cap reached"
+                        );
+                        ws_concurrency_full_response()
+                    }
+                    AdmitDecision::PerIpFull => {
+                        warn!(
+                            event = "ws.upgrade.rejected",
+                            reason = "per_ip_concurrency_cap",
+                            per_ip_in_use = ws_concurrency.per_ip_in_use(ip),
+                            per_ip_cap = ws_concurrency.per_ip_cap(),
+                            peer_ip = %ip,
+                            "ws upgrade rejected: per-IP concurrency cap reached"
+                        );
+                        ws_concurrency_full_response()
+                    }
+                }
+            }
             Err(RateLimitError::Limited { retry_after_ms, .. }) => {
                 let secs = retry_after_ms.div_ceil(1000).max(1);
+                warn!(
+                    event = "ws.upgrade.rejected",
+                    reason = "stt_rate_limit",
+                    peer_ip = ?client_ip,
+                    retry_after_ms = retry_after_ms,
+                    "ws upgrade rejected: STT rate limit exceeded"
+                );
                 let mut resp = (
                     StatusCode::TOO_MANY_REQUESTS,
                     "rate limit exceeded for STT pipeline",
@@ -84,10 +175,49 @@ pub async fn ws_upgrade(
         // No peer address (in-process call, some test harnesses):
         // bypass the limiter. The rate-limit code path is unit-tested
         // independently.
-        None => ws
-            .on_upgrade(move |socket| ws_connection(socket, stt_for_conn, config_for_conn, None))
-            .into_response(),
+        None => match ws_concurrency.try_admit(None) {
+            AdmitDecision::Admitted => ws
+                .on_upgrade(move |socket| {
+                    ws_connection(socket, stt_for_conn, config_for_conn, None)
+                })
+                .into_response(),
+            AdmitDecision::GlobalFull => {
+                warn!(
+                    event = "ws.upgrade.rejected",
+                    reason = "global_concurrency_cap",
+                    global_in_use = ws_concurrency.global_in_use(),
+                    global_cap = ws_concurrency.global_cap(),
+                    "ws upgrade rejected: global concurrency cap reached"
+                );
+                ws_concurrency_full_response()
+            }
+            AdmitDecision::PerIpFull => {
+                warn!(
+                    event = "ws.upgrade.rejected",
+                    reason = "per_ip_concurrency_cap",
+                    "ws upgrade rejected: per-IP concurrency cap reached"
+                );
+                ws_concurrency_full_response()
+            }
+        },
     }
+}
+
+/// Build the `503 + Retry-After: 1` response returned when the
+/// WebSocket concurrency caps are saturated (plan S-1). Kept in a
+/// helper so both branches (with and without a resolved peer IP)
+/// stay in sync.
+fn ws_concurrency_full_response() -> axum::response::Response {
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "STT WebSocket concurrency cap reached; retry shortly",
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    resp
 }
 
 /// Per-connection task: loops between inbound frames and outbound messages.
@@ -143,7 +273,14 @@ pub async fn ws_connection(
                         // misbehaving session flooding the inference
                         // queue after upgrade.
                         if let Err(e) = limiter.check_opt(peer_ip) {
-                            warn!(%session_id, "ws inbound rate-limited: {e}");
+                            warn!(
+                                event = "ws.frame.rejected",
+                                reason = "stt_per_frame_rate_limit",
+                                session_id = %session_id,
+                                peer_ip = ?peer_ip,
+                                error = %e,
+                                "ws inbound rate-limited"
+                            );
                             let err_payload = Payload::Error(ErrorMessage {
                                 code: 1,
                                 message: format!("{e}"),
@@ -159,7 +296,25 @@ pub async fn ws_connection(
                             break;
                         }
                         if let Err(e) = handle_inbound(&stt, &config, session_id, &buf).await {
-                            warn!(%session_id, "inbound error: {e}");
+                            // Frame validation rejections carry an
+                            // `event = "ws.frame.rejected"` tag and
+                            // the `error` field with the human-readable
+                            // reason so a log aggregator can filter on
+                            // the rejection reason without parsing the
+                            // message text.
+                            let reason = match &e {
+                                InboundError::Validation(_) => "frame_validation",
+                                InboundError::Codec(_) => "codec_decode",
+                                InboundError::ClientStop => "client_stop",
+                                InboundError::WorkerUnavailable => "worker_unavailable",
+                            };
+                            warn!(
+                                event = "ws.frame.rejected",
+                                reason = reason,
+                                session_id = %session_id,
+                                error = %e,
+                                "ws inbound frame rejected"
+                            );
                             if matches!(e, InboundError::ClientStop) {
                                 break;
                             }
@@ -169,7 +324,11 @@ pub async fn ws_connection(
                             });
                             if let Ok(bytes) = encode_frame(&err_payload) {
                                 if ws_tx.send(Message::Binary(bytes)).await.is_err() {
-                                    warn!(%session_id, "ws send error frame failed");
+                                    warn!(
+                                        event = "ws.frame.send_failed",
+                                        session_id = %session_id,
+                                        "ws send error frame failed"
+                                    );
                                 }
                             }
                         }
@@ -182,7 +341,12 @@ pub async fn ws_connection(
                         // axum handles ping/pong automatically; nothing to do.
                     }
                     Some(Ok(Message::Text(_))) => {
-                        warn!(%session_id, "unexpected text frame");
+                        warn!(
+                            event = "ws.frame.rejected",
+                            reason = "unexpected_text_frame",
+                            session_id = %session_id,
+                            "unexpected text frame"
+                        );
                     }
                     Some(Err(e)) => {
                         warn!(%session_id, "ws error: {e}");
@@ -219,8 +383,14 @@ pub async fn ws_connection(
     }
 
     // Connection ended — remove ourselves from the map so subsequent
-    // results are dropped instead of being routed into a dead channel.
+    // results are routed into a dead channel instead of being dropped,
+    // and release the WebSocket concurrency slot reserved at the
+    // HTTP upgrade (plan S-1).
     unregister(&stt.sessions, session_id);
+    match peer_ip {
+        Some(ip) => stt.ws_concurrency.release_with_ip(ip),
+        None => stt.ws_concurrency.release_global(),
+    }
     info!(%session_id, "ws connection closed");
 }
 

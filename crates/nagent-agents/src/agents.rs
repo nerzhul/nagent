@@ -31,6 +31,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::egress::EgressPool;
 use crate::services::{ServiceDef, ServiceRegistry};
 
 // ---------------------------------------------------------------------------
@@ -486,18 +487,28 @@ impl AgentRegistry {
     /// `false` the function returns `Self::empty()` so the LLM
     /// proxy injects no `tools` field.
     ///
+    /// `pool` is the shared `reqwest::Client` pool — every network
+    /// agent is built with `EgressClient::from_shared_client(...)`
+    /// against one of the pool's clients, so the connection pool
+    /// and TLS roots stay warm across agents of the same policy
+    /// class (plan 4.C).
+    ///
     /// A descriptor that returns `Err` from its `build` closure
     /// is logged at `warn` and skipped — the rest of the registry
     /// still loads. Today every descriptor is infallible; the
     /// branch exists so a future agent can validate its config
     /// without breaking the others.
-    pub fn from_config(cfgs: &crate::config::AgentConfigs, enabled: bool) -> Self {
+    pub fn from_config(
+        cfgs: &crate::config::AgentConfigs,
+        enabled: bool,
+        pool: &EgressPool,
+    ) -> Self {
         if !enabled {
             return Self::empty();
         }
         let mut registry = Self::empty();
         for descriptor in AGENT_DESCRIPTORS {
-            match (descriptor.build)(cfgs) {
+            match (descriptor.build)(cfgs, pool) {
                 Ok(agent) => registry.push_agent_boxed(agent),
                 Err(e) => {
                     tracing::warn!(
@@ -657,14 +668,15 @@ pub struct AgentDescriptor {
     /// Surfaced for the `get_log` debug helper; not enforced
     /// at runtime because the table itself is `cfg`-gated.
     pub feature: &'static str,
-    /// Build a boxed instance from the global agent configs.
-    /// Returning `Err` is reserved for agents whose config is
-    /// invalid (a missing API key, an unparseable base URL); the
-    /// registry will skip the agent and log a warning. Today
-    /// every entry is infallible; the `Result` exists so a
-    /// future agent can fail gracefully without breaking the
-    /// other descriptors.
-    pub build: fn(&crate::config::AgentConfigs) -> Result<Box<dyn Agent>, AgentBuildError>,
+    /// Build a boxed instance from the global agent configs and
+    /// the shared [`EgressPool`]. Returning `Err` is reserved
+    /// for agents whose config is invalid (a missing API key,
+    /// an unparseable base URL); the registry will skip the
+    /// agent and log a warning. Today every entry is infallible;
+    /// the `Result` exists so a future agent can fail gracefully
+    /// without breaking the other descriptors.
+    pub build:
+        fn(&crate::config::AgentConfigs, &EgressPool) -> Result<Box<dyn Agent>, AgentBuildError>,
 }
 
 /// Static factory table. Walked by
@@ -676,8 +688,9 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "web_fetch",
         feature: "web-agent",
-        build: |cfgs| {
-            Ok(Box::new(web_fetch::WebFetchAgent::new(
+        build: |cfgs, pool| {
+            Ok(Box::new(web_fetch::WebFetchAgent::with_pool(
+                pool.strict(),
                 cfgs.web_fetch.clone(),
             )))
         },
@@ -686,7 +699,7 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "get_datetime",
         feature: "datetime-agent",
-        build: |cfgs| {
+        build: |cfgs, _pool| {
             Ok(Box::new(datetime_agent::DateTimeAgent::from_config(
                 cfgs.datetime.clone(),
             )))
@@ -696,8 +709,9 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "get_weather",
         feature: "weather-agent",
-        build: |cfgs| {
-            Ok(Box::new(weather_agent::WeatherAgent::new(
+        build: |cfgs, pool| {
+            Ok(Box::new(weather_agent::WeatherAgent::with_shared_pool(
+                pool.public(),
                 cfgs.weather.clone(),
             )))
         },
@@ -706,8 +720,9 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "get_stock_quote",
         feature: "stock-agent",
-        build: |cfgs| {
-            Ok(Box::new(stock_agent::StockAgent::from_config(
+        build: |cfgs, pool| {
+            Ok(Box::new(stock_agent::StockAgent::with_shared_pool(
+                pool.public(),
                 cfgs.stock.clone(),
             )))
         },
@@ -716,7 +731,7 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "calculate",
         feature: "calculate-agent",
-        build: |cfgs| {
+        build: |cfgs, _pool| {
             Ok(Box::new(calculate_agent::CalculateAgent::from_config(
                 cfgs.calculate.clone(),
             )))
@@ -726,7 +741,7 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "unit_convert",
         feature: "unit-convert-agent",
-        build: |cfgs| {
+        build: |cfgs, _pool| {
             Ok(Box::new(unit_convert_agent::UnitConvertAgent::new(
                 cfgs.unit_convert.clone(),
             )))
@@ -736,8 +751,9 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "wikipedia",
         feature: "wikipedia-agent",
-        build: |cfgs| {
-            Ok(Box::new(wikipedia_agent::WikipediaAgent::new(
+        build: |cfgs, pool| {
+            Ok(Box::new(wikipedia_agent::WikipediaAgent::with_shared_pool(
+                pool.public(),
                 cfgs.wikipedia.clone(),
             )))
         },
@@ -746,10 +762,13 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
     AgentDescriptor {
         id: "dictionary",
         feature: "dictionary-agent",
-        build: |cfgs| {
-            Ok(Box::new(dictionary_agent::DictionaryAgent::new(
-                cfgs.dictionary.clone(),
-            )))
+        build: |cfgs, pool| {
+            Ok(Box::new(
+                dictionary_agent::DictionaryAgent::with_shared_pool(
+                    pool.public(),
+                    cfgs.dictionary.clone(),
+                ),
+            ))
         },
     },
 ];
@@ -779,8 +798,9 @@ mod descriptor_table_tests {
         // descriptor's `id`. Guards against a future
         // copy-paste typo in either field.
         let cfgs = AgentConfigs::default();
+        let pool = EgressPool::new();
         for d in AGENT_DESCRIPTORS {
-            let agent = (d.build)(&cfgs)
+            let agent = (d.build)(&cfgs, &pool)
                 .unwrap_or_else(|e| panic!("descriptor {} build() failed: {e}", d.id));
             assert_eq!(
                 agent.name(),

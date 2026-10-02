@@ -30,11 +30,15 @@
 //! session_idle_timeout_ms = 30_000
 //! infer_timeout_ms = 30_000
 //!
-//! # WebSocket frame limits
+//! # WebSocket frame limits + HTTP transport guardrails (S-1)
 //! [server.limits]
 //! max_audio_frame_samples = 480_000
 //! required_sample_rate = 16_000
 //! max_language_hint_bytes = 16
+//! request_timeout_ms = 30_000        # TimeoutLayer on non-streaming routes
+//! body_limit_bytes = 2_097_152       # DefaultBodyLimit on /v1/* and /api/*
+//! ws_max_concurrent = 1024           # global WS upgrade cap
+//! ws_max_per_ip = 16                 # per-IP WS upgrade cap
 //!
 //! # Rate limits (per source IP)
 //! [server.rate_limits]
@@ -186,6 +190,8 @@ pub struct TomlServerConfig {
     pub rate_limits: Option<TomlRateLimitConfig>,
     #[serde(default)]
     pub trusted_proxies: Option<TomlTrustedProxiesConfig>,
+    #[serde(default)]
+    pub allowed_origins: Option<TomlAllowedOriginsConfig>,
 }
 
 /// LLM proxy knobs. Mirrors [`crate::config::LlmConfig`].
@@ -332,13 +338,26 @@ pub struct TomlReadDocumentConfig {
     pub max_extracted_chars: Option<usize>,
 }
 
-/// WebSocket frame-limit knobs. Mirrors [`crate::config::LimitsConfig`].
+/// WebSocket frame-limit knobs and HTTP transport guardrails (S-1).
+/// Mirrors [`crate::config::LimitsConfig`].
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TomlLimitsConfig {
     pub max_audio_frame_samples: Option<usize>,
     pub required_sample_rate: Option<u32>,
     pub max_language_hint_bytes: Option<usize>,
+    /// Per-request timeout for non-streaming routes, in milliseconds.
+    /// Mirrors `REQUEST_TIMEOUT_MS`; env wins when both are set.
+    pub request_timeout_ms: Option<u64>,
+    /// Maximum size of a single HTTP request body, in bytes.
+    /// Mirrors `BODY_LIMIT_BYTES`; env wins when both are set.
+    pub body_limit_bytes: Option<usize>,
+    /// Global cap on concurrent WebSocket sessions attached to
+    /// `/ws`. Mirrors `WS_MAX_CONCURRENT`; env wins when both are set.
+    pub ws_max_concurrent: Option<usize>,
+    /// Per-source-IP cap on concurrent WebSocket sessions.
+    /// Mirrors `WS_MAX_PER_IP`; env wins when both are set.
+    pub ws_max_per_ip: Option<usize>,
 }
 
 /// Per-IP rate-limit knobs. Mirrors [`crate::config::RateLimitConfig`].
@@ -347,6 +366,19 @@ pub struct TomlLimitsConfig {
 pub struct TomlRateLimitConfig {
     pub stt_per_min: Option<u32>,
     pub llm_per_min: Option<u32>,
+}
+
+/// `Origin` / `Host` allow-list (plan S-2). Mirrors
+/// [`crate::config::AllowedOriginsConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlAllowedOriginsConfig {
+    /// Operator-supplied allow-list (`scheme://host[:port]`).
+    /// Mirrors `NAGENT_ALLOWED_ORIGINS`; env wins when both are
+    /// set. Empty by default — the runtime derives the allow-list
+    /// from `[server].bind_addr` so the historical dev workflow
+    /// (loopback bind, no config) keeps working.
+    pub origins: Option<Vec<String>>,
 }
 
 /// Trusted-proxy knobs (security plan #5).
@@ -648,6 +680,27 @@ fn merge_toml_server(
                 e.trusted_proxies.as_ref(),
                 l.trusted_proxies.as_ref(),
             ),
+            allowed_origins: merge_toml_allowed_origins(
+                e.allowed_origins.as_ref(),
+                l.allowed_origins.as_ref(),
+            ),
+        }),
+    }
+}
+
+fn merge_toml_allowed_origins(
+    earlier: Option<&TomlAllowedOriginsConfig>,
+    later: Option<&TomlAllowedOriginsConfig>,
+) -> Option<TomlAllowedOriginsConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        // Later wins per-key (same shape as every other merge
+        // helper): operator-provided entries override the
+        // system-file default.
+        (Some(e), Some(l)) => Some(TomlAllowedOriginsConfig {
+            origins: l.origins.clone().or_else(|| e.origins.clone()),
         }),
     }
 }
@@ -679,6 +732,10 @@ fn merge_toml_limits(
             max_audio_frame_samples: l.max_audio_frame_samples.or(e.max_audio_frame_samples),
             required_sample_rate: l.required_sample_rate.or(e.required_sample_rate),
             max_language_hint_bytes: l.max_language_hint_bytes.or(e.max_language_hint_bytes),
+            request_timeout_ms: l.request_timeout_ms.or(e.request_timeout_ms),
+            body_limit_bytes: l.body_limit_bytes.or(e.body_limit_bytes),
+            ws_max_concurrent: l.ws_max_concurrent.or(e.ws_max_concurrent),
+            ws_max_per_ip: l.ws_max_per_ip.or(e.ws_max_per_ip),
         }),
     }
 }

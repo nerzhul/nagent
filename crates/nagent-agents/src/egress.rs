@@ -414,6 +414,89 @@ pub struct ValidateOk {
     pub addresses: Vec<SocketAddr>,
 }
 
+/// Shared `reqwest::Client` pool for every network agent (plan 4.C).
+///
+/// Two policy classes are pre-built once at boot and reused across
+/// every agent of that class — the connection pool, TLS roots,
+/// and DNS resolver stay warm and one `reqwest::Client` instance
+/// per policy class avoids the "5 different connection pools for
+/// 5 different agents" pattern that the previous code grew into.
+///
+/// | Pool    | Where it is used                                            |
+/// |---------|-------------------------------------------------------------|
+/// | strict  | `web_fetch` — default-deny SSRF policy.                     |
+/// | public  | `weather`, `dictionary`, `stock`, `wikipedia` — well-known |
+/// |         | vendor APIs that the SSRF block would forbid.              |
+///
+/// Agents take the pool client via [`EgressClient::from_shared_client`]
+/// so the per-call SSRF check (`web_fetch`) and the per-call
+/// timeouts / allow-lists still apply; the pool only owns the
+/// `reqwest::Client`, not the policy.
+#[derive(Clone)]
+pub struct EgressPool {
+    inner: Arc<EgressPoolInner>,
+}
+
+struct EgressPoolInner {
+    /// Strict egress: SSRF-defended SSRF pool. Used by `web_fetch`.
+    strict: reqwest::Client,
+    /// Public egress: `api-` / `weatherapi.com`-class APIs that
+    /// the strict pool would reject (public IPs are not allowed).
+    public: reqwest::Client,
+}
+
+impl std::fmt::Debug for EgressPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EgressPool").finish()
+    }
+}
+
+impl Default for EgressPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EgressPool {
+    /// Build a fresh pool with one `reqwest::Client` per policy
+    /// class. Both clients share the TLS roots shipped by
+    /// `rustls-tls` (re-exported through `reqwest`'s default
+    /// features).
+    pub fn new() -> Self {
+        let strict = reqwest::Client::builder()
+            // Mirror the strict pool's timeouts: connect timeout is
+            // 30 s by default; the request timeout is unbounded
+            // (each `EgressClient` short-circuits with its own
+            // config). Redirect policy is left to the per-agent
+            // `EgressClient` so the SSRF check runs after every hop.
+            .connect_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("strict egress client must build");
+        let public = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("public egress client must build");
+        Self {
+            inner: Arc::new(EgressPoolInner { strict, public }),
+        }
+    }
+
+    /// Strict policy-class `reqwest::Client`. Use this for any
+    /// agent that runs an SSRF pre-flight (`web_fetch` today).
+    pub fn strict(&self) -> reqwest::Client {
+        self.inner.strict.clone()
+    }
+
+    /// Public policy-class `reqwest::Client`. Use this for any
+    /// agent that talks to a well-known vendor endpoint
+    /// (`weather`, `dictionary`, `stock`, `wikipedia` today).
+    pub fn public(&self) -> reqwest::Client {
+        self.inner.public.clone()
+    }
+}
+
 // ---- Network policy (shared) --------------------------------------------
 
 /// True when `ip` is allowed by the egress IP policy. Always rejects
@@ -651,5 +734,33 @@ mod tests {
         let t = truncate_body(s, 3);
         assert!(t.starts_with("h"));
         assert!(t.ends_with("…[truncated]"));
+    }
+
+    // ---- EgressPool (plan 4.C) ------------------------------------------
+
+    #[test]
+    fn egress_pool_returns_distinct_strict_and_public_clients() {
+        let pool = EgressPool::new();
+        let strict_a = pool.strict();
+        let strict_b = pool.strict();
+        let public_a = pool.public();
+        let public_b = pool.public();
+        // Cloning a `reqwest::Client` bumps its internal `Arc`,
+        // so `strict_a` and `strict_b` share the same connection
+        // pool. Same for the public pair. The test only proves
+        // that the handles can be cloned; a live request would
+        // require DNS resolution which the unit-test sandbox
+        // forbids.
+        let _ = (strict_a, strict_b, public_a, public_b);
+    }
+
+    #[test]
+    fn egress_pool_default_matches_new() {
+        // `Default` is required by `derive(Default)` on derive chains.
+        let a = EgressPool::new();
+        let b = EgressPool::default();
+        // Both can hand out clients; the test only proves the
+        // `Default` impl compiles and runs.
+        let _ = (a.strict(), b.strict());
     }
 }

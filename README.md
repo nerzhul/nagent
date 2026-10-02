@@ -128,6 +128,11 @@ without a default and is required.
 | `MAX_AUDIO_FRAME_SAMPLES`    | `480000` (30 s × 16 kHz)                      | WS frame limits| Maximum PCM Float32 samples accepted in one `AudioFrame`.                                                     |
 | `REQUIRED_SAMPLE_RATE`       | `16000`                                       | WS frame limits| Sample rate the server accepts; any other value is rejected with `INVALID_FRAME`.                             |
 | `MAX_LANGUAGE_HINT_BYTES`    | `16`                                          | WS frame limits| Maximum length of the ISO 639-1 language hint.                                                                |
+| `REQUEST_TIMEOUT_MS`         | `30000`                                       | HTTP guardrails| Per-request timeout (`tower_http::timeout::TimeoutLayer`) applied to every non-streaming `/v1/*` and `/api/*` route. SSE (`/v1/chat/completions`) and the WebSocket upgrade stay exempt. Floored at 1 s. |
+| `BODY_LIMIT_BYTES`           | `2097152` (2 MiB)                             | HTTP guardrails| Maximum size of a single HTTP request body, applied via `axum::extract::DefaultBodyLimit` to the whole `/v1/*` and `/api/*` subtree. Oversized uploads are rejected with `413 Payload Too Large` (or a transport-level abort) before they reach a handler. Floored at 1 KiB. |
+| `WS_MAX_CONCURRENT`          | `1024`                                        | HTTP guardrails| Global cap on concurrent WebSocket sessions on `/ws`. Reached upgrades are rejected with `503 Service Unavailable` + `Retry-After: 1` instead of being silently dropped. |
+| `WS_MAX_PER_IP`              | `16`                                          | HTTP guardrails| Per-source-IP cap on concurrent WebSocket sessions. Reached upgrades are rejected with `503` + `Retry-After: 1`. |
+| `NAGENT_ALLOWED_ORIGINS`     | _(empty → derived from `BIND_ADDR`)_          | Origin/Host guard| Comma-separated list of `Origin` allow-list entries (`scheme://host[:port]`). Empty by default — the allow-list is derived from `[server].bind_addr` (loopback names plus the bind host). Mirrors `[server].allowed_origins].origins` in TOML. |
 | `STT_RATE_PER_MIN`           | `120`                                         | Rate limits    | Inbound STT WS frames allowed per source IP per minute (loopback bypasses).                                   |
 | `LLM_RATE_PER_MIN`           | `30`                                          | Rate limits    | Inbound LLM HTTP requests allowed per source IP per minute (`/v1/chat/completions`, `/v1/models`).           |
 | `LLM_ENABLED`                | `false`                                       | LLM proxy      | Master switch. When `false` the `/v1/*` routes are not registered at all.                                     |
@@ -223,7 +228,8 @@ for per-source-IP rate limits:
 | `[server].inference_workers`      | `INFERENCE_WORKERS`         | Stick to backend-derived default unless overridden. |
 | `[server].session_idle_timeout_ms`| `SESSION_IDLE_TIMEOUT_MS`   |                                                |
 | `[server].infer_timeout_ms`       | `INFER_TIMEOUT_MS`          |                                                |
-| `[server.limits].*`               | `MAX_*`, `REQUIRED_*`       | WebSocket frame knobs.                         |
+| `[server.limits].*`               | `MAX_*`, `REQUIRED_*`, `REQUEST_TIMEOUT_MS`, `BODY_LIMIT_BYTES`, `WS_MAX_*` | WebSocket frame knobs + HTTP transport guardrails (S-1). |
+| `[server.allowed_origins].*`      | `NAGENT_ALLOWED_ORIGINS`    | `Origin` / `Host` allow-list (plan S-2). Empty = derived from `bind_addr`. |
 | `[server.rate_limits].*`          | `STT_RATE_PER_MIN`, `LLM_*` | Per-IP buckets.                                |
 | `[server.trusted_proxies].*`      | `NAGENT_TRUSTED_PROXIES*`   | Reverse-proxy CIDR list (see "Trusted proxies" below). |
 | `[llm].*`                         | `LLM_*`, `OLLAMA_*`         | OpenAI-compatible proxy.                       |
@@ -307,6 +313,45 @@ loopback_bypass = true
 Boot emits a `WARN` when the bind address is non-loopback and
 `trusted_proxies.cidr` is empty — that combination is almost
 always a misconfiguration behind a reverse proxy.
+
+### Origin / Host allow-list (security plan S-2)
+
+Browsers do not apply CORS to WebSocket upgrades, so a public
+deployment of `nagent-server` is wide-open to cross-site WebSocket
+hijacking (CSWSH) and DNS-rebinding when the bind address is
+reachable. With `auth.enabled = false` (the default) the
+[`RequireAuth`] middleware is not installed — any web page the user
+visits can open `ws://localhost:8080/ws` and start streaming audio
+through the inference pipeline.
+
+The server validates `Origin` on every state-changing route
+(`POST` / `PUT` / `PATCH` / `DELETE`) and on the WebSocket upgrade,
+and validates `Host` against an allow-list derived from
+`[server].bind_addr` plus any operator-supplied entries. Cross-
+origin POSTs return `403 Forbidden`; cross-site WS upgrades are
+rejected at the HTTP layer (no WS handshake is started). A request
+with a forged `Host` (DNS rebinding attempt) is rejected with
+`421 Misdirected Request`.
+
+The default allow-list (no operator override) is derived from
+`[server].bind_addr` (loopback names plus the bind host) so the
+historical dev workflow keeps working on a single-user loopback
+deployment. Operators exposing the server on a non-loopback
+address MUST populate the allow-list with the publicly-
+reachable scheme + host:
+
+```toml
+[server.allowed_origins]
+# Empty by default — derived from `bind_addr` so a single-user
+# loopback bind keeps working. Required when the bind address is
+# non-loopback, otherwise every state-changing request fails.
+origins = ["https://nagent.example.com"]
+```
+
+The matching env var is `NAGENT_ALLOWED_ORIGINS` (comma-
+separated). Env wins over the TOML file when both are set.
+
+[`RequireAuth`]: #routing-contract
 
 ## Authentication
 

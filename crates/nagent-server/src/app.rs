@@ -328,6 +328,10 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         job_tx,
         ready,
         rate_limiter: stt_rate_limiter,
+        ws_concurrency: crate::stt::ws_concurrency::WsConcurrency::new(
+            cfg.limits.ws_max_concurrent,
+            cfg.limits.ws_max_per_ip,
+        ),
     };
 
     Ok(Arc::new(AppState {
