@@ -492,16 +492,22 @@ select, input[type="checkbox"] {
 
 /* Hide the inactive mode's `<main>` when `hidden` is set on it by
  * `applyMode()`. Specificity is *deliberately* raised to (1, 1, 0)
- * via the ID so it beats the `#view-discussion { display: flex; ... }`
- * rule below (specificity 1, 0, 0). Without the ID in the selector,
- * the flex display wins and the Discussion view stays visible after
- * the user clicks the Transcript tab — a subtle regression where
- * switching modes appears to do nothing visually. The Transcript
- * view has no `display` override, so it never hit the bug, but it is
- * listed here for symmetry and so a future flex layout for it
- * inherits the same guarantee. */
+ * via the ID so it beats both:
+ *   - `#view-discussion { display: flex; ... }` (specificity 1, 0, 0)
+ *     below — without the ID selector, the flex display wins and
+ *     the Discussion view stays visible after the user clicks the
+ *     Transcript tab;
+ *   - the global `main { display: block; }` rule at line ~145
+ *     (specificity 0, 0, 1) which also beats the user-agent
+ *     `[hidden] { display: none }` rule. That second case bit
+ *     `#view-settings` after the settings-tab-rework commit
+ *     (f60b7c8) — the Settings view had no `display` override so
+ *     the global `display: block` won and `[hidden]` was a no-op.
+ *     Adding `#view-settings[hidden]` to this rule restores the
+ *     tab behaviour for every mode. */
 #view-transcript[hidden],
-#view-discussion[hidden] { display: none; }
+#view-discussion[hidden],
+#view-settings[hidden]   { display: none; }
 
 /* Discussion mode needs a wider canvas than the default `.view`
  * cap (920px) — the 260px sidebar eats into that, leaving the chat
@@ -1951,6 +1957,140 @@ select, input[type="checkbox"] {
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
+}
+
+/* CalDAV "Discover" affordance (plan 1790963194218 §2.7).
+ *
+ * The discover row lives directly under the `url` field of
+ * the CalDAV configure modal. Clicking "Discover calendars"
+ * runs a PROPFIND against the principal URL the user pasted
+ * and renders a list of `<C:calendar/>` resources; the user
+ * picks one to auto-fill the URL field. */
+.chat-integration-discover {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: -0.2rem 0 0.2rem 0;
+}
+.chat-integration-discover-status {
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+.chat-integration-discover-status[data-state="ok"] {
+  opacity: 1;
+  color: var(--chat-success-fg, #6cc26c);
+}
+.chat-integration-discover-status[data-state="empty"] {
+  opacity: 1;
+  color: var(--chat-warn-fg, #d4a04e);
+}
+.chat-integration-discover-status[data-state="error"] {
+  opacity: 1;
+  color: var(--chat-danger-fg, #d96767);
+}
+.chat-integration-probe-results {
+  margin-top: 0.2rem;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--chat-input-border, #444);
+  border-radius: 0.3rem;
+  padding: 0.3rem 0.4rem;
+  background: var(--chat-input-bg, #232529);
+}
+.chat-integration-probe-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.chat-integration-probe-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.chat-integration-probe-name {
+  flex: 1;
+  font-weight: 500;
+}
+.chat-integration-probe-href {
+  font-size: 0.78em;
+  opacity: 0.65;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.chat-integration-probe-empty {
+  margin: 0;
+  font-size: 0.85em;
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Settings tab integration rows (plan 1790963194218 §2.7).
+ *
+ * The same per-user services are rendered twice: once in
+ * the chat-coupled drawer (where users spot "I can ask the
+ * model about CalDAV") and once in the Settings tab (where
+ * users look for things to *configure*). The Settings tab
+ * copy uses a card-style row with a primary CTA on the
+ * "Not configured" path so the "Configure CalDAV" affordance
+ * is the obvious next click. */
+.settings-integrations-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.settings-integration-row {
+  border: 1px solid var(--chat-input-border, #444);
+  border-radius: 0.4rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--chat-input-bg, #232529);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.settings-integration-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.settings-integration-label {
+  flex: 1;
+  font-weight: 500;
+}
+.settings-integration-status {
+  font-size: 0.8em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.3rem;
+  border: 1px solid currentColor;
+}
+.settings-integration-status.is-configured {
+  color: var(--chat-success-fg, #6cc26c);
+}
+.settings-integration-status.is-unconfigured {
+  opacity: 0.65;
+}
+.settings-integration-docs {
+  font-size: 0.85em;
+  opacity: 0.75;
+  text-decoration: none;
+}
+.settings-integration-docs:hover {
+  text-decoration: underline;
+}
+.settings-integrations-empty {
+  opacity: 0.75;
+  font-style: italic;
+  padding: 0.4rem 0;
+  margin: 0;
 }
 
 /* Per-message replay button. Renders inside each assistant bubble,

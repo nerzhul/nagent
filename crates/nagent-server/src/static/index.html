@@ -590,6 +590,40 @@
         Reset to defaults
       </button>
     </section>
+
+    <!--
+      Per-user integrations. Plan 1790963194218 §2.7: the
+      "Configure CalDAV" affordance lives in the Settings tab
+      (where users look for things to configure) rather than
+      buried in the Discussion view's Advanced disclosure. The
+      same data is still rendered in the chat-coupled drawer
+      (so a user can spot the per-service status while typing
+      a prompt), but the *editor* opens from here so the
+      setup flow has a single discoverable entry point.
+
+      The list is populated by `static/integrations.js` once
+      `auth.js` has confirmed a session — same gating as the
+      drawer copy, so anonymous users see nothing and never a
+      confusing "0 configured" placeholder.
+    -->
+    <section class="settings-section" id="settings-integrations"
+             aria-labelledby="settings-integrations-title">
+      <h3 id="settings-integrations-title" class="settings-section-title">
+        Integrations
+      </h3>
+      <p class="settings-section-help">
+        Connect external accounts (CalDAV calendars, IMAP,
+        Home Assistant, GitHub, …) to your account. Credentials
+        are encrypted with AES-256-GCM at rest and never leave
+        the server in plaintext. The chat agents use them when
+        you ask the assistant to read or act on those resources.
+      </p>
+      <ul id="settings-integrations-list" class="settings-integrations-list">
+        <li class="chat-integrations-empty">
+          Loading integrations…
+        </li>
+      </ul>
+    </section>
   </main>
 
   <!-- Mode toggle is a plain script (no imports) so it can run as a

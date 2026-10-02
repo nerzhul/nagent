@@ -24,6 +24,15 @@
 
 const SECTION_ID = "chat-integrations";
 const LIST_ID = "chat-integrations-list";
+// Settings tab surface (plan 1790963194218 §2.7). Same data
+// as the chat-coupled drawer, but rendered with the
+// "settings-section" visual weight so users find the
+// "Configure CalDAV" affordance without digging through the
+// Discussion view's Advanced disclosure. The chat drawer
+// stays for the chat-coupled "I can ask the model about X"
+// hint; the Settings tab is the setup entry point.
+const SETTINGS_LIST_ID = "settings-integrations-list";
+const SETTINGS_SECTION_ID = "settings-integrations";
 
 function csrfHeaders() {
   return window.nagentAuth?.csrfHeaders?.() || undefined;
@@ -138,12 +147,77 @@ function renderIntegrationRow(svc) {
   return li;
 }
 
+// Settings-tab variant: the visual weight matches
+// `.settings-section` (no chat-integration-icon leading), the
+// status pill is more compact, and the action button is the
+// primary CTA so users spot "Configure CalDAV" without
+// hunting. The two surfaces share `openEditor` so the
+// discover flow stays single-sourced.
+function renderSettingsIntegrationRow(svc) {
+  const li = document.createElement("li");
+  li.className = "settings-integration-row";
+  li.dataset.serviceId = svc.id;
+  li.dataset.configured = svc.configured ? "1" : "0";
+
+  const header = document.createElement("div");
+  header.className = "settings-integration-header";
+
+  const label = document.createElement("span");
+  label.className = "settings-integration-label";
+  label.textContent = svc.display_name;
+  header.appendChild(label);
+
+  const status = document.createElement("span");
+  status.className = `settings-integration-status${
+    svc.configured ? " is-configured" : " is-unconfigured"
+  }`;
+  status.textContent = svc.configured ? "Configured" : "Not configured";
+  header.appendChild(status);
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = svc.configured ? "ghost" : "primary";
+  btn.textContent = svc.configured ? "Edit" : "Configure";
+  btn.addEventListener("click", () => openEditor(svc));
+  header.appendChild(btn);
+
+  li.appendChild(header);
+
+  // Surface the operator-facing docs URL when the ServiceDef
+  // has one — the CalDAV connector ships a setup walkthrough
+  // that explains Nextcloud / Radicale / Fastmail / iCloud
+  // specifics. A short helper line keeps the row compact
+  // while still pointing users at the right doc.
+  if (svc.docs_url) {
+    const docs = document.createElement("a");
+    docs.className = "settings-integration-docs";
+    docs.href = svc.docs_url;
+    docs.target = "_blank";
+    docs.rel = "noopener noreferrer";
+    docs.textContent = "Setup guide →";
+    li.appendChild(docs);
+  }
+
+  return li;
+}
+
 async function renderList() {
   const root = document.getElementById(LIST_ID);
-  if (!root) return;
-  root.replaceChildren();
+  const settingsRoot = document.getElementById(SETTINGS_LIST_ID);
+  if (!root && !settingsRoot) return;
+  if (root) root.replaceChildren();
+  if (settingsRoot) settingsRoot.replaceChildren();
   if (!isAuthed()) {
     setSectionVisible(false);
+    if (settingsRoot) {
+      // The Settings tab is auth-gated: replace the
+      // "Loading…" placeholder with a quiet hint so the
+      // user knows the section is not broken.
+      const empty = document.createElement("li");
+      empty.className = "settings-integrations-empty";
+      empty.textContent = "Sign in to configure your integrations.";
+      settingsRoot.appendChild(empty);
+    }
     return;
   }
   // Fetch in parallel — the two endpoints are independent and
@@ -167,20 +241,40 @@ async function renderList() {
     return;
   }
   setSectionVisible(true);
+  // The chat-coupled drawer is hidden when the build has no
+  // per-user services to show (the same `data` array drives both
+  // surfaces — if `data` is empty the drawer stays hidden via
+  // setSectionVisible(false), and the Settings tab gets an empty
+  // state hint so the user does not think the section is broken).
   let appended = 0;
-  for (const agent of agents) {
-    root.appendChild(renderAgentRow(agent));
-    appended++;
+  if (root) {
+    for (const agent of agents) {
+      root.appendChild(renderAgentRow(agent));
+      appended++;
+    }
+    for (const svc of data) {
+      root.appendChild(renderIntegrationRow(svc));
+      appended++;
+    }
+    if (appended === 0) {
+      const empty = document.createElement("li");
+      empty.className = "chat-integrations-empty";
+      empty.textContent = "No integrations available yet.";
+      root.appendChild(empty);
+    }
   }
-  for (const svc of data) {
-    root.appendChild(renderIntegrationRow(svc));
-    appended++;
-  }
-  if (appended === 0) {
-    const empty = document.createElement("li");
-    empty.className = "chat-integrations-empty";
-    empty.textContent = "No integrations available yet.";
-    root.appendChild(empty);
+  if (settingsRoot) {
+    if (data.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "settings-integrations-empty";
+      empty.textContent =
+        "No integrations available in this build. The CalDAV connector ships behind `--features nagent-server/caldav-agent`; restart the server with that feature to enable the calendar tools.";
+      settingsRoot.appendChild(empty);
+    } else {
+      for (const svc of data) {
+        settingsRoot.appendChild(renderSettingsIntegrationRow(svc));
+      }
+    }
   }
 }
 
@@ -213,6 +307,158 @@ function buildFormField(field) {
   return wrap;
 }
 
+// ---------------------------------------------------------------------------
+// CalDAV setup-only probe (plan 1790963194218 §2.7).
+//
+// `POST /api/integrations/caldav/probe-calendars` authenticates against
+// the principal URL the user pasted and returns the discovered
+// `<C:calendar/>` resources. The UI lets the user pick one and
+// auto-fills the `url` field with the chosen calendar's href so the
+// chat agents target the right collection.
+// ---------------------------------------------------------------------------
+const CALDAV_SERVICE_ID = "caldav";
+const PROBE_PATH = "/api/integrations/caldav/probe-calendars";
+
+async function probeCalendars(principalUrl, username, password) {
+  const resp = await fetch(PROBE_PATH, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "content-type": "application/json",
+      ...(csrfHeaders() || {}),
+    },
+    body: JSON.stringify({
+      principal_url: principalUrl,
+      username,
+      password,
+    }),
+  });
+  // The probe handler never returns 401 — auth rejections from
+  // CalDAV are mapped to 502 with the upstream body verbatim. So
+  // any non-2xx is an error path; we surface the JSON `error`
+  // field when present, the raw text otherwise.
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const body = await resp.json();
+      if (body && typeof body.error === "string") msg = body.error;
+    } catch {
+      try {
+        msg = `${msg}: ${await resp.text()}`;
+      } catch {
+        /* fall through */
+      }
+    }
+    throw new Error(msg);
+  }
+  const body = await resp.json();
+  return Array.isArray(body?.data) ? body.data : [];
+}
+
+function renderProbeResults(container, calendars, urlField) {
+  // Replace any previous probe results.
+  container.replaceChildren();
+  if (!calendars.length) {
+    const empty = document.createElement("p");
+    empty.className = "chat-integration-probe-empty";
+    empty.textContent =
+      "No calendars found at this URL. Double-check the principal URL and credentials, then try again.";
+    container.appendChild(empty);
+    return;
+  }
+  const list = document.createElement("ul");
+  list.className = "chat-integration-probe-list";
+  for (const cal of calendars) {
+    const li = document.createElement("li");
+    li.className = "chat-integration-probe-item";
+    const name = document.createElement("span");
+    name.className = "chat-integration-probe-name";
+    name.textContent = cal.display_name || cal.href;
+    const href = document.createElement("code");
+    href.className = "chat-integration-probe-href";
+    href.textContent = cal.href;
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "primary";
+    pick.textContent = "Use this";
+    pick.addEventListener("click", () => {
+      // Auto-fill the `url` field with the picked calendar's
+      // href and visually highlight the change so the user
+      // knows what happened before they hit Save.
+      urlField.value = cal.href;
+      urlField.dispatchEvent(new Event("input", { bubbles: true }));
+      urlField.focus();
+      urlField.select();
+    });
+    li.append(name, href, pick);
+    list.appendChild(li);
+  }
+  container.appendChild(list);
+}
+
+function attachCalDavDiscover(form, modal) {
+  // Pull the three fields the probe needs out of the form.
+  const urlField = form.querySelector('input[data-key="url"]');
+  const usernameField = form.querySelector('input[data-key="username"]');
+  const passwordField = form.querySelector('input[data-key="password"]');
+  if (!urlField || !usernameField || !passwordField) return;
+
+  // Wrap the URL field with a discover row. We keep the URL
+  // input itself unchanged so the existing submit handler still
+  // sees it; the discover button + result list live in a
+  // sibling container directly underneath.
+  const discoverRow = document.createElement("div");
+  discoverRow.className = "chat-integration-discover";
+  const discoverBtn = document.createElement("button");
+  discoverBtn.type = "button";
+  discoverBtn.className = "ghost";
+  discoverBtn.textContent = "Discover calendars";
+  const discoverStatus = document.createElement("span");
+  discoverStatus.className = "chat-integration-discover-status";
+  discoverStatus.setAttribute("role", "status");
+  discoverStatus.setAttribute("aria-live", "polite");
+  discoverRow.append(discoverBtn, discoverStatus);
+  const results = document.createElement("div");
+  results.className = "chat-integration-probe-results";
+  // Insert right after the URL field's wrapper label.
+  urlField.parentElement.insertAdjacentElement("afterend", discoverRow);
+  discoverRow.insertAdjacentElement("afterend", results);
+
+  discoverBtn.addEventListener("click", async () => {
+    // Disable the button while the probe is in flight so a
+    // double-click cannot fire two concurrent requests.
+    discoverBtn.disabled = true;
+    discoverStatus.textContent = "Probing…";
+    discoverStatus.dataset.state = "pending";
+    results.replaceChildren();
+    try {
+      // The probe needs the principal URL (where the user is
+      // authenticated), not the calendar collection URL. The
+      // `help` text on the URL field says "Use the 'Discover'
+      // button on this form to probe the server and pick the
+      // calendar you want" — the field is initially the
+      // principal URL the user pastes; once they pick a
+      // calendar we overwrite it with the collection href.
+      const calendars = await probeCalendars(
+        urlField.value.trim(),
+        usernameField.value,
+        passwordField.value,
+      );
+      discoverStatus.textContent = calendars.length
+        ? `Found ${calendars.length} calendar(s).`
+        : "No calendars found.";
+      discoverStatus.dataset.state = calendars.length ? "ok" : "empty";
+      renderProbeResults(results, calendars, urlField);
+    } catch (e) {
+      console.error("caldav probe failed:", e);
+      discoverStatus.textContent = `Probe failed: ${e.message}`;
+      discoverStatus.dataset.state = "error";
+    } finally {
+      discoverBtn.disabled = false;
+    }
+  });
+}
+
 function openEditor(svc) {
   const overlay = document.createElement("div");
   overlay.className = "chat-integration-overlay";
@@ -230,6 +476,19 @@ function openEditor(svc) {
   form.className = "chat-integration-form";
   for (const f of svc.fields) form.appendChild(buildFormField(f));
   modal.appendChild(form);
+
+  // Plan 1790963194218: the CalDAV `ServiceDef` ships a
+  // setup-only probe endpoint. The chat agents only know how
+  // to read / create against a *calendar collection* URL; the
+  // probe endpoint authenticates with the principal URL and
+  // lets the user pick the collection they want. This is a
+  // UX layer on top of the existing credential form — the
+  // auto-filled `url` is saved through the same `PUT
+  // /api/integrations/caldav/credentials` flow as any other
+  // integration.
+  if (svc.id === CALDAV_SERVICE_ID) {
+    attachCalDavDiscover(form, modal);
+  }
 
   const actions = document.createElement("div");
   actions.className = "chat-integration-actions";
