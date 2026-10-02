@@ -52,6 +52,13 @@ use crate::llm::sse::{
 /// `user_id` is the authenticated user id from `AuthUser`
 /// (SEV 2 fix). Threaded into the per-round `UserContext` so
 /// per-user agents (`read_document`) can scope their queries.
+///
+/// `max_auto_continues` is the maximum number of auto-continue
+/// rounds appended when the upstream ends with `finish_reason:
+/// "length"` and only reasoning (no visible answer) was emitted
+/// before the cap. Defaults to `1`; raising it past `1` is
+/// generally useless because the same reasoning-style truncation
+/// repeats on the continuation round.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_tool_loop(
     http: reqwest::Client,
@@ -60,6 +67,7 @@ pub(crate) async fn run_tool_loop(
     initial_body: Value,
     agents: Option<AgentRegistry>,
     max_rounds: u32,
+    max_auto_continues: u32,
     idle_timeout: Duration,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     first_stream: UpstreamByteStream,
@@ -69,6 +77,11 @@ pub(crate) async fn run_tool_loop(
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
     let mut round: u32 = 0;
+    // Number of "continue" rounds triggered because the upstream
+    // ran out of tokens while still emitting reasoning. Counted
+    // separately from `round` so the auto-continue path cannot
+    // accidentally eat into `max_rounds`.
+    let mut auto_continue_count: u32 = 0;
     let mut current_stream: Option<UpstreamByteStream> = Some(first_stream);
     info!("tool loop: starting (max_rounds={max_rounds})");
     loop {
@@ -140,6 +153,69 @@ pub(crate) async fn run_tool_loop(
         };
 
         if outcome.tool_calls.is_empty() {
+            // Reasoning-only truncation (plan R8 follow-up):
+            // reasoning-capable models (`qwen3.5` with reasoning
+            // on, DeepSeek-R1, …) stream `delta.reasoning` first
+            // and may hit the upstream's token cap before ever emitting
+            // a `delta.content` answer, leaving the user staring at
+            // an empty bubble. We detect the pattern
+            //   `finish_reason == "length"`
+            //       && assistant_text.is_empty()
+            //       && !reasoning_text.is_empty()
+            // and append a follow-up round that asks the model to
+            // continue. The continuation round runs without
+            // re-emitting the reasoning (most models repeat it
+            // verbatim if asked), so the user only sees the
+            // `delta.content` they were waiting for. Limited to
+            // `max_auto_continues` so a truly runaway model cannot
+            // burn the upstream's token budget.
+            let is_reasoning_truncation = outcome.finish_reason.as_deref()
+                    == Some("length")
+                && outcome.assistant_text.is_empty()
+                && !outcome.reasoning_text.is_empty();
+            if is_reasoning_truncation
+                && auto_continue_count < max_auto_continues
+            {
+                auto_continue_count += 1;
+                info!(
+                    auto_continue_count,
+                    reasoning_chars = outcome.reasoning_text.chars().count(),
+                    "tool loop: length-truncated with reasoning only; auto-continuing",
+                );
+                // Append the partial assistant turn + a "continue"
+                // user message. We deliberately do NOT preserve the
+                // reasoning text in the assistant message — most
+                // models repeat it verbatim if we do, doubling the
+                // token cost of the next round. The reasoning stays
+                // visible to the user via the `<details>` block in
+                // the chat UI; the LLM does not need it back.
+                let assistant_partial = json!({
+                    "role": "assistant",
+                    "content": "",
+                });
+                let continue_user = json!({
+                    "role": "user",
+                    "content":
+                        "Your previous response was cut off while you were still \
+                         reasoning (no answer reached the user). Please continue \
+                         from where you left off and produce the visible answer now. \
+                         Do not repeat the reasoning you already did; just finish the \
+                         response."
+                });
+                if let Some(messages) = body
+                    .as_object_mut()
+                    .and_then(|o| o.get_mut("messages"))
+                    .and_then(|m| m.as_array_mut())
+                {
+                    messages.push(assistant_partial);
+                    messages.push(continue_user);
+                }
+                // Force the next round to open a fresh upstream
+                // connection (the current_stream slot is None after
+                // the `take()` at the top of the loop body).
+                current_stream = None;
+                continue;
+            }
             // No tool calls — conversation is done. Always emit a
             // single `data: [DONE]` here because `drain_upstream_round`
             // swallows any upstream `[DONE]` (forwarding it would let

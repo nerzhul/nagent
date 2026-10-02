@@ -43,21 +43,21 @@ use axum::Router;
 // stt_core is no longer imported here — the phase-5.B test
 // builder creates the backend + worker pool internally.
 #[cfg(feature = "calculate-agent")]
-use nagent_server::agents::calculate_agent::CalculateAgent;
+use nagent_agents::agents::calculate_agent::CalculateAgent;
 #[cfg(feature = "datetime-agent")]
-use nagent_server::agents::datetime_agent::DateTimeAgent;
+use nagent_agents::agents::datetime_agent::DateTimeAgent;
 #[cfg(feature = "dictionary-agent")]
-use nagent_server::agents::dictionary_agent::DictionaryAgent;
+use nagent_agents::agents::dictionary_agent::DictionaryAgent;
 #[cfg(feature = "stock-agent")]
-use nagent_server::agents::stock_agent::StockAgent;
+use nagent_agents::agents::stock_agent::StockAgent;
 #[cfg(feature = "unit-convert-agent")]
-use nagent_server::agents::unit_convert_agent::UnitConvertAgent;
+use nagent_agents::agents::unit_convert_agent::UnitConvertAgent;
 #[cfg(feature = "weather-agent")]
-use nagent_server::agents::weather_agent::WeatherAgent;
+use nagent_agents::agents::weather_agent::WeatherAgent;
 #[cfg(feature = "web-agent")]
-use nagent_server::agents::web_fetch::WebFetchAgent;
+use nagent_agents::agents::web_fetch::WebFetchAgent;
 #[cfg(feature = "wikipedia-agent")]
-use nagent_server::agents::wikipedia_agent::WikipediaAgent;
+use nagent_agents::agents::wikipedia_agent::WikipediaAgent;
 use nagent_server::agents::ServiceRegistry;
 use nagent_server::agents::UserContext;
 use nagent_server::agents::{Agent, AgentRegistry};
@@ -244,7 +244,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_list_returns_web_fetch_when_feature_enabled() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -415,7 +415,7 @@ async fn web_fetch_adaptive_retry_caps_at_server_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_fetch_invoke_unknown_agent_404s() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -434,7 +434,7 @@ async fn web_fetch_invoke_unknown_agent_404s() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_fetch_invoke_invalid_args_400s() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -531,7 +531,7 @@ async fn tool_loop_dispatches_and_completes() {
     // Disable `web_fetch` from actually doing network: empty
     // allow-list + public blocked = the call to `example.com` will
     // be rejected by the sandbox. The proxy still emits the events.
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
     let llm_client = LlmClient::new(llm_cfg).unwrap();
@@ -656,7 +656,7 @@ async fn tool_loop_aborts_after_max_rounds() {
     let mut server_cfg = make_server_cfg(upstream_url);
     server_cfg.agents.llm_max_tool_rounds = 2;
     let cfg = Arc::new(server_cfg);
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
     let llm_client = LlmClient::new(llm_cfg).unwrap();
@@ -721,7 +721,7 @@ async fn datetime_agent_rejects_unknown_timezone() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn datetime_agent_invoke_endpoint_returns_400_for_bad_timezone() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -869,7 +869,7 @@ async fn stock_agent_parses_csv_with_loopback_fixture() {
     // public schema + name on the wired-up registry, so a
     // regression that renamed the tool surfaces here.
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     assert!(
         agents.get("get_stock_quote").is_some(),
         "registry must contain `get_stock_quote` when `stock-agent` feature is on"
@@ -914,7 +914,7 @@ async fn stock_agent_rejects_invalid_ticker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stock_agent_invoke_endpoint_returns_400_for_bad_ticker() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -956,7 +956,7 @@ async fn calculate_agent_invoke_endpoint_returns_400_for_invalid_chars() {
     // gate, the agent returns `InvalidArguments`, and the proxy
     // surfaces it as 400.
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1000,7 +1000,7 @@ async fn unit_convert_agent_rejects_cross_category() {
     // 500. The proxy relies on this distinction to tell the LLM
     // "your args are wrong" vs "the upstream broke".
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1147,7 +1147,7 @@ async fn wikipedia_agent_sends_descriptive_user_agent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wikipedia_agent_invoke_endpoint_returns_400_for_missing_title() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1247,7 +1247,7 @@ async fn dictionary_agent_parses_entries_fixture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dictionary_agent_invoke_endpoint_returns_400_for_missing_word() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1283,7 +1283,7 @@ async fn dictionary_agent_invoke_endpoint_returns_400_for_missing_word() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tools_schema_includes_every_registered_agent() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = AgentRegistry::from_config(&cfg.agents);
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
     let listed = agents.list();
     let names: Vec<&str> = listed.iter().map(|s| s.name.as_str()).collect();
     let schemas = agents.tools_schema();
@@ -1313,4 +1313,168 @@ async fn tools_schema_includes_every_registered_agent() {
         assert!(names.contains(&name));
         assert!(!s["function"]["description"].as_str().unwrap().is_empty());
     }
+}
+
+// ---- 11. reasoning-only truncation auto-continue (plan R8 follow-up) ----
+//
+// Regression guard for the "bubble stuck on reasoning" UX bug
+// (qwen3.5 with reasoning on, DeepSeek-R1, …). The upstream
+// emits a long stream of `delta.reasoning` chunks followed by
+// `finish_reason: "length"` with no `delta.content`. Without
+// auto-continue the client sees an empty bubble + an italic
+// "[reasoning only — no answer received]" note. With the
+// auto-continue heuristic in `run_tool_loop`, the proxy opens a
+// follow-up round asking the model to finish the answer and the
+// client receives the visible reply as a continuation of the
+// same SSE stream.
+
+/// Fake upstream modelling a `finish_reason: "length"` round
+/// followed by a successful continuation:
+///
+/// - Round 1: emits `delta.role: "assistant"` + a long
+///   `delta.reasoning` chain and ends with
+///   `finish_reason: "length"` (no content).
+/// - Round 2: emits the visible `delta.content` answer and ends
+///   with `finish_reason: "stop"`.
+///
+/// Round-2 captures the request body so the test can assert the
+/// auto-continue appended a "please continue" user message and the
+/// partial assistant turn.
+#[cfg(feature = "web-agent")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tool_loop_auto_continues_after_reasoning_truncation() {
+    use std::sync::Arc;
+    let captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let upstream_url = spawn_reasoning_truncation_upstream(captured.clone()).await;
+
+    let cfg = Arc::new(make_server_cfg(upstream_url));
+    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None);
+    let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
+    let llm_cfg = Arc::new(cfg.llm.clone());
+    let llm_client = LlmClient::new(llm_cfg).unwrap();
+    let state = make_app_state(cfg, Some(llm_client), Some(agents), sessions);
+    let url = start_test_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"answer me"}],"stream":true,"model":"qwen3.5"}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.text().await.unwrap();
+    // The continuation round must surface the visible answer to
+    // the client verbatim. If the auto-continue logic didn't
+    // fire, the body would only contain the reasoning chain
+    // and `[DONE]` without the answer.
+    assert!(
+        body.contains("Done."),
+        "client did not receive the visible answer (auto-continue did not fire?): {body}"
+    );
+
+    // Round-2 (the continuation) must have appended a user
+    // message asking the model to finish, plus an empty-content
+    // assistant partial turn so the upstream sees the
+    // conversation history correctly.
+    let captured = captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        2,
+        "expected 2 rounds (initial + auto-continue), got {}",
+        captured.len()
+    );
+    let messages = captured[1]["messages"]
+        .as_array()
+        .expect("round-2 messages array");
+    // The last message must be the auto-continue user prompt.
+    let last = messages.last().expect("messages array non-empty");
+    let last_role = last["role"].as_str().unwrap_or("");
+    let last_content = last["content"].as_str().unwrap_or("");
+    assert_eq!(
+        last_role, "user",
+        "last message must be the auto-continue user prompt"
+    );
+    assert!(
+        last_content.contains("continue") || last_content.contains("finish"),
+        "auto-continue user prompt must ask for a continuation (was `{last_content}`)"
+    );
+    // The message just before the last must be the empty-content
+    // assistant partial turn.
+    let second_last = &messages[messages.len() - 2];
+    let second_last_role = second_last["role"].as_str().unwrap_or("");
+    assert_eq!(
+        second_last_role, "assistant",
+        "second-to-last message must be the assistant partial turn"
+    );
+    let second_last_content = second_last["content"].as_str().unwrap_or("");
+    assert!(
+        second_last_content.is_empty(),
+        "assistant partial turn must carry no content (was `{second_last_content}`)"
+    );
+}
+
+/// Fake upstream that emits a reasoning-only truncation on round 1
+/// and a normal text reply on round 2.
+#[cfg(feature = "web-agent")]
+async fn spawn_reasoning_truncation_upstream(
+    captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+) -> String {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let captured = Arc::clone(&captured);
+            async move {
+                let parsed: serde_json::Value = serde_json::from_slice(&body)
+                    .unwrap_or_else(|_| serde_json::json!({"_raw": String::from_utf8_lossy(&body).to_string()}));
+                let round = captured.lock().await.len();
+                captured.lock().await.push(parsed);
+
+                let body = if round == 0 {
+                    // Round 1: reasoning-only truncation. The
+                    // chain below mirrors the user-reported payload
+                    // from qwen3.5 with reasoning on.
+                    let mut s = String::new();
+                    s.push_str("event: message\n");
+                    s.push_str(
+                        "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"Let me think.\"},\"finish_reason\":null}]}\n\n",
+                    );
+                    for token in [" user", " wants", " an", " answer", "."] {
+                        s.push_str("event: message\n");
+                        s.push_str(&format!(
+                            "data: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\"{token}\"}},\"finish_reason\":null}}]}}\n\n"
+                        ));
+                    }
+                    s.push_str(
+                        "event: message\ndata: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+                    );
+                    s.push_str("data: [DONE]\n\n");
+                    s
+                } else {
+                    // Round 2: visible answer after auto-continue.
+                    concat!(
+                        "event: message\n",
+                        "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Done.\"},\"finish_reason\":null}]}\n\n",
+                        "event: message\n",
+                        "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    ).to_string()
+                };
+
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/event-stream"),
+                    )],
+                    body,
+                )
+            }
+        }),
+    );
+    spawn_router(app).await
 }

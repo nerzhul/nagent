@@ -99,6 +99,20 @@ pub(crate) async fn drain_upstream_round(
 ) -> Result<RoundOutcome, std::io::Error> {
     let mut acc = ToolCallAccumulator::new();
     let mut assistant_text = String::new();
+    // Reasoning-text accumulator (plan R8 follow-up). Reasoning models
+    // like `qwen3.5` (with reasoning on) and DeepSeek-R1 stream
+    // their internal monologue into `delta.reasoning` instead of
+    // `delta.content`. We surface both pieces of state on
+    // [`RoundOutcome`] so the tool loop can detect the
+    // "reasoning exhausted the token budget before any answer was
+    // produced" pattern (finish_reason = "length" + empty content +
+    // non-empty reasoning) and auto-continue.
+    let mut reasoning_text = String::new();
+    // `finish_reason` of the round's last chunk. The OpenAI spec
+    // emits it on the final SSE frame of the round ("stop",
+    // "tool_calls", "length", or "content_filter"). Empty until the
+    // final frame of a normal round.
+    let mut finish_reason: Option<String> = None;
 
     let mut sse = SseStream::new(idle_timeout, upstream_bytes);
     while let Some(event) = sse.next_event().await? {
@@ -129,6 +143,8 @@ pub(crate) async fn drain_upstream_round(
             // next iteration.
             return Ok(RoundOutcome {
                 assistant_text,
+                reasoning_text,
+                finish_reason,
                 tool_calls: acc.into_sorted(),
             });
         }
@@ -142,8 +158,20 @@ pub(crate) async fn drain_upstream_round(
                     if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
                         assistant_text.push_str(text);
                     }
+                    if let Some(text) = delta.get("reasoning").and_then(|v| v.as_str()) {
+                        reasoning_text.push_str(text);
+                    }
                     if let Some(tcs) = delta.get("tool_calls") {
                         acc.apply_delta(tcs);
+                    }
+                }
+                // `finish_reason` lives on the choice (not the delta)
+                // because it describes the round, not the token.
+                if finish_reason.is_none() {
+                    if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                        if !fr.is_empty() {
+                            finish_reason = Some(fr.to_string());
+                        }
                     }
                 }
             }
@@ -152,12 +180,21 @@ pub(crate) async fn drain_upstream_round(
 
     Ok(RoundOutcome {
         assistant_text,
+        reasoning_text,
+        finish_reason,
         tool_calls: acc.into_sorted(),
     })
 }
 
 pub(crate) struct RoundOutcome {
     pub(crate) assistant_text: String,
+    /// Accumulated `delta.reasoning` from the round. Empty for models
+    /// that do not emit a reasoning field; non-empty for qwen3.5
+    /// (with reasoning on) and DeepSeek-R1.
+    pub(crate) reasoning_text: String,
+    /// `finish_reason` reported on the round's last chunk.
+    /// `Some("length")` is the auto-continue trigger.
+    pub(crate) finish_reason: Option<String>,
     pub(crate) tool_calls: Vec<PendingToolCall>,
 }
 

@@ -52,6 +52,16 @@ pub struct AgentConfig {
     /// docs alone (without a registered document store) does not
     /// silently drop the agent.
     pub read_document_enabled: bool,
+    /// Maximum number of auto-continue rounds appended when the
+    /// upstream emits `finish_reason: "length"` while still in the
+    /// reasoning phase of a reasoning-capable model (qwen3.5 with
+    /// reasoning on, DeepSeek-R1, …). Each round asks the model
+    /// to produce the visible answer rather than re-running the
+    /// reasoning that already filled the token budget. Set to `0`
+    /// to disable the heuristic; raising past `1` is generally
+    /// useless because the same reasoning-style truncation
+    /// repeats on the continuation round.
+    pub llm_max_auto_continues: u32,
 }
 
 impl Default for AgentConfig {
@@ -67,6 +77,7 @@ impl Default for AgentConfig {
             stock: StockConfig::default(),
             read_document: ReadDocumentConfig::default(),
             read_document_enabled: false,
+            llm_max_auto_continues: 1,
         }
     }
 }
@@ -89,6 +100,13 @@ impl AgentConfig {
                 "LLM_MAX_TOOL_ROUNDS",
             )?
             .clamp(1, 32),
+            llm_max_auto_continues: resolve_primitive(
+                env_opt("LLM_MAX_AUTO_CONTINUES").as_deref(),
+                toml.llm_max_auto_continues,
+                defaults.llm_max_auto_continues,
+                "LLM_MAX_AUTO_CONTINUES",
+            )?
+            .clamp(0, 4),
             web_fetch: WebFetchConfig::from_env_with_toml(toml.web_fetch.as_ref())?,
             weather: WeatherConfig::from_env_with_toml(toml.get_weather.as_ref())?,
             unit_convert: UnitConvertConfig::from_env_with_toml(toml.unit_convert.as_ref())?,

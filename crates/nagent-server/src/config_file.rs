@@ -242,6 +242,10 @@ pub struct TomlLlmConfig {
 pub struct TomlAgentConfig {
     pub enabled: Option<bool>,
     pub llm_max_tool_rounds: Option<u32>,
+    /// Max number of auto-continue rounds when the upstream
+    /// reasoning model hits `finish_reason: "length"` mid-reasoning
+    /// (default `1`; set to `0` to disable).
+    pub llm_max_auto_continues: Option<u32>,
     #[serde(default)]
     pub web_fetch: Option<TomlWebFetchConfig>,
     #[serde(default)]
@@ -730,6 +734,7 @@ fn merge_toml_agents(
         (Some(e), Some(l)) => Some(TomlAgentConfig {
             enabled: l.enabled.or(e.enabled),
             llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
+            llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
             web_fetch: merge_toml_web_fetch(e.web_fetch.as_ref(), l.web_fetch.as_ref()),
             get_weather: merge_toml_weather(e.get_weather.as_ref(), l.get_weather.as_ref()),
             unit_convert: merge_toml_unit_convert(e.unit_convert.as_ref(), l.unit_convert.as_ref()),
