@@ -41,7 +41,7 @@
 //! `DESCRIPTION`, `LOCATION`, `RRULE`.
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use url::Url;
 
@@ -863,12 +863,40 @@ fn resolve_href(href: &str, principal: &Url) -> String {
 // §3.1 and the parameter syntax of §3.2 well enough for the
 // five properties we care about.
 
-/// Unfold a CRLF + space/tab folded content line per RFC 5545
-/// §3.1. The input is a full iCalendar body; the output has
-/// the continuation sequences collapsed.
+/// Unfold a folded iCalendar body per RFC 5545 §3.1.
+///
+/// RFC 5545 §3.1 mandates CRLF as the line terminator and
+/// treats a CRLF followed by a single space (or tab) as a
+/// continuation of the previous line (the leading whitespace
+/// is stripped). The output has the continuation sequences
+/// collapsed so the rest of the parser can treat one logical
+/// line as one entry.
+///
+/// v1 must also tolerate LF-only input: real-world CalDAV
+/// servers (Google Calendar subscription exports, some
+/// Nextcloud / Radicale configurations) emit `\n` instead of
+/// the canonical `\r\n`. Splitting on `\r\n` alone would
+/// leave folded continuations as separate lines, which
+/// `split_blocks` would then feed to `split_property` —
+/// causing a panic when a continuation line has no `:`. We
+/// split on `\n` and strip a trailing `\r` so both line
+/// endings are normalised.
+///
+/// v1 must additionally tolerate the XML-entity-encoded
+/// variants Nextcloud / SabreDAV emit when wrapping
+/// iCalendar content inside `<C:calendar-data>…</C:calendar-data>`:
+/// the LF byte is left as-is, but the CR byte (which is not
+/// normalised by XML 1.0 element-content parsing) is
+/// encoded as `&#13;` / `&#xD;`. Without stripping those
+/// 5- or 6-character suffixes, each line ends with the
+/// literal entity and `split_blocks` parses the line kind
+/// as `VEVENT&#13;` instead of `VEVENT`, so the
+/// `block.kind != "VEVENT"` check downstream filters every
+/// `VEVENT` block out and the agent returns zero events.
 fn unfold(ical: &str) -> String {
     let mut out = String::with_capacity(ical.len());
-    for line in ical.split("\r\n") {
+    for raw_line in ical.split('\n') {
+        let line = strip_line_terminator_artifacts(raw_line);
         if let Some(rest) = line.strip_prefix(' ').or_else(|| line.strip_prefix('\t')) {
             // Continuation: drop the leading whitespace and
             // append without a separator.
@@ -881,6 +909,25 @@ fn unfold(ical: &str) -> String {
         }
     }
     out
+}
+
+/// Strip every line-terminator artefact a real-world CalDAV
+/// server may emit on a wrapped iCalendar line. Loops because
+/// the artefacts can appear in any combination (e.g. the
+/// server sends `&#13;\r`).
+fn strip_line_terminator_artifacts(line: &str) -> &str {
+    let mut current = line;
+    loop {
+        let next = current
+            .strip_suffix('\r')
+            .or_else(|| current.strip_suffix("&#13;"))
+            .or_else(|| current.strip_suffix("&#xD;"))
+            .or_else(|| current.strip_suffix("&#xd;"));
+        match next {
+            Some(s) => current = s,
+            None => return current,
+        }
+    }
 }
 
 /// Parse the first `VEVENT` in `ical` and return it as an
@@ -901,12 +948,12 @@ pub fn parse_vevent(ical: &str, href: &str) -> Result<Event, AgentError> {
         let mut description: Option<String> = None;
         let mut location: Option<String> = None;
         let mut rrule: Option<String> = None;
-        for (name, _params, value) in &block.properties {
+        for (name, params, value) in &block.properties {
             match name.as_str() {
                 "UID" => uid = Some(value.clone()),
                 "SUMMARY" => summary = ical_unescape(value),
-                "DTSTART" => dt_start = parse_dt(value),
-                "DTEND" => dt_end = parse_dt(value),
+                "DTSTART" => dt_start = parse_dt(value, params),
+                "DTEND" => dt_end = parse_dt(value, params),
                 "DURATION" => duration = parse_duration(value),
                 "DESCRIPTION" => description = Some(ical_unescape(value)),
                 "LOCATION" => location = Some(ical_unescape(value)),
@@ -952,16 +999,66 @@ fn ical_unescape(s: &str) -> String {
 }
 
 /// Parse an iCalendar `DTSTART` / `DTEND` value. Handles
-/// - `YYYYMMDDTHHMMSSZ` (UTC)
-/// - `YYYYMMDDTHHMMSS` (floating; assumed UTC for v1)
-/// - `YYYYMMDD` (date-only)
-fn parse_dt(raw: &str) -> Option<DateTime<Utc>> {
+/// - `YYYYMMDDTHHMMSSZ` (UTC) — RFC 5545 §3.3.5 date-time UTC
+/// - `YYYYMMDDTHHMMSS` (floating; assumed UTC for v1) —
+///   RFC 5545 §3.3.5 date-time with no `Z` and no `TZID`
+/// - `YYYYMMDD` (date-only) — RFC 5545 §3.3.4 date
+/// - `YYYYMMDDTHHMMSS` paired with a `TZID` parameter
+///   (RFC 5545 §3.2.19). v1 resolves the timezone via
+///   `chrono-tz` against the IANA tz database; an unknown
+///   `TZID` is logged and ignored (the event is then silently
+///   dropped by the caller because it has no `dt_start`).
+///
+/// `params` are the iCalendar property parameters extracted
+/// by [`split_property`] for the property line being parsed
+/// (e.g. `[("TZID", "Europe/Paris")]`). An empty / missing
+/// `TZID` parameter falls through to the bare-`raw` paths.
+fn parse_dt(raw: &str, params: &[(String, String)]) -> Option<DateTime<Utc>> {
+    // TZID-bound date-time (RFC 5545 §3.2.19 + §3.3.5). The
+    // value is a floating local time in the named IANA
+    // timezone; we resolve it to UTC via chrono-tz so the
+    // LLM-facing JSON exposes a single canonical timestamp.
+    if let Some((_, tzid)) = params.iter().find(|(k, _)| k == "TZID") {
+        if let Ok(tz) = tzid.parse::<chrono_tz::Tz>() {
+            // Floating date-time first (no Z, no offset).
+            let formats = ["%Y%m%dT%H%M%S", "%Y%m%dT%H%M"];
+            for fmt in formats {
+                if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(raw, fmt) {
+                    if let Some(local) = tz.from_local_datetime(&naive).earliest() {
+                        return Some(local.with_timezone(&Utc));
+                    }
+                }
+            }
+            // Date-only fallback (RFC 5545 §3.3.4 with TZID,
+            // uncommon but legal for all-day events).
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(raw, "%Y%m%d") {
+                if let Some(naive) = date.and_hms_opt(0, 0, 0) {
+                    if let Some(local) = tz.from_local_datetime(&naive).earliest() {
+                        return Some(local.with_timezone(&Utc));
+                    }
+                }
+            }
+            // Unknown local time (DST gap): surface as None so
+            // the caller can decide. We deliberately do NOT
+            // fall back to interpreting the value as UTC —
+            // that would silently lie about the event's
+            // absolute moment.
+        }
+        // Unknown TZID: drop the event (return None).
+        // The caller logs the offending TZID so the operator
+        // can spot a misconfigured server.
+        return None;
+    }
+    // Bare UTC date-time.
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%SZ") {
         return Some(dt.and_utc());
     }
+    // Floating date-time — v1 interprets as UTC, matching the
+    // documented limitation in `Event::dt_start`.
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%S") {
         return Some(dt.and_utc());
     }
+    // Date-only.
     if let Ok(d) = chrono::NaiveDate::parse_from_str(raw, "%Y%m%d") {
         return d.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc());
     }
@@ -1054,10 +1151,19 @@ fn split_blocks(body: &str) -> Vec<Block> {
 /// `name` is uppercased; `params` is `[(KEY, VALUE), …]` in
 /// insertion order; `value` is the raw text after the final
 /// `:`. Quoted parameter values are unquoted.
+///
+/// Defensive: a line without `:` (a stray continuation
+/// fragment, a malformed property, or any other edge case the
+/// unfolder did not recognise) yields an empty `name` and an
+/// empty `value` rather than panicking on an out-of-bounds
+/// slice index. The rest of the parser drops empty entries
+/// silently, which matches the documented "permissive"
+/// stance.
 fn split_property(line: &str) -> (String, Vec<(String, String)>, String) {
-    let colon = line.find(':').unwrap_or(line.len());
-    let head = &line[..colon];
-    let value = line[colon + 1..].to_string();
+    let (head, value) = match line.find(':') {
+        Some(c) => (&line[..c], line[c + 1..].to_string()),
+        None => (line, String::new()),
+    };
     let mut parts = head.split(';');
     let name = parts.next().unwrap_or("").to_ascii_uppercase();
     let mut params = Vec::new();
@@ -1152,11 +1258,20 @@ pub fn extract_events_from_multistatus(
             Some(end) => end,
             None => break,
         };
-        let chunk_lower = &lower[rel_start..abs_end];
-        let href = extract_inner_from_lower(chunk_lower, "href")
+        // Tag matching happens on the lowercased buffer (cheap
+        // and case-insensitive), but content extraction must
+        // slice the **original-case** chunk — iCalendar property
+        // names (`BEGIN`, `END`, `UID`, …) and the embedded
+        // event payloads are case-sensitive in `split_blocks`
+        // and `split_property`, so a lowercased iCalendar body
+        // would silently produce zero VEVENT blocks. Slicing
+        // from `xml` with the same byte offsets is safe because
+        // `to_ascii_lowercase` preserves byte length.
+        let chunk = &xml[rel_start..abs_end];
+        let href = extract_inner(chunk, "href")
             .map(|s| resolve_href(&s, calendar_url))
             .unwrap_or_default();
-        if let Some(ical) = extract_inner_from_lower(chunk_lower, "calendar-data") {
+        if let Some(ical) = extract_inner(chunk, "calendar-data") {
             // The server may return multiple VEVENTs in one
             // `calendar-data` blob; parse the whole VCALENDAR
             // and walk the components.
@@ -1172,12 +1287,12 @@ pub fn extract_events_from_multistatus(
                 let mut description: Option<String> = None;
                 let mut location: Option<String> = None;
                 let mut rrule: Option<String> = None;
-                for (name, _params, value) in &block.properties {
+                for (name, params, value) in &block.properties {
                     match name.as_str() {
                         "UID" => uid = Some(value.clone()),
                         "SUMMARY" => summary = ical_unescape(value),
-                        "DTSTART" => dt_start = parse_dt(value),
-                        "DTEND" => dt_end = parse_dt(value),
+                        "DTSTART" => dt_start = parse_dt(value, params),
+                        "DTEND" => dt_end = parse_dt(value, params),
                         "DURATION" => duration = parse_duration(value),
                         "DESCRIPTION" => description = Some(ical_unescape(value)),
                         "LOCATION" => location = Some(ical_unescape(value)),
@@ -1203,19 +1318,6 @@ pub fn extract_events_from_multistatus(
         cursor = abs_end;
     }
     Ok(events)
-}
-
-/// Variant of [`extract_inner`] that takes an
-/// already-lowercased string.
-fn extract_inner_from_lower(lower: &str, name: &str) -> Option<String> {
-    let lower_bytes = lower.as_bytes();
-    let open_pos = find_open_tag(lower, 0, name)?;
-    let after_open = lower_bytes[open_pos..]
-        .iter()
-        .position(|&b| b == b'>')
-        .map(|p| open_pos + p + 1)?;
-    let end = find_close_tag_in_lower(lower, open_pos, name)?;
-    Some(lower[after_open..end].trim().to_string())
 }
 
 // ===========================================================================
@@ -1579,6 +1681,49 @@ mod tests {
         assert_eq!(end.to_rfc3339(), "2026-02-01T15:30:00+00:00");
     }
 
+    /// Regression: Google Calendar subscription exports and most
+    /// Exchange / iCloud calendars emit
+    /// `DTSTART;TZID=Region/City:YYYYMMDDTHHMMSS` (RFC 5545
+    /// §3.2.19 + §3.3.5). The pre-fix `parse_dt` only handled
+    /// bare UTC and floating forms, so every such event was
+    /// silently dropped — the agent returned an empty list
+    /// while events existed on the server. v1 resolves the
+    /// TZID against the IANA `chrono-tz` database and emits
+    /// the corresponding UTC instant in the LLM-facing JSON.
+    #[test]
+    fn parse_vevent_handles_tzid_bound_dtstart() {
+        // Paris in February is UTC+1, so 14:00 local == 13:00 UTC.
+        let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:tzid-1\r\nDTSTAMP:20260101T120000Z\r\nDTSTART;TZID=Europe/Paris:20260201T140000\r\nDTEND;TZID=Europe/Paris:20260201T150000\r\nSUMMARY:Réunion Paris\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let event = parse_vevent(ical, "x").expect("parse");
+        assert_eq!(event.uid, "tzid-1");
+        assert_eq!(event.summary, "Réunion Paris");
+        assert_eq!(
+            event.dt_start.to_rfc3339(),
+            "2026-02-01T13:00:00+00:00",
+            "Europe/Paris (UTC+1 in February) — 14:00 local must be 13:00 UTC"
+        );
+        assert_eq!(
+            event.dt_end.expect("dtend").to_rfc3339(),
+            "2026-02-01T14:00:00+00:00"
+        );
+    }
+
+    /// Regression: a TZID the IANA database does not know
+    /// (misconfigured server, custom VTIMEZONE the client does
+    /// not parse) must not panic. The event is silently
+    /// dropped so the agent does not surface a fabricated
+    /// timestamp — the operator can spot the bad TZID in the
+    /// structured logs.
+    #[test]
+    fn parse_vevent_drops_unknown_tzid_without_panic() {
+        let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:bad-tzid\r\nDTSTAMP:20260101T120000Z\r\nDTSTART;TZID=Not/A/Real_Zone:20260201T140000\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let result = parse_vevent(ical, "x");
+        assert!(
+            result.is_err(),
+            "unknown TZID must cause the VEVENT to be reported as missing DTSTART; got: {result:?}"
+        );
+    }
+
     #[test]
     fn parse_vevent_handles_unfolding() {
         // RFC 5545 §3.1 line folding: a CR-LF followed by a
@@ -1589,11 +1734,255 @@ mod tests {
         assert_eq!(event.summary, "long title continues here");
     }
 
+    /// Regression: real-world CalDAV servers (Google Calendar
+    /// subscription exports, some Nextcloud / Radicale
+    /// configurations) emit `\n` instead of the canonical
+    /// `\r\n` line terminator. The unfolder must still collapse
+    /// folded continuations — without the fix, the LF-only
+    /// input flowed straight into `split_blocks`, which
+    /// dispatched a continuation line starting with a single
+    /// space to `split_property`; that line had no `:`, so the
+    /// slice index panicked at runtime.
+    #[test]
+    fn parse_vevent_handles_lf_only_line_endings_with_folded_continuation() {
+        let ical =
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:lf-1\nDTSTAMP:20260101T120000Z\nDTSTART:20260201T140000Z\nSUMMARY:long\n  title continues here\nEND:VEVENT\nEND:VCALENDAR\n";
+        let event = parse_vevent(ical, "x").expect("parse");
+        assert_eq!(event.summary, "long title continues here");
+    }
+
+    /// Regression: Nextcloud / SabreDAV wrap the iCalendar
+    /// payload inside `<C:calendar-data>…</C:calendar-data>`,
+    /// leaving the LF byte as-is but encoding the CR byte as
+    /// the XML numeric character reference `&#13;` (XML 1.0
+    /// element-content parsing does not normalise bare CR).
+    /// Each physical line of the iCalendar body therefore
+    /// ends with the literal 5-character string `&#13;`. The
+    /// pre-fix `unfold` only stripped a trailing `\r`, so
+    /// `split_blocks` saw `BEGIN:VEVENT&#13;`, parsed the
+    /// block kind as `VEVENT&#13;`, and the
+    /// `block.kind != "VEVENT"` check downstream filtered
+    /// every event out (`vevent_blocks=0` in production logs).
+    #[test]
+    fn parse_vevent_strips_xml_cr_entity_after_each_line() {
+        // The exact shape Nextcloud 33 emits: every iCalendar
+        // line ends with `&#13;`, lines are LF-separated.
+        let ical = "BEGIN:VCALENDAR&#13;\nVERSION:2.0&#13;\nPRODID:-//Nextcloud//EN&#13;\nBEGIN:VEVENT&#13;\nUID:cr-entity-1&#13;\nDTSTAMP:20260101T120000Z&#13;\nDTSTART:20260201T140000Z&#13;\nDTEND:20260201T150000Z&#13;\nSUMMARY:RDV Nextcloud&#13;\nEND:VEVENT&#13;\nEND:VCALENDAR&#13;\n";
+        let event = parse_vevent(ical, "x").expect("parse");
+        assert_eq!(event.uid, "cr-entity-1");
+        assert_eq!(event.summary, "RDV Nextcloud");
+    }
+
+    /// Same regression, hex variant (`&#xD;`) and mixed
+    /// artefacts: one line ends with `&#xD;\r`, the next with
+    /// `&#13;` alone. The `strip_line_terminator_artifacts`
+    /// helper loops until no suffix matches.
+    #[test]
+    fn parse_vevent_strips_mixed_cr_entity_and_crlf() {
+        let ical = "BEGIN:VCALENDAR&#xD;\nBEGIN:VEVENT&#xD;\r\nUID:mix-1&#xD;\nDTSTAMP:20260101T120000Z&#xD;\nDTSTART:20260201T140000Z&#xD;\nSUMMARY:mix&#13;\nEND:VEVENT&#xD;\nEND:VCALENDAR&#13;\n";
+        let event = parse_vevent(ical, "x").expect("parse");
+        assert_eq!(event.uid, "mix-1");
+        assert_eq!(event.summary, "mix");
+    }
+
+    /// Regression: the exact panic observed in production —
+    /// a `DESCRIPTION` whose value is a long URL that RFC 5545
+    /// §3.1 folds across two LF-terminated lines. The
+    /// continuation line (" b.fr/...") carries no `:`, so
+    /// before the fix the parser panicked inside
+    /// `split_property` (`byte index N is out of bounds`).
+    /// The fix merges the continuation back into the value so
+    /// the property is recovered as one string.
+    #[test]
+    fn parse_vevent_recovers_lf_folded_description_with_url() {
+        // Reproduces the exact crash shape from the field
+        // log: a Google Calendar subscription event with a
+        // DESCRIPTION value that RFC 5545 §3.1 breaks across
+        // two LF terminators. The second line starts with a
+        // single space (RFC 5545 §3.1 continuation marker)
+        // and carries the rest of the URL plus the literal
+        // `\n` escape (iCalendar TEXT escape for a newline
+        // within the value) followed by "Via Doctolib".
+        let ical = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:fold-url\nDTSTAMP:20260101T120000Z\nDTSTART:20260201T140000Z\nSUMMARY:RDV\nDESCRIPTION:https://example.docs.b.fr/guest_access/89M44Deg?anonymous_origin=\n ics_attachment\\n\\nVia Doctolib&#13;\nEND:VEVENT\nEND:VCALENDAR\n";
+        let event = parse_vevent(ical, "x").expect("parse");
+        let desc = event.description.expect("description present");
+        // The URL and the "Via Doctolib" label must round-trip
+        // into a single description, joined by the
+        // continuation rule (one leading space stripped per
+        // RFC 5545 §3.1).
+        assert!(
+            desc.contains("example.docs.b.fr/guest_access/89M44Deg"),
+            "description should contain the folded URL; got: {desc}"
+        );
+        assert!(
+            desc.contains("Via Doctolib"),
+            "description should contain the trailing label; got: {desc}"
+        );
+    }
+
+    /// Defensive guard for `split_property`: a line with no
+    /// `:` (a stray continuation fragment that survived the
+    /// unfolder, a malformed property, or any other edge
+    /// case) must not panic on `line[colon + 1..]`. The
+    /// function degrades gracefully — the line is treated as
+    /// a pseudo-property with an empty value, which the
+    /// downstream `match name.as_str()` drops because the
+    /// name does not match any known iCalendar property.
+    #[test]
+    fn split_property_does_not_panic_on_lines_without_colon() {
+        // No `:` at all — the regression path that used to
+        // panic with `byte index N is out of bounds`. The
+        // defensive branch uppercases the whole line as a
+        // pseudo-name and yields an empty value, which the
+        // caller then ignores.
+        let (name, _params, value) = split_property("orphan continuation line");
+        assert_eq!(name, "ORPHAN CONTINUATION LINE");
+        assert_eq!(value, "");
+        // Empty line: head is empty, value is empty.
+        let (name, _params, value) = split_property("");
+        assert_eq!(name, "");
+        assert_eq!(value, "");
+        // A line that is only whitespace is also benign.
+        let (name, _params, value) = split_property("   ");
+        assert_eq!(name, "   ");
+        assert_eq!(value, "");
+    }
+
     #[test]
     fn parse_vevent_missing_uid_is_error() {
         let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDTSTAMP:20260101T120000Z\r\nDTSTART:20260201T140000Z\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let err = parse_vevent(ical, "x").unwrap_err();
         assert!(matches!(err, AgentError::AgentFailed(_)));
+    }
+
+    /// Regression: a realistic Nextcloud / SabreDAV
+    /// `REPORT calendar-query` multistatus body must yield
+    /// one `VEVENT` per `<D:response>`, with the iCalendar
+    /// payload extracted **case-preserved**. The earlier
+    /// implementation sliced the lowercased XML chunk, which
+    /// silently produced an empty list because `split_blocks`
+    /// matches `BEGIN:` / `END:` case-sensitively.
+    #[test]
+    fn extract_events_from_multistatus_parses_nextcloud_response() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:response>
+    <D:href>/remote.php/dav/calendars/alice/personal/abc-123.ics</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"abc123"</D:getetag>
+        <C:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Nextcloud//EN
+BEGIN:VEVENT
+UID:abc-123
+DTSTAMP:20260101T120000Z
+DTSTART:20261010T100000Z
+DTEND:20261010T110000Z
+SUMMARY:Réunion d'équipe
+LOCATION:Salle A
+DESCRIPTION:Point hebdo
+END:VEVENT
+END:VCALENDAR
+</C:calendar-data>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>
+"#;
+        let calendar_url = Url::parse(PRINCIPAL).unwrap();
+        let events = extract_events_from_multistatus(xml, &calendar_url).unwrap();
+        assert_eq!(events.len(), 1, "one VEVENT expected; got: {events:?}");
+        let event = &events[0];
+        assert_eq!(event.uid, "abc-123");
+        // The summary carries accented characters; the test
+        // guards against any accidental lowercasing of the
+        // extracted iCalendar payload (the regression).
+        assert_eq!(event.summary, "Réunion d'équipe");
+        assert_eq!(event.location.as_deref(), Some("Salle A"));
+        assert_eq!(event.description.as_deref(), Some("Point hebdo"));
+        assert!(event.dt_start.to_rfc3339().contains("2026-10-10T10:00:00"));
+        assert_eq!(
+            event.dt_end.expect("dtend").to_rfc3339(),
+            "2026-10-10T11:00:00+00:00"
+        );
+        // The href is absolute, resolved against the principal
+        // (the calendar collection the user picked during
+        // setup).
+        assert!(event.href.ends_with("/abc-123.ics"), "href: {}", event.href);
+    }
+
+    /// Regression: a single `<C:calendar-data>` blob that
+    /// carries several `VEVENT` blocks (the server expanded a
+    /// recurring event via `<C:expand>`) must yield one
+    /// `Event` per block. The parser walks the whole
+    /// `VCALENDAR` and surfaces every `VEVENT` sibling.
+    #[test]
+    fn extract_events_from_multistatus_handles_expanded_recurrence() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:response>
+    <D:href>/calendars/alice/work/recur.ics</D:href>
+    <D:propstat>
+      <D:prop>
+        <C:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//SabreDAV//EN
+BEGIN:VEVENT
+UID:recur-1
+RECURRENCE-ID:20261010T100000Z
+DTSTAMP:20260101T120000Z
+DTSTART:20261010T100000Z
+DTEND:20261010T110000Z
+SUMMARY:Stand-up (overridden)
+END:VEVENT
+BEGIN:VEVENT
+UID:recur-1
+RECURRENCE-ID:20261011T100000Z
+DTSTAMP:20260101T120000Z
+DTSTART:20261011T100000Z
+DTEND:20261011T110000Z
+SUMMARY:Stand-up
+END:VEVENT
+END:VCALENDAR
+</C:calendar-data>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>
+"#;
+        let calendar_url = Url::parse(PRINCIPAL).unwrap();
+        let events = extract_events_from_multistatus(xml, &calendar_url).unwrap();
+        assert_eq!(events.len(), 2, "two VEVENTs expected; got: {events:?}");
+        assert_eq!(events[0].uid, "recur-1");
+        assert_eq!(events[0].summary, "Stand-up (overridden)");
+        assert_eq!(events[1].uid, "recur-1");
+        assert_eq!(events[1].summary, "Stand-up");
+        assert!(events[1].dt_start.to_rfc3339().contains("2026-10-11"));
+    }
+
+    /// Negative path: a multistatus with **no** `<C:calendar-data>`
+    /// (the server answered "no matching events") must yield
+    /// an empty `Vec`, not an error. The agent surfaces an
+    /// empty list to the LLM, which is the correct semantic.
+    #[test]
+    fn extract_events_from_multistatus_empty_response_is_ok() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:response>
+    <D:href>/calendars/alice/work/missing.ics</D:href>
+    <D:propstat>
+      <D:prop/>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>
+"#;
+        let calendar_url = Url::parse(PRINCIPAL).unwrap();
+        let events = extract_events_from_multistatus(xml, &calendar_url).unwrap();
+        assert!(events.is_empty());
     }
 
     #[test]

@@ -21,7 +21,7 @@ wikipedia-agent = []
 dictionary-agent = []
 web-agent = []
 read-document-agent = []
-caldav-agent = ["dep:icalendar"]
+caldav-agent = ["dep:icalendar", "dep:chrono-tz"]
 x-agent = []
 # Convenience meta-feature that turns on every agent. The Makefile
 # targets list it once so an operator does not need to enumerate
