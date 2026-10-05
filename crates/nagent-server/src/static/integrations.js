@@ -321,7 +321,14 @@ function buildFormField(field) {
   // `filled` boolean, so we leave the field empty.
   input.autocomplete = "off";
   input.spellcheck = false;
-  wrap.appendChild(input);
+  // The input lives inside a flex group so a service that
+  // exposes a probe affordance (currently CalDAV) can place a
+  // button next to the URL input without changing the markup
+  // contract for the other services.
+  const group = document.createElement("div");
+  group.className = "chat-integration-input-group";
+  group.appendChild(input);
+  wrap.appendChild(group);
   if (field.help) {
     const help = document.createElement("small");
     help.textContent = field.help;
@@ -341,6 +348,15 @@ function buildFormField(field) {
 // ---------------------------------------------------------------------------
 const CALDAV_SERVICE_ID = "caldav";
 const PROBE_PATH = "/api/integrations/caldav/probe-calendars";
+
+// One-line subtitle per service. Sets the user's mental
+// model before they read the field labels. Falls back to a
+// generic "encrypted at rest" line so future ServiceDefs
+// don't render a bare title.
+const MODAL_SUBTITLES = {
+  caldav:
+    "Connect your personal calendar (Nextcloud, Radicale, Fastmail, iCloud, …). Read + add events only — edit/delete are out of scope for v1.",
+};
 
 async function probeCalendars(principalUrl, username, password) {
   const resp = await fetch(PROBE_PATH, {
@@ -426,26 +442,32 @@ function attachCalDavDiscover(form, modal) {
   const passwordField = form.querySelector('input[data-key="password"]');
   if (!urlField || !usernameField || !passwordField) return;
 
-  // Wrap the URL field with a discover row. We keep the URL
-  // input itself unchanged so the existing submit handler still
-  // sees it; the discover button + result list live in a
-  // sibling container directly underneath.
-  const discoverRow = document.createElement("div");
-  discoverRow.className = "chat-integration-discover";
+  // The URL field is now wrapped in a `.chat-integration-input-group`
+  // by `buildFormField`; we drop the discover button into that
+  // group so the layout reads as a single "URL + action" row.
+  const urlGroup = urlField.parentElement;
+  if (!urlGroup || !urlGroup.classList.contains("chat-integration-input-group")) {
+    return;
+  }
   const discoverBtn = document.createElement("button");
   discoverBtn.type = "button";
   discoverBtn.className = "ghost";
-  discoverBtn.textContent = "Discover calendars";
+  discoverBtn.textContent = "Discover";
+  urlGroup.appendChild(discoverBtn);
+
+  // Status + results live in a container that we insert right
+  // after the URL field group. Keeps the affordance visually
+  // attached to the URL row without crowding the input.
   const discoverStatus = document.createElement("span");
   discoverStatus.className = "chat-integration-discover-status";
   discoverStatus.setAttribute("role", "status");
   discoverStatus.setAttribute("aria-live", "polite");
-  discoverRow.append(discoverBtn, discoverStatus);
   const results = document.createElement("div");
   results.className = "chat-integration-probe-results";
-  // Insert right after the URL field's wrapper label.
-  urlField.parentElement.insertAdjacentElement("afterend", discoverRow);
-  discoverRow.insertAdjacentElement("afterend", results);
+  urlField.closest(".chat-integration-field").append(
+    discoverStatus,
+    results,
+  );
 
   discoverBtn.addEventListener("click", async () => {
     // Disable the button while the probe is in flight so a
@@ -493,6 +515,16 @@ function openEditor(svc) {
 
   const title = document.createElement("h3");
   title.textContent = `Configure ${svc.display_name}`;
+  // Subtitle gives a one-liner about the connector so the
+  // user lands in the right mental model before reading the
+  // field labels. Different services get a hand-written
+  // blurb; falls back to the generic "encrypted at rest"
+  // reassurance for any future ServiceDef.
+  const subtitle = document.createElement("span");
+  subtitle.className = "chat-integration-modal-subtitle";
+  subtitle.textContent = MODAL_SUBTITLES[svc.id] ||
+    "Credentials are encrypted with AES-256-GCM at rest. The chat agents use them when you ask the assistant to read or act on this service.";
+  title.appendChild(subtitle);
   modal.appendChild(title);
 
   const form = document.createElement("form");
@@ -516,13 +548,11 @@ function openEditor(svc) {
   const actions = document.createElement("div");
   actions.className = "chat-integration-actions";
 
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.className = "ghost";
-  cancel.textContent = "Cancel";
-  cancel.addEventListener("click", () => overlay.remove());
-  actions.appendChild(cancel);
-
+  // Remove (danger) sits on the left when the service is
+  // already configured; the spacer pushes Cancel + Save to
+  // the right so the destructive action is visually isolated
+  // from the positive "Save" CTA — a hard requirement for
+  // any modal that can lose data.
   if (svc.configured) {
     const del = document.createElement("button");
     del.type = "button";
@@ -539,12 +569,26 @@ function openEditor(svc) {
       }
     });
     actions.appendChild(del);
+    const spacer = document.createElement("span");
+    spacer.className = "chat-integration-actions-spacer";
+    actions.appendChild(spacer);
+  } else {
+    const spacer = document.createElement("span");
+    spacer.className = "chat-integration-actions-spacer";
+    actions.appendChild(spacer);
   }
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "ghost";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => overlay.remove());
+  actions.appendChild(cancel);
 
   const save = document.createElement("button");
   save.type = "submit";
   save.className = "primary";
-  save.textContent = "Save";
+  save.textContent = svc.configured ? "Save changes" : "Save";
   actions.appendChild(save);
   modal.appendChild(actions);
 

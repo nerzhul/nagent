@@ -1928,73 +1928,163 @@ select, input[type="checkbox"] {
 .chat-integration-modal {
   background: var(--chat-modal-bg, #1d1f23);
   color: var(--chat-modal-fg, #f1f1f1);
-  padding: 1.2rem;
-  border-radius: 0.5rem;
-  max-width: 480px;
+  padding: 1.5rem 1.6rem 1.2rem;
+  border-radius: 0.6rem;
+  max-width: 540px;
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
+  gap: 1.1rem;
+  border: 1px solid var(--chat-input-border, #3a3d42);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+.chat-integration-modal h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.chat-integration-modal h3 .chat-integration-modal-subtitle {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.85rem;
+  font-weight: 400;
+  opacity: 0.7;
+  letter-spacing: 0;
 }
 .chat-integration-form {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 1rem;
 }
 .chat-integration-field {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.45rem;
+}
+.chat-integration-field > span {
+  /* Field label. Sits well above the input so the two never
+   * visually merge; uppercase + smaller tracking gives a
+   * clear "this is a label" affordance without competing
+   * with the input text. */
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--chat-label-fg, #c8ccd4);
+  opacity: 0.85;
 }
 .chat-integration-field input {
-  padding: 0.4rem;
-  border-radius: 0.3rem;
+  /* Generous vertical padding keeps the field easy to scan
+   * and gives the user enough room to type / verify long
+   * URLs and tokens without crowding. */
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.4rem;
   border: 1px solid var(--chat-input-border, #444);
   background: var(--chat-input-bg, #2a2c30);
   color: inherit;
+  font: inherit;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.chat-integration-field input::placeholder {
+  opacity: 0.5;
+}
+.chat-integration-field input:hover {
+  border-color: var(--chat-input-border-hover, #5a5e64);
+}
+.chat-integration-field input:focus {
+  outline: none;
+  border-color: var(--chat-accent-fg, #8ab4ff);
+  box-shadow: 0 0 0 3px rgba(138, 180, 255, 0.18);
+}
+.chat-integration-field small {
+  /* Help text under each field. Slightly dimmer than the
+   * label so the hierarchy is: input (primary) > label
+   * (categorical) > help (contextual). The line-height
+   * matches the input so the row stays compact. */
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--chat-help-fg, #a8acb4);
+  opacity: 0.85;
+}
+.chat-integration-field .chat-integration-input-group {
+  /* Input + "Discover" button on the same row when the
+   * service exposes a probe flow (currently CalDAV only). The
+   * button sits inside the field block, not the actions row,
+   * so the discovery flow reads as part of the URL input
+   * step. */
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.chat-integration-field .chat-integration-input-group > input {
+  flex: 1;
+  min-width: 0;
 }
 .chat-integration-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--chat-input-border, #3a3d42);
+}
+.chat-integration-actions > .chat-integration-actions-spacer {
+  flex: 1;
 }
 
 /* CalDAV "Discover" affordance (plan 1790963194218 §2.7).
  *
- * The discover row lives directly under the `url` field of
- * the CalDAV configure modal. Clicking "Discover calendars"
- * runs a PROPFIND against the principal URL the user pasted
- * and renders a list of `<C:calendar/>` resources; the user
- * picks one to auto-fill the URL field. */
-.chat-integration-discover {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin: -0.2rem 0 0.2rem 0;
+ * The discover button sits inline with the URL input (inside
+ * `.chat-integration-input-group`); the status line + result
+ * list live in a column below the URL row, attached to the
+ * same field block so the visual grouping reads as "URL +
+ * discovery" without disrupting the rest of the form. */
+.chat-integration-input-group > button {
+  flex-shrink: 0;
+  /* Match the input height so the button doesn't make the
+   * row taller than the other form fields. */
+  padding: 0 0.85rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--chat-input-border, #5a5e64);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.chat-integration-input-group > button:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--chat-input-border-hover, #6a6e74);
+}
+.chat-integration-input-group > button:disabled {
+  opacity: 0.5;
+  cursor: progress;
 }
 .chat-integration-discover-status {
-  font-size: 0.85em;
-  opacity: 0.75;
+  display: block;
+  font-size: 0.82rem;
+  margin-top: 0.5rem;
+  min-height: 1.2em;
 }
 .chat-integration-discover-status[data-state="ok"] {
-  opacity: 1;
   color: var(--chat-success-fg, #6cc26c);
 }
 .chat-integration-discover-status[data-state="empty"] {
-  opacity: 1;
   color: var(--chat-warn-fg, #d4a04e);
 }
 .chat-integration-discover-status[data-state="error"] {
-  opacity: 1;
   color: var(--chat-danger-fg, #d96767);
 }
 .chat-integration-probe-results {
-  margin-top: 0.2rem;
+  margin-top: 0.5rem;
   max-height: 240px;
   overflow-y: auto;
   border: 1px solid var(--chat-input-border, #444);
-  border-radius: 0.3rem;
-  padding: 0.3rem 0.4rem;
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.5rem;
   background: var(--chat-input-bg, #232529);
 }
 .chat-integration-probe-list {
@@ -2003,30 +2093,51 @@ select, input[type="checkbox"] {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.4rem;
 }
 .chat-integration-probe-item {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.3rem;
+}
+.chat-integration-probe-item:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 .chat-integration-probe-name {
   flex: 1;
   font-weight: 500;
+  font-size: 0.92rem;
 }
 .chat-integration-probe-href {
-  font-size: 0.78em;
-  opacity: 0.65;
+  font-size: 0.76rem;
+  opacity: 0.6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 16rem;
+  max-width: 18rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.chat-integration-probe-item > button {
+  flex-shrink: 0;
+  padding: 0.3rem 0.7rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--chat-accent-fg, #8ab4ff);
+  background: var(--chat-accent-fg, #8ab4ff);
+  color: var(--chat-modal-bg, #1d1f23);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.chat-integration-probe-item > button:hover {
+  filter: brightness(1.1);
+}
 .chat-integration-probe-empty {
-  margin: 0;
-  font-size: 0.85em;
-  opacity: 0.7;
+  margin: 0.3rem 0;
+  font-size: 0.85rem;
+  opacity: 0.75;
   font-style: italic;
 }
 
@@ -2107,15 +2218,32 @@ select, input[type="checkbox"] {
   border: 1px solid rgba(212, 160, 78, 0.30);
 }
 .settings-integration-docs {
+  /* Force a high-contrast accent colour so the link stays
+   * readable on a dark background; the browser default (a dim
+   * purple for visited links) loses against the surrounding
+   * panel background. Dotted underline gives a clear "this is
+   * a link" affordance without the visual weight of a solid
+   * underline. */
   font-size: 0.85em;
-  opacity: 0.78;
-  text-decoration: none;
+  color: var(--chat-link-fg, #8ab4ff);
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 0.2em;
+  text-decoration-thickness: 1px;
   align-self: flex-start;
   padding-left: 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
-.settings-integration-docs:hover {
-  text-decoration: underline;
-  opacity: 1;
+.settings-integration-docs:visited {
+  color: var(--chat-link-fg, #8ab4ff);
+}
+.settings-integration-docs:hover,
+.settings-integration-docs:focus-visible {
+  color: var(--chat-link-hover-fg, #b3c8ff);
+  text-decoration-style: solid;
+  text-decoration-thickness: 1.5px;
+  outline: none;
 }
 .settings-integrations-empty {
   opacity: 0.75;
