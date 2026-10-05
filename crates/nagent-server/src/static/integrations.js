@@ -265,10 +265,16 @@ async function renderList() {
   }
   if (settingsRoot) {
     if (data.length === 0) {
+      // The empty state is intentionally *not* technical. The
+      // operator-facing reason (build feature) is documented in
+      // the deployment guide; the user just needs to know "this
+      // section is empty because there are no integrations to
+      // configure right now". A future "Request an integration"
+      // link would live here.
       const empty = document.createElement("li");
       empty.className = "settings-integrations-empty";
       empty.textContent =
-        "No integrations available in this build. The CalDAV connector ships behind `--features nagent-server/caldav-agent`; restart the server with that feature to enable the calendar tools.";
+        "No integrations available yet. New connectors (CalDAV, IMAP, Home Assistant, GitHub, …) will appear here as they are added to your server.";
       settingsRoot.appendChild(empty);
     } else {
       for (const svc of data) {

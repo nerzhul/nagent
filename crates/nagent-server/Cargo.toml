@@ -25,7 +25,30 @@ dictionary-agent = ["nagent-agents/dictionary-agent"]
 read-document-agent = ["nagent-agents/read-document-agent"]
 caldav-agent = ["nagent-agents/caldav-agent"]
 # Convenience meta-feature: every agent compiled in.
-all-agents = ["nagent-agents/all-agents"]
+#
+# Cargo's feature forwarding has a sharp edge here: `nagent-agents/all-agents`
+# only enables the agents in the agents crate (so the `AgentDescriptor`
+# table is populated). The matching `#[cfg(feature = "…-agent")]`
+# gates on the SERVER crate (e.g. `app.rs` conditionally swaps the
+# `ServiceRegistry` for CalDAV, `credentials/caldav_probe.rs` mounts
+# the probe endpoint, `agents/mod.rs` forwards the per-agent config)
+# are NOT auto-enabled. We must list every local per-agent feature
+# here too — without this, `make run-hipblas` builds with the agents
+# compiled but the server-side wiring silently degrades to the
+# no-feature default (empty registry, no probe endpoint).
+all-agents = [
+    "nagent-agents/all-agents",
+    "datetime-agent",
+    "weather-agent",
+    "stock-agent",
+    "calculate-agent",
+    "unit-convert-agent",
+    "wikipedia-agent",
+    "dictionary-agent",
+    "web-agent",
+    "read-document-agent",
+    "caldav-agent",
+]
 # Piper TTS; pulls piper-rs + ort + espeak-ng FFI through the
 # `nagent-tts` crate so the engine can be split into its own
 # inference tier later (plan 4.F / plan H).

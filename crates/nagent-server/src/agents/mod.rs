@@ -275,7 +275,7 @@ pub fn build_registry(
     // public client. Connection reuse + warm DNS / TLS roots are
     // the gains; per-agent SSRF policy still applies.
     let pool = nagent_agents::egress::EgressPool::new();
-    let registry = AgentRegistry::from_config(&cfgs, cfg.enabled, &pool);
+    let mut registry = AgentRegistry::from_config(&cfgs, cfg.enabled, &pool);
     if let (true, Some(store), true) = (cfg.enabled, document_store, cfg.read_document_enabled) {
         #[cfg(feature = "read-document-agent")]
         registry.push_agent_boxed(Box::new(nagent_agents::ReadDocumentAgent::new(Arc::new(
