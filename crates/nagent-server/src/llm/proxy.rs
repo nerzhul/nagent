@@ -292,6 +292,11 @@ pub async fn chat_completions(
     // reasoning stream hits `finish_reason: "length"` with no visible
     // answer yet. See `tool_loop::run_tool_loop` for the heuristic.
     let max_auto_continues = llm_state.cfg.llm_max_auto_continues;
+    // Cumulative cap on `delta.reasoning` chars across every
+    // auto-continue round. Pairs with `max_auto_continues` so a
+    // runaway model cannot burn the upstream's token budget on
+    // endless reasoning.
+    let max_thinking_chars = llm_state.cfg.llm_max_thinking_chars;
     let agents = agents.0.clone().map(|arc| (*arc).clone());
 
     // Channel that drives the response body. The tool-loop coroutine
@@ -330,6 +335,7 @@ pub async fn chat_completions(
             agents,
             max_rounds,
             max_auto_continues,
+            max_thinking_chars,
             timeout,
             tx,
             first_stream,

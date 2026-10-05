@@ -56,9 +56,26 @@ use crate::llm::sse::{
 /// `max_auto_continues` is the maximum number of auto-continue
 /// rounds appended when the upstream ends with `finish_reason:
 /// "length"` and only reasoning (no visible answer) was emitted
-/// before the cap. Defaults to `1`; raising it past `1` is
-/// generally useless because the same reasoning-style truncation
-/// repeats on the continuation round.
+/// before the cap. Counted on its own counter so the
+/// auto-continue path does **not** eat into `max_rounds`: the
+/// latter gates tool-call rounds, the former gates
+/// reasoning-truncation rounds, and they can run side by side.
+/// The default (5) leaves headroom for long reasoning chains
+/// (DeepSeek-R1, Qwen3.5 with thinking, o1/o3) that may truncate
+/// 2-3 times before producing the visible answer; raising the
+/// cap further only protects against truly runaway models.
+///
+/// `max_thinking_chars` is the cumulative cap on
+/// `delta.reasoning` characters across every auto-continue
+/// round of one user turn. Pairs with `max_auto_continues` so a
+/// runaway model cannot burn the upstream's token budget: the
+/// count cap guards against unbounded rounds, the chars cap
+/// guards against unbounded per-round reasoning length. When
+/// the chars cap is hit, the loop emits an SSE `error` event
+/// and exits cleanly so the chat UI can show a friendly bubble
+/// instead of leaving the user waiting on an empty assistant
+/// turn. The reasoning text already streamed to the client
+/// stays visible in the chat UI's `<details>` block.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_tool_loop(
     http: reqwest::Client,
@@ -68,6 +85,7 @@ pub(crate) async fn run_tool_loop(
     agents: Option<AgentRegistry>,
     max_rounds: u32,
     max_auto_continues: u32,
+    max_thinking_chars: u32,
     idle_timeout: Duration,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     first_stream: UpstreamByteStream,
@@ -76,27 +94,29 @@ pub(crate) async fn run_tool_loop(
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
-    let mut round: u32 = 0;
-    // Number of "continue" rounds triggered because the upstream
-    // ran out of tokens while still emitting reasoning. Counted
-    // separately from `round` so the auto-continue path cannot
-    // accidentally eat into `max_rounds`.
+    // `tool_round` counts only rounds that produced at least one
+    // tool call. Auto-continues (reasoning truncations that
+    // append a "please continue" user prompt) live on their own
+    // counter so a model that needs several reasoning rounds to
+    // finish a long thought does not exhaust the tool-call
+    // budget. See the comment on `max_auto_continues` above.
+    let mut tool_round: u32 = 0;
     let mut auto_continue_count: u32 = 0;
+    // Cumulative `delta.reasoning` characters emitted across
+    // every round of the current user turn. Tracked so a model
+    // that keeps emitting reasoning but never produces an answer
+    // cannot burn the upstream's token budget indefinitely. The
+    // chat UI streams the reasoning text to the user via the
+    // `<details>` block as soon as it lands, so when the cap is
+    // hit the user already sees what the model was thinking.
+    let mut total_thinking_chars: u64 = 0;
     let mut current_stream: Option<UpstreamByteStream> = Some(first_stream);
-    info!("tool loop: starting (max_rounds={max_rounds})");
+    info!(
+        "tool loop: starting (max_rounds={max_rounds}, \
+         max_auto_continues={max_auto_continues}, \
+         max_thinking_chars={max_thinking_chars})"
+    );
     loop {
-        round += 1;
-        if round > max_rounds {
-            let _ = tx
-                .send(Ok(Bytes::from(sse_error_event(
-                    "agent loop exceeded",
-                    &format!("max tool rounds ({max_rounds}) reached"),
-                ))))
-                .await;
-            let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
-            return;
-        }
-
         let stream = if let Some(s) = current_stream.take() {
             s
         } else {
@@ -166,17 +186,67 @@ pub(crate) async fn run_tool_loop(
             // continue. The continuation round runs without
             // re-emitting the reasoning (most models repeat it
             // verbatim if asked), so the user only sees the
-            // `delta.content` they were waiting for. Limited to
-            // `max_auto_continues` so a truly runaway model cannot
-            // burn the upstream's token budget.
+            // `delta.content` they were waiting for. Two budgets
+            // gate this path:
+            //   - `max_auto_continues` on the count of continues
+            //     already appended (default 5, plenty for o1 / R1
+            //     chains);
+            //   - `max_thinking_chars` on the cumulative
+            //     `delta.reasoning` chars across every round of
+            //     the user turn (default 32 KB, the real "how
+            //     much is the model allowed to think" knob).
+            // When either cap is hit, the loop surfaces a clear
+            // SSE `error` event naming the budget so the chat UI
+            // can render a friendly error bubble. The reasoning
+            // already streamed to the client stays visible in the
+            // chat UI's `<details>` block.
             let is_reasoning_truncation = outcome.finish_reason.as_deref() == Some("length")
                 && outcome.assistant_text.is_empty()
                 && !outcome.reasoning_text.is_empty();
-            if is_reasoning_truncation && auto_continue_count < max_auto_continues {
+            if is_reasoning_truncation {
+                let round_chars = outcome.reasoning_text.chars().count() as u64;
+                total_thinking_chars = total_thinking_chars.saturating_add(round_chars);
+                let over_count_cap = auto_continue_count >= max_auto_continues;
+                let over_chars_cap =
+                    max_thinking_chars > 0 && total_thinking_chars > max_thinking_chars as u64;
+                if over_count_cap || over_chars_cap {
+                    let reason = if over_chars_cap {
+                        format!(
+                            "the model spent {total_thinking_chars} chars of reasoning \
+                             (limit: {max_thinking_chars}) without producing an answer; \
+                             try a shorter question or a different model"
+                        )
+                    } else {
+                        format!(
+                            "the model kept reasoning after {max_auto_continues} \
+                             auto-continues ({total_thinking_chars} chars total) \
+                             without producing an answer; try a shorter question \
+                             or a different model"
+                        )
+                    };
+                    warn!(
+                        auto_continue_count,
+                        total_thinking_chars,
+                        max_auto_continues,
+                        max_thinking_chars,
+                        "tool loop: reasoning budget exhausted; surfacing error to client"
+                    );
+                    let _ = tx
+                        .send(Ok(Bytes::from(sse_error_event(
+                            "thinking truncated",
+                            &reason,
+                        ))))
+                        .await;
+                    let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
+                    return;
+                }
                 auto_continue_count += 1;
                 info!(
                     auto_continue_count,
-                    reasoning_chars = outcome.reasoning_text.chars().count(),
+                    max_auto_continues,
+                    round_chars,
+                    total_thinking_chars,
+                    max_thinking_chars,
                     "tool loop: length-truncated with reasoning only; auto-continuing",
                 );
                 // Append the partial assistant turn + a "continue"
@@ -213,19 +283,41 @@ pub(crate) async fn run_tool_loop(
                 current_stream = None;
                 continue;
             }
-            // No tool calls — conversation is done. Always emit a
-            // single `data: [DONE]` here because `drain_upstream_round`
+            // No tool calls, no reasoning-truncation → the
+            // conversation is done. Always emit a single
+            // `data: [DONE]` here because `drain_upstream_round`
             // swallows any upstream `[DONE]` (forwarding it would let
             // the browser cut the response mid-loop and drop our
             // subsequent `event: tool_call` / `event: tool_result`
             // frames — see the regression in `tests/agents.rs`). The
             // sentinel we send is the only one the client ever sees.
-            info!(round, "tool loop: conversation complete (no tool_calls)");
+            info!(
+                tool_round,
+                auto_continue_count,
+                total_thinking_chars,
+                "tool loop: conversation complete (no tool_calls)"
+            );
+            let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
+            return;
+        }
+        // Tool calls: this round counts against `max_rounds`.
+        // Auto-continues never reach this branch (the empty-tool-
+        // calls path returns or `continue`s above), so the two
+        // budgets stay independent as documented on
+        // `max_auto_continues`.
+        tool_round += 1;
+        if tool_round > max_rounds {
+            let _ = tx
+                .send(Ok(Bytes::from(sse_error_event(
+                    "agent loop exceeded",
+                    &format!("max tool rounds ({max_rounds}) reached"),
+                ))))
+                .await;
             let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
             return;
         }
         info!(
-            round,
+            tool_round,
             tools = %crate::llm::sse::tool_call_names_pub(&outcome.tool_calls),
             "tool loop: dispatching agents"
         );
@@ -299,7 +391,7 @@ pub(crate) async fn run_tool_loop(
                     &tc.id,
                     &name,
                     &tc.arguments,
-                    round,
+                    tool_round,
                 ))))
                 .await;
 

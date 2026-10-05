@@ -137,27 +137,61 @@ pub struct FieldSummary {
     pub required: bool,
     pub help: Option<&'static str>,
     pub placeholder: Option<&'static str>,
-    /// True iff the user has saved a value for this field. Never
-    /// carries the value itself — only the configured-bit.
+    /// True iff the user has saved a value for this field.
     pub filled: bool,
+    /// Plaintext value for **non-Password** fields when the
+    /// field is filled. The server populates this only for
+    /// fields whose `kind` is not `Password` (URLs, hostnames,
+    /// usernames, account IDs) — the form echoes the saved
+    /// value back on edit so the user does not have to retype
+    /// the connector's URL every time. `Password` fields are
+    /// always `None` so the masked placeholder is the only
+    /// signal the JSON ever carries for a secret; the
+    /// `Serialize` skip keeps the field absent from the
+    /// payload when it is not relevant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 impl ServiceDef {
     /// Project to the JSON shape returned to the browser. `filled`
     /// is computed by the caller from
     /// `AuthStore::list_configured_field_keys(user_id, id)`.
-    pub fn to_summary(&self, filled_keys: &[String]) -> ServiceSummary {
+    /// `plaintext_values` is the map of decrypted values for
+    /// non-`Password` fields; the route handler builds it by
+    /// iterating over the filled fields, skipping `Password`
+    /// ones, and calling the existing `decrypt` helper on the
+    /// `(nonce, ciphertext)` row.
+    pub fn to_summary(
+        &self,
+        filled_keys: &[String],
+        plaintext_values: &std::collections::HashMap<String, String>,
+    ) -> ServiceSummary {
         let fields = self
             .fields
             .iter()
-            .map(|f| FieldSummary {
-                key: f.key,
-                label: f.label,
-                kind: f.kind,
-                required: f.required,
-                help: f.help,
-                placeholder: f.placeholder,
-                filled: filled_keys.iter().any(|k| k == f.key),
+            .map(|f| {
+                let filled = filled_keys.iter().any(|k| k == f.key);
+                // Only non-Password fields get their plaintext
+                // surfaced back to the form. Passwords are
+                // always `None` regardless of `plaintext_values`
+                // so a route handler that mis-populates the map
+                // cannot accidentally leak a secret.
+                let value = match (f.kind, filled) {
+                    (FieldKind::Password, _) => None,
+                    (_, false) => None,
+                    (_, true) => plaintext_values.get(f.key).cloned(),
+                };
+                FieldSummary {
+                    key: f.key,
+                    label: f.label,
+                    kind: f.kind,
+                    required: f.required,
+                    help: f.help,
+                    placeholder: f.placeholder,
+                    filled,
+                    value,
+                }
             })
             .collect();
         let configured = self
@@ -244,13 +278,36 @@ mod tests {
 
     #[test]
     fn summary_configured_only_when_required_fields_filled() {
-        let s = FAKE_SERVICE.to_summary(&[]);
+        let empty = std::collections::HashMap::new();
+        let s = FAKE_SERVICE.to_summary(&[], &empty);
         assert!(!s.configured, "no fields filled → not configured");
-        let s = FAKE_SERVICE.to_summary(&["host".to_string()]);
+        let s = FAKE_SERVICE.to_summary(&["host".to_string()], &empty);
         assert!(!s.configured, "missing required password → not configured");
-        let s = FAKE_SERVICE.to_summary(&["host".to_string(), "password".to_string()]);
+        let s = FAKE_SERVICE.to_summary(&["host".to_string(), "password".to_string()], &empty);
         assert!(s.configured, "both required fields filled");
         assert_eq!(s.fields.len(), 2);
         assert!(s.fields[0].filled);
+    }
+
+    /// Non-Password fields surface their saved plaintext so the
+    /// integrations UI can pre-fill the form on edit. Password
+    /// fields are always `None` regardless of what the caller
+    /// hands the summary helper — the type-level guard is the
+    /// last line of defence against a route handler that
+    /// accidentally populates the plaintext map for a secret.
+    #[test]
+    fn summary_surfaces_plaintext_only_for_non_password_fields() {
+        let mut plaintext = std::collections::HashMap::new();
+        plaintext.insert("host".to_string(), "imap.example.com".to_string());
+        plaintext.insert("password".to_string(), "hunter2".to_string());
+        let s = FAKE_SERVICE.to_summary(&["host".to_string(), "password".to_string()], &plaintext);
+        let host = s.fields.iter().find(|f| f.key == "host").unwrap();
+        assert_eq!(host.value.as_deref(), Some("imap.example.com"));
+        let pwd = s.fields.iter().find(|f| f.key == "password").unwrap();
+        assert!(
+            pwd.value.is_none(),
+            "password field must never carry a plaintext value, got {:?}",
+            pwd.value
+        );
     }
 }

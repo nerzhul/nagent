@@ -109,8 +109,9 @@
 # enabled = true
 
 # [llm]
-# llm_max_tool_rounds = 4                   # hard cap, defended against loops
-# llm_max_auto_continues = 1               # max reasoning-truncation auto-continue rounds (set 0 to disable)
+# llm_max_tool_rounds = 8                   # hard cap on tool-call rounds per user turn (defends against tool loops)
+# llm_max_auto_continues = 5               # max reasoning-truncation auto-continue rounds (set 0 to disable)
+# llm_max_thinking_chars = 32768           # cumulative cap on delta.reasoning chars across auto-continues (0 disables; 32 KB default)
 
 # `web_fetch` agent — sandbox + transfer knobs
 # [agents.web_fetch]

@@ -340,6 +340,7 @@ async fn features_llm_models_reflects_upstream_list() {
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 1,
+        llm_max_thinking_chars: 0,
     };
     let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");
@@ -436,6 +437,7 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 1,
+        llm_max_thinking_chars: 0,
     };
     let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");

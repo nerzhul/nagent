@@ -27,13 +27,13 @@ use uuid::Uuid;
 
 use crate::auth::error::{require_auth_store, AuthError};
 use crate::auth::middleware::check_csrf;
-use nagent_agents::ServiceRegistry;
+use nagent_agents::{FieldKind, ServiceDef, ServiceRegistry};
 // Plan 4.A: the `AuthStore` shim is on its way out. The
 // `CredentialState` exposes the shared `nagent_db::Db` directly
 // (its `store: nagent_db::Db` field) and route handlers reach
 // per-user scoped views through it.
 use crate::auth::AuthUser;
-use crate::credentials::crypto::encrypt;
+use crate::credentials::crypto::{decrypt, encrypt};
 use crate::credentials::key::CredentialsKey;
 
 /// Per-route state. `store` is the shared `nagent_db::Db`; the
@@ -111,8 +111,78 @@ pub fn credential_state_db(state: &Arc<crate::AppState>) -> nagent_db::Db {
     auth_db(state.clone())
 }
 
+/// Build the `field_key → plaintext` map for every **non-Password**
+/// filled field of one service. Used by the GET routes so the
+/// integrations UI can echo the saved URL / username / host back
+/// to the form on edit. `Password` fields are never read here —
+/// the type-level filter is the safety boundary; a future
+/// `FieldKind` that requires the same treatment can sit in
+/// the same `match` arm.
+///
+/// A decryption failure on a single field is logged (and skipped)
+/// so a single corrupted ciphertext does not 500 the whole
+/// `GET /api/integrations` response. The user can re-type the
+/// value through the form; the upsert path will overwrite the
+/// broken row.
+async fn build_plaintext_values(
+    svc: &ServiceDef,
+    filled: &[String],
+    user_id: uuid::Uuid,
+    state: &CredentialState,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for f in svc.fields {
+        if !matches!(f.kind, FieldKind::Text | FieldKind::Url) {
+            continue;
+        }
+        if !filled.iter().any(|k| k == f.key) {
+            continue;
+        }
+        let Some(row) = state
+            .store
+            .for_user(user_id)
+            .credentials()
+            .fetch(svc.id, f.key)
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let sealed = crate::credentials::crypto::EncryptedSecret {
+            nonce: row.nonce,
+            ciphertext: row.ciphertext,
+        };
+        match decrypt(&state.key, &sealed) {
+            Ok(secret) => {
+                use secrecy::ExposeSecret;
+                out.insert(f.key.to_string(), secret.expose_secret().to_string());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    service = svc.id,
+                    field = f.key,
+                    user = %user_id,
+                    error = %e,
+                    "failed to decrypt non-secret field for GET /api/integrations; \
+                     the form will leave the field empty and the user can re-type it"
+                );
+            }
+        }
+    }
+    out
+}
+
 /// `GET /api/integrations` — list every service with `configured`
 /// flags per service for the caller.
+///
+/// The list endpoint intentionally does **not** decrypt any
+/// field. The browser only needs the `configured` boolean and
+/// the per-field `filled` flag to render the settings page; the
+/// saved plaintexts (URL, username, host) are surfaced by
+/// [`get_integration`] when the user opens the edit modal for
+/// one connector. Decrypting every connector on every list
+/// poll would burn CPU on values the UI is not going to read.
 pub async fn list_integrations(
     State(state): State<CredentialState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -125,7 +195,7 @@ pub async fn list_integrations(
             .credentials()
             .list_field_keys(svc.id)
             .await?;
-        data.push(svc.to_summary(&filled));
+        data.push(svc.to_summary(&filled, &std::collections::HashMap::new()));
     }
     Ok(Json(serde_json::json!({ "data": data })).into_response())
 }
@@ -146,7 +216,8 @@ pub async fn get_integration(
         .credentials()
         .list_field_keys(svc.id)
         .await?;
-    Ok(Json(svc.to_summary(&filled)).into_response())
+    let plaintext = build_plaintext_values(svc, &filled, user.id, &state).await;
+    Ok(Json(svc.to_summary(&filled, &plaintext)).into_response())
 }
 
 /// Body shape for `PUT /api/integrations/:id/credentials`.

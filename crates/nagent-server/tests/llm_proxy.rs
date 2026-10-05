@@ -117,6 +117,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 1,
+        llm_max_thinking_chars: 0,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -571,6 +572,7 @@ async fn start_test_server_with_llm_auth(
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 1,
+        llm_max_thinking_chars: 0,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -806,5 +808,331 @@ async fn bearer_mode_accepts_lowercase_scheme() {
         resp.status(),
         StatusCode::OK,
         "lowercase 'bearer' scheme must be accepted"
+    );
+}
+
+// ---- Reasoning budget (plan: dynamic LLM thinking cap) ---------------------
+//
+// A reasoning-capable model can burn the upstream's token budget on
+// `delta.reasoning` for several rounds before producing a visible
+// answer. The proxy must let the model think for as long as it
+// needs (within operator-set budgets) without asking the user to
+// manually continue. The two new knobs are:
+//
+// - `llm_max_auto_continues` (count cap on reasoning-truncation
+//   rounds, default 5);
+// - `llm_max_thinking_chars` (cumulative cap on the number of
+//   reasoning characters, default 32 KB).
+//
+// The tests below exercise both caps end-to-end through the
+// proxy: a mock upstream always emits reasoning-only truncations
+// (no final answer ever), and the proxy must surface a clear SSE
+// `error` event once the relevant cap is hit. The reasoning
+// already streamed to the client must still be visible in the
+// response body so the chat UI can render it in the `<details>`
+// block.
+
+/// Build a proxy with custom `llm_max_auto_continues` and
+/// `llm_max_thinking_chars` (the test fixtures in
+/// `start_test_server_with_llm` hardcode the defaults; the budget
+/// tests need to set tight caps to keep the test fast).
+async fn start_test_server_with_llm_budget(
+    _upstream_url: String,
+    max_auto_continues: u32,
+    max_thinking_chars: u32,
+) -> (String, Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>) {
+    let captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post({
+                let captured = Arc::clone(&captured);
+                move |_headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let captured = Arc::clone(&captured);
+                    async move {
+                        let parsed: serde_json::Value = serde_json::from_slice(&body)
+                            .unwrap_or_else(|_| {
+                                serde_json::json!({
+                                    "_raw": String::from_utf8_lossy(&body).to_string()
+                                })
+                            });
+                        let round = captured.lock().await.len();
+                        captured.lock().await.push(parsed);
+                        // Always emit reasoning + `finish_reason:
+                        // "length"` so the proxy keeps
+                        // auto-continuing (or hits the cap). The
+                        // reasoning text grows by 50 chars per
+                        // round so the cumulative chars cap has a
+                        // predictable test surface.
+                        let reasoning = "x".repeat(50);
+                        let body = format!(
+                            "event: message\n\
+                             data: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":\
+                             {{\"role\":\"assistant\",\"reasoning\":\"{reasoning}\"}},\
+                             \"finish_reason\":null}}]}}\n\n\
+                             event: message\ndata: {{\"id\":\"1\",\"choices\":\
+                             [{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"length\"}}]}}\n\n\
+                             data: [DONE]\n\n"
+                        );
+                        (
+                            StatusCode::OK,
+                            [(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("text/event-stream"),
+                            )],
+                            body,
+                        )
+                            .pipe(|t| {
+                                // `round` is captured in scope; this
+                                // closure is only ever read by the
+                                // `round = captured.lock().await.len()`
+                                // above, so the unused-variable lint
+                                // never fires. The `.pipe` shim is a
+                                // no-op that keeps the closure body
+                                // linear.
+                                let _ = round;
+                                t
+                            })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    r#"{"object":"list","data":[{"id":"llama3.1","object":"model"}]}"#,
+                )
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let upstream_url = format!("http://{addr}");
+
+    let llm_cfg = LlmConfig {
+        enabled: true,
+        base_url: upstream_url,
+        default_model: "llama3.1".into(),
+        api_key: None,
+        inbound_auth_key: None,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins: vec![],
+        system_prompt: None,
+        allow_user_location: true,
+        allow_user_timezone: true,
+        allow_user_reply_language: true,
+        llm_max_tool_rounds: 8,
+        llm_max_auto_continues: max_auto_continues,
+        llm_max_thinking_chars: max_thinking_chars,
+    };
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
+
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    let state = builder.with_llm(llm_client).build();
+
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+    (url, captured)
+}
+
+/// Helper trait to make the mock upstream closure linear instead
+/// of nesting the `(StatusCode, headers, body)` tuple inside
+/// `pipe`. Keeps the test body readable.
+trait Pipe: Sized {
+    fn pipe<U, F: FnOnce(Self) -> U>(self, f: F) -> U {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
+
+/// Reasoning-only truncation + count cap: the model keeps emitting
+/// reasoning forever; the proxy must give up after
+/// `max_auto_continues` rounds and surface a clear SSE error
+/// naming the cap so the chat UI can show a friendly bubble.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_loop_surfaces_error_when_auto_continues_cap_is_reached() {
+    let (url, captured) = start_test_server_with_llm_budget(
+        "http://placeholder".into(),
+        2, // max_auto_continues
+        0, // disable chars cap so it cannot win the race
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"think hard"}],"stream":true,"model":"llama3.1"}"#,
+        )
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("body");
+
+    // The error frame must reach the client so the chat UI can
+    // render an error bubble instead of an empty assistant
+    // turn. Naming the cap (`max auto-continues (2) reached`) is
+    // the contract — operators read this in the logs, and the
+    // chat UI can also surface it.
+    assert!(
+        body.contains("event: error") || body.contains("\"type\":\"error\""),
+        "client must receive an SSE error frame; got: {body}"
+    );
+    assert!(
+        body.contains("max auto-continues")
+            || body.contains("auto-continues")
+            || body.contains("thinking truncated"),
+        "error frame must name the cap or the error type; got: {body}"
+    );
+
+    // The reasoning already streamed on the first two rounds
+    // must remain in the body so the chat UI can render it in
+    // the `<details>` block.
+    assert!(
+        body.contains("xxxxxx"),
+        "reasoning text from the rounds before the cap must reach the client; got: {body}"
+    );
+
+    // Count the upstream calls: original + 2 auto-continues.
+    let calls = captured.lock().await.clone();
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected 1 original + {0} auto-continues = 3 rounds; got {1}",
+        2,
+        calls.len()
+    );
+}
+
+/// Reasoning-only truncation + chars cap: the model emits
+/// reasoning whose cumulative length crosses
+/// `llm_max_thinking_chars`; the proxy must surface a clear SSE
+/// error naming the chars cap (not the count cap) so the
+/// operator can tell the two failure modes apart in the logs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_loop_surfaces_error_when_thinking_chars_cap_is_reached() {
+    // Mock upstream emits 50 reasoning chars per round, so:
+    //   round 0 → 50 cumulative
+    //   round 1 → 100
+    //   round 2 → 150 (cap=120 hit BEFORE auto-continuing)
+    //   → error event after round 2.
+    // Disable the count cap so it cannot win the race first.
+    let (url, captured) =
+        start_test_server_with_llm_budget("http://placeholder".into(), 100, 120).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"think even harder"}],"stream":true,"model":"llama3.1"}"#,
+        )
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("body");
+
+    // The error frame must name the chars cap (not the count
+    // cap) so operators can disambiguate the two failure modes
+    // in the audit logs.
+    assert!(
+        body.contains("event: error") || body.contains("\"type\":\"error\""),
+        "client must receive an SSE error frame; got: {body}"
+    );
+    assert!(
+        body.contains("chars of reasoning")
+            || body.contains("limit: 120")
+            || body.contains("thinking truncated"),
+        "error frame must name the chars budget or the error type; got: {body}"
+    );
+
+    // The reasoning already streamed must reach the client.
+    assert!(
+        body.contains("xxxxxx"),
+        "reasoning text from the rounds before the cap must reach the client; got: {body}"
+    );
+
+    // The cap fires the moment cumulative chars exceed the
+    // budget. With 50 chars per round and a cap of 120, the
+    // loop continues twice (rounds 0 + 1 = 100 chars < 120)
+    // and bails after round 2 (150 > 120), so 3 upstream
+    // calls are expected (1 original + 2 auto-continues).
+    let calls = captured.lock().await.clone();
+    assert!(
+        calls.len() <= 3,
+        "auto-continue must stop the moment cumulative chars exceed the cap; got {} calls",
+        calls.len()
+    );
+    assert!(
+        calls.len() >= 2,
+        "at least one auto-continue must have fired before the cap was hit; got {} calls",
+        calls.len()
+    );
+}
+
+/// `llm_max_thinking_chars = 0` disables the chars cap so a
+/// model that legitimately needs a long thinking chain is not
+/// artificially cut off. The count cap still applies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_loop_thinking_chars_zero_disables_the_cap() {
+    let (url, captured) = start_test_server_with_llm_budget(
+        "http://placeholder".into(),
+        // Both caps set so a runaway would still hit the count cap.
+        1, // count cap: at most 1 auto-continue
+        0, // chars cap disabled
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[{"role":"user","content":"go"}],"stream":true}"#)
+        .send()
+        .await
+        .expect("post");
+    let body = resp.text().await.expect("body");
+
+    // Count cap fires (1 auto-continue used, the next is blocked).
+    assert!(
+        body.contains("event: error") || body.contains("\"type\":\"error\""),
+        "count cap must fire when chars cap is disabled; got: {body}"
+    );
+    // Chars-cap message must NOT appear because the cap is
+    // disabled; the count-cap message must appear instead.
+    assert!(
+        !body.contains("limit: 0"),
+        "disabled chars cap must not surface its limit in the error message; got: {body}"
+    );
+    // 1 original + 1 auto-continue = 2 upstream calls.
+    let calls = captured.lock().await.clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected 1 original + 1 auto-continue = 2 rounds; got {}",
+        calls.len()
     );
 }

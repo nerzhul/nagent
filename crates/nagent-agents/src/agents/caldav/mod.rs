@@ -467,12 +467,62 @@ pub fn extract_propfind_responses(xml: &str, principal: &Url) -> Vec<PropfindRes
             href,
             display_name,
             ctag,
-            is_calendar: resourcetype.contains("calendar")
-                && !resourcetype.contains("calendarcollection"),
+            is_calendar: is_user_calendar(&resourcetype),
         });
         cursor = abs_end;
     }
     out
+}
+
+/// Decide whether a `<D:resourcetype>` body identifies a leaf
+/// user calendar (the kind the chat agents can list / create
+/// events against) versus a sibling resource that mentions
+/// "calendar" in another role.
+///
+/// `resourcetype` is the lowercased inner XML of the
+/// `<D:resourcetype>` element (e.g. `<d:collection/><c:calendar/>`
+/// for a leaf calendar, `<d:collection/><c:calendar/>\
+/// <nc:calendar-proxy-read/>` for a Nextcloud delegation
+/// proxy). The function is intentionally substring-based —
+/// parsing the XML would mean pulling in a real XML crate,
+/// and the v1 surface area is small enough that an explicit
+/// allow-list / deny-list stays auditable.
+///
+/// What counts as a user calendar:
+/// - The `<C:calendar/>` token (with any namespace prefix)
+///   must be present. SabreDAV / Nextcloud / Radicale / Baïkal
+///   all use the caldav namespace for this element.
+///
+/// What is explicitly rejected:
+/// - `<C:calendar-collection/>` — the calendar home (RFC 4791
+///   §5.1), which contains calendars as children and is not
+///   itself a listable event source.
+/// - `<NC:calendar-proxy-read/>` and `<NC:calendar-proxy-write/>`
+///   — Nextcloud 21+ injects these auto-generated delegation
+///   collections next to the user's real calendars. They are
+///   virtual unions of every event the user can read / write
+///   and the LLM has no business listing through them.
+/// - `<C:schedule-inbox/>` / `<C:schedule-outbox/>` — RFC 6638
+///   scheduling resources.
+/// - `<C:schedule/>` — the generic scheduling collection.
+fn is_user_calendar(resourcetype: &str) -> bool {
+    if find_open_tag(resourcetype, 0, "calendar").is_none() {
+        return false;
+    }
+    for blocker in [
+        "calendar-collection",
+        "calendar-proxy-",
+        "schedule-inbox",
+        "schedule-outbox",
+    ] {
+        if resourcetype.contains(blocker) {
+            return false;
+        }
+    }
+    if find_open_tag(resourcetype, 0, "schedule").is_some() {
+        return false;
+    }
+    true
 }
 
 /// One `<D:response>` from a PROPFIND multistatus body.
@@ -481,10 +531,9 @@ pub struct PropfindResponse {
     pub href: String,
     pub display_name: String,
     pub ctag: Option<String>,
-    /// `true` when `<d:resourcetype>` contains `<C:calendar/>`
-    /// (the calendar collection element, not the
-    /// `<C:calendar-collection/>` resource-type short-hand some
-    /// servers use).
+    /// `true` when the resource is a leaf user calendar the
+    /// chat agents can target. See [`is_user_calendar`] for the
+    /// exact predicate.
     pub is_calendar: bool,
 }
 
@@ -1209,6 +1258,108 @@ mod tests {
         assert_eq!(calendars[0].ctag.as_deref(), Some("1234"));
         assert!(calendars[0].href.contains("/personal/"));
         assert!(!responses[1].is_calendar);
+    }
+
+    /// Nextcloud 21+ injects two virtual collections next to
+    /// the user's real calendars: `calendar-proxy-read` and
+    /// `calendar-proxy-write`. Their resourcetype contains
+    /// `<C:calendar/>` *plus* a `calendar-proxy-*` element,
+    /// so the v1 filter `contains("calendar") &&
+    /// !contains("calendarcollection")` wrongly accepted them
+    /// as calendars and hid the actual `Personnel` calendar
+    /// behind them in the integrations UI. This test pins the
+    /// regression: only `Personnel` must come out.
+    #[test]
+    fn extract_propfind_responses_rejects_nextcloud_calendar_proxies() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:NC="http://nextcloud.org/ns">
+  <D:response>
+    <D:href>/remote.php/dav/calendars/alice/calendar-proxy-read/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:displayname>calendar-proxy-read</D:displayname>
+        <D:resourcetype>
+          <D:collection/>
+          <C:calendar/>
+          <NC:calendar-proxy-read/>
+        </D:resourcetype>
+        <CS:getctag xmlns:CS="http://calendarserver.org/ns/">a</CS:getctag>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/remote.php/dav/calendars/alice/calendar-proxy-write/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:displayname>calendar-proxy-write</D:displayname>
+        <D:resourcetype>
+          <D:collection/>
+          <C:calendar/>
+          <NC:calendar-proxy-read/>
+          <NC:calendar-proxy-write/>
+        </D:resourcetype>
+        <CS:getctag xmlns:CS="http://calendarserver.org/ns/">b</CS:getctag>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/remote.php/dav/calendars/alice/personal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:displayname>Personnel</D:displayname>
+        <D:resourcetype>
+          <D:collection/>
+          <C:calendar/>
+        </D:resourcetype>
+        <CS:getctag xmlns:CS="http://calendarserver.org/ns/">c</CS:getctag>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+</D:multistatus>
+"#;
+        let principal = Url::parse(PRINCIPAL).unwrap();
+        let responses = extract_propfind_responses(xml, &principal);
+        let calendars: Vec<_> = responses.iter().filter(|r| r.is_calendar).collect();
+        assert_eq!(
+            calendars.len(),
+            1,
+            "only the real calendar must be returned; proxies must be filtered out; got: {:?}",
+            calendars
+                .iter()
+                .map(|r| (&r.display_name, &r.href))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(calendars[0].display_name, "Personnel");
+        assert!(calendars[0].href.contains("/personal/"));
+    }
+
+    /// Pin the negative cases the filter must keep rejecting:
+    /// the calendar-collection home (RFC 4791), the scheduling
+    /// inbox / outbox (RFC 6638), and a plain DAV collection.
+    #[test]
+    fn is_user_calendar_rejects_collection_variants() {
+        // Calendar home (SabreDAV / Nextcloud): no
+        // <c:calendar-collection/> marker, but it is a
+        // container of calendars, not a listable event source.
+        assert!(!is_user_calendar(
+            "<d:collection/><c:calendar/><c:calendar-collection/>"
+        ));
+        // Schedule inbox.
+        assert!(!is_user_calendar("<d:collection/><c:schedule-inbox/>"));
+        // Schedule outbox.
+        assert!(!is_user_calendar("<d:collection/><c:schedule-outbox/>"));
+        // Plain DAV collection (no <c:calendar/> at all).
+        assert!(!is_user_calendar("<d:collection/>"));
+    }
+
+    #[test]
+    fn is_user_calendar_accepts_leaf_calendar() {
+        assert!(is_user_calendar("<d:collection/><c:calendar/>"));
+        // Attribute-bearing tag (some servers add
+        // `xmlns:c="..."` on the element itself).
+        assert!(is_user_calendar(
+            r#"<d:collection/><c:calendar xmlns:c="urn:ietf:params:xml:ns:caldav"/>"#
+        ));
     }
 
     #[test]

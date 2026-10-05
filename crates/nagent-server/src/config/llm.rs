@@ -159,17 +159,42 @@ pub struct LlmConfig {
     /// Maximum number of auto-continue rounds appended when the
     /// upstream emits `finish_reason: "length"` while still in the
     /// reasoning phase of a reasoning-capable model (qwen3.5 with
-    /// reasoning on, DeepSeek-R1, …). Each round asks the model to
-    /// produce the visible answer rather than re-running the
-    /// reasoning that already filled the token budget. Set to `0`
-    /// to disable the heuristic; raising past `1` is generally
-    /// useless because the same reasoning-style truncation repeats
-    /// on the continuation round. Counted separately from
-    /// `llm_max_tool_rounds` so the auto-continue path cannot
-    /// accidentally eat into the tool budget. Env var
-    /// `LLM_MAX_AUTO_CONTINUES`, TOML key
-    /// `[llm].llm_max_auto_continues`.
+    /// reasoning on, DeepSeek-R1, o1/o3, …). Each round asks the
+    /// model to produce the visible answer rather than re-running
+    /// the reasoning that already filled the token budget. The
+    /// default of `5` leaves headroom for the long reasoning
+    /// chains those models emit — a single continuation is not
+    /// enough in practice, the model often truncates 2-3 times
+    /// before the visible answer lands, and complex questions
+    /// can take four or five. Set to `0` to disable the
+    /// heuristic; raise the cap further only if a specific
+    /// upstream needs more headroom (each extra round burns the
+    /// upstream's token budget). Counted on its own counter so
+    /// the auto-continue path does **not** eat into
+    /// `llm_max_tool_rounds`. Env var `LLM_MAX_AUTO_CONTINUES`,
+    /// TOML key `[llm].llm_max_auto_continues`.
     pub llm_max_auto_continues: u32,
+    /// Cumulative cap on the number of `delta.reasoning`
+    /// characters the LLM is allowed to emit across every
+    /// auto-continue round of a single user turn. Acts as the
+    /// real "how much is the model allowed to think" budget and
+    /// pairs with `llm_max_auto_continues` so a runaway model
+    /// cannot burn the upstream's token budget indefinitely:
+    /// the count cap guards against unbounded round count, the
+    /// chars cap guards against unbounded reasoning length per
+    /// round. When the chars cap is hit, the tool loop emits a
+    /// clear SSE `error` event naming the budget and the loop
+    /// exits cleanly so the chat UI can show a friendly bubble
+    /// instead of leaving the user waiting on an empty
+    /// assistant turn. Set to `0` to disable the chars budget
+    /// (NOT recommended — the round-count cap alone does not
+    /// bound per-round reasoning length). The default of
+    /// `32768` (32 KB) covers the long chains DeepSeek-R1 and
+    /// o1 emit on hard problems; raise it for workloads that
+    /// regularly need 50k+ chars of reasoning. Env var
+    /// `LLM_MAX_THINKING_CHARS`, TOML key
+    /// `[llm].llm_max_thinking_chars`.
+    pub llm_max_thinking_chars: u32,
 }
 
 impl Default for LlmConfig {
@@ -187,8 +212,9 @@ impl Default for LlmConfig {
             allow_user_location: true,
             allow_user_timezone: true,
             allow_user_reply_language: true,
-            llm_max_tool_rounds: 4,
-            llm_max_auto_continues: 1,
+            llm_max_tool_rounds: 8,
+            llm_max_auto_continues: 5,
+            llm_max_thinking_chars: 32_768,
         }
     }
 }
@@ -272,7 +298,13 @@ impl LlmConfig {
             defaults.llm_max_auto_continues,
             "LLM_MAX_AUTO_CONTINUES",
         )?
-        .clamp(0, 4);
+        .clamp(0, 16);
+        let llm_max_thinking_chars = resolve_primitive(
+            env_opt("LLM_MAX_THINKING_CHARS").as_deref(),
+            toml.llm_max_thinking_chars,
+            defaults.llm_max_thinking_chars,
+            "LLM_MAX_THINKING_CHARS",
+        )?;
 
         Ok(Self {
             enabled,
@@ -289,6 +321,7 @@ impl LlmConfig {
             allow_user_reply_language,
             llm_max_tool_rounds,
             llm_max_auto_continues,
+            llm_max_thinking_chars,
         })
     }
 }

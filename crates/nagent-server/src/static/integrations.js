@@ -301,8 +301,15 @@ function buildFormField(field) {
       ? "url"
       : "text";
   if (field.placeholder) input.placeholder = field.placeholder;
-  // Never auto-fill; the server returns no plaintext, only the
-  // `filled` boolean, so we leave the field empty.
+  // Pre-fill the field when the server echoed back a saved
+  // value. The server only populates `field.value` for
+  // non-`password` kinds (URL, username, host, …); secret
+  // fields always come back as `undefined` so we never
+  // auto-populate a password. Leaving the field empty on edit
+  // is also a valid "keep what is already saved" signal —
+  // the PUT handler skips empty inputs and the existing
+  // ciphertext row stays untouched.
+  if (typeof field.value === "string") input.value = field.value;
   input.autocomplete = "off";
   input.spellcheck = false;
   // The input lives inside a flex group so a service that
@@ -595,7 +602,7 @@ function openEditor(svc) {
   save.className = "primary";
   save.textContent = svc.configured ? "Save changes" : "Save";
   actions.appendChild(save);
-  modal.appendChild(actions);
+  form.appendChild(actions);
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
