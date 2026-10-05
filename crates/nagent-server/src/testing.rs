@@ -436,6 +436,7 @@ fn default_test_config() -> Config {
             allow_user_reply_language: true,
             llm_max_tool_rounds: 4,
             llm_max_auto_continues: 0,
+            num_predict: None,
         },
         agents: AgentConfig::default(),
         tts: TtsConfig::default(),

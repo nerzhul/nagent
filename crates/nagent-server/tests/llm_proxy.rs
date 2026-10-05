@@ -117,6 +117,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 0,
+        num_predict: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -536,6 +537,127 @@ async fn proxy_is_passthrough_when_system_prompt_unset() {
     assert_eq!(messages[0]["content"], "hi");
 }
 
+// ---- `num_predict` injection (per-response generation budget) -------------
+//
+// Mirrors the `start_test_server_with_llm_and_system_prompt` helper
+// shape so we can exercise the `LLM_NUM_PREDICT` knob end-to-end
+// without depending on the system-prompt knob.
+
+/// Same as [`start_test_server_with_llm_and_system_prompt`] but
+/// lets the caller pick `num_predict` directly so the body-merge
+/// path can be exercised end-to-end. Returns the chat URL plus
+/// the upstream-side body capture (the only thing these tests
+/// need to assert on).
+async fn start_test_server_with_llm_num_predict(
+    upstream_url: String,
+    num_predict: Option<u32>,
+) -> (String, Arc<tokio::sync::Mutex<Option<Value>>>) {
+    let llm_cfg = LlmConfig {
+        enabled: true,
+        base_url: upstream_url,
+        default_model: "llama3.1".into(),
+        api_key: None,
+        inbound_auth_key: None,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins: vec![],
+        system_prompt: None,
+        allow_user_location: true,
+        allow_user_timezone: true,
+        allow_user_reply_language: true,
+        llm_max_tool_rounds: 4,
+        llm_max_auto_continues: 0,
+        num_predict,
+    };
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
+
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    let state = builder.with_llm(llm_client).build();
+
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+
+    let on_body = Arc::new(tokio::sync::Mutex::new(None));
+    (url, on_body)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_injects_num_predict_into_options_when_configured() {
+    // The `LLM_NUM_PREDICT` knob is opt-in: when set, the proxy must
+    // merge `options.num_predict` into the upstream body so reasoning
+    // models get a per-response generation budget that lets them
+    // finish a reasoning + tool-call round in one upstream request.
+    let (upstream_url, _on_headers, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let (chat_url, _) = start_test_server_with_llm_num_predict(upstream_url, Some(2048)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{chat_url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#)
+        .send()
+        .await
+        .expect("post chat");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+
+    let captured = on_body.lock().await.take().expect("captured body");
+    let options = captured["options"]
+        .as_object()
+        .expect("upstream received `options` object");
+    assert_eq!(
+        options["num_predict"].as_u64(),
+        Some(2048),
+        "expected `options.num_predict = 2048`, got: {captured}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_does_not_inject_num_predict_when_unset() {
+    // Backwards-compatibility guard: when the admin has not set
+    // `LLM_NUM_PREDICT` (and the field defaults to `None`), the
+    // proxy must NOT inject `options.num_predict` so the upstream
+    // keeps its own default (e.g. Ollama's 128 tokens). Without
+    // this assertion a future regression could silently start
+    // setting `num_predict` and break every deployment that relies
+    // on the upstream default.
+    let (upstream_url, _on_headers, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let (chat_url, _) = start_test_server_with_llm_num_predict(upstream_url, None).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{chat_url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"llama3.1"}"#)
+        .send()
+        .await
+        .expect("post chat");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+
+    let captured = on_body.lock().await.take().expect("captured body");
+    let injected = captured
+        .get("options")
+        .and_then(|o| o.get("num_predict"))
+        .and_then(|v| v.as_u64());
+    assert!(
+        injected.is_none(),
+        "expected no `options.num_predict` when knob is unset, got: {captured}"
+    );
+}
+
 // ---- Inbound auth gate (P0 — Auth on the LLM proxy) ------------------------
 //
 // Mirrors the structure of `start_test_server_with_llm_and_system_prompt`
@@ -571,6 +693,7 @@ async fn start_test_server_with_llm_auth(
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 0,
+        num_predict: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -1013,6 +1136,7 @@ async fn tool_loop_auto_continues_on_reasoning_truncation_until_visible_answer()
         allow_user_reply_language: true,
         llm_max_tool_rounds: 8,
         llm_max_auto_continues: 3,
+        num_predict: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");

@@ -107,6 +107,32 @@ pub(crate) fn resolve_opt_string(
     }
 }
 
+/// Resolve an `Option<T>` knob where `T: FromStr`: env value if
+/// present, else TOML value, else `None`. The env parse error is
+/// surfaced as a [`ConfigError`] (a typo must fail loudly at boot
+/// rather than silently dropping the knob). Use for optional
+/// numeric knobs (`num_predict`, future batch sizes, …) where the
+/// proxy must distinguish "operator opted in" (`Some`) from
+/// "operator has no opinion, leave upstream default alone"
+/// (`None`).
+pub(crate) fn resolve_opt_primitive<T>(
+    env_value: Option<&str>,
+    toml_value: Option<T>,
+    env_key: &str,
+) -> Result<Option<T>, ConfigError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match env_value {
+        Some(v) => v
+            .parse::<T>()
+            .map(Some)
+            .map_err(|e| ConfigError::InvalidEnv(env_key.into(), e.to_string())),
+        None => Ok(toml_value),
+    }
+}
+
 /// Resolve a comma-separated string list: env value (split + trimmed
 /// + empty-filtered) > TOML list > default.
 pub(crate) fn resolve_csv(

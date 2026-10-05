@@ -299,5 +299,6 @@ fn _suppress_unused_warnings() {
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 0,
+        num_predict: None,
     };
 }

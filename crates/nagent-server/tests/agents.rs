@@ -233,6 +233,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             allow_user_reply_language: true,
             llm_max_tool_rounds: 4,
             llm_max_auto_continues: 0,
+            num_predict: None,
         },
         agents: AgentConfig::default(),
         tts: nagent_server::config::TtsConfig::default(),

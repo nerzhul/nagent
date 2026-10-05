@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use crate::config::file::TomlLlmConfig;
-use crate::config::{env_opt, resolve_csv, resolve_opt_string, resolve_primitive, ConfigError};
+use crate::config::{
+    env_opt, resolve_csv, resolve_opt_primitive, resolve_opt_string, resolve_primitive, ConfigError,
+};
 
 /// Authentication mode applied to inbound `/v1/*` requests.
 ///
@@ -179,6 +181,20 @@ pub struct LlmConfig {
     /// TOML key `[llm].llm_max_auto_continues`. See
     /// `docs/llm-configuration.md` for the full contract.
     pub llm_max_auto_continues: u32,
+    /// Optional per-response generation cap (in tokens) forwarded
+    /// to the upstream as `options.num_predict`. Reasoners
+    /// (deepseek-r1, qwen3.5 with thinking on, o1/o3) emit a long
+    /// reasoning phase before any tool call; the Ollama default
+    /// of `128` tokens cuts them off mid-thought and trips the
+    /// `llm_max_auto_continues` heuristic into a loop. Setting
+    /// this to `2048` or `4096` lets the model finish a single
+    /// reasoning + tool-call round in one upstream request, so the
+    /// auto-continue heuristic rarely fires. `None` (the default)
+    /// leaves the upstream's `num_predict` untouched — the proxy
+    /// only injects the field when the operator opts in. Env var
+    /// `LLM_NUM_PREDICT`, TOML key `[llm].num_predict`. See
+    /// `docs/llm-configuration.md` for the full contract.
+    pub num_predict: Option<u32>,
 }
 
 impl Default for LlmConfig {
@@ -198,6 +214,7 @@ impl Default for LlmConfig {
             allow_user_reply_language: true,
             llm_max_tool_rounds: 64,
             llm_max_auto_continues: 32,
+            num_predict: None,
         }
     }
 }
@@ -282,6 +299,15 @@ impl LlmConfig {
             "LLM_MAX_AUTO_CONTINUES",
         )?
         .clamp(0, 64);
+        // `None` is the contract: the proxy only injects
+        // `options.num_predict` when the operator opts in. Resolving
+        // an env var on top of `None` keeps the three-way merge
+        // (env > TOML > default) intact.
+        let num_predict = resolve_opt_primitive(
+            env_opt("LLM_NUM_PREDICT").as_deref(),
+            toml.num_predict,
+            "LLM_NUM_PREDICT",
+        )?;
 
         Ok(Self {
             enabled,
@@ -298,6 +324,7 @@ impl LlmConfig {
             allow_user_reply_language,
             llm_max_tool_rounds,
             llm_max_auto_continues,
+            num_predict,
         })
     }
 }
