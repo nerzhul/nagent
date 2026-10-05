@@ -157,64 +157,159 @@ pub async fn probe_calendars(
             .encode(format!("{}:{}", body.username, body.password).as_bytes())
     );
     let body_xml = nagent_agents::agents::caldav::build_propfind_body();
-    let validated = match egress.validate(principal_url.as_str()).await {
-        Ok(v) => v,
-        Err(e) => {
-            let msg = format!("validate: {e}");
-            write_probe_audit(&state, user.id, &host, ProbeOutcome::ValidationFailed);
-            return Ok(error_response(StatusCode::BAD_REQUEST, msg));
-        }
-    };
-    let resp = match egress
-        .inner()
-        .request(
-            reqwest::Method::from_bytes(b"PROPFIND").expect("PROPFIND"),
-            validated.url.as_str(),
-        )
-        .header(reqwest::header::AUTHORIZATION, &auth_header)
-        .header("Depth", "1")
-        .header("Content-Type", "application/xml; charset=utf-8")
-        .body(body_xml)
-        .send()
-        .await
-    {
+
+    // Step 1 of the discovery chain (RFC 4791 §5.2, RFC 5397):
+    // ask the user-supplied URL for its own properties,
+    // including `<C:calendar-home-set>`. If the resource is a
+    // CalDAV principal, that property points to the user's
+    // calendar home — the URL we actually want to PROPFIND
+    // with `Depth: 1` to enumerate calendars. If the
+    // property is absent, the resource is already a calendar
+    // home (or similar) and we list calendars directly.
+    let initial = match propfind(&egress, &principal_url, 0, &auth_header, &body_xml).await {
         Ok(r) => r,
-        Err(e) => {
-            let msg = format!("upstream connect failed: {e}");
+        Err(ProbeError::Validation(e)) => {
+            write_probe_audit(&state, user.id, &host, ProbeOutcome::ValidationFailed);
+            return Ok(error_response(
+                StatusCode::BAD_REQUEST,
+                format!("validate: {e}"),
+            ));
+        }
+        Err(ProbeError::Transport(e)) => {
             write_probe_audit(&state, user.id, &host, ProbeOutcome::TransportError);
-            return Ok(error_response(StatusCode::BAD_GATEWAY, msg));
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream: {e}"),
+            ));
+        }
+        Err(ProbeError::AuthRejected(body)) => {
+            write_probe_audit(&state, user.id, &host, ProbeOutcome::AuthRejected);
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("CalDAV server rejected the credentials: {body}"),
+            ));
+        }
+        Err(ProbeError::Upstream(status, body)) => {
+            write_probe_audit(&state, user.id, &host, ProbeOutcome::UpstreamError);
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("CalDAV returned {status}: {body}"),
+            ));
         }
     };
-    let status = resp.status();
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            let msg = format!("upstream read failed: {e}");
-            write_probe_audit(&state, user.id, &host, ProbeOutcome::TransportError);
-            return Ok(error_response(StatusCode::BAD_GATEWAY, msg));
+
+    let calendar_home_hrefs =
+        nagent_agents::agents::caldav::extract_calendar_home_hrefs(&initial, &principal_url);
+
+    // Decide which URLs to PROPFIND for the actual calendar
+    // list. If the user pasted a principal URL, the
+    // `calendar-home-set` property tells us where the user's
+    // calendar home is; otherwise we treat the user URL as
+    // a calendar home and list its children directly.
+    let listing_urls: Vec<Url> = if calendar_home_hrefs.is_empty() {
+        vec![principal_url.clone()]
+    } else {
+        // Validate each chain URL against the allowlist so the
+        // upstream cannot redirect us to an unrelated host
+        // through a malicious `calendar-home-set` response.
+        let mut parsed = Vec::with_capacity(calendar_home_hrefs.len());
+        for href in calendar_home_hrefs {
+            let url = match Url::parse(&href) {
+                Ok(u) => u,
+                Err(e) => {
+                    write_probe_audit(&state, user.id, &host, ProbeOutcome::InvalidUrl);
+                    return Ok(error_response(
+                        StatusCode::BAD_GATEWAY,
+                        format!("upstream returned an invalid calendar-home URL `{href}`: {e}"),
+                    ));
+                }
+            };
+            if let Err(e) = egress.validate(url.as_str()).await {
+                write_probe_audit(
+                    &state,
+                    user.id,
+                    url.host_str().unwrap_or(""),
+                    ProbeOutcome::NotInAllowlist,
+                );
+                return Ok(error_response(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "calendar-home host `{}` is not in the CalDAV allowlist: {e}",
+                        url.host_str().unwrap_or("")
+                    ),
+                ));
+            }
+            parsed.push(url);
         }
+        parsed
     };
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        let body = String::from_utf8_lossy(&bytes).into_owned();
-        write_probe_audit(&state, user.id, &host, ProbeOutcome::AuthRejected);
-        return Ok(error_response(
-            StatusCode::BAD_GATEWAY,
-            format!("CalDAV server rejected the credentials: {body}"),
-        ));
+
+    // Step 2: PROPFIND each calendar home with `Depth: 1` to
+    // enumerate the user's calendars. Concatenate the parsed
+    // responses and dedupe by href.
+    let mut all_responses: Vec<nagent_agents::agents::caldav::PropfindResponse> = Vec::new();
+    for url in &listing_urls {
+        let xml = match propfind(&egress, url, 1, &auth_header, &body_xml).await {
+            Ok(r) => r,
+            Err(ProbeError::Validation(e)) => {
+                write_probe_audit(
+                    &state,
+                    user.id,
+                    url.host_str().unwrap_or(""),
+                    ProbeOutcome::ValidationFailed,
+                );
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("validate: {e}"),
+                ));
+            }
+            Err(ProbeError::Transport(e)) => {
+                write_probe_audit(
+                    &state,
+                    user.id,
+                    url.host_str().unwrap_or(""),
+                    ProbeOutcome::TransportError,
+                );
+                return Ok(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    format!("upstream: {e}"),
+                ));
+            }
+            Err(ProbeError::AuthRejected(body)) => {
+                write_probe_audit(
+                    &state,
+                    user.id,
+                    url.host_str().unwrap_or(""),
+                    ProbeOutcome::AuthRejected,
+                );
+                return Ok(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    format!("CalDAV server rejected the credentials: {body}"),
+                ));
+            }
+            Err(ProbeError::Upstream(status, body)) => {
+                write_probe_audit(
+                    &state,
+                    user.id,
+                    url.host_str().unwrap_or(""),
+                    ProbeOutcome::UpstreamError,
+                );
+                return Ok(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    format!("CalDAV returned {status}: {body}"),
+                ));
+            }
+        };
+        let responses = nagent_agents::agents::caldav::extract_propfind_responses(&xml, url);
+        for r in responses {
+            if r.is_calendar && !all_responses.iter().any(|prev| prev.href == r.href) {
+                all_responses.push(r);
+            }
+        }
     }
-    if !status.is_success() && status.as_u16() != 207 {
-        let body = String::from_utf8_lossy(&bytes).into_owned();
-        write_probe_audit(&state, user.id, &host, ProbeOutcome::UpstreamError);
-        return Ok(error_response(
-            StatusCode::BAD_GATEWAY,
-            format!("CalDAV returned {status}: {body}"),
-        ));
-    }
-    let xml = String::from_utf8_lossy(&bytes);
-    let responses = nagent_agents::agents::caldav::extract_propfind_responses(&xml, &principal_url);
-    let mut data: Vec<CalendarEntry> = responses
+
+    let mut data: Vec<CalendarEntry> = all_responses
         .into_iter()
-        .filter(|r| r.is_calendar)
         .map(|r| CalendarEntry {
             href: r.href,
             display_name: r.display_name,
@@ -228,6 +323,68 @@ pub async fn probe_calendars(
     });
     write_probe_audit(&state, user.id, &host, ProbeOutcome::Ok);
     Ok(Json(ProbeResponse { data }).into_response())
+}
+
+/// One PROPFIND request against the CalDAV upstream, with
+/// the allowlist enforced, the status checked, and the body
+/// decoded as UTF-8. Pulled out of `probe_calendars` so the
+/// two-step discovery chain (principal, then calendar home)
+/// shares the same error-handling.
+async fn propfind(
+    egress: &EgressClient,
+    url: &Url,
+    depth: u8,
+    auth_header: &str,
+    body: &str,
+) -> Result<String, ProbeError> {
+    use nagent_agents::egress::EgressError;
+    let validated = egress.validate(url.as_str()).await.map_err(|e| match e {
+        EgressError::NotInAllowlist { host } => {
+            ProbeError::Validation(format!("host `{host}` is not in the CalDAV allowlist"))
+        }
+        other => ProbeError::Validation(other.to_string()),
+    })?;
+    let resp = egress
+        .inner()
+        .request(
+            reqwest::Method::from_bytes(b"PROPFIND").expect("PROPFIND"),
+            validated.url.as_str(),
+        )
+        .header(reqwest::header::AUTHORIZATION, auth_header)
+        .header("Depth", depth.to_string())
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| ProbeError::Transport(format!("connect: {e}")))?;
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ProbeError::Transport(format!("read: {e}")))?;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err(ProbeError::AuthRejected(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ));
+    }
+    if !status.is_success() && status.as_u16() != 207 {
+        return Err(ProbeError::Upstream(
+            status,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Internal error type for the `propfind` helper so the
+/// discovery chain can share the same status / body handling
+/// without `probe_calendars` growing a forest of `match`
+/// branches per URL.
+enum ProbeError {
+    Validation(String),
+    Transport(String),
+    AuthRejected(String),
+    Upstream(StatusCode, String),
 }
 
 fn error_response(status: StatusCode, message: String) -> Response {

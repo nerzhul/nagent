@@ -474,6 +474,82 @@ pub fn extract_propfind_responses(xml: &str, principal: &Url) -> Vec<PropfindRes
     out
 }
 
+/// Extract every `<C:calendar-home-set>` href from a PROPFIND
+/// response. RFC 4791 §5.2 defines `<C:calendar-home-set>` as
+/// an `Href` element (or list of `Href`s) on a calendar
+/// principal pointing to the user's calendar home — the
+/// canonical way for a CalDAV client to discover calendars
+/// without the user having to paste the calendar home URL
+/// directly. The function is permissive: a missing property
+/// returns an empty vec, a malformed response returns the
+/// partial list, no panics.
+///
+/// `xml` is the raw PROPFIND body. `principal` is used to
+/// resolve relative hrefs (SabreDAV/Nextcloud usually emits
+/// absolute paths starting with `/`, so the resolver just
+/// pins them onto the base URL). Duplicates are removed.
+pub fn extract_calendar_home_hrefs(xml: &str, principal: &Url) -> Vec<String> {
+    let lower = xml.to_ascii_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel_start) = find_open_tag(&lower, cursor, "calendar-home-set") {
+        let abs_end = match find_close_tag_in_lower(&lower, rel_start, "calendar-home-set") {
+            Some(end) => end,
+            None => break,
+        };
+        // `calendar-home-set` wraps one or more `<D:href>`
+        // children. Walk the inner XML and pull every href.
+        // The depth-aware `find_close_tag_in_lower` is called
+        // on the full lowercased buffer (not on a sub-slice)
+        // so it can locate the matching `</D:href>`; we then
+        // constrain the result to the `calendar-home-set`
+        // range with an `abs_end` cap to avoid picking up an
+        // href that lives outside the property.
+        let mut inner_cursor = rel_start;
+        while let Some(href_open) = find_open_tag(&lower, inner_cursor, "href") {
+            if href_open >= abs_end {
+                break;
+            }
+            // Find the matching `</D:href>` in the whole
+            // buffer; depth-aware so a `<D:href>` inside an
+            // href (unusual but possible) does not derail us.
+            let href_close_lt = match find_close_tag_in_lower(&lower, href_open, "href") {
+                Some(end) => end,
+                None => break,
+            };
+            // `find_close_tag_in_lower` returns the position
+            // of the `<` in `</D:href>`. Walk past `>` to get
+            // the end of the close tag, then `extract_inner`
+            // works on the original-case slice.
+            let lower_bytes = lower.as_bytes();
+            let after_close = lower_bytes[href_close_lt..]
+                .iter()
+                .position(|&b| b == b'>')
+                .map(|p| href_close_lt + p + 1)
+                .unwrap_or(lower.len());
+            // The href inner text lives between the opening
+            // tag's `>` and the closing tag's `<`. We can
+            // locate the opening tag's `>` by finding the
+            // first `>` in `&lower[href_open..]`.
+            let href_open_close = lower_bytes[href_open..]
+                .iter()
+                .position(|&b| b == b'>')
+                .map(|p| href_open + p + 1)
+                .unwrap_or(href_close_lt);
+            let href_text = xml[href_open_close..href_close_lt].trim().to_string();
+            if !href_text.is_empty() {
+                let resolved = resolve_href(&href_text, principal);
+                if !out.contains(&resolved) {
+                    out.push(resolved);
+                }
+            }
+            inner_cursor = after_close;
+        }
+        cursor = abs_end;
+    }
+    out
+}
+
 /// Decide whether a `<D:resourcetype>` body identifies a leaf
 /// user calendar (the kind the chat agents can list / create
 /// events against) versus a sibling resource that mentions
@@ -1000,7 +1076,25 @@ fn split_property(line: &str) -> (String, Vec<(String, String)>, String) {
 // ===========================================================================
 
 /// Build the `PROPFIND` request body used by the probe endpoint
-/// to discover the user's calendars.
+/// to discover the user's calendars. Asks for everything the
+/// discovery chain (RFC 4791 §5.2, RFC 5397) needs in one
+/// round-trip:
+///
+/// - `<D:displayname>`, `<D:resourcetype>`, `<CS:getctag>` —
+///   the per-resource info we surface to the chat UI.
+/// - `<C:calendar-home-set>` — only meaningful on a principal
+///   (the user's calendar home URL); the probe uses it to walk
+///   principal → calendar home → calendars when the caller
+///   pasted a principal URL.
+/// - `<D:principal-URL>` — used in reverse: if the caller
+///   pasted a calendar home URL, this property on the
+///   response lets us cross-check the caller's intent without
+///   a second round-trip.
+///
+/// Including all four in one request keeps the discovery
+/// chain at one network call when the caller is happy with a
+/// calendar home URL and only two when they paste a principal
+/// URL.
 pub fn build_propfind_body() -> String {
     r#"<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
@@ -1008,6 +1102,8 @@ pub fn build_propfind_body() -> String {
     <D:displayname/>
     <D:resourcetype/>
     <CS:getctag/>
+    <C:calendar-home-set/>
+    <D:principal-URL/>
   </D:prop>
 </D:propfind>
 "#
@@ -1148,6 +1244,98 @@ mod tests {
         assert!(body.contains("displayname"));
         assert!(body.contains("resourcetype"));
         assert!(body.contains("getctag"));
+        // The discovery chain (RFC 4791 §5.2) needs the
+        // principal property too so a single round-trip can
+        // tell a principal URL from a calendar home URL.
+        assert!(body.contains("calendar-home-set"));
+        assert!(body.contains("principal-URL"));
+    }
+
+    /// Mirrors the real Nextcloud 33 PROPFIND response on a
+    /// principal URL. The discovery chain has to extract the
+    /// calendar-home href and resolve it to an absolute URL
+    /// so the second PROPFIND knows where to go.
+    #[test]
+    fn extract_calendar_home_hrefs_finds_nextcloud_principal_home() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/remote.php/dav/principals/users/alice/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>Alice</d:displayname>
+        <d:resourcetype>
+          <d:collection/>
+          <d:principal/>
+        </d:resourcetype>
+        <c:calendar-home-set>
+          <d:href>/remote.php/dav/calendars/alice/</d:href>
+        </c:calendar-home-set>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"#;
+        let principal = Url::parse(PRINCIPAL).unwrap();
+        let homes = extract_calendar_home_hrefs(xml, &principal);
+        assert_eq!(homes.len(), 1);
+        assert!(homes[0].ends_with("/remote.php/dav/calendars/alice/"));
+    }
+
+    /// Multiple `<D:href>` children inside one
+    /// `calendar-home-set` (RFC 4791 allows the property to
+    /// carry a list). The chain must visit every home, not
+    /// just the first one.
+    #[test]
+    fn extract_calendar_home_hrefs_supports_multiple_homes() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/remote.php/dav/principals/users/alice/</d:href>
+    <d:propstat>
+      <d:prop>
+        <c:calendar-home-set>
+          <d:href>/remote.php/dav/calendars/alice/</d:href>
+          <d:href>/remote.php/dav/calendars/alice-shared/</d:href>
+        </c:calendar-home-set>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"#;
+        let principal = Url::parse(PRINCIPAL).unwrap();
+        let homes = extract_calendar_home_hrefs(xml, &principal);
+        assert_eq!(homes.len(), 2);
+        assert!(homes.iter().any(|h| h.ends_with("/calendars/alice/")));
+        assert!(homes
+            .iter()
+            .any(|h| h.ends_with("/calendars/alice-shared/")));
+    }
+
+    /// A calendar home URL (no `calendar-home-set` in the
+    /// response) must yield an empty list so the chain
+    /// falls back to listing calendars directly on the
+    /// user-provided URL.
+    #[test]
+    fn extract_calendar_home_hrefs_returns_empty_for_calendar_home() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/alice/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype>
+          <d:collection/>
+          <c:calendar/>
+        </d:resourcetype>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"#;
+        let principal = Url::parse(PRINCIPAL).unwrap();
+        let homes = extract_calendar_home_hrefs(xml, &principal);
+        assert!(homes.is_empty());
     }
 
     #[test]
@@ -1207,12 +1395,12 @@ mod tests {
     fn extract_inner_handles_namespaced_tags() {
         let xml = r#"<D:response><D:displayname>Personal</D:displayname></D:response>"#;
         let got = extract_inner(xml, "displayname");
-        eprintln!("got = {:?}", got);
+        assert_eq!(got.as_deref(), Some("Personal"));
         let pos = find_open_tag(&xml.to_ascii_lowercase(), 0, "displayname");
-        eprintln!("open pos = {:?}", pos);
+        assert!(pos.is_some());
         if let Some(p) = pos {
             let close = find_close_tag_in_lower(&xml.to_ascii_lowercase(), p, "displayname");
-            eprintln!("close = {:?}", close);
+            assert!(close.is_some());
         }
     }
 
