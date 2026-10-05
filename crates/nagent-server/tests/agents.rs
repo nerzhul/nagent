@@ -232,8 +232,6 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             allow_user_timezone: true,
             allow_user_reply_language: true,
             llm_max_tool_rounds: 4,
-            llm_max_auto_continues: 1,
-            llm_max_thinking_chars: 0,
         },
         agents: AgentConfig::default(),
         tts: nagent_server::config::TtsConfig::default(),

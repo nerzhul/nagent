@@ -95,8 +95,6 @@ async fn start_test_server_with_overrides(
         allow_user_timezone: true,
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
-        llm_max_auto_continues: 1,
-        llm_max_thinking_chars: 0,
     };
     let stt_limiter = RateLimiter::new(RateLimitPolicy::stt(rate_limit.stt_per_min));
     let llm_limiter = RateLimiter::new(RateLimitPolicy::llm(rate_limit.llm_per_min));

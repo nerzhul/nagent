@@ -248,25 +248,6 @@ pub struct TomlLlmConfig {
     /// when both are set. Defaults to `8`. Defends against models
     /// that loop on a tool call.
     pub llm_max_tool_rounds: Option<u32>,
-    /// Max number of auto-continue rounds when the upstream reasoning
-    /// model hits `finish_reason: "length"` mid-reasoning. Mirrors
-    /// the `LLM_MAX_AUTO_CONTINUES` env var; env wins when both are
-    /// set. Defaults to `5`; set to `0` to disable. Counted on
-    /// its own counter so the auto-continue path does not eat into
-    /// `llm_max_tool_rounds`.
-    pub llm_max_auto_continues: Option<u32>,
-    /// Cumulative cap on `delta.reasoning` characters across every
-    /// auto-continue round of a single user turn. Mirrors the
-    /// `LLM_MAX_THINKING_CHARS` env var; env wins when both are
-    /// set. Defaults to `32768` (32 KB). Pairs with
-    /// `llm_max_auto_continues` so a runaway model cannot burn
-    /// the upstream's token budget: the count cap guards against
-    /// unbounded rounds, the chars cap guards against unbounded
-    /// per-round reasoning length. When the chars cap is hit, the
-    /// tool loop emits a clear SSE `error` event and exits
-    /// cleanly. Set to `0` to disable (NOT recommended — the
-    /// count cap alone does not bound per-round length).
-    pub llm_max_thinking_chars: Option<u32>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -859,8 +840,6 @@ fn merge_toml_llm(
             allow_user_timezone: l.allow_user_timezone.or(e.allow_user_timezone),
             allow_user_reply_language: l.allow_user_reply_language.or(e.allow_user_reply_language),
             llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
-            llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
-            llm_max_thinking_chars: l.llm_max_thinking_chars.or(e.llm_max_thinking_chars),
         }),
     }
 }
@@ -1231,7 +1210,6 @@ mod tests {
             cors_allow_origins = ["https://example.com"]
             system_prompt = "from-toml"
             llm_max_tool_rounds = 2
-            llm_max_auto_continues = 1
 
             [agents]
             enabled = true
@@ -1439,7 +1417,6 @@ mod tests {
 
                 [llm]
                 llm_max_tool_rounds = 7
-                llm_max_auto_continues = 0
 
                 [agents.web_fetch]
                 allow_public = true
