@@ -347,6 +347,7 @@ mod tests {
             agents: Default::default(),
             tts: Default::default(),
             allowed_origins: Default::default(),
+            x_oauth: Default::default(),
             auth: AuthConfig {
                 enabled: true,
                 backends: vec![AuthBackendKind::Local],

@@ -106,6 +106,37 @@ pub trait SecretSource: Send + Sync {
     ) -> Result<Option<secrecy::SecretString>, AgentError>;
 }
 
+/// What an agent needs from the auth subtree to **write back**
+/// refreshed per-user secrets (plan 1790695073418 — the X OAuth
+/// "refresh handled by the agent itself" locked decision).
+///
+/// Mirror image of [`SecretSource`]: the same crate boundary is
+/// enforced (agents cannot reach the DB / key), the impl lives in
+/// `nagent-server` next to the `CredentialResolver`, and the
+/// [`UserContext`] `sink` field is `None` outside the chat-session
+/// constructor so test contexts and direct-invoke paths stay
+/// sink-free.
+#[async_trait]
+pub trait SecretSink: Send + Sync {
+    /// Replace the supplied `(service, field) → plaintext` pairs
+    /// atomically for `user_id`. The implementation must
+    /// encrypt + UPSERT every row and write one audit row of
+    /// kind `credential_access` (same as a read on the resolver
+    /// side) so the audit log reads uniformly across reads and
+    /// writes.
+    ///
+    /// `fields` is `&[(&str, secrecy::SecretString)]` so callers
+    /// can hand the write-back path the same `SecretString` they
+    /// received from [`SecretSource::fetch`] without an extra
+    /// clone.
+    async fn update(
+        &self,
+        user_id: Uuid,
+        service: &str,
+        fields: &[(&str, secrecy::SecretString)],
+    ) -> Result<(), AgentError>;
+}
+
 /// What an agent needs from the documents subtree to fetch a single
 /// uploaded document. The crate boundary must not let agents see
 /// the cache directory layout; only the document store implements
@@ -249,6 +280,13 @@ pub struct UserContext {
     /// When `None`, [`UserContext::secret`] returns
     /// `CredentialsMissing` without touching the DB.
     resolver: Option<Arc<dyn SecretSource>>,
+    /// `None` for `for_tests()` contexts and any agent path that
+    /// has not been wired with a sink (plan 1790695073418). When
+    /// `None`, [`UserContext::update_secret`] returns
+    /// `AgentFailed("credential sink not wired in this context")`
+    /// so refresh-style agents fail closed outside the chat-session
+    /// constructor.
+    sink: Option<Arc<dyn SecretSink>>,
     cache: crate::agents::credential_cache::SecretCache,
     /// Active chat session id, when the agent was invoked from the
     /// `/v1/chat/completions` tool loop. The id is propagated from
@@ -273,6 +311,7 @@ impl std::fmt::Debug for UserContext {
             .field("user_id", &self.user_id)
             .field("services", &self.services)
             .field("resolver", &self.resolver.as_ref().map(|_| "<resolver>"))
+            .field("sink", &self.sink.as_ref().map(|_| "<sink>"))
             .field("cache_entries", &self.cache.len())
             .field("chat_session_id", &self.chat_session_id)
             .field("invoked_this_turn", &self.invoked_this_turn)
@@ -294,6 +333,7 @@ impl UserContext {
             user_id,
             services,
             resolver: Some(resolver),
+            sink: None,
             cache: crate::agents::credential_cache::SecretCache::new(),
             chat_session_id: None,
             invoked_this_turn: Vec::new(),
@@ -311,6 +351,7 @@ impl UserContext {
             user_id,
             services,
             resolver: None,
+            sink: None,
             cache: crate::agents::credential_cache::SecretCache::new(),
             chat_session_id: None,
             invoked_this_turn: Vec::new(),
@@ -325,12 +366,14 @@ impl UserContext {
         user_id: Uuid,
         services: Arc<ServiceRegistry>,
         resolver: Option<Arc<dyn SecretSource>>,
+        sink: Option<Arc<dyn SecretSink>>,
         chat_session_id: Uuid,
     ) -> Self {
         Self {
             user_id,
             services,
             resolver,
+            sink,
             cache: crate::agents::credential_cache::SecretCache::new(),
             chat_session_id: Some(chat_session_id),
             invoked_this_turn: Vec::new(),
@@ -418,6 +461,35 @@ impl UserContext {
             Err(e @ AgentError::CredentialsDecryptFailed { .. }) => Err(e),
             Err(other) => Err(other),
         }
+    }
+
+    /// Write back one or more `(field, plaintext)` rows under
+    /// `service` for the calling user (plan 1790695073418 — the X
+    /// OAuth "refresh handled by the agent itself" locked
+    /// decision). The companion of [`Self::secret`]; the impl is
+    /// the inverse direction of [`SecretSource`] and lives next to
+    /// it on the server side.
+    ///
+    /// Returns:
+    /// - `Ok(())` after the new field set is persisted + audited;
+    /// - `Err(AgentError::AgentFailed("credential sink not wired in
+    ///   this context"))` when no sink is wired (test contexts,
+    ///   direct-invoke routes); the agent should surface the error
+    ///   verbatim so the LLM tells the user to reconnect X via
+    ///   `/settings/integrations`;
+    /// - `Err(AgentError::AgentFailed)` for encrypt / DB errors
+    ///   surfaced by the server-side impl.
+    pub async fn update_secret(
+        &self,
+        service: &str,
+        fields: &[(&str, secrecy::SecretString)],
+    ) -> Result<(), AgentError> {
+        let Some(sink) = &self.sink else {
+            return Err(AgentError::AgentFailed(
+                "credential sink not wired in this context".into(),
+            ));
+        };
+        sink.update(self.user_id, service, fields).await
     }
 }
 
@@ -808,6 +880,22 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
             )))
         },
     },
+    // Plan 1790695073418: X timeline agent. Read-only v1; refresh
+    // is handled inside the agent itself when X returns 401
+    // (locked decision). The shared client is `pool.public()`
+    // because `api.x.com` is a public host (with the agent's
+    // `allowlist` enforcing exactly that host).
+    #[cfg(feature = "x-agent")]
+    AgentDescriptor {
+        id: "x_timeline",
+        feature: "x-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(x_timeline::XTimelineAgent::new(
+                cfgs.x_timeline.clone(),
+                pool.public(),
+            )))
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -935,3 +1023,5 @@ pub mod unit_convert_agent;
 pub mod weather_agent;
 #[cfg(feature = "wikipedia-agent")]
 pub mod wikipedia_agent;
+#[cfg(feature = "x-agent")]
+pub mod x_timeline;

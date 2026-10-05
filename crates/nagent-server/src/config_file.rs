@@ -166,6 +166,13 @@ pub struct TomlConfig {
     /// deps (`pdf-extract` + `mime_guess`).
     #[serde(default)]
     pub documents: Option<TomlDocumentsConfig>,
+    /// X OAuth 2.0 PKCE flow config (plan 1790695073418). Top-level
+    /// (not under `[auth.*]`) because the X flow is a per-user
+    /// integration, not a nagent login backend. Always parsed so a
+    /// build without the `x-agent` cargo feature still surfaces
+    /// typos in the section.
+    #[serde(default)]
+    pub x_oauth: Option<TomlXOAuthConfig>,
 }
 
 /// Server-side knobs grouped under `[server]`.
@@ -275,6 +282,13 @@ pub struct TomlAgentConfig {
     pub read_document_enabled: Option<bool>,
     #[serde(default)]
     pub caldav: Option<TomlCalDavConfig>,
+    /// Knobs for the `x_timeline` agent (plan 1790695073418).
+    /// Mirrors [`crate::config::XTimelineConfig`]. Parsed
+    /// unconditionally so a TOML typo surfaces at boot rather than
+    /// silently dropping the section; the agent itself is only
+    /// registered when the `x-agent` cargo feature is on.
+    #[serde(default)]
+    pub x_timeline: Option<TomlXTimelineConfig>,
 }
 
 /// Sandbox and transfer knobs for the built-in `web_fetch` tool.
@@ -353,6 +367,36 @@ pub struct TomlCalDavConfig {
     pub allowlist: Option<Vec<String>>,
     pub max_events: Option<usize>,
     pub max_body_bytes: Option<usize>,
+}
+
+/// Knobs for the `x_timeline` agent. Mirrors
+/// [`crate::config::XTimelineConfig`]. Parsed unconditionally
+/// so a TOML typo surfaces at boot; the agent itself is only
+/// registered when the `x-agent` cargo feature is on.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlXTimelineConfig {
+    pub timeout_ms: Option<u64>,
+    pub max_posts: Option<usize>,
+    pub allowlist: Option<Vec<String>>,
+    pub cache_ttl_secs: Option<u64>,
+    pub base_url: Option<String>,
+}
+
+/// Knobs for the X OAuth 2.0 PKCE flow. Mirrors
+/// [`crate::config::x_oauth::XOAuthConfig`]. Always parsed so a
+/// TOML typo surfaces at boot; the actual routes are only
+/// registered when the `x-agent` cargo feature is on AND
+/// `client_id` is non-empty.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlXOAuthConfig {
+    pub enabled: Option<bool>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub redirect_path: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub timeout_ms: Option<u64>,
 }
 
 /// WebSocket frame-limit knobs and HTTP transport guardrails (S-1).
@@ -648,6 +692,7 @@ pub fn merge_toml_configs(earlier: &TomlConfig, later: &TomlConfig) -> TomlConfi
         tts: merge_toml_tts(earlier.tts.as_ref(), later.tts.as_ref()),
         auth: merge_toml_auth(earlier.auth.as_ref(), later.auth.as_ref()),
         documents: merge_toml_documents(earlier.documents.as_ref(), later.documents.as_ref()),
+        x_oauth: merge_toml_x_oauth(earlier.x_oauth.as_ref(), later.x_oauth.as_ref()),
     }
 }
 
@@ -827,6 +872,7 @@ fn merge_toml_agents(
             ),
             read_document_enabled: l.read_document_enabled.or(e.read_document_enabled),
             caldav: merge_toml_caldav(e.caldav.as_ref(), l.caldav.as_ref()),
+            x_timeline: merge_toml_x_timeline(e.x_timeline.as_ref(), l.x_timeline.as_ref()),
         }),
     }
 }
@@ -951,6 +997,43 @@ fn merge_toml_caldav(
             allowlist: l.allowlist.clone().or_else(|| e.allowlist.clone()),
             max_events: l.max_events.or(e.max_events),
             max_body_bytes: l.max_body_bytes.or(e.max_body_bytes),
+        }),
+    }
+}
+
+fn merge_toml_x_timeline(
+    earlier: Option<&TomlXTimelineConfig>,
+    later: Option<&TomlXTimelineConfig>,
+) -> Option<TomlXTimelineConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlXTimelineConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            max_posts: l.max_posts.or(e.max_posts),
+            allowlist: l.allowlist.clone().or_else(|| e.allowlist.clone()),
+            cache_ttl_secs: l.cache_ttl_secs.or(e.cache_ttl_secs),
+            base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
+        }),
+    }
+}
+
+fn merge_toml_x_oauth(
+    earlier: Option<&TomlXOAuthConfig>,
+    later: Option<&TomlXOAuthConfig>,
+) -> Option<TomlXOAuthConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlXOAuthConfig {
+            enabled: l.enabled.or(e.enabled),
+            client_id: l.client_id.clone().or_else(|| e.client_id.clone()),
+            client_secret: l.client_secret.clone().or_else(|| e.client_secret.clone()),
+            redirect_path: l.redirect_path.clone().or_else(|| e.redirect_path.clone()),
+            scopes: l.scopes.clone().or_else(|| e.scopes.clone()),
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
         }),
     }
 }

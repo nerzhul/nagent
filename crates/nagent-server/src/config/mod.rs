@@ -32,6 +32,7 @@ pub mod ratelimit;
 pub mod server;
 pub mod trusted_proxies;
 pub mod tts;
+pub mod x_oauth;
 
 // Re-export the TOML schema module under `crate::config::file` so the
 // section files can write `crate::config::file::TomlFooConfig`
@@ -47,7 +48,7 @@ pub use server::{CliArgs, Config, ConfigError};
 /// agents/*, llm/*, …).
 pub use agents::{
     AgentConfig, DictionaryConfig, ReadDocumentConfig, StockConfig, UnitConvertConfig,
-    WeatherConfig, WebFetchConfig, WikipediaConfig,
+    WeatherConfig, WebFetchConfig, WikipediaConfig, XTimelineConfig,
 };
 pub use allowed_origins::AllowedOriginsConfig;
 pub use auth::{
@@ -60,6 +61,7 @@ pub use llm::{LlmAuthMode, LlmConfig};
 pub use ratelimit::RateLimitConfig;
 pub use trusted_proxies::TrustedProxiesConfig;
 pub use tts::TtsConfig;
+pub use x_oauth::XOAuthConfig;
 
 /// Read an env var and return `None` for both unset and empty values.
 /// Empty values (e.g. `env: - ""` in a container manifest) are treated

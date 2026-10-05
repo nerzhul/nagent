@@ -49,7 +49,7 @@ async fn fresh_store() -> (DocumentStore, nagent_db::Db) {
 
 fn ctx_with_session(session_id: Uuid) -> UserContext {
     let services = ServiceRegistry::empty().into_arc();
-    UserContext::for_chat_session(Uuid::nil(), services, None, session_id)
+    UserContext::for_chat_session(Uuid::nil(), services, None, None, session_id)
 }
 
 fn ctx_without_session() -> UserContext {
@@ -454,6 +454,7 @@ async fn read_document_blocks_cross_user_reads() {
         user_b,
         ServiceRegistry::empty().into_arc(),
         None,
+        None,
         session_id,
     );
     let err = agent
@@ -468,6 +469,7 @@ async fn read_document_blocks_cross_user_reads() {
     let ctx_a = UserContext::for_chat_session(
         user_a,
         ServiceRegistry::empty().into_arc(),
+        None,
         None,
         session_id,
     );
@@ -548,6 +550,7 @@ async fn read_document_blocks_disk_path_escape() {
     let ctx = UserContext::for_chat_session(
         user_id,
         ServiceRegistry::empty().into_arc(),
+        None,
         None,
         session_id,
     );

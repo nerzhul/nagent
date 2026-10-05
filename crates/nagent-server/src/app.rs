@@ -288,11 +288,10 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // `caldav_create_event`) are feature-gated the same way; a
     // build without the feature has no CalDAV surface and the
     // registry stays empty (the historical default).
-    #[cfg(feature = "caldav-agent")]
-    let services =
-        ServiceRegistry::new(&[nagent_agents::caldav_service::CALDAV_SERVICE]).into_arc();
-    #[cfg(not(feature = "caldav-agent"))]
-    let services = ServiceRegistry::empty().into_arc();
+    //
+    // Plan 1790695073418: when `x-agent` is on the `x_account`
+    // `ServiceDef` is appended; the X OAuth flow (`/api/auth/login/x/*`)
+    // and the `x_timeline` agent share the same encryption key.
     let has_credentials = auth_store.is_some() && agents.as_ref().is_some_and(|a| !a.is_empty());
     let (credential_resolver, credentials_key) = if has_credentials {
         let key = match CredentialsKey::from_hex(&cfg.auth.credentials.key) {
@@ -317,6 +316,55 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         (None, None)
     };
 
+    // ---- ServiceRegistry ------------------------------------------------
+    //
+    // Build the static `ServiceRegistry` from the per-feature
+    // service catalog. Each per-feature entry is gated on the
+    // matching cargo feature so a build without the feature has
+    // no surface to render.
+    #[cfg(all(feature = "caldav-agent", not(feature = "x-agent")))]
+    let services =
+        ServiceRegistry::new(&[nagent_agents::caldav_service::CALDAV_SERVICE]).into_arc();
+    #[cfg(all(not(feature = "caldav-agent"), feature = "x-agent"))]
+    let services =
+        ServiceRegistry::new(&[nagent_agents::x_account_service::X_ACCOUNT_SERVICE]).into_arc();
+    #[cfg(all(feature = "caldav-agent", feature = "x-agent"))]
+    let services = ServiceRegistry::new(&[
+        nagent_agents::caldav_service::CALDAV_SERVICE,
+        nagent_agents::x_account_service::X_ACCOUNT_SERVICE,
+    ])
+    .into_arc();
+    #[cfg(not(any(feature = "caldav-agent", feature = "x-agent")))]
+    let services = ServiceRegistry::empty().into_arc();
+
+    // Plan 1790695073418: build the X OAuth state when the cargo
+    // feature is on AND the operator supplied a `client_id` (the
+    // master switch is `x_oauth.enabled`, defaulted to `false`).
+    // The encryption key is the same `[auth.credentials].key` the
+    // per-user vault uses, so X OAuth tokens and CalDAV-style
+    // credentials share the same audit row shape.
+    #[cfg(feature = "x-agent")]
+    let auth_x_opt = match (auth_store.clone(), credentials_key.clone()) {
+        (Some(store), Some(key)) => crate::oauth::x::build_state(
+            Arc::new(crate::oauth::x::XOAuthConfig {
+                enabled: cfg.x_oauth.enabled,
+                client_id: cfg.x_oauth.client_id.clone(),
+                client_secret: cfg.x_oauth.client_secret.clone(),
+                redirect_path: cfg.x_oauth.redirect_path.clone(),
+                scopes: cfg.x_oauth.scopes.clone(),
+                timeout_ms: cfg.x_oauth.timeout_ms,
+            }),
+            store,
+            key,
+            cfg.auth.public_url.clone(),
+        ),
+        _ => None,
+    };
+    #[cfg(feature = "x-agent")]
+    if auth_x_opt.is_some() {
+        tracing::info!("X OAuth backend ready");
+    }
+
     // ---- Compose AuthState ----------------------------------------------
     let auth = auth_store.map(|store: nagent_db::Db| {
         let hash_concurrency = cfg.auth.password.hash_concurrency.max(1);
@@ -325,6 +373,8 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
             cfg: Arc::new(cfg.auth.clone()),
             oidc: auth_oidc,
             passkey: auth_passkey,
+            #[cfg(feature = "x-agent")]
+            x: auth_x_opt.map(Arc::new),
             login_rate_limiter: LoginRateLimiter::new(),
             services: services.clone(),
             credential_resolver,

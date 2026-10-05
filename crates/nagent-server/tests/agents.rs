@@ -58,7 +58,7 @@ use nagent_agents::agents::weather_agent::WeatherAgent;
 use nagent_agents::agents::web_fetch::WebFetchAgent;
 #[cfg(feature = "wikipedia-agent")]
 use nagent_agents::agents::wikipedia_agent::WikipediaAgent;
-use nagent_server::agents::ServiceRegistry;
+use nagent_agents::ServiceRegistry;
 use nagent_server::agents::UserContext;
 use nagent_server::agents::{Agent, AgentRegistry};
 use nagent_server::config::{
@@ -238,6 +238,8 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
         tts: nagent_server::config::TtsConfig::default(),
         auth: nagent_server::config::AuthConfig::default(),
         documents: nagent_server::config::DocumentsConfig::default(),
+        allowed_origins: nagent_server::config::AllowedOriginsConfig::default(),
+        x_oauth: nagent_server::config::XOAuthConfig::default(),
     }
 }
 

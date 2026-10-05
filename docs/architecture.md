@@ -159,12 +159,21 @@ propagated from the browser, and the `invoked_this_turn` vector
 consumed by `requires_confirmation`. Its `Drop` impl zeroises the
 plaintext cache so no credential outlives the request.
 
-The crate boundary is enforced by two capability traits:
+The crate boundary is enforced by three capability traits:
 
 - `SecretSource` — `async fn fetch(user_id, service, field)`. The
-  only thing the agents crate sees of the credentials subsystem.
-  `nagent-server`'s `ResolverSecretSource` adapts the
-  `CredentialResolver` to it.
+  only thing the agents crate sees of the credentials subsystem
+  on the **read** path. `nagent-server`'s `ResolverSecretSource`
+  adapts the `CredentialResolver` to it.
+- `SecretSink` — `async fn update(user_id, service, fields)` (plan
+  1790695073418). The write-side mirror; the agents crate can
+  refresh a per-user secret back into the vault through this
+  trait without ever seeing the encryption key. `nagent-server`'s
+  `SecretSinkImpl` (next to the resolver) writes one audit row
+  of kind `credential_access` on every successful update so the
+  audit log reads uniformly across reads and writes.
+  `UserContext::sink` is `None` outside the chat-session
+  constructor so test / direct-invoke paths stay sink-free.
 - `DocumentSource` — `async fn read(user_id, chat_session_id, name)`.
   The only thing the agents crate sees of the documents
   subsystem. `nagent-server`'s `StoreDocumentSource` adapts the
@@ -198,6 +207,7 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `caldav_list_events` | `caldav-agent` | Per-user CalDAV calendar: list `VEVENT`s in a time range. Read-only. |
 | `caldav_get_event` | `caldav-agent` | Per-user CalDAV calendar: fetch a single `VEVENT` by `UID`. Read-only. |
 | `caldav_create_event` | `caldav-agent` | Per-user CalDAV calendar: append a new `VEVENT` (confirm-on-write). |
+| `x_timeline` | `x-agent` | Per-user X (Twitter) home timeline via the v2 API (mode "Abonnements" / "Pour Vous"). Read-only. Refreshes the OAuth access token itself on 401. |
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:
@@ -243,6 +253,16 @@ contains the `caldav` `ServiceDef` (id `"caldav"`, fields `url`,
 integrations UI discover the user's calendar collection
 before saving it; the chat agents read the saved `url` as
 the calendar collection URL.
+
+When the `x-agent` cargo feature is on, the registry also
+contains the `x_account` `ServiceDef` (id `"x_account"`, six
+fields: `access_token`, `refresh_token`, `token_scope`,
+`x_user_id`, `x_screen_name`, `token_expires_at`). The OAuth
+flow at `/api/auth/login/x/{start,callback,disconnect}`
+populates the row at connect time; the `x_timeline` agent
+refreshes the token-shaped fields in place on 401 through
+`UserContext::update_secret(...)`. See
+`docs/integrations/x.md` for the operator-facing guide.
 
 #### 2.7 Setup-only helpers
 
@@ -332,8 +352,10 @@ For every tool call the LLM emits:
 1. Look up the agent by name in `AgentRegistry`. Unknown names
    produce a synthetic tool-result error fed to the LLM so the
    model can recover, not a 500 to the browser.
-2. Build a fresh `UserContext::for_chat_session(user_id, services,
-   chat_session_id)`.
+2. Build a `UserContext` for the authenticated user and current chat
+  session. The current implementation creates a new context for
+  each policy check and invocation; credential injection and
+  per-turn history are not yet wired (see §4, Phases 0 and 2).
 3. If `Agent::requires_confirmation(ctx, args)` returns
    `NeedsConfirmation { reason }`, emit `role: "tool"` with the
    reason verbatim — the LLM is expected to ask the user in plain
@@ -344,12 +366,12 @@ For every tool call the LLM emits:
    `role: "tool"` content in an untrusted-input fence before
    sending the next round's request body to the upstream.
 
-The cross-agent confirmation rule (e.g. "`web_fetch` after
-`read_document` requires user confirmation") lives entirely in
-the agent's own `requires_confirmation` impl — the tool loop
-never has to know about any specific agent by name. That is the
-load-bearing design constraint that lets the agent set grow
-without touching the loop.
+The cross-agent confirmation policy (e.g. "`web_fetch` after
+`read_document` requires user confirmation") lives in the agent's
+own `requires_confirmation` impl — the tool loop does not need to
+know agent names. The current loop does not preserve invocation
+history between calls, so this policy is not reliably enforced yet
+(see §4, Phase 0).
 
 ### 3.4 SSE framing
 

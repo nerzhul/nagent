@@ -7,7 +7,7 @@
 pub use crate::agents::config_doc::{
     CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig, DictionaryAgentConfig,
     ReadDocumentAgentConfig, StockAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig,
-    WebFetchAgentConfig, WikipediaAgentConfig,
+    WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
 };
 
 /// Bag of every per-agent config. Plain data only — the server
@@ -23,8 +23,6 @@ pub struct AgentConfigs {
     pub calculate: CalculateAgentConfig,
     pub datetime: DateTimeAgentConfig,
     pub read_document: ReadDocumentAgentConfig,
-    /// CalDAV plugin knobs (plan 1790963194218). Field is always
-    /// present; the actual agents are only registered when the
-    /// `caldav-agent` cargo feature is on.
     pub caldav: CalDavAgentConfig,
+    pub x_timeline: XTimelineAgentConfig,
 }

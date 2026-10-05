@@ -25,6 +25,9 @@ pub mod pkce;
 pub mod refresh;
 pub mod state;
 
+#[cfg(feature = "x-agent")]
+pub mod x;
+
 pub use pkce::{PkcePair, PkceVerifier};
 pub use refresh::{RefreshTokenClient, RefreshTokenError, TokenSet};
 pub use state::{StateStore, StateStoreEntry};

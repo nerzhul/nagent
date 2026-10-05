@@ -76,6 +76,7 @@ through the `make` targets and the Dockerfile `BACKEND` arg.
 | `unit-convert-agent`            | Register the `unit_convert` chat agent (pure-local conversion tables).                  |
 | `wikipedia-agent`               | Register the `wikipedia` chat agent (REST `wikipedia.org`, no API key, `User-Agent` set).|
 | `dictionary-agent`              | Register the `dictionary` chat agent (Free Dictionary REST API, no API key).             |
+| `x-agent`                       | Register the `x_timeline` chat agent (per-user X / Twitter home timeline via the v2 API; PKCE OAuth flow + self-managed refresh). Operator opt-in via `X_OAUTH_CLIENT_ID`. See `docs/integrations/x.md`. |
 | `stt-core/whisper-rs-backend`   | Pulls in `whisper-rs` (CPU). Always required, even when a GPU backend is also selected.  |
 | `stt-core/whisper-rs-vulkan`    | Enable the Vulkan GPU backend (needs `libvulkan-dev` at build time).                     |
 | `stt-core/whisper-rs-cuda`      | Enable the CUDA GPU backend (needs CUDA toolkit at build time).                          |
@@ -161,6 +162,17 @@ without a default and is required.
 | `WIKIPEDIA_USER_AGENT`       | `nagent-wikipedia-agent/<version>`            | `wikipedia`    | Override the `User-Agent` header. Wikimedia rejects unidentified clients — keep this descriptive and add a contact URL. |
 | `DICTIONARY_TIMEOUT_MS`      | `5000`                                        | `dictionary`   | Per-request timeout in milliseconds.                                                                          |
 | `DICTIONARY_BASE_URL`        | `https://api.dictionaryapi.dev/api/v2`        | `dictionary`   | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
+| `X_OAUTH_ENABLED`            | `false`                                       | `x_timeline`   | Master switch for the X OAuth flow + the `x_timeline` agent. When `false`, neither the routes nor the agent are registered. |
+| `X_OAUTH_CLIENT_ID`          | _(empty)_                                     | `x_timeline`   | X Developer app client id. Required for the OAuth flow to mount.                                                |
+| `X_OAUTH_CLIENT_SECRET`      | _(empty)_                                     | `x_timeline`   | Optional `client_secret` (confidential-client mode). Leave empty for PKCE-only public clients.                |
+| `X_OAUTH_REDIRECT_PATH`      | `/api/auth/login/x/callback`                 | `x_timeline`   | Path component of the OAuth callback URL; combined with `NAGENT_AUTH_PUBLIC_URL`.                              |
+| `X_OAUTH_SCOPES`             | `tweet.read,users.read,follows.read`          | `x_timeline`   | Comma-separated OAuth scopes. The v1 surface is read-only.                                                     |
+| `X_OAUTH_TIMEOUT_MS`         | `8000`                                        | `x_timeline`   | Per-request timeout in milliseconds for `/oauth2/token` + `/users/me` + timeline.                              |
+| `X_TIMELINE_TIMEOUT_MS`      | `8000`                                        | `x_timeline`   | Per-request connect+read timeout in milliseconds for the timeline GET.                                         |
+| `X_TIMELINE_MAX_POSTS`       | `20`                                          | `x_timeline`   | LLM-callable upper bound on returned posts.                                                                   |
+| `X_TIMELINE_ALLOWLIST`       | `api.x.com,x.com`                             | `x_timeline`   | Hostname allow-list applied to the timeline URL.                                                               |
+| `X_TIMELINE_CACHE_TTL_SECS`  | `60`                                          | `x_timeline`   | In-process cache TTL per `(user_id, mode)` pair. `0` disables.                                                 |
+| `X_TIMELINE_BASE_URL`        | `https://api.x.com`                           | `x_timeline`   | Override the upstream base URL — useful for tests against a loopback fixture.                                  |
 | `NAGENT_AUTH_ENABLED`        | `false`                                       | Auth           | Master switch. When `false`, the server keeps the single-user trust boundary (no `/api/me`, no `RequireAuth`, no login routes). |
 | `NAGENT_AUTH_BACKENDS`       | _(empty)_                                     | Auth           | Comma-separated subset of `local`, `oidc`, `passkey`. Each enabled backend exposes its own login route.       |
 | `NAGENT_AUTH_DB_BACKEND`     | _(empty)_                                     | Auth           | `"sqlite"` or `"postgres"`. Required when `auth.enabled = true`. The choice is runtime — both engines compile into the same binary. |
@@ -649,8 +661,18 @@ The `0002_credentials.sql` migration adds:
    `--features nagent-server/caldav-agent` to enable
    `caldav_list_events` / `caldav_get_event` / `caldav_create_event`
    plus the setup-only `POST /api/integrations/caldav/probe-calendars`
-   endpoint (see [`docs/integrations/caldav.md`](docs/integrations/caldav.md)
-   and [`examples/caldav.toml`](examples/caldav.toml)).
+    endpoint (see [`docs/integrations/caldav.md`](docs/integrations/caldav.md)
+    and [`examples/caldav.toml`](examples/caldav.toml)).
+  - **X (Twitter) timeline** is the second concrete integration
+    (plan 1790695073418). Build with
+    `--features nagent-server/x-agent` to enable the
+    `x_timeline` chat agent, the PKCE OAuth 2.0 flow at
+    `/api/auth/login/x/{start,callback,disconnect}`, and the
+    `x_account` entry in the per-user service catalogue.
+    Operator opt-in is `X_OAUTH_CLIENT_ID` (and optionally
+    `X_OAUTH_CLIENT_SECRET` for confidential-client mode). The
+    agent refreshes the access token itself on 401. See
+    [`docs/integrations/x.md`](docs/integrations/x.md).
 
 ### Kubernetes overlays
 

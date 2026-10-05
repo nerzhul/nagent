@@ -178,6 +178,65 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* Button variants. The base `button` rule above gives every
+ * button the same neutral look; the three variants below
+ * separate the visual hierarchy so the user sees which action
+ * is the primary CTA, which is a quiet cancel, and which is a
+ * destructive remove. The Save button in the configure modal
+ * uses `.primary` (the validation / positive action); Cancel
+ * uses `.ghost` (quiet, doesn't compete for attention);
+ * Remove uses `.danger` (red, visually isolated so a fat-finger
+ * double-click is harder to land). */
+button.primary,
+button.ghost,
+button.danger {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #0b0d10;
+  border-color: var(--accent);
+}
+button.primary:hover:not(:disabled) {
+  /* Slightly lighter accent on hover for affordance; the
+   * contrast with the dark text stays AA. */
+  background: #79b8ff;
+  border-color: #79b8ff;
+}
+button.primary:disabled {
+  background: var(--bg-elev);
+  color: var(--fg-mute);
+  border-color: var(--border);
+}
+
+button.ghost {
+  /* Transparent over the panel background so Cancel visually
+   * recedes behind the primary CTA. Border stays so the
+   * button keeps its hit area. */
+  background: transparent;
+  color: var(--fg-mute);
+  border-color: var(--border);
+}
+button.ghost:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-elev);
+  border-color: var(--accent);
+}
+
+button.danger {
+  background: var(--error);
+  color: #fff;
+  border-color: var(--error);
+}
+button.danger:hover:not(:disabled) {
+  /* Slightly lighter red on hover so the user knows the click
+   * registered; same contrast story. */
+  background: #ff6e63;
+  border-color: #ff6e63;
+}
+
 #record-btn:not(:disabled) {
   background: var(--accent);
   color: #0b0d10;
@@ -2021,6 +2080,33 @@ select, input[type="checkbox"] {
   flex: 1;
   min-width: 0;
 }
+.chat-integration-modal-docs {
+  /* Operator-facing setup guide link. Sits between the
+   * subtitle and the form so the user spots it before they
+   * start typing — the form fields below assume the user has
+   * read the matching walkthrough (CalDAV's Nextcloud /
+   * Radicale / Fastmail / iCloud specifics, the X Developer
+   * app registration flow). High-contrast accent on dark
+   * backgrounds; dotted underline gives a clear link
+   * affordance without the visual weight of a solid line. */
+  align-self: flex-start;
+  margin: -0.25rem 0 0.5rem;
+  font-size: 0.85em;
+  color: var(--chat-link-fg, #8ab4ff);
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 0.2em;
+  text-decoration-thickness: 1px;
+}
+.chat-integration-modal-docs:visited {
+  color: var(--chat-link-fg, #8ab4ff);
+}
+.chat-integration-modal-docs:hover,
+.chat-integration-modal-docs:focus-visible {
+  color: var(--chat-link-hover-fg, #b3c8ff);
+  text-decoration-style: solid;
+  text-decoration-thickness: 1.5px;
+  outline: none;
+}
 .chat-integration-actions {
   display: flex;
   justify-content: flex-end;
@@ -2216,34 +2302,6 @@ select, input[type="checkbox"] {
   color: var(--chat-warn-fg, #d4a04e);
   background: rgba(212, 160, 78, 0.10);
   border: 1px solid rgba(212, 160, 78, 0.30);
-}
-.settings-integration-docs {
-  /* Force a high-contrast accent colour so the link stays
-   * readable on a dark background; the browser default (a dim
-   * purple for visited links) loses against the surrounding
-   * panel background. Dotted underline gives a clear "this is
-   * a link" affordance without the visual weight of a solid
-   * underline. */
-  font-size: 0.85em;
-  color: var(--chat-link-fg, #8ab4ff);
-  text-decoration: underline dotted currentColor;
-  text-underline-offset: 0.2em;
-  text-decoration-thickness: 1px;
-  align-self: flex-start;
-  padding-left: 2.5rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-}
-.settings-integration-docs:visited {
-  color: var(--chat-link-fg, #8ab4ff);
-}
-.settings-integration-docs:hover,
-.settings-integration-docs:focus-visible {
-  color: var(--chat-link-hover-fg, #b3c8ff);
-  text-decoration-style: solid;
-  text-decoration-thickness: 1.5px;
-  outline: none;
 }
 .settings-integrations-empty {
   opacity: 0.75;

@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::credentials::crypto::{decrypt, CryptoError, EncryptedSecret};
+use crate::credentials::crypto::{decrypt, encrypt, CryptoError, EncryptedSecret};
 use crate::credentials::key::CredentialsKey;
+use nagent_agents::{AgentError, SecretSink};
 use nagent_db::NewAuthEvent;
 
 /// Public error type for `CredentialResolver` lookups.
@@ -150,5 +151,89 @@ impl CredentialResolver {
             user_agent: self.request_user_agent.clone(),
             target_service: Some(target_service.to_string()),
         });
+    }
+}
+
+/// Write-side adapter that backs [`SecretSink`] (plan 1790695073418).
+///
+/// Companion to [`CredentialResolver`] but lives next to the same
+/// `Db` + `CredentialsKey` so reads and writes share the audit row
+/// shape (`kind = "credential_access"`, `target_service = "<id>"`).
+/// Used by the `x_timeline` agent to write back refreshed OAuth
+/// tokens when X returns 401.
+pub struct SecretSinkImpl {
+    db: nagent_db::Db,
+    key: Arc<CredentialsKey>,
+    request_ip: Option<String>,
+    request_user_agent: Option<String>,
+}
+
+impl std::fmt::Debug for SecretSinkImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretSinkImpl")
+            .field("db", &"<nagent_db::Db>")
+            .field("key", &self.key)
+            .field("request_ip", &self.request_ip)
+            .field("request_user_agent", &self.request_user_agent)
+            .finish()
+    }
+}
+
+impl SecretSinkImpl {
+    pub fn new(
+        db: nagent_db::Db,
+        key: Arc<CredentialsKey>,
+        request_ip: Option<String>,
+        request_user_agent: Option<String>,
+    ) -> Self {
+        Self {
+            db,
+            key,
+            request_ip,
+            request_user_agent,
+        }
+    }
+
+    fn audit(&self, user_id: Uuid, kind: &str, target_service: &str) {
+        self.db.admin().events.record(NewAuthEvent {
+            user_id: Some(user_id),
+            kind: kind.to_string(),
+            provider: "credentials".to_string(),
+            ip: self.request_ip.clone(),
+            user_agent: self.request_user_agent.clone(),
+            target_service: Some(target_service.to_string()),
+        });
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretSink for SecretSinkImpl {
+    async fn update(
+        &self,
+        user_id: Uuid,
+        service: &str,
+        fields: &[(&str, secrecy::SecretString)],
+    ) -> Result<(), AgentError> {
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let mut rows: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::with_capacity(fields.len());
+        for (field_key, plaintext) in fields {
+            use secrecy::ExposeSecret;
+            let sealed = encrypt(self.key.as_ref(), plaintext.expose_secret()).map_err(|e| {
+                AgentError::AgentFailed(format!(
+                    "X refresh write encrypt failed for {service}/{field_key}: {e}"
+                ))
+            })?;
+            rows.push((field_key.to_string(), sealed.nonce, sealed.ciphertext));
+        }
+        self.db
+            .for_user(user_id)
+            .credentials()
+            .upsert(service, &rows)
+            .await
+            .map_err(|e| AgentError::AgentFailed(format!("X refresh write DB error: {e}")))?;
+        self.audit(user_id, "credential_access", service);
+        Ok(())
     }
 }

@@ -488,6 +488,7 @@ mod tests {
             auth: crate::config::AuthConfig::default(),
             documents: crate::config::DocumentsConfig::default(),
             allowed_origins: crate::config::AllowedOriginsConfig::default(),
+            x_oauth: crate::config::XOAuthConfig::default(),
         }
     }
 

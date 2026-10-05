@@ -323,7 +323,7 @@ pub(crate) async fn run_tool_loop(
                         let services = nagent_agents::ServiceRegistry::empty().into_arc();
                         let ctx = match chat_session_id {
                             Some(sid) => {
-                                UserContext::for_chat_session(user_id, services, None, sid)
+                                UserContext::for_chat_session(user_id, services, None, None, sid)
                             }
                             None => UserContext::for_tests(user_id, services),
                         };
@@ -384,7 +384,9 @@ pub(crate) async fn run_tool_loop(
                     // so a user cannot read another user's docs.
                     let services = nagent_agents::ServiceRegistry::empty().into_arc();
                     let mut ctx = match chat_session_id {
-                        Some(sid) => UserContext::for_chat_session(user_id, services, None, sid),
+                        Some(sid) => {
+                            UserContext::for_chat_session(user_id, services, None, None, sid)
+                        }
                         None => UserContext::for_tests(user_id, services),
                     };
                     // Plan 4.C: record the invocation so the next

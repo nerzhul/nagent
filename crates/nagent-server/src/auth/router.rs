@@ -25,6 +25,11 @@ use crate::auth::routes::{
     get_preferences_handler, logout_handler, me_handler, put_preferences_handler,
 };
 
+#[cfg(feature = "x-agent")]
+use crate::oauth::x::{
+    callback_handler as x_callback, disconnect_handler as x_disconnect, start_handler as x_start,
+};
+
 /// Build the public (anonymous) half of the auth subtree. These
 /// routes accept an unauthenticated request — the OIDC callback
 /// arrives without a session cookie because the user just came back
@@ -49,6 +54,12 @@ pub fn build_public_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             .route("/api/auth/login/oidc/start", get(oidc_start))
             .route("/api/auth/login/oidc/callback", get(oidc_callback));
     }
+    // Plan 1790695073418: X OAuth flow. The handlers require an
+    // authenticated session (the `start` handler reads the cookie
+    // so the resulting tokens bind to the calling user), so the
+    // routes are mounted under `RequireAuth` in the protected
+    // subtree below. We only mount them when the X OAuth state is
+    // `Some` (the operator supplied a `client_id`).
     public.with_state(state)
 }
 
@@ -84,6 +95,18 @@ pub fn build_protected_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>
                 "/api/auth/login/passkey/register/finish",
                 post(passkey_register_finish),
             );
+    }
+    // Plan 1790695073418: X OAuth flow. All three endpoints live
+    // under `RequireAuth` so the start handler can read `AuthUser`
+    // and bind the resulting tokens to the calling user. The URL
+    // surface keeps the `/api/auth/login/x/...` prefix to mirror
+    // the existing OIDC + passkey URLs.
+    #[cfg(feature = "x-agent")]
+    if auth_state.x.is_some() {
+        protected = protected
+            .route("/api/auth/login/x/start", get(x_start))
+            .route("/api/auth/login/x/callback", get(x_callback))
+            .route("/api/auth/login/x/disconnect", post(x_disconnect));
     }
     protected.with_state(state)
 }

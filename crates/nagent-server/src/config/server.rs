@@ -15,6 +15,7 @@ use crate::config::llm::LlmConfig;
 use crate::config::ratelimit::RateLimitConfig;
 use crate::config::trusted_proxies::TrustedProxiesConfig;
 use crate::config::tts::TtsConfig;
+use crate::config::x_oauth::XOAuthConfig;
 use crate::config::{env_opt, resolve_primitive};
 
 /// Runtime configuration of the server.
@@ -86,6 +87,13 @@ pub struct Config {
     /// empty, the allow-list is derived from `bind_addr` so the
     /// historical dev workflow keeps working on loopback binds.
     pub allowed_origins: AllowedOriginsConfig,
+    /// `[x_oauth]` — X (Twitter) OAuth 2.0 PKCE flow config
+    /// (plan 1790695073418). Top-level (not under `[auth.*]`)
+    /// because the X flow is a per-user integration, not a
+    /// nagent login backend. The routes are mounted only when
+    /// `x_oauth.enabled = true` AND `x_oauth.client_id` is
+    /// non-empty AND the `x-agent` cargo feature is on.
+    pub x_oauth: XOAuthConfig,
 }
 
 /// CLI flags parsed before config loading.
@@ -229,6 +237,7 @@ impl Config {
         let allowed_origins = AllowedOriginsConfig::from_env_with_toml(
             server.and_then(|s| s.allowed_origins.as_ref()),
         )?;
+        let x_oauth = XOAuthConfig::from_env_with_toml(toml.and_then(|t| t.x_oauth.as_ref()))?;
 
         Ok(Self {
             bind_addr,
@@ -246,6 +255,7 @@ impl Config {
             auth,
             documents,
             allowed_origins,
+            x_oauth,
         })
     }
 

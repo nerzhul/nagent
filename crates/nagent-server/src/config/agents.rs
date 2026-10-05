@@ -55,6 +55,10 @@ pub struct AgentConfig {
     /// parsed; the actual agents are only registered when the
     /// `caldav-agent` cargo feature is on.
     pub caldav: CalDavConfig,
+    /// Knobs for the X timeline agent (plan 1790695073418). The
+    /// field is always parsed; the actual agent is only
+    /// registered when the `x-agent` cargo feature is on.
+    pub x_timeline: XTimelineConfig,
 }
 
 impl Default for AgentConfig {
@@ -70,6 +74,7 @@ impl Default for AgentConfig {
             read_document: ReadDocumentConfig::default(),
             read_document_enabled: false,
             caldav: CalDavConfig::default(),
+            x_timeline: XTimelineConfig::default(),
         }
     }
 }
@@ -99,6 +104,7 @@ impl AgentConfig {
                 "READ_DOCUMENT_AGENT_ENABLED",
             )?,
             caldav: CalDavConfig::from_env_with_toml(toml.caldav.as_ref())?,
+            x_timeline: XTimelineConfig::from_env_with_toml(toml.x_timeline.as_ref())?,
         })
     }
 }
@@ -504,6 +510,79 @@ impl CalDavConfig {
                 defaults.max_body_bytes,
                 "CALDAV_MAX_BODY_BYTES",
             )?,
+        })
+    }
+}
+
+/// Knobs for the X timeline agent (plan 1790695073418). Mirrors
+/// the shape of the agents crate's `XTimelineAgentConfig`; the
+/// `From` impl in `crate::agents` converts one to the other.
+#[derive(Debug, Clone)]
+pub struct XTimelineConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// LLM-callable upper bound on the number of posts returned
+    /// per call.
+    pub max_posts: usize,
+    /// Hostname allow-list applied to the timeline URL. Default
+    /// `["api.x.com", "x.com"]`.
+    pub allowlist: Vec<String>,
+    /// In-process cache TTL (per `(user_id, mode)` pair). `0`
+    /// disables the cache entirely.
+    pub cache_ttl_secs: u64,
+    /// Override the upstream base URL — useful for integration
+    /// tests against a loopback fixture. Defaults to
+    /// `https://api.x.com`.
+    pub base_url: String,
+}
+
+impl Default for XTimelineConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 8_000,
+            max_posts: 20,
+            allowlist: vec!["api.x.com".to_string(), "x.com".to_string()],
+            cache_ttl_secs: 60,
+            base_url: "https://api.x.com".to_string(),
+        }
+    }
+}
+
+impl XTimelineConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlXTimelineConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("X_TIMELINE_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "X_TIMELINE_TIMEOUT_MS",
+            )?,
+            max_posts: resolve_primitive(
+                env_opt("X_TIMELINE_MAX_POSTS").as_deref(),
+                toml.max_posts,
+                defaults.max_posts,
+                "X_TIMELINE_MAX_POSTS",
+            )?,
+            allowlist: resolve_csv(
+                env_opt("X_TIMELINE_ALLOWLIST").as_deref(),
+                toml.allowlist.clone(),
+                defaults.allowlist.clone(),
+            ),
+            cache_ttl_secs: resolve_primitive(
+                env_opt("X_TIMELINE_CACHE_TTL_SECS").as_deref(),
+                toml.cache_ttl_secs,
+                defaults.cache_ttl_secs,
+                "X_TIMELINE_CACHE_TTL_SECS",
+            )?,
+            base_url: resolve_opt_string(
+                env_opt("X_TIMELINE_BASE_URL").as_deref(),
+                toml.base_url.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.base_url.clone()),
         })
     }
 }

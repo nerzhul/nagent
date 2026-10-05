@@ -199,22 +199,6 @@ function renderSettingsIntegrationRow(svc) {
   header.appendChild(actions);
   li.appendChild(header);
 
-  // Surface the operator-facing docs URL when the ServiceDef
-  // has one — the CalDAV connector ships a setup walkthrough
-  // that explains Nextcloud / Radicale / Fastmail / iCloud
-  // specifics. The docs line lives on its own line so the
-  // card has clear vertical rhythm and the link has room to
-  // breathe.
-  if (svc.docs_url) {
-    const docs = document.createElement("a");
-    docs.className = "settings-integration-docs";
-    docs.href = svc.docs_url;
-    docs.target = "_blank";
-    docs.rel = "noopener noreferrer";
-    docs.textContent = "Setup guide →";
-    li.appendChild(docs);
-  }
-
   return li;
 }
 
@@ -356,6 +340,8 @@ const PROBE_PATH = "/api/integrations/caldav/probe-calendars";
 const MODAL_SUBTITLES = {
   caldav:
     "Connect your personal calendar (Nextcloud, Radicale, Fastmail, iCloud, …). Read + add events only — edit/delete are out of scope for v1.",
+  x_account:
+    "Sign in with X to let the assistant read your home timeline (Abonnements / Pour Vous). Read-only — the agent never posts, replies, or writes on your behalf.",
 };
 
 async function probeCalendars(principalUrl, username, password) {
@@ -526,6 +512,25 @@ function openEditor(svc) {
     "Credentials are encrypted with AES-256-GCM at rest. The chat agents use them when you ask the assistant to read or act on this service.";
   title.appendChild(subtitle);
   modal.appendChild(title);
+
+  // Operator-facing setup guide. Lives inside the modal (not
+  // on the card) so the link is always one click away from
+  // the form the user is filling out — CalDAV's
+  // Nextcloud/Fastmail/iCloud specifics and the X Developer
+  // app registration both require non-trivial context that
+  // fits in a separate tab, not a sentence under a status
+  // pill. The link is omitted when the ServiceDef did not
+  // ship a `docs_url` so future connectors without
+  // documentation still render cleanly.
+  if (svc.docs_url) {
+    const docs = document.createElement("a");
+    docs.className = "chat-integration-modal-docs";
+    docs.href = svc.docs_url;
+    docs.target = "_blank";
+    docs.rel = "noopener noreferrer";
+    docs.textContent = "Setup guide →";
+    modal.appendChild(docs);
+  }
 
   const form = document.createElement("form");
   form.className = "chat-integration-form";

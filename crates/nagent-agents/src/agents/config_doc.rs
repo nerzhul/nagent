@@ -219,3 +219,47 @@ impl Default for CalDavAgentConfig {
         }
     }
 }
+
+/// Knobs for the `x_timeline` agent
+///
+/// v1 ships a single read-only agent that reads the calling user's
+/// authenticated X home timeline (mode "Abonnements" by default,
+/// "Pour Vous" on demand). The agent refreshes the access token
+/// itself when X returns 401 (locked decision from the plan) and
+/// caches the latest response per `(user_id, mode)` for
+/// `cache_ttl_secs` so the user can ask "résume ma timeline X"
+/// twice in a row without two upstream calls.
+#[derive(Debug, Clone)]
+pub struct XTimelineAgentConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// LLM-callable upper bound on the number of posts returned
+    /// per call (also enforced server-side before the response is
+    /// shaped).
+    pub max_posts: usize,
+    /// Hostname allow-list applied by the egress client to the
+    /// timeline URL. When non-empty, only the listed hosts (or
+    /// their subdomains, for `*.foo` entries) may be reached. When
+    /// empty, the default-deny SSRF policy rejects every public
+    /// host.
+    pub allowlist: Vec<String>,
+    /// In-process cache TTL (per `(user_id, mode)` pair). `0`
+    /// disables the cache entirely.
+    pub cache_ttl_secs: u64,
+    /// Override the upstream base URL — useful for integration
+    /// tests against a loopback fixture. Defaults to the
+    /// production `https://api.x.com` host.
+    pub base_url: String,
+}
+
+impl Default for XTimelineAgentConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 8_000,
+            max_posts: 20,
+            allowlist: vec!["api.x.com".to_string(), "x.com".to_string()],
+            cache_ttl_secs: 60,
+            base_url: "https://api.x.com".to_string(),
+        }
+    }
+}

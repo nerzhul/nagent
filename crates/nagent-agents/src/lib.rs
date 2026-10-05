@@ -23,15 +23,17 @@ pub mod caldav_service;
 pub mod config;
 pub mod egress;
 pub mod services;
+#[cfg(feature = "x-agent")]
+pub mod x_account_service;
 
 pub use agents::{
     Agent, AgentError, AgentRegistry, AgentSummary, ConfirmationDecision, DocumentPayload,
-    DocumentSource, SecretSource, UserContext,
+    DocumentSource, SecretSink, SecretSource, UserContext,
 };
 pub use config::{
     AgentConfigs, CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig,
     DictionaryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig, UnitConvertAgentConfig,
-    WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig,
+    WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
 };
 
 // Re-export the `read_document` agent unconditionally so the

@@ -144,6 +144,14 @@ an English word via the Free Dictionary API (no API key). Use for \
 'fast'\", \"pronunciation of 'quinoa'\". Do NOT use for encyclopedic / \
 biographical / historical questions — answer those from your own \
 knowledge; this tool is scoped to English vocabulary lookups.
+- x_timeline: read the user's authenticated X (Twitter) home timeline \
+via the v2 API (mode 'following' / 'Abonnements' by default, or 'for_you' / \
+'Pour Vous' on demand). Use for \"résume ma timeline X\", \"quelles sont \
+les news intéressantes aujourd'hui sur mon compte\", \"déduplique les \
+posts qui parlent du même sujet\". Returns the ~20 most recent posts \
+pre-sorted newest-first with author, date, text, hashtags, and URLs. \
+Read-only — never posts, replies, or writes. Requires the user to have \
+connected their X account via /settings/integrations.
 
 Tool-usage rules:
 - NEVER invent specific factual data: weather, current date or time, \

@@ -330,6 +330,8 @@ impl AppStateBuilder {
                 cfg: Arc::new(self.config.auth.clone()),
                 oidc: self.auth_oidc,
                 passkey: self.auth_passkey,
+                #[cfg(feature = "x-agent")]
+                x: None,
                 login_rate_limiter: LoginRateLimiter::new(),
                 services: self
                     .services
@@ -440,5 +442,6 @@ fn default_test_config() -> Config {
         auth: AuthConfig::default(),
         documents: DocumentsConfig::default(),
         allowed_origins,
+        x_oauth: crate::config::XOAuthConfig::default(),
     }
 }

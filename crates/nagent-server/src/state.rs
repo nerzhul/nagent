@@ -44,6 +44,9 @@ use crate::stt::ws_concurrency::WsConcurrency;
 use crate::{agents, llm, tts};
 use nagent_agents::ServiceRegistry;
 
+#[cfg(feature = "x-agent")]
+use crate::oauth::x::XOAuthState;
+
 /// STT pipeline sub-state. Always present (the WebSocket
 /// `/ws` route is registered unconditionally).
 #[derive(Clone)]
@@ -108,6 +111,8 @@ pub struct AuthState {
     pub cfg: Arc<AuthConfig>,
     pub oidc: Option<OidcState>,
     pub passkey: Option<PasskeyState>,
+    #[cfg(feature = "x-agent")]
+    pub x: Option<Arc<XOAuthState>>,
     pub login_rate_limiter: LoginRateLimiter,
     pub services: Arc<ServiceRegistry>,
     pub credential_resolver: Option<Arc<CredentialResolver>>,
@@ -126,6 +131,13 @@ impl std::fmt::Debug for AuthState {
             .field("cfg", &self.cfg)
             .field("oidc", &self.oidc.as_ref().map(|_| "<OidcState>"))
             .field("passkey", &self.passkey.as_ref().map(|_| "<PasskeyState>"))
+            .field(
+                "x",
+                #[cfg(feature = "x-agent")]
+                &self.x.as_ref().map(|_| "<XOAuthState>"),
+                #[cfg(not(feature = "x-agent"))]
+                &"<x-agent off>",
+            )
             .field("login_rate_limiter", &self.login_rate_limiter)
             .field("services", &self.services)
             .field(
@@ -153,6 +165,8 @@ impl AuthState {
             cfg: Arc::new(cfg.auth.clone()),
             oidc: None,
             passkey: None,
+            #[cfg(feature = "x-agent")]
+            x: None,
             login_rate_limiter: LoginRateLimiter::new(),
             services: ServiceRegistry::empty().into_arc(),
             credential_resolver: None,

@@ -24,6 +24,9 @@ wikipedia-agent = ["nagent-agents/wikipedia-agent"]
 dictionary-agent = ["nagent-agents/dictionary-agent"]
 read-document-agent = ["nagent-agents/read-document-agent"]
 caldav-agent = ["nagent-agents/caldav-agent"]
+# Plan 1790695073418: X timeline agent — forwards the agent +
+# registry into the server.
+x-agent = ["nagent-agents/x-agent"]
 # Convenience meta-feature: every agent compiled in.
 #
 # Cargo's feature forwarding has a sharp edge here: `nagent-agents/all-agents`
@@ -48,6 +51,7 @@ all-agents = [
     "web-agent",
     "read-document-agent",
     "caldav-agent",
+    "x-agent",
 ]
 # Piper TTS; pulls piper-rs + ort + espeak-ng FFI through the
 # `nagent-tts` crate so the engine can be split into its own

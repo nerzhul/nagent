@@ -21,10 +21,8 @@ wikipedia-agent = []
 dictionary-agent = []
 web-agent = []
 read-document-agent = []
-# Plan 1790963194218: CalDAV plugin. v1 ships read + add only (no
-# update / delete). The heavy dependency is the `icalendar` crate
-# for VEVENT parsing; `reqwest` is already pulled in by `egress`.
 caldav-agent = ["dep:icalendar"]
+x-agent = []
 # Convenience meta-feature that turns on every agent. The Makefile
 # targets list it once so an operator does not need to enumerate
 # the whole set in CI.
@@ -39,6 +37,7 @@ all-agents = [
     "web-agent",
     "read-document-agent",
     "caldav-agent",
+    "x-agent",
 ]
 
 [dependencies]
