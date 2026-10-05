@@ -99,6 +99,14 @@ pub(crate) async fn drain_upstream_round(
 ) -> Result<RoundOutcome, std::io::Error> {
     let mut acc = ToolCallAccumulator::new();
     let mut assistant_text = String::new();
+    // Sum of `delta.reasoning` string lengths received this round.
+    // Reasoning models (qwen3.5 with reasoning on, deepseek-r1,
+    // o1/o3) stream a separate `reasoning` field before any visible
+    // `content`; the total bytes streamed there lets the tool loop
+    // tell "model is actively reasoning" apart from "model is
+    // emitting visible text" without re-parsing every SSE frame.
+    // Diagnostic only — never surfaced to the client.
+    let mut reasoning_chars: usize = 0;
     // `finish_reason` of the round's last chunk. The OpenAI spec
     // emits it on the final SSE frame of the round ("stop",
     // "tool_calls", "length", or "content_filter"). Empty until the
@@ -139,6 +147,7 @@ pub(crate) async fn drain_upstream_round(
             // next iteration.
             return Ok(RoundOutcome {
                 assistant_text,
+                reasoning_chars,
                 finish_reason,
                 tool_calls: acc.into_sorted(),
             });
@@ -152,6 +161,13 @@ pub(crate) async fn drain_upstream_round(
                 if let Some(delta) = choice.get("delta") {
                     if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
                         assistant_text.push_str(text);
+                    }
+                    // Reasoning deltas flow through verbatim (see the
+                    // `tx.send` above); we only need the byte total
+                    // here so the tool loop can log how much the
+                    // model thought this round.
+                    if let Some(reasoning) = delta.get("reasoning").and_then(|v| v.as_str()) {
+                        reasoning_chars += reasoning.len();
                     }
                     if let Some(tcs) = delta.get("tool_calls") {
                         acc.apply_delta(tcs);
@@ -172,6 +188,7 @@ pub(crate) async fn drain_upstream_round(
 
     Ok(RoundOutcome {
         assistant_text,
+        reasoning_chars,
         finish_reason,
         tool_calls: acc.into_sorted(),
     })
@@ -179,6 +196,12 @@ pub(crate) async fn drain_upstream_round(
 
 pub(crate) struct RoundOutcome {
     pub(crate) assistant_text: String,
+    /// Total bytes of `delta.reasoning` streamed this round. Lets the
+    /// tool loop distinguish "model produced visible text and was
+    /// truncated" from "model only thought and produced no visible
+    /// text" — the latter triggers the auto-continue heuristic.
+    /// Diagnostic only; never forwarded to the client.
+    pub(crate) reasoning_chars: usize,
     /// `finish_reason` reported on the round's last chunk
     /// (`"stop"`, `"tool_calls"`, `"length"`, or `"content_filter"`).
     /// The tool loop reads this to decide whether to dispatch

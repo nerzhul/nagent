@@ -158,6 +158,35 @@ pub(crate) async fn run_tool_loop(
         };
 
         if outcome.tool_calls.is_empty() {
+            // Diagnostic snapshot of the round's outcome. Helps
+            // operators tell apart "model is actively reasoning and
+            // hits the token cap" (large `reasoning_chars`, empty
+            // `assistant_text_len`, `finish_reason=length`) from
+            // "model finished cleanly" (`finish_reason=stop`,
+            // visible text) and from "model produced some visible
+            // text and ran out of tokens mid-sentence" (non-zero
+            // `assistant_text_len`, `finish_reason=length`). The
+            // first pattern is the auto-continue trigger; the others
+            // are clean exits.
+            let assistant_text_len = outcome.assistant_text.chars().count();
+            let sample: String = outcome.assistant_text.chars().take(200).collect();
+            let fr = outcome.finish_reason.as_deref().unwrap_or("none");
+            info!(
+                tool_round,
+                auto_continue_count,
+                finish_reason = fr,
+                assistant_text_len,
+                reasoning_chars = outcome.reasoning_chars,
+                "tool loop: round outcome (no tool_calls)"
+            );
+            if !sample.is_empty() {
+                tracing::debug!(
+                    tool_round,
+                    auto_continue_count,
+                    assistant_text_sample = %sample,
+                    "tool loop: round outcome assistant_text sample"
+                );
+            }
             // Reasoning-only truncation auto-continue. Reasoning
             // models (qwen3.5 with reasoning on, DeepSeek-R1,
             // o1/o3, …) stream `delta.reasoning` first and can
@@ -194,6 +223,7 @@ pub(crate) async fn run_tool_loop(
                     warn!(
                         auto_continue_count,
                         max_auto_continues,
+                        reasoning_chars = outcome.reasoning_chars,
                         "tool loop: max auto-continues reached on reasoning truncation; \
                          surfacing error to client"
                     );
@@ -214,6 +244,7 @@ pub(crate) async fn run_tool_loop(
                 info!(
                     auto_continue_count,
                     max_auto_continues,
+                    reasoning_chars = outcome.reasoning_chars,
                     "tool loop: length-truncated with reasoning only; auto-continuing",
                 );
                 // Append the partial assistant turn + a "continue"
@@ -258,6 +289,8 @@ pub(crate) async fn run_tool_loop(
                 tool_round,
                 auto_continue_count,
                 finish_reason = outcome.finish_reason.as_deref().unwrap_or("none"),
+                assistant_text_len,
+                reasoning_chars = outcome.reasoning_chars,
                 "tool loop: conversation complete (no tool_calls)"
             );
             let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
