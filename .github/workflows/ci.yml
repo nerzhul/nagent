@@ -103,7 +103,7 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Build the runtime image but DO NOT push it — the build
       # cache is enough for Syft to inspect the resulting image.
