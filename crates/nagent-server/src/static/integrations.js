@@ -159,35 +159,52 @@ function renderSettingsIntegrationRow(svc) {
   li.dataset.serviceId = svc.id;
   li.dataset.configured = svc.configured ? "1" : "0";
 
+  // Header row: icon + label on the left, status + CTA on the
+  // right. Flex-wrap lets the status pill / CTA drop under the
+  // label on narrow viewports (mobile / side panel).
   const header = document.createElement("div");
   header.className = "settings-integration-header";
+
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "settings-integration-title";
+  const icon = document.createElement("span");
+  icon.className = "settings-integration-icon";
+  icon.textContent = svc.icon || "•";
+  icon.setAttribute("aria-hidden", "true");
+  titleGroup.appendChild(icon);
 
   const label = document.createElement("span");
   label.className = "settings-integration-label";
   label.textContent = svc.display_name;
-  header.appendChild(label);
+  titleGroup.appendChild(label);
+  header.appendChild(titleGroup);
+
+  const actions = document.createElement("div");
+  actions.className = "settings-integration-actions";
 
   const status = document.createElement("span");
   status.className = `settings-integration-status${
     svc.configured ? " is-configured" : " is-unconfigured"
   }`;
   status.textContent = svc.configured ? "Configured" : "Not configured";
-  header.appendChild(status);
+  actions.appendChild(status);
 
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = svc.configured ? "ghost" : "primary";
   btn.textContent = svc.configured ? "Edit" : "Configure";
   btn.addEventListener("click", () => openEditor(svc));
-  header.appendChild(btn);
+  actions.appendChild(btn);
 
+  header.appendChild(actions);
   li.appendChild(header);
 
   // Surface the operator-facing docs URL when the ServiceDef
   // has one — the CalDAV connector ships a setup walkthrough
   // that explains Nextcloud / Radicale / Fastmail / iCloud
-  // specifics. A short helper line keeps the row compact
-  // while still pointing users at the right doc.
+  // specifics. The docs line lives on its own line so the
+  // card has clear vertical rhythm and the link has room to
+  // breathe.
   if (svc.docs_url) {
     const docs = document.createElement("a");
     docs.className = "settings-integration-docs";
