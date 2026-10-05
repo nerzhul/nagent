@@ -19,10 +19,14 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
-use crate::agents::{AgentError, AgentRegistry, AgentRegistryNewtype};
+use crate::agents::{
+    AgentError, AgentRegistry, AgentRegistryNewtype, ResolverSecretSource, SecretSource,
+    UserContext,
+};
 use crate::llm::client::LlmError;
-use crate::state::ArcServices;
+use crate::state::{ArcServices, OptArcAuthState};
 
 /// `GET /v1/agents` — list every agent registered on this server.
 ///
@@ -51,6 +55,7 @@ pub async fn agents_list(State(agents): State<AgentRegistryNewtype>) -> Result<R
 pub async fn agent_invoke(
     State(agents): State<AgentRegistryNewtype>,
     State(services): State<ArcServices>,
+    State(auth_state): State<OptArcAuthState>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     Path(name): Path<String>,
     body: Bytes,
@@ -67,17 +72,33 @@ pub async fn agent_invoke(
         .unwrap_or(Value::Object(Default::default()));
 
     // SEV 2 fix: thread the authenticated user id into the
-    // `UserContext` so per-user agents (currently `read_document`)
-    // can scope their lookups. The `/v1/agents/:name/invoke` route
-    // is still reachable from any authenticated user; per-user
-    // agents that read `ctx.secret(...)` will surface
-    // `CredentialsMissing` because the resolver is not wired into
-    // this code path (the route handler escapes the LLM tool loop,
-    // which is where the resolver lives).
+    // `UserContext` so per-user agents (currently
+    // `read_document`) can scope their lookups. `auth_user` is
+    // `None` on the `auth.enabled = false` trust boundary (and
+    // on the integration tests that don't mount `RequireAuth`);
+    // fall back to `Uuid::nil()` so per-user agents surface a
+    // clear tool error instead of panicking.
     let user_id = auth_user
         .map(|axum::Extension(u)| u.id)
         .unwrap_or_else(uuid::Uuid::nil);
-    let ctx = crate::agents::UserContext::for_tests(user_id, services.0.clone());
+    // Same wiring the tool loop does (see `llm::tool_loop`):
+    // wrap the boot-time `CredentialResolver` in a
+    // `ResolverSecretSource` and hand it to `UserContext` so
+    // per-user agents that read `ctx.secret(...)`
+    // (`caldav_list_events`, `x_timeline`, …) actually hit the
+    // vault. `None` on the `auth.enabled = false` path —
+    // `UserContext::secret` then returns `CredentialsMissing`
+    // without touching the DB, which is the right behaviour on
+    // that trust boundary.
+    let resolver: Option<Arc<dyn SecretSource>> = auth_state
+        .0
+        .as_ref()
+        .and_then(|auth| auth.credential_resolver.clone())
+        .map(|r| Arc::new(ResolverSecretSource::new(r)) as _);
+    let ctx = match resolver {
+        Some(r) => UserContext::new(user_id, services.0.clone(), r),
+        None => UserContext::for_tests(user_id, services.0.clone()),
+    };
 
     match agent.invoke(&ctx, args).await {
         Ok(result) => {

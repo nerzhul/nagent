@@ -56,6 +56,26 @@ async function fetchIntegrations() {
   return body.data || [];
 }
 
+// Fetch a single integration summary, including the decrypted
+// `value` for every non-`Password` field whose `echo_on_edit` flag
+// is `true`. The list endpoint (`GET /api/integrations`)
+// returns no `value` to keep the list cheap — the integrations page
+// only needs `configured` + per-field `filled` to render the
+// settings page. The edit modal does need the saved plaintexts
+// (at minimum the calendar URL for CalDAV) so we re-fetch via
+// the per-id endpoint the moment the user clicks Edit. 404 falls
+// back to `null` so the caller can show a clean "service no
+// longer available" message instead of a raw HTTP error.
+async function fetchIntegration(id) {
+  const resp = await fetch(
+    `/api/integrations/${encodeURIComponent(id)}`,
+    { credentials: "same-origin" },
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`integration ${id} returned ${resp.status}`);
+  return resp.json();
+}
+
 // Fetch the agent catalogue. `/v1/agents` is anonymous (same as the
 // chat-completions route family) and returns `{ data: [{ name,
 // description }, ...] }`. A 404 means the operator compiled the
@@ -142,7 +162,14 @@ function renderIntegrationRow(svc) {
   btn.type = "button";
   btn.className = "chat-integration-edit ghost";
   btn.textContent = svc.configured ? "Edit" : "Configure";
-  btn.addEventListener("click", () => openEditor(svc));
+  // Edit / Configure click — refetch the single integration so the
+  // form pre-fills the saved URL (and any other `echo_on_edit`
+  // field). The list endpoint deliberately omits `field.value`
+  // to keep the list cheap; see `fetchIntegration` for the full
+  // rationale. The freshly-loaded summary replaces the list-row
+  // snapshot we already have so `openEditor` sees the populated
+  // `field.value` strings.
+  btn.addEventListener("click", () => openIntegrationEditor(svc));
   li.appendChild(btn);
   return li;
 }
@@ -193,7 +220,7 @@ function renderSettingsIntegrationRow(svc) {
   btn.type = "button";
   btn.className = svc.configured ? "ghost" : "primary";
   btn.textContent = svc.configured ? "Edit" : "Configure";
-  btn.addEventListener("click", () => openEditor(svc));
+  btn.addEventListener("click", () => openIntegrationEditor(svc));
   actions.appendChild(btn);
 
   header.appendChild(actions);
@@ -495,6 +522,27 @@ function attachCalDavDiscover(form, modal) {
       discoverBtn.disabled = false;
     }
   });
+}
+
+// Async wrapper around `openEditor`. Refetches the single
+// integration summary (which decrypts the `echo_on_edit` fields)
+// and only opens the modal once we have the populated data —
+// otherwise the form would render with every input empty. The
+// list endpoint never populates `field.value` so we cannot reuse
+// the row we already have on hand.
+async function openIntegrationEditor(svc) {
+  let fresh = svc;
+  try {
+    const fetched = await fetchIntegration(svc.id);
+    if (fetched) fresh = fetched;
+  } catch (e) {
+    // Network / 5xx — fall back to the list-row snapshot so the
+    // user can still edit (they just won't see the saved URL
+    // until the network recovers). Surface the error to the
+    // console so an operator debugging the page gets a signal.
+    console.error(`failed to refetch integration ${svc.id}:`, e);
+  }
+  openEditor(fresh);
 }
 
 function openEditor(svc) {

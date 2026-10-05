@@ -32,7 +32,9 @@
 //! (OAuth callback, refresh) is wired in `nagent-server` behind the
 //! same `x-agent` cargo feature as the chat agent.
 
-use crate::services::{FieldDef, FieldKind, ServiceDef};
+use crate::services::{
+    FieldDef, FieldKind, ServiceDef, ECHO_ON_EDIT_NON_PASSWORD, ECHO_ON_EDIT_PASSWORD,
+};
 
 /// `x_account` integration entry in the per-user service catalogue.
 ///
@@ -56,6 +58,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  `x_timeline` agent on 401. Stored AES-256-GCM encrypted at rest.",
             ),
             placeholder: None,
+            echo_on_edit: ECHO_ON_EDIT_PASSWORD,
         },
         FieldDef {
             key: "refresh_token",
@@ -67,6 +70,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  access token when the stored one is expired. Stored AES-256-GCM encrypted at rest.",
             ),
             placeholder: None,
+            echo_on_edit: ECHO_ON_EDIT_PASSWORD,
         },
         FieldDef {
             key: "token_scope",
@@ -78,6 +82,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  does not branch on this).",
             ),
             placeholder: None,
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
             key: "x_user_id",
@@ -89,6 +94,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  Required to build the timeline URL.",
             ),
             placeholder: None,
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
             key: "x_screen_name",
@@ -97,6 +103,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
             required: true,
             help: Some("@handle surfaced in the chat UI (\"Connecté en tant que @naval\")."),
             placeholder: None,
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
             key: "token_expires_at",
@@ -108,6 +115,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  callback time. The agent refreshes when this is past or within 60 s.",
             ),
             placeholder: None,
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
     ],
     docs_url: Some("https://github.com/nagent/nagent/blob/main/docs/integrations/x.md"),

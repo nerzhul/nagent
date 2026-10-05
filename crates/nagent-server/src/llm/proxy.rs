@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tracing::{debug, warn};
 
-use crate::agents::{AgentRegistry, AgentRegistryNewtype};
+use crate::agents::{AgentRegistry, AgentRegistryNewtype, ResolverSecretSource};
 use crate::config::LlmConfig;
 use crate::llm::client::{parse_chat_session_header, LlmError};
 use crate::llm::privacy::{
@@ -358,6 +358,21 @@ pub async fn chat_completions(
     let user_id = auth_user
         .map(|axum::Extension(u)| u.id)
         .unwrap_or_else(uuid::Uuid::nil);
+    // Wire the per-user credential resolver into the tool loop
+    // so agents that read `ctx.secret(...)` (currently
+    // `caldav_list_events` / `caldav_get_event` /
+    // `caldav_create_event` and `x_timeline`) actually hit the
+    // vault. The resolver lives on `AuthState` (built at boot
+    // when `[auth.credentials].key` is configured); `None` on
+    // the `auth.enabled = false` trust boundary and on the
+    // integration tests that skip the credentials subsystem. The
+    // adapter is `ResolverSecretSource`, the server-side
+    // implementation of the agents crate's `SecretSource` trait.
+    let resolver: Option<std::sync::Arc<dyn crate::agents::SecretSource>> = auth_state
+        .0
+        .as_ref()
+        .and_then(|auth| auth.credential_resolver.clone())
+        .map(|r| std::sync::Arc::new(ResolverSecretSource::new(r)) as _);
     // Plan 4.C: the tool loop is now generic over
     // `Agent::requires_confirmation`. The cross-agent rule (e.g.
     // "`read_document` → `web_fetch` needs confirmation") lives
@@ -379,6 +394,7 @@ pub async fn chat_completions(
             first_stream,
             chat_session_id,
             user_id,
+            resolver,
         )
         .await;
     });
@@ -532,12 +548,20 @@ pub async fn agents_list(State(agents): State<AgentRegistryNewtype>) -> Result<R
 pub async fn agent_invoke(
     State(agents): State<AgentRegistryNewtype>,
     State(services): State<ArcServices>,
+    State(auth_state): State<OptArcAuthState>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<Response, LlmError> {
-    crate::agents::routes::agent_invoke(State(agents), State(services), auth_user, Path(name), body)
-        .await
+    crate::agents::routes::agent_invoke(
+        State(agents),
+        State(services),
+        State(auth_state),
+        auth_user,
+        Path(name),
+        body,
+    )
+    .await
 }
 
 // Silence the unused-import lint on `LlmConfig` / `AgentRegistry` if a

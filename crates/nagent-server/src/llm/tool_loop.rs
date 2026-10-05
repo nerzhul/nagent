@@ -17,6 +17,7 @@
 //! [`crate::agents::Agent::requires_confirmation`] impl; this
 //! module never has to know about a specific agent by name.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -24,7 +25,7 @@ use bytes::Bytes;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use crate::agents::{AgentRegistry, UserContext};
+use crate::agents::{AgentRegistry, SecretSource, UserContext};
 use crate::llm::sse::{
     drain_upstream_round, sse_error_event, sse_tool_call_event, sse_tool_result_event,
     UpstreamByteStream,
@@ -52,6 +53,16 @@ use crate::llm::sse::{
 /// `user_id` is the authenticated user id from `AuthUser`
 /// (SEV 2 fix). Threaded into the per-round `UserContext` so
 /// per-user agents (`read_document`) can scope their queries.
+///
+/// `resolver` is the per-user credential resolver wrapped as
+/// `Arc<dyn SecretSource>` (the server's `ResolverSecretSource`
+/// adapts `CredentialResolver`). Wired into the per-round
+/// `UserContext` so per-user agents that read `ctx.secret(...)`
+/// (`caldav_list_events`, `x_timeline`, …) actually hit the
+/// vault. `None` on the anonymous / `auth.enabled = false`
+/// path; per-user agents then surface `CredentialsMissing`
+/// without touching the DB, which is the right behaviour on
+/// that trust boundary.
 ///
 /// `max_rounds` is the maximum number of tool-call rounds a
 /// single user turn may trigger before the proxy bails out and
@@ -87,6 +98,7 @@ pub(crate) async fn run_tool_loop(
     first_stream: UpstreamByteStream,
     chat_session_id: Option<uuid::Uuid>,
     user_id: uuid::Uuid,
+    resolver: Option<Arc<dyn SecretSource>>,
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
@@ -405,10 +417,11 @@ pub(crate) async fn run_tool_loop(
                     .get(&name)
                     .and_then(|agent| -> Option<nagent_agents::ConfirmationDecision> {
                         let services = nagent_agents::ServiceRegistry::empty().into_arc();
+                        let resolver = resolver.clone();
                         let ctx = match chat_session_id {
-                            Some(sid) => {
-                                UserContext::for_chat_session(user_id, services, None, None, sid)
-                            }
+                            Some(sid) => UserContext::for_chat_session(
+                                user_id, services, resolver, None, sid,
+                            ),
                             None => UserContext::for_tests(user_id, services),
                         };
                         Some(agent.requires_confirmation(&ctx, &args_value))
@@ -441,16 +454,18 @@ pub(crate) async fn run_tool_loop(
             }
             let result = match agents.get(&name) {
                 Some(agent) => {
-                    // Per-tool-round `UserContext`. The chat-completions
-                    // handler does not (yet) read the authenticated
-                    // user off the request, so per-user agents that
-                    // call `ctx.secret(...)` will surface
-                    // `CredentialsMissing` from this anonymous
-                    // pathway — wired-up production deployments must
-                    // thread the session user through to this ctx in
-                    // a follow-up. The plumbing here (resolver,
-                    // services, cache) is already in place; only the
-                    // user-id source needs wiring.
+                    // Per-tool-round `UserContext`. Carries the
+                    // authenticated `user_id` (SEV 2 fix) AND the
+                    // per-user credential `resolver` so agents like
+                    // `caldav_list_events` / `x_timeline` that read
+                    // `ctx.secret(...)` actually hit the vault.
+                    // Without the resolver, every per-user secret
+                    // lookup would short-circuit to
+                    // `CredentialsMissing` regardless of whether the
+                    // user has configured the integration. `resolver`
+                    // is `None` on the `auth.enabled = false` trust
+                    // boundary; in that mode per-user agents surface
+                    // a clear tool error instead of panicking.
                     //
                     // When `chat_session_id` is set (browser sent
                     // `X-Chat-Session-Id`), use `for_chat_session`
@@ -458,18 +473,11 @@ pub(crate) async fn run_tool_loop(
                     // queries to the right session. Otherwise fall
                     // back to `for_tests` and let the session-scoped
                     // agents surface a clear tool error.
-                    //
-                    // SEV 2 fix: `user_id` is the authenticated
-                    // user id from `AuthUser`. The chat-completions
-                    // middleware extracts it from the session
-                    // cookie / bearer header and threads it through.
-                    // Per-user agents (currently `read_document`)
-                    // scope every DB query by `(user_id, session_id)`
-                    // so a user cannot read another user's docs.
                     let services = nagent_agents::ServiceRegistry::empty().into_arc();
+                    let resolver = resolver.clone();
                     let mut ctx = match chat_session_id {
                         Some(sid) => {
-                            UserContext::for_chat_session(user_id, services, None, None, sid)
+                            UserContext::for_chat_session(user_id, services, resolver, None, sid)
                         }
                         None => UserContext::for_tests(user_id, services),
                     };

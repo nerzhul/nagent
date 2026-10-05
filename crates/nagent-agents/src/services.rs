@@ -49,7 +49,30 @@ pub struct FieldDef {
     pub help: Option<&'static str>,
     /// Optional placeholder shown when the input is empty.
     pub placeholder: Option<&'static str>,
+    /// Whether the server should echo the saved plaintext back on
+    /// `GET /api/integrations/:id` so the edit form can pre-fill
+    /// the field. Defaults to `true` for non-`Password` kinds via
+    /// the constants below; set to `false` for fields whose value
+    /// is credential-adjacent and should never be displayed again
+    /// once saved (e.g. CalDAV's `username`). The constant
+    /// [`FieldDef::ECHO_ON_EDIT_NON_PASSWORD] holds that
+    /// shared default so the call sites can opt in with a single
+    /// identifier instead of repeating the bool. `Password` fields
+    /// are always masked at the JSON layer regardless of this flag.
+    pub echo_on_edit: bool,
 }
+
+/// Default for [`FieldDef::echo_on_edit`] when the field is not
+/// a `Password`. Kept as a public constant so each service can
+/// write `echo_on_edit: FieldDef::ECHO_ON_EDIT_NON_PASSWORD` and
+/// stay readable at the call site.
+pub const ECHO_ON_EDIT_NON_PASSWORD: bool = true;
+
+/// Default for [`FieldDef::echo_on_edit`] when the field IS a
+/// `Password`. Mirrors the JSON-layer mask; even if a service
+/// accidentally sets `true` on a `Password` field,
+/// `to_summary` and the JSON skip rule refuse to leak the value.
+pub const ECHO_ON_EDIT_PASSWORD: bool = false;
 
 /// Static description of one integration.
 #[derive(Debug, Clone)]
@@ -140,13 +163,16 @@ pub struct FieldSummary {
     /// True iff the user has saved a value for this field.
     pub filled: bool,
     /// Plaintext value for **non-Password** fields when the
-    /// field is filled. The server populates this only for
-    /// fields whose `kind` is not `Password` (URLs, hostnames,
-    /// usernames, account IDs) — the form echoes the saved
-    /// value back on edit so the user does not have to retype
-    /// the connector's URL every time. `Password` fields are
-    /// always `None` so the masked placeholder is the only
-    /// signal the JSON ever carries for a secret; the
+    /// field is filled AND the field's `echo_on_edit` flag
+    /// allows it. The server populates this only for fields
+    /// whose `kind` is not `Password` AND whose
+    /// [`FieldDef::echo_on_edit`] is `true` — the form echoes
+    /// the saved value back on edit so the user does not have
+    /// to retype the connector's URL every time. `Password`
+    /// fields are always `None` so the masked placeholder is
+    /// the only signal the JSON ever carries for a secret;
+    /// credential-adjacent `Text` fields (e.g. CalDAV's
+    /// `username`) opt out via `echo_on_edit = false`. The
     /// `Serialize` skip keeps the field absent from the
     /// payload when it is not relevant.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,15 +198,19 @@ impl ServiceDef {
             .iter()
             .map(|f| {
                 let filled = filled_keys.iter().any(|k| k == f.key);
-                // Only non-Password fields get their plaintext
-                // surfaced back to the form. Passwords are
-                // always `None` regardless of `plaintext_values`
-                // so a route handler that mis-populates the map
-                // cannot accidentally leak a secret.
-                let value = match (f.kind, filled) {
-                    (FieldKind::Password, _) => None,
-                    (_, false) => None,
-                    (_, true) => plaintext_values.get(f.key).cloned(),
+                // Only non-Password fields with `echo_on_edit = true`
+                // get their plaintext surfaced back to the form.
+                // Passwords are always `None` regardless of
+                // `plaintext_values` so a route handler that
+                // mis-populates the map cannot accidentally leak a
+                // secret. Credential-adjacent `Text` fields (e.g.
+                // CalDAV's `username`) opt out via
+                // `echo_on_edit = false` and are also `None` here.
+                let value = match (f.kind, filled, f.echo_on_edit) {
+                    (FieldKind::Password, _, _) => None,
+                    (_, false, _) => None,
+                    (_, _, false) => None,
+                    (_, _, true) => plaintext_values.get(f.key).cloned(),
                 };
                 FieldSummary {
                     key: f.key,
@@ -248,6 +278,7 @@ mod tests {
                 required: true,
                 help: None,
                 placeholder: Some("imap.example.com"),
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             },
             FieldDef {
                 key: "password",
@@ -256,6 +287,45 @@ mod tests {
                 required: true,
                 help: None,
                 placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_PASSWORD,
+            },
+        ],
+        docs_url: None,
+    };
+
+    /// Service that opts its `username` field out of edit-mode echo
+    /// so we can verify the per-field flag is honoured.
+    const FAKE_SERVICE_NO_USERNAME_ECHO: ServiceDef = ServiceDef {
+        id: "fake-no-username-echo",
+        display_name: "Fake (no username echo)",
+        icon: "?",
+        fields: &[
+            FieldDef {
+                key: "url",
+                label: "URL",
+                kind: FieldKind::Url,
+                required: true,
+                help: None,
+                placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+            },
+            FieldDef {
+                key: "username",
+                label: "Username",
+                kind: FieldKind::Text,
+                required: true,
+                help: None,
+                placeholder: None,
+                echo_on_edit: false,
+            },
+            FieldDef {
+                key: "password",
+                label: "Password",
+                kind: FieldKind::Password,
+                required: true,
+                help: None,
+                placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
         docs_url: None,
@@ -307,6 +377,48 @@ mod tests {
         assert!(
             pwd.value.is_none(),
             "password field must never carry a plaintext value, got {:?}",
+            pwd.value
+        );
+    }
+
+    /// A field whose `echo_on_edit` flag is `false` must surface
+    /// `value: None` even when the route handler populates the
+    /// plaintext map for that field — the flag is the per-field
+    /// opt-out so a `Text` field like CalDAV's `username` can be
+    /// saved without being echoed back on edit.
+    #[test]
+    fn summary_respects_echo_on_edit_opt_out() {
+        let mut plaintext = std::collections::HashMap::new();
+        plaintext.insert(
+            "url".to_string(),
+            "https://cal.example.com/u/cal/".to_string(),
+        );
+        plaintext.insert("username".to_string(), "alice".to_string());
+        plaintext.insert("password".to_string(), "hunter2".to_string());
+        let s = FAKE_SERVICE_NO_USERNAME_ECHO.to_summary(
+            &[
+                "url".to_string(),
+                "username".to_string(),
+                "password".to_string(),
+            ],
+            &plaintext,
+        );
+        let url = s.fields.iter().find(|f| f.key == "url").unwrap();
+        assert_eq!(
+            url.value.as_deref(),
+            Some("https://cal.example.com/u/cal/"),
+            "Url fields with the default `echo_on_edit = true` must be echoed"
+        );
+        let user = s.fields.iter().find(|f| f.key == "username").unwrap();
+        assert!(
+            user.value.is_none(),
+            "fields with `echo_on_edit = false` must never carry a plaintext value, got {:?}",
+            user.value
+        );
+        let pwd = s.fields.iter().find(|f| f.key == "password").unwrap();
+        assert!(
+            pwd.value.is_none(),
+            "password fields must never carry a plaintext value, got {:?}",
             pwd.value
         );
     }

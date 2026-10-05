@@ -112,12 +112,19 @@ pub fn credential_state_db(state: &Arc<crate::AppState>) -> nagent_db::Db {
 }
 
 /// Build the `field_key → plaintext` map for every **non-Password**
-/// filled field of one service. Used by the GET routes so the
-/// integrations UI can echo the saved URL / username / host back
-/// to the form on edit. `Password` fields are never read here —
-/// the type-level filter is the safety boundary; a future
-/// `FieldKind` that requires the same treatment can sit in
-/// the same `match` arm.
+/// filled field of one service **whose `echo_on_edit` flag allows
+/// it**. Used by the GET routes so the integrations UI can echo
+/// the saved URL / username / host back to the form on edit.
+///
+/// Three filters gate the decrypt path, each independent:
+///
+/// - `kind != Password` — the type-level filter is the safety
+///   boundary; a future `FieldKind` that requires the same
+///   treatment can sit in the same `match` arm.
+/// - `echo_on_edit == true` — credential-adjacent `Text` fields
+///   (e.g. CalDAV's `username`) opt out via this flag so the saved
+///   value is never re-displayed on edit.
+/// - `filled` — only fields with a saved row are echoed.
 ///
 /// A decryption failure on a single field is logged (and skipped)
 /// so a single corrupted ciphertext does not 500 the whole
@@ -133,6 +140,9 @@ async fn build_plaintext_values(
     let mut out = std::collections::HashMap::new();
     for f in svc.fields {
         if !matches!(f.kind, FieldKind::Text | FieldKind::Url) {
+            continue;
+        }
+        if !f.echo_on_edit {
             continue;
         }
         if !filled.iter().any(|k| k == f.key) {

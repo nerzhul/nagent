@@ -271,7 +271,10 @@ async fn http_list_integrations_empty_registry_returns_empty_data() {
 /// (or any other plaintext leak) for `Password` kind.
 #[tokio::test]
 async fn http_get_integration_echoes_plaintext_only_for_non_password_fields() {
-    use nagent_agents::{FieldDef, FieldKind, ServiceDef, ServiceRegistry};
+    use nagent_agents::{
+        FieldDef, FieldKind, ServiceDef, ServiceRegistry, ECHO_ON_EDIT_NON_PASSWORD,
+        ECHO_ON_EDIT_PASSWORD,
+    };
     use nagent_server::credentials::CredentialResolver;
     use std::time::Duration;
 
@@ -288,6 +291,7 @@ async fn http_get_integration_echoes_plaintext_only_for_non_password_fields() {
                 required: true,
                 help: None,
                 placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             },
             FieldDef {
                 key: "username",
@@ -296,6 +300,7 @@ async fn http_get_integration_echoes_plaintext_only_for_non_password_fields() {
                 required: true,
                 help: None,
                 placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             },
             FieldDef {
                 key: "password",
@@ -304,6 +309,7 @@ async fn http_get_integration_echoes_plaintext_only_for_non_password_fields() {
                 required: true,
                 help: None,
                 placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
         docs_url: None,
@@ -486,6 +492,206 @@ async fn http_get_integration_echoes_plaintext_only_for_non_password_fields() {
     let body_text = serde_json::to_string(&body).unwrap();
     assert!(
         !body_text.contains("s3cr3t"),
+        "password plaintext leaked into GET /api/integrations response: {body_text}"
+    );
+}
+
+/// Regression: `GET /api/integrations/:id` must honour the
+/// per-field `echo_on_edit` flag. A `Text` field opted out via
+/// `echo_on_edit = false` (currently CalDAV's `username`) must NOT
+/// appear in the response — neither via the per-field `value`
+/// property nor anywhere else in the JSON. The `url` field on
+/// the same service MUST still echo so the user can confirm
+/// which calendar they connected. Without this test, a future
+/// refactor could regress to echoing everything that is not a
+/// `Password` (a) re-exposing credential-adjacent identifiers and
+/// (b) undoing the explicit `echo_on_edit = false` opt-out that
+/// CalDAV relies on.
+#[tokio::test]
+async fn http_get_integration_respects_echo_on_edit_opt_out() {
+    use nagent_agents::{
+        FieldDef, FieldKind, ServiceDef, ServiceRegistry, ECHO_ON_EDIT_NON_PASSWORD,
+        ECHO_ON_EDIT_PASSWORD,
+    };
+    use nagent_server::credentials::CredentialResolver;
+    use std::time::Duration;
+
+    // Mirrors the production CalDAV shape: `url` echoed, the
+    // credential-adjacent `username` opted out, `password` masked
+    // by the kind-level guard. The username plaintext must never
+    // appear in the response body.
+    const TEST_SVC: ServiceDef = ServiceDef {
+        id: "test_svc_optout",
+        display_name: "Test opt-out",
+        icon: "?",
+        fields: &[
+            FieldDef {
+                key: "url",
+                label: "URL",
+                kind: FieldKind::Url,
+                required: true,
+                help: None,
+                placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+            },
+            FieldDef {
+                key: "username",
+                label: "Username",
+                kind: FieldKind::Text,
+                required: true,
+                help: None,
+                placeholder: None,
+                // Opt-out: never echo back on edit.
+                echo_on_edit: false,
+            },
+            FieldDef {
+                key: "password",
+                label: "Password",
+                kind: FieldKind::Password,
+                required: true,
+                help: None,
+                placeholder: None,
+                echo_on_edit: ECHO_ON_EDIT_PASSWORD,
+            },
+        ],
+        docs_url: None,
+    };
+    let services = Arc::new(ServiceRegistry::new(&[TEST_SVC]));
+
+    let auth_store = temp_store().await;
+    let key = Arc::new(CredentialsKey::from_bytes([0xa7u8; 32]));
+    let resolver = CredentialResolver::new(auth_store.clone(), key.clone(), None, None);
+
+    let user_id = auth_store
+        .admin()
+        .users
+        .create("bob@example.com", "Bob", "local", Some(b"hash"))
+        .await
+        .expect("create_user");
+    let session = auth_store
+        .admin()
+        .sessions
+        .create(user_id, Duration::from_secs(60), None, None)
+        .await
+        .expect("create_session");
+    let session_token = session
+        .plaintext_token
+        .clone()
+        .expect("create_session must mint a plaintext token");
+
+    let url_sealed = encrypt(&key, "https://cal.example.com/bob/personal/").expect("seal url");
+    let user_sealed = encrypt(&key, "bob-secret-handle").expect("seal user");
+    let pwd_sealed = encrypt(&key, "s3cr3t-opt-out").expect("seal pwd");
+    auth_store
+        .admin()
+        .credentials
+        .upsert(
+            user_id,
+            "test_svc_optout",
+            &[
+                ("url".to_string(), url_sealed.nonce, url_sealed.ciphertext),
+                (
+                    "username".to_string(),
+                    user_sealed.nonce,
+                    user_sealed.ciphertext,
+                ),
+                (
+                    "password".to_string(),
+                    pwd_sealed.nonce,
+                    pwd_sealed.ciphertext,
+                ),
+            ],
+        )
+        .await
+        .expect("upsert");
+
+    let mut builder = nagent_server::testing::app_state();
+    Arc::make_mut(&mut builder.config).auth.enabled = true;
+    Arc::make_mut(&mut builder.config).auth.backends =
+        vec![nagent_server::config::AuthBackendKind::Local];
+    Arc::make_mut(&mut builder.config).auth.public_url = "https://example.com".into();
+    Arc::make_mut(&mut builder.config).auth.db = nagent_server::config::AuthDbConfig {
+        backend: "sqlite".into(),
+        url: format!(
+            "sqlite://file:cred_optout_{}?mode=memory&cache=shared",
+            Uuid::new_v4()
+        ),
+        max_connections: 1,
+        auto_migrate: true,
+    };
+    let state = builder
+        .with_auth(auth_store.clone())
+        .with_credential_resolver(Arc::new(resolver), key)
+        .with_services(services)
+        .build();
+
+    let auth_state = state.auth.as_ref().expect("auth must be wired").clone();
+    let auth_layer = axum::middleware::from_fn_with_state(
+        auth_state,
+        nagent_server::auth::middleware::require_auth_middleware,
+    );
+    let identity = nagent_server::auth::router::build_protected_auth_router(state.clone());
+    let cred_routes =
+        nagent_server::credentials::routes::build_protected_credentials_router(state.clone());
+    let app = identity
+        .merge(cred_routes)
+        .layer(auth_layer)
+        .with_state(state.clone());
+
+    let cookie = format!("{}={}", state.config.auth.cookie_name(), session_token);
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/integrations/test_svc_optout")
+                .header(axum::http::header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let fields = body["fields"].as_array().expect("fields array");
+    let by_key = |k: &str| {
+        fields
+            .iter()
+            .find(|f| f["key"] == k)
+            .unwrap_or_else(|| panic!("field {k} missing from response: {body}"))
+    };
+    // URL echoes (the form pre-fill the user relies on).
+    assert_eq!(
+        by_key("url")["value"].as_str(),
+        Some("https://cal.example.com/bob/personal/"),
+        "url field with `echo_on_edit = true` must echo"
+    );
+    // username is opted out — `value` is absent (skip_serializing_if).
+    let user_field = by_key("username");
+    assert!(
+        user_field.get("value").is_none(),
+        "username field with `echo_on_edit = false` must NOT carry a value key; got: {user_field}"
+    );
+    assert!(
+        user_field["value"].is_null(),
+        "username field must serialise as null/missing; got: {user_field}"
+    );
+    // Password — masked by the kind-level guard.
+    assert!(
+        by_key("password")["value"].is_null(),
+        "password field must NEVER carry a plaintext value"
+    );
+    // Belt-and-braces: scan the entire response so neither the
+    // username plaintext nor the password plaintext leaks via a
+    // future regression that smuggles the value into another key.
+    let body_text = serde_json::to_string(&body).unwrap();
+    assert!(
+        !body_text.contains("bob-secret-handle"),
+        "username plaintext leaked into GET /api/integrations response: {body_text}"
+    );
+    assert!(
+        !body_text.contains("s3cr3t-opt-out"),
         "password plaintext leaked into GET /api/integrations response: {body_text}"
     );
 }
