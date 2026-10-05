@@ -288,6 +288,11 @@ pub async fn chat_completions(
 
     let timeout = llm.cfg.request_timeout;
     let max_rounds = llm_state.cfg.llm_max_tool_rounds;
+    // Plan R8 follow-up: max number of auto-continue rounds when the
+    // reasoning stream hits `finish_reason: "length"` mid-reasoning.
+    // See `tool_loop::run_tool_loop` for the heuristic and
+    // `docs/llm-configuration.md` for the full contract.
+    let max_auto_continues = llm_state.cfg.llm_max_auto_continues;
     let agents = agents.0.clone().map(|arc| (*arc).clone());
 
     // Channel that drives the response body. The tool-loop coroutine
@@ -325,6 +330,7 @@ pub async fn chat_completions(
             body_for_loop,
             agents,
             max_rounds,
+            max_auto_continues,
             timeout,
             tx,
             first_stream,

@@ -245,9 +245,17 @@ pub struct TomlLlmConfig {
     /// Maximum number of tool-call rounds a single user turn may
     /// trigger before the proxy bails out and surfaces an error
     /// bubble. Mirrors the `LLM_MAX_TOOL_ROUNDS` env var; env wins
-    /// when both are set. Defaults to `8`. Defends against models
-    /// that loop on a tool call.
+    /// when both are set. Defaults to `64`. Defends against models
+    /// that loop on a tool call; lower the cap for upstreams that
+    /// show runaway behaviour.
     pub llm_max_tool_rounds: Option<u32>,
+    /// Maximum number of auto-continue rounds appended when the
+    /// upstream reasoning model hits `finish_reason: "length"`
+    /// mid-reasoning. Mirrors the `LLM_MAX_AUTO_CONTINUES` env
+    /// var; env wins when both are set. Defaults to `32`; set
+    /// to `0` to disable. See `docs/llm-configuration.md` for
+    /// the full contract.
+    pub llm_max_auto_continues: Option<u32>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -840,6 +848,7 @@ fn merge_toml_llm(
             allow_user_timezone: l.allow_user_timezone.or(e.allow_user_timezone),
             allow_user_reply_language: l.allow_user_reply_language.or(e.allow_user_reply_language),
             llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
+            llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
         }),
     }
 }

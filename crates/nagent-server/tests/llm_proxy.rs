@@ -116,6 +116,7 @@ async fn start_test_server_with_llm_and_system_prompt(
         allow_user_timezone: true,
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
+        llm_max_auto_continues: 0,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -569,6 +570,7 @@ async fn start_test_server_with_llm_auth(
         allow_user_timezone: true,
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
+        llm_max_auto_continues: 0,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -807,37 +809,42 @@ async fn bearer_mode_accepts_lowercase_scheme() {
     );
 }
 
-// ---- Natural completion (no auto-continue) ----------------------------------
+// ---- Reasoning-truncation auto-continue contract ---------------------------
 //
-// The previous "auto-continue on reasoning truncation" heuristic
-// was removed. The loop now closes the stream as soon as the
-// upstream finishes a turn, regardless of `finish_reason`. The
-// chat UI can show what the model produced (reasoning text in
-// the `<details>` block, partial content in the bubble) and the
-// user can ask for an explicit continuation if the upstream's
-// per-request token cap clipped the response. The contract is:
+// Reasoning-capable models (qwen3.5 with reasoning on, DeepSeek-R1,
+// o1/o3) can hit the upstream's per-request token cap before ever
+// producing a visible `delta.content` answer — the upstream surfaces
+// this as `finish_reason: "length"` with an empty content. The
+// proxy's auto-continue heuristic appends a "please continue" user
+// message and re-requests so the model can finish its thought, up
+// to `llm_max_auto_continues` times. The contract is:
 //
-// - `finish_reason: "stop"` → stream ends with `[DONE]`,
-//   content is in `delta.content`.
-// - `finish_reason: "length"` (truncation) → stream also ends
-//   with `[DONE]`; the model has nothing more to say this turn
-//   from the proxy's perspective. No follow-up round, no
-//   appended "please continue" user message, no SSE error event
-//   (the user got what the upstream emitted).
-// - `tool_calls` present → loop continues with the next round
-//   after dispatching the agents (handled by the existing
-//   tool-call branch; budgeted by `llm_max_tool_rounds`).
+// - `llm_max_auto_continues = 0` (or reasoning-only truncation
+//   fires N+1 times): the loop closes the stream with
+//   `data: [DONE]`, no follow-up round, the reasoning text
+//   already streamed stays visible in the chat UI's
+//   `<details>` block, the user can ask for an explicit
+//   continuation.
+// - `llm_max_auto_continues > 0` and the upstream truncates: the
+//   loop appends the "please continue" user message, opens a
+//   fresh upstream connection, and forwards everything verbatim.
+//   The chat UI accumulates the reasoning across all rounds in
+//   the `<details>` block; once the model emits a visible
+//   `delta.content` and ends with `finish_reason: "stop"`, the
+//   loop closes with `[DONE]`.
+// - `tool_calls` present → the tool-call branch takes over
+//   (budgeted by `llm_max_tool_rounds`); auto-continue does
+//   not fire on tool-call rounds.
 //
-// The test below guards the "truncation closes the stream"
-// contract end-to-end: a mock upstream emits reasoning then
-// truncates, and the proxy must close after exactly one
-// upstream call with no appended messages.
+// See `docs/llm-configuration.md` for the full contract and
+// how to bump the upstream's `num_ctx` / `-c` so the auto-
+// continue fallback rarely needs to fire in practice.
 
-/// Spawn a mock upstream that records the request body and
-/// always returns a reasoning-only truncation
-/// (`finish_reason: "length"`, no `delta.content`). The proxy
-/// must close the stream after this single response — no
-/// auto-continue, no second upstream call.
+/// Spawn a mock upstream that always returns a reasoning-only
+/// truncation (`finish_reason: "length"`, no `delta.content`).
+/// The proxy must close the stream after this single response
+/// when `llm_max_auto_continues = 0`, and after N+1 responses
+/// when `llm_max_auto_continues = N`.
 async fn spawn_always_truncates_upstream(
     captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
 ) -> String {
@@ -876,11 +883,17 @@ async fn spawn_always_truncates_upstream(
     format!("http://{addr}")
 }
 
+/// With `llm_max_auto_continues = 0`, reasoning-only truncation
+/// closes the stream after a single round: no follow-up request,
+/// no SSE error event, the user sees the reasoning text in the
+/// chat UI's `<details>` block and can ask for a continuation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_loop_closes_cleanly_on_reasoning_truncation_without_auto_continue() {
+async fn tool_loop_closes_on_truncation_when_auto_continues_disabled() {
     let captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let upstream_url = spawn_always_truncates_upstream(captured.clone()).await;
+    // The default fixture sets `llm_max_auto_continues: 0`,
+    // i.e. the heuristic is disabled.
     let (url, _) = start_test_server_with_llm(upstream_url, None).await;
 
     let resp = reqwest::Client::new()
@@ -895,37 +908,196 @@ async fn tool_loop_closes_cleanly_on_reasoning_truncation_without_auto_continue(
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.text().await.expect("body");
 
-    // The reasoning text must reach the client so the chat UI
-    // can render it in the `<details>` block.
     assert!(
         body.contains("thinking hard"),
         "reasoning text from the round must reach the client; got: {body}"
     );
-
-    // The loop must close cleanly with `[DONE]` — no SSE error
-    // event, no second upstream call. The user sees what the
-    // model produced and can ask for an explicit continuation
-    // if the upstream's per-request cap clipped the response.
     assert!(
         body.contains("data: [DONE]"),
         "stream must end with [DONE] after the truncation; got: {body}"
     );
     assert!(
         !body.contains("event: error") && !body.contains("\"type\":\"error\""),
-        "truncation must not surface an SSE error event; the model simply \
-         ran out of upstream tokens this turn; got: {body}"
+        "truncation must not surface an SSE error event; got: {body}"
     );
-
-    // Exactly one upstream call: the proxy must NOT have
-    // auto-continued with a "please continue" message. (Before
-    // the removal of the auto-continue heuristic, this test
-    // would have observed 2+ upstream calls.)
     let calls = captured.lock().await.clone();
     assert_eq!(
         calls.len(),
         1,
-        "no auto-continue must be appended on reasoning-only truncation; \
-         got {} upstream calls",
+        "auto-continue disabled → exactly one upstream call; got {}",
         calls.len()
+    );
+}
+
+/// With `llm_max_auto_continues > 0` and the upstream truncating
+/// on round 0, the loop appends a "please continue" user message
+/// and re-requests. The new helper builds a server with
+/// `llm_max_auto_continues = 3` and a mock upstream that
+/// truncates on round 0 then produces a visible answer with
+/// `finish_reason: "stop"` on round 1. The client must see the
+/// reasoning from round 0, the answer from round 1, and the
+/// stream must end with `[DONE]`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_loop_auto_continues_on_reasoning_truncation_until_visible_answer() {
+    let captured: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let captured = Arc::clone(&captured);
+            move |_headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    let parsed: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or_else(|_| {
+                            serde_json::json!({
+                                "_raw": String::from_utf8_lossy(&body).to_string()
+                            })
+                        });
+                    let round = captured.lock().await.len();
+                    captured.lock().await.push(parsed);
+                    let body = if round == 0 {
+                        // Round 0: reasoning-only truncation.
+                        "event: message\n\
+                         data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":\
+                         {\"role\":\"assistant\",\"reasoning\":\"thinking hard\"},\
+                         \"finish_reason\":null}]}\n\n\
+                         event: message\ndata: {\"id\":\"1\",\"choices\":[{\"index\":0,\
+                         \"delta\":{},\"finish_reason\":\"length\"}]}\n\n\
+                         data: [DONE]\n\n"
+                            .to_string()
+                    } else {
+                        // Round 1: visible answer + stop.
+                        "event: message\n\
+                         data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":\
+                         {\"role\":\"assistant\",\"content\":\"Done.\"},\
+                         \"finish_reason\":null}]}\n\n\
+                         event: message\ndata: {\"id\":\"1\",\"choices\":[{\"index\":0,\
+                         \"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                         data: [DONE]\n\n"
+                            .to_string()
+                    };
+                    (
+                        StatusCode::OK,
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("text/event-stream"),
+                        )],
+                        body,
+                    )
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let upstream_url = format!("http://{addr}");
+
+    // Build a server with `llm_max_auto_continues = 3` so the
+    // single auto-continue round is well within the cap.
+    let llm_cfg = LlmConfig {
+        enabled: true,
+        base_url: upstream_url,
+        default_model: "llama3.1".into(),
+        api_key: None,
+        inbound_auth_key: None,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins: vec![],
+        system_prompt: None,
+        allow_user_location: true,
+        allow_user_timezone: true,
+        allow_user_reply_language: true,
+        llm_max_tool_rounds: 8,
+        llm_max_auto_continues: 3,
+    };
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    let state = builder.with_llm(llm_client).build();
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"think about it"}],"stream":true,"model":"llama3.1"}"#,
+        )
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("body");
+
+    // The reasoning from round 0 must reach the client so the
+    // chat UI can render it in the `<details>` block.
+    assert!(
+        body.contains("thinking hard"),
+        "reasoning text from the truncated round must reach the client; got: {body}"
+    );
+    // The visible answer from round 1 must also reach the
+    // client.
+    assert!(
+        body.contains("Done."),
+        "visible answer from the auto-continue round must reach the client; got: {body}"
+    );
+    // The stream closes cleanly.
+    assert!(
+        body.contains("data: [DONE]"),
+        "stream must end with [DONE] after the auto-continue; got: {body}"
+    );
+    assert!(
+        !body.contains("event: error") && !body.contains("\"type\":\"error\""),
+        "auto-continue within the cap must not surface an error; got: {body}"
+    );
+
+    // The auto-continue round 1 must carry a "please continue"
+    // user message so the model knows to resume. Inspect the
+    // second upstream call's body.
+    let calls = captured.lock().await.clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected 1 original + 1 auto-continue = 2 rounds; got {}",
+        calls.len()
+    );
+    let messages = calls[1]["messages"]
+        .as_array()
+        .expect("round-1 messages array");
+    let last = messages.last().expect("messages non-empty");
+    assert_eq!(
+        last["role"], "user",
+        "last message must be the auto-continue prompt"
+    );
+    let last_content = last["content"].as_str().unwrap_or("");
+    assert!(
+        last_content.contains("continue") || last_content.contains("finish"),
+        "auto-continue user prompt must ask for a continuation; was `{last_content}`"
+    );
+    // The message just before the last must be the empty-content
+    // assistant partial turn (the upstream saw the truncation
+    // and we did not re-feed the reasoning as assistant
+    // content).
+    let second_last = &messages[messages.len() - 2];
+    assert_eq!(second_last["role"], "assistant");
+    assert!(
+        second_last["content"].as_str().unwrap_or("").is_empty(),
+        "assistant partial turn must carry no content (reasoning stays client-side)"
     );
 }

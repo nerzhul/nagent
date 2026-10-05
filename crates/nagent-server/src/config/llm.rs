@@ -154,8 +154,31 @@ pub struct LlmConfig {
     /// Env var `LLM_MAX_TOOL_ROUNDS`, TOML key
     /// `[llm].llm_max_tool_rounds`. Previously mis-housed on
     /// `AgentConfig`; moved here because it gates the proxy's tool
-    /// loop, not the agent registry.
+    /// loop, not the agent registry. Default of `64` covers
+    /// deep agent compositions where the model chains many
+    /// tool calls in a single turn; lower the cap if a specific
+    /// upstream shows runaway behaviour.
     pub llm_max_tool_rounds: u32,
+    /// Maximum number of auto-continue rounds the loop appends
+    /// when the upstream emits `finish_reason: "length"` while
+    /// still in the reasoning phase of a reasoning-capable
+    /// model (qwen3.5 with reasoning on, DeepSeek-R1, o1/o3,
+    /// …). Each auto-continue is a fresh upstream request that
+    /// asks the model to "continue from where you left off and
+    /// produce the visible answer now" without re-emitting the
+    /// prior reasoning (the chat UI already showed it). The
+    /// default of `32` is generous — a single long question
+    /// rarely needs more than a handful of truncations on
+    /// upstreams with a sane `num_ctx`; raise the cap for
+    /// providers with a small fixed context window (e.g.
+    /// cloud-hosted models where you cannot bump the upstream).
+    /// Set to `0` to disable the heuristic; the loop then
+    /// closes the stream on truncation, surfacing the reasoning
+    /// text to the user and leaving continuation to an explicit
+    /// "continue" prompt. Env var `LLM_MAX_AUTO_CONTINUES`,
+    /// TOML key `[llm].llm_max_auto_continues`. See
+    /// `docs/llm-configuration.md` for the full contract.
+    pub llm_max_auto_continues: u32,
 }
 
 impl Default for LlmConfig {
@@ -173,7 +196,8 @@ impl Default for LlmConfig {
             allow_user_location: true,
             allow_user_timezone: true,
             allow_user_reply_language: true,
-            llm_max_tool_rounds: 8,
+            llm_max_tool_rounds: 64,
+            llm_max_auto_continues: 32,
         }
     }
 }
@@ -250,7 +274,14 @@ impl LlmConfig {
             defaults.llm_max_tool_rounds,
             "LLM_MAX_TOOL_ROUNDS",
         )?
-        .clamp(1, 32);
+        .clamp(1, 256);
+        let llm_max_auto_continues = resolve_primitive(
+            env_opt("LLM_MAX_AUTO_CONTINUES").as_deref(),
+            toml.llm_max_auto_continues,
+            defaults.llm_max_auto_continues,
+            "LLM_MAX_AUTO_CONTINUES",
+        )?
+        .clamp(0, 64);
 
         Ok(Self {
             enabled,
@@ -266,6 +297,7 @@ impl LlmConfig {
             allow_user_timezone,
             allow_user_reply_language,
             llm_max_tool_rounds,
+            llm_max_auto_continues,
         })
     }
 }

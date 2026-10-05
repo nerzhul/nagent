@@ -83,10 +83,10 @@ pub struct LlmState {
     /// Owning clone of the [`LlmConfig`] the proxy was wired
     /// from. Carrying the config on the state (rather than just
     /// `Arc<Config>`) keeps the proxy's signature narrow: the
-    /// per-tool-loop knob (`llm_max_tool_rounds`) lives on the
-    /// LLM subtree, not on `AgentConfig`, and the proxy needs
-    /// both the runtime state (client + rate limiter) and the
-    /// config (knobs).
+    /// per-tool-loop knobs (`llm_max_tool_rounds`,
+    /// `llm_max_auto_continues`) live on the LLM subtree, not on
+    /// `AgentConfig`, and the proxy needs both the runtime state
+    /// (client + rate limiter) and the config (knobs).
     pub cfg: LlmConfig,
 }
 
