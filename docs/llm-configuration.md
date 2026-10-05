@@ -50,6 +50,11 @@ leaving continuation to an explicit "continue" prompt).
 
 ## Upstream-side knob: `n_ctx` (the actual lever for long thinking)
 
+`num_ctx` controls how much conversation history + system prompt
+the model can see at once. `num_predict` (next section) controls
+how many tokens it can emit per response. Both matter; bumping
+only one often hides the other.
+
 `llm_max_auto_continues` is a fallback. The real fix for
 "the model ran out of context mid-reasoning" is to give the
 upstream more context. Each `num_ctx` bump roughly doubles
@@ -128,6 +133,67 @@ honours whatever `-c` is set to.
   client. This is exactly the case where `llm_max_auto_continues`
   matters — it lets the model keep producing across the
   provider's hard cap.
+
+## Upstream-side knob: `num_predict` (the actual lever for per-response length)
+
+`num_predict` is **how many tokens the model may emit in a single
+response**, distinct from `num_ctx` (how much history the model
+can see). It is the most common cause of "the model keeps
+reasoning but never produces an answer" symptoms on reasoning
+models.
+
+### The Ollama default that bites
+
+Ollama's default `num_predict` is **128 tokens**. Reasoning
+models stream a long thinking phase before any tool call or
+visible text:
+
+```
+1203 chars of reasoning  → ~250 tokens wanted
+128-token cap           → cut off mid-thought
+finish_reason: "length" → triggers llm_max_auto_continues
+"please continue" prompt → model re-derives from scratch
+                            (~50 chars of reasoning before
+                            the next truncation)
+```
+
+…which produces a 30+ round auto-continue loop on a question
+that should take one or two rounds. The model is not stupid;
+it is being denied the budget to finish a thought.
+
+### Fix
+
+Set `num_predict` to `2048` (safe for 9B-class reasoners like
+`qwen3.5:9b`) or `4096` (for 32B+ reasoners like
+`deepseek-r1:32b`). One line:
+
+```bash
+LLM_NUM_PREDICT=2048
+```
+
+…or in `config.toml`:
+
+```toml
+[llm]
+num_predict = 2048
+```
+
+The proxy forwards this to the upstream as
+`options.num_predict` on every `/v1/chat/completions` request,
+including the tool-loop rounds. Setting it is purely additive —
+operators who do not opt in keep the upstream's choice (e.g.
+Ollama's 128-token default for non-reasoning models is fine).
+
+- Env var: `LLM_NUM_PREDICT`
+- TOML key: `[llm].num_predict`
+- Recommended: `2048` for 9B reasoners, `4096` for 32B+ reasoners
+- A `None` / unset value leaves the upstream's default alone —
+  the proxy only injects the field when the operator opts in.
+
+This is the single most effective knob for stopping the
+auto-continue loop. Bumping `llm_max_auto_continues` is a
+safety net for cloud-hosted providers with fixed small caps;
+bumping `num_predict` is the actual fix for local Ollama.
 
 ## How auto-continue interacts with the upstream cap
 
