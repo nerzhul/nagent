@@ -337,6 +337,32 @@ pub(crate) fn sse_tool_result_event(id: &str, name: &str, ok: bool, payload: &st
     format!("event: tool_result\ndata: {payload_json}\n\n")
 }
 
+/// Enriched `tool_result` SSE frame for an `Agent::requires_confirmation`
+/// outcome. Carries `needs_approval: true`, the pre-formatted `prompt`
+/// object the chat UI renders in the inline approval card, and the
+/// `tool_call_id` so the client can build the `[APPROVE:...]`
+/// sentinel. `payload` is the agent's own reason text — fed to the LLM
+/// verbatim so the model still sees the request if the user types a
+/// plain-text "yes" in the chat.
+pub(crate) fn sse_tool_result_needs_approval(
+    id: &str,
+    name: &str,
+    payload: &str,
+    prompt: serde_json::Value,
+) -> String {
+    let payload_json = json!({
+        "id": id,
+        "name": name,
+        "ok": false,
+        "needs_approval": true,
+        "tool_call_id": id,
+        "prompt": prompt,
+        "summary": payload.chars().take(160).collect::<String>(),
+        "content": payload,
+    });
+    format!("event: tool_result\ndata: {payload_json}\n\n")
+}
+
 pub(crate) fn sse_error_event(reason: &str, detail: &str) -> String {
     let payload = json!({
         "error": reason,

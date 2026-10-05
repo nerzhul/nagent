@@ -204,8 +204,8 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `wikipedia` | `wikipedia-agent` | `wikipedia.org` REST, no API key, `User-Agent` set. |
 | `dictionary` | `dictionary-agent` | Free Dictionary REST API, no API key. |
 | `get_stock_quote` | `stock-agent` | Stooq CSV, no API key. |
-| `caldav_list_events` | `caldav-agent` | Per-user CalDAV calendar: list `VEVENT`s in a time range. Read-only. |
-| `caldav_get_event` | `caldav-agent` | Per-user CalDAV calendar: fetch a single `VEVENT` by `UID`. Read-only. |
+| `caldav_list_events` | `caldav-agent` | Per-user CalDAV calendar: list `VEVENT`s in a time range. Confirm-on-read — calendar contents are sensitive. |
+| `caldav_get_event` | `caldav-agent` | Per-user CalDAV calendar: fetch a single `VEVENT` by `UID`. Confirm-on-read. |
 | `caldav_create_event` | `caldav-agent` | Per-user CalDAV calendar: append a new `VEVENT` (confirm-on-write). |
 | `x_timeline` | `x-agent` | Per-user X (Twitter) home timeline via the v2 API (mode "Abonnements" / "Pour Vous"). Read-only. Refreshes the OAuth access token itself on 401. |
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
@@ -384,6 +384,57 @@ conversation actually completes) so the browser cannot cut the
 response mid-loop and drop subsequent `event: tool_call` /
 `event: tool_result` frames. The regression is documented inline
 in the file.
+
+### 3.4.1 Permission flow (chat-only)
+
+When an agent's `requires_confirmation` returns
+`NeedsConfirmation`, the tool loop now pushes a `PendingApproval`
+entry into a per-session [`PermissionStore`](../../crates/nagent-server/src/llm/permission.rs)
+keyed on the tool call id, and emits an enriched `tool_result`
+SSE frame carrying `needs_approval: true` plus a pre-formatted
+`prompt` object (`title`, `body`, `danger` ∈ {`low`,`medium`,
+`high`}) so the chat UI can render an inline approval card with
+three buttons.
+
+- **Direct-invoke route** (`POST /v1/agents/:name/invoke`) is
+  **unchanged**: direct calls bypass the chat SSE flow entirely
+  and have no UI affordance. The permission flow is a chat-only
+  concern.
+- **`Agent::requires_confirmation`** trait contract is preserved;
+  the bypass happens at the tool-loop call site by checking the
+  session-wide override set before consulting the trait method.
+  This keeps the direct-invoke route honest and respects the
+  existing trait contract.
+- **Chat route intercept**: `llm::proxy::chat_completions` runs
+  the user's latest message through
+  `parse_decision_prefix` BEFORE the upstream round begins. On a
+  recognised sentinel (`[APPROVE:tool_call_id]`,
+  `[APPROVE_ALWAYS:tool_name]`, `[DENY:tool_call_id]`), the
+  route drives the matching action:
+  - `Approve`: pop the pending entry, invoke the agent directly
+    with `force_allow` semantics (no `requires_confirmation`
+    check), emit synthetic `tool_call` / `tool_result` SSE
+    frames, and append the matching `tool_calls[]` +
+    `role: "tool"` entry to the body so the LLM summarises.
+  - `ApproveAlways`: insert `tool_name` into the session's
+    override set; if a pending entry exists for that name, drive
+    it as `Approve`; otherwise let the LLM ack on the next round.
+  - `Deny`: drop the pending entry and emit a synthetic
+    `tool_result { ok=false, content="Utilisateur refusé" }`; the
+    LLM picks the denial up as a normal tool error and writes a
+    one-line acknowledgment.
+- **Stale or unknown id** (`[APPROVE:abc]` where `abc` was never
+  registered): the chat route emits a synthetic tool error
+  (`[error] approval expired or unknown; please ask the user
+  again`) so the LLM can re-prompt.
+- **Persistence**: `PermissionStore` is in-memory only and is
+  cleared on session mint. A server restart drops both pending
+  entries and overrides, matching the LLM-mediated path's own
+  lack of state. A future plan can persist the override set to
+  `nagent_db` if needed.
+
+The detailed wire-level diff lives in plan
+`.kilo/plans/1791229183545-tool-bubble-footer-pill.md` §2.6.
 
 ### 3.5 Hardening
 

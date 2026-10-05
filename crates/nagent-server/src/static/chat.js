@@ -558,23 +558,21 @@ function applyMarkdown(bubbleEl, text) {
     ensureReplayButton(bubbleEl);
     refreshReplayButtonVisibility();
   }
-  if (bubbleEl._toolUsageEls && bubbleEl._toolUsageEls.length > 0) {
-    // `_toolUsageEls` is in source order (the order each tool_call
-    // landed). Insert them as the last children of the bubble —
-    // just before the replay button — so the visible flow stays
-    // (prose, then tool traces, then 🔊 button).
+  // The tools footer holds every tool entry as a child. Re-mount
+  // it once (the footer itself tracks its own list of entries).
+  // We re-mount unconditionally: the `innerHTML = ...` above just
+  // disconnected the footer from the DOM (its `isConnected` is
+  // now `false`), so the previous `isConnected` guard dropped it
+  // forever and the user saw the prose with no footer at all.
+  if (bubbleEl._toolsFooterEl) {
     const replayBtn = bubbleEl._replayBtn;
-    for (const details of bubbleEl._toolUsageEls) {
-      bubbleEl.insertBefore(details, replayBtn);
+    if (replayBtn) {
+      bubbleEl.insertBefore(bubbleEl._toolsFooterEl, replayBtn);
+    } else {
+      bubbleEl.appendChild(bubbleEl._toolsFooterEl);
     }
   }
   if (bubbleEl._weatherCards && bubbleEl._weatherCards.length > 0) {
-    // Weather cards live as direct children of the bubble (NOT
-    // inside any tool-trace `<details>` — the user closes the tool
-    // summary but the answer must stay readable). Re-insert each
-    // tracked card before the replay button so it stays the last
-    // visible element. Order matches insertion order (one card per
-    // `get_weather` call).
     const replayBtn = bubbleEl._replayBtn;
     for (const card of bubbleEl._weatherCards) {
       bubbleEl.insertBefore(card, replayBtn);
@@ -914,21 +912,14 @@ function renderHistory(sessionId) {
   let toolAnchorEl = null;
   for (const msg of history) {
     if (msg.role === "tool") {
-      // Render each tool bubble under the current tool anchor so
+      // Render each tool entry under the current tool anchor so
       // reloads reproduce the same DOM as the live stream.
       if (toolAnchorEl) {
         const id = msg.tool_call_id || "";
         const name = msg.name || "tool";
-        // The matching assistant `tool_calls[]` entry (processed just
-        // above) already created a running `<details>` for this id with
-        // the tool's args wired into the bubble body. Don't add a second
-        // one — only resolve the existing bubble. Without this guard
-        // each tool call ends up with two traces after a refresh: the
-        // first one flips to `ok` via `resolveToolBubble`, the second
-        // stays in `--running` and the user sees a stuck
-        // "tool running…" pill that never settles.
         const existing = id
           ? messagesEl.querySelector(
+              `details.chat-message__tool-entry[data-tool-id="${CSS.escape(id)}"], ` +
               `details.chat-message__tool-usage[data-tool-id="${CSS.escape(id)}"]`,
             )
           : null;
@@ -939,18 +930,16 @@ function renderHistory(sessionId) {
             toolAnchorEl,
           );
         }
-        // Prefer the server-curated `summary` (matches the live pill
-        // byte-for-byte, ≤ 80 chars on success / ≤ 160 on error). Fall
-        // back to a content-derived truncation for history written by
-        // older builds that did not persist `summary`.
         const summary = msg.summary
           || (msg.content ? truncateSummary(msg.content) : "");
         resolveToolBubble(null, {
           id,
           name,
-          ok: true,
+          ok: !msg.needs_approval,
           summary,
           content: msg.content,
+          needs_approval: msg.needs_approval === true,
+          prompt: msg.prompt || null,
         });
       }
       continue;
@@ -1005,15 +994,13 @@ function renderHistory(sessionId) {
     toolAnchorEl = null;
     continue;
   }
-  // Historical assistant bubbles: collapse the inlined tool traces
+  // Historical assistant bubbles: collapse the inlined tools footer
   // by default so the rehydrated view matches the "retracted after
-  // the reply settles" rule. Live streams drop the same traces in
-  // `streamReply`'s `finally` block.
+  // the reply settles" rule. Live streams collapse the same footer
+  // in `streamReply`'s `finally` block.
   for (const bubble of messagesEl.querySelectorAll(".chat-assistant")) {
-    const traces = bubble.querySelectorAll(
-      "details.chat-message__tool-usage[open]",
-    );
-    traces.forEach((d) => { d.open = false; });
+    const footer = bubble.querySelector(".chat-message__tools-summary");
+    if (footer) footer.open = false;
   }
   // Re-append the inline voice-graph at the very end so it stays
   // the last child of `#chat-messages` per §4.10 ("appended to
@@ -1341,152 +1328,298 @@ function toolIcon(name) {
 }
 
 /**
- * Render a tool bubble under `assistantEl`. Returns the bubble so
- * the matching `tool_result` event can swap its contents in place.
+ * Render a human-readable caption for a tool call. Falls back to the
+ * tool name when no per-tool formatter is registered, so adding a new
+ * tool never regresses to a JSON dump. The function is pure (no DOM,
+ * no globals) so unit tests can call it directly.
  *
- * `persist` defaults to true: the assistant's `tool_calls[]` entry
- * is written to history now (so reloads see it even before the agent
- * returns), and the matching `role: "tool"` entry is appended when
- * the result lands.
+ * Decision B from the tool-footer plan: every entry in the footer
+ * carries a one-line caption instead of `JSON.stringify(args)`.
+ */
+function describeTool(name, args, resultSummary) {
+  if (name === "get_datetime") {
+    const iso = args && typeof args === "object" ? args.iso : null;
+    const tz = args && typeof args === "object" ? args.timezone : null;
+    if (iso) {
+      return `Maintenant : ${formatLocal(iso, tz)}`;
+    }
+    return "Date / heure actuelle";
+  }
+  if (name === "caldav_list_events") {
+    const start = args && typeof args === "object" ? args.start : null;
+    const end = args && typeof args === "object" ? args.end : null;
+    if (start && end) {
+      const count = extractCountFromSummary(resultSummary);
+      const n = count != null ? `${count} événement(s) ` : "événements ";
+      return `${n}du ${formatDate(start)} au ${formatDate(end)}`;
+    }
+    return "Liste des événements CalDAV";
+  }
+  if (name === "caldav_get_event") {
+    return "Lecture d'un événement CalDAV";
+  }
+  if (name === "caldav_create_event") {
+    const summary = args && typeof args === "object" ? args.summary : null;
+    return summary ? `Créer « ${summary} »` : "Créer un événement";
+  }
+  if (name === "web_fetch") {
+    const url = args && typeof args === "object" ? args.url : null;
+    return url ? String(url) : "Visiter une URL";
+  }
+  if (name === "wikipedia") {
+    const query = args && typeof args === "object" ? args.query : null;
+    return query ? `Recherche : « ${query} »` : "Recherche Wikipédia";
+  }
+  if (name === "calculate") {
+    const expr = args && typeof args === "object" ? args.expression : null;
+    return expr ? `Calcul : ${expr}` : "Calcul";
+  }
+  if (name === "unit_convert") {
+    const expr = args && typeof args === "object" ? args.expression : null;
+    return expr ? `Conversion : ${expr}` : "Conversion d'unités";
+  }
+  if (name === "get_weather") {
+    const loc = args && typeof args === "object" ? args.location : null;
+    return loc ? `Météo : ${loc}` : "Météo (carte ci-dessus)";
+  }
+  if (name === "dictionary") {
+    const word = args && typeof args === "object" ? args.word : null;
+    return word ? `Définition : ${word}` : "Définition";
+  }
+  if (name === "get_stock_quote") {
+    const sym = args && typeof args === "object" ? args.symbol : null;
+    return sym ? `Cours : ${sym}` : "Cours de bourse";
+  }
+  if (name === "x_timeline") {
+    return "Timeline X (abonnements)";
+  }
+  if (name === "read_document") {
+    return "Lecture d'un document";
+  }
+  if (name === "config_doc") {
+    return "Catalogue de services";
+  }
+  return name || "Outil";
+}
+
+function extractCountFromSummary(s) {
+  if (!s) return null;
+  const m = String(s).match(/(\d+)\s*événement/);
+  return m ? Number(m[1]) : null;
+}
+
+function formatDate(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleDateString("fr-FR", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+  } catch (_e) {
+    return String(iso);
+  }
+}
+
+function formatLocal(iso, tz) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    const opts = {
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    };
+    if (tz) opts.timeZone = tz;
+    return d.toLocaleString("fr-FR", opts);
+  } catch (_e) {
+    return String(iso);
+  }
+}
+
+/**
+ * Lazily create the per-bubble tools footer (a `<details>` that holds
+ * one entry per tool call). The footer sits at the bottom of the
+ * assistant bubble, above the replay button. Tracked on
+ * `assistantEl._toolsFooterEl` so `applyMarkdown`'s per-tick
+ * `innerHTML = ""` reset can re-insert it after every wipe.
+ */
+function ensureToolsFooter(assistantEl) {
+  if (!assistantEl) return null;
+  let footer = assistantEl._toolsFooterEl;
+  if (footer && footer.isConnected) return footer;
+  footer = document.createElement("details");
+  footer.className = "chat-message__tools-summary";
+  footer.open = true;
+  const summary = document.createElement("summary");
+  const icon = document.createElement("span");
+  icon.className = "chat-message__tools-icon";
+  icon.textContent = "\u{1F6E0}";
+  const label = document.createElement("span");
+  label.className = "chat-message__tools-label";
+  label.textContent = "Outils utilisés";
+  const status = document.createElement("span");
+  status.className = "chat-message__tools-status";
+  status.textContent = "…";
+  summary.appendChild(icon);
+  summary.appendChild(label);
+  summary.appendChild(status);
+  footer.appendChild(summary);
+  const list = document.createElement("div");
+  list.className = "chat-message__tools-list";
+  footer.appendChild(list);
+  const replayBtn = assistantEl.querySelector(".chat-message-replay");
+  if (replayBtn) {
+    assistantEl.insertBefore(footer, replayBtn);
+  } else {
+    assistantEl.appendChild(footer);
+  }
+  assistantEl._toolsFooterEl = footer;
+  footer._listEl = list;
+  return footer;
+}
+
+/**
+ * Rebuild the footer summary line ("N outils utilisés", or "N outils
+ * · 1 en attente d'autorisation") based on the live entries.
+ */
+function updateToolsSummaryLabel(footer) {
+  if (!footer) return;
+  const list = footer._listEl;
+  const entries = list ? list.querySelectorAll(".chat-message__tool-entry") : [];
+  let pending = 0;
+  entries.forEach((entry) => {
+    if (entry.dataset.state === "needs-approval" || entry.dataset.state === "pending") {
+      pending += 1;
+    }
+  });
+  const label = footer.querySelector(".chat-message__tools-label");
+  const status = footer.querySelector(".chat-message__tools-status");
+  const count = entries.length;
+  if (label) {
+    label.textContent = count <= 1
+      ? "1 outil utilisé"
+      : `${count} outils utilisés`;
+  }
+  if (status) {
+    status.textContent = pending > 0
+      ? `· ${pending} en attente d'autorisation`
+      : (count > 0 ? "✓" : "…");
+  }
+}
+
+/**
+ * Render a tool bubble under `assistantEl`. Returns the entry so the
+ * matching `tool_result` event can swap its contents in place.
+ *
+ * The "tool bubble" is now a `<details class="chat-message__tool-entry">`
+ * inside the per-bubble `<details class="chat-message__tools-summary">`
+ * footer. The old per-tool `<details class="chat-message__tool-usage">`
+ * wrapper class is kept as an alias on the entry so existing selectors
+ * (sanity tests, weather widget lookups) keep working byte-for-byte.
  */
 function appendToolBubble(
   sessionId,
   { id, name, args, index },
   assistantEl,
 ) {
-  const div = document.createElement("div");
-  div.className = "chat-tool-bubble chat-tool-bubble--running";
-  div.dataset.toolId = id;
-  div.dataset.toolName = name;
+  const footer = ensureToolsFooter(assistantEl);
+  const list = footer ? footer._listEl : null;
+  const entry = document.createElement("details");
+  entry.className = "chat-message__tool-entry chat-message__tool-usage";
+  entry.dataset.toolId = id;
+  entry.dataset.toolName = name;
+  entry.dataset.state = "pending";
+  entry.open = false;
 
+  const summary = document.createElement("summary");
   const icon = document.createElement("span");
   icon.className = "chat-tool-icon";
   icon.textContent = toolIcon(name);
-  div.appendChild(icon);
-
   const nameEl = document.createElement("span");
   nameEl.className = "chat-tool-name";
   nameEl.textContent = name;
-  div.appendChild(nameEl);
-
-  // First-line context: URL for web_fetch, raw args otherwise.
-  const detailEl = document.createElement("span");
-  detailEl.className = "chat-tool-detail";
-  if (name === "web_fetch" && args && typeof args === "object" && args.url) {
-    detailEl.textContent = String(args.url);
-  } else if (args && Object.keys(args).length > 0) {
-    detailEl.textContent = JSON.stringify(args);
-  } else {
-    detailEl.textContent = "…";
-  }
-  div.appendChild(detailEl);
-
   const statusEl = document.createElement("span");
   statusEl.className = "chat-tool-status";
-  statusEl.textContent = "running…";
-  div.appendChild(statusEl);
+  statusEl.textContent = "⏳";
+  const captionEl = document.createElement("span");
+  captionEl.className = "chat-tool-caption";
+  captionEl.textContent = describeTool(name, args);
+  summary.appendChild(icon);
+  summary.appendChild(nameEl);
+  summary.appendChild(statusEl);
+  summary.appendChild(captionEl);
+  entry.appendChild(summary);
 
-  // Wrap the tool bubble in a collapsible `<details>` element so the
-  // user can hide the tool trace by default once the reply settles.
-  // The `<summary>` carries a compact "🔧 wikipedia …" line; the body
-  // is the full tool bubble. During the tool run the `<details>` is
-  // open so the user sees progress; once the reply completes we
-  // remove the `open` attribute (see `finalizeAssistantBubble`).
-  //
-  // The wrapper is inserted INSIDE the assistant bubble (before the
-  // replay button), so the tool trace visually hangs off the message
-  // that produced it. Rehydration on history reload reproduces the
-  // same DOM via the `renderHistory` path, which calls
-  // `appendToolBubble` with `sessionId = null` and the assistant
-  // bubble as anchor.
-  const details = document.createElement("details");
-  details.className = "chat-message__tool-usage";
-  details.dataset.toolId = id;
-  details.dataset.toolName = name;
-  details.open = true;
-  const summary = document.createElement("summary");
-  // `summary` must contain the same label so the user sees a stable
-  // caption in both states (collapsed: this line; expanded: this line
-  // + the full body). The icon + name are duplicated into the body
-  // by the existing `.chat-tool-bubble` markup below.
-  const summaryIcon = document.createElement("span");
-  summaryIcon.className = "chat-message__tool-summary-icon";
-  summaryIcon.textContent = toolIcon(name);
-  const summaryName = document.createElement("span");
-  summaryName.className = "chat-message__tool-summary-name";
-  summaryName.textContent = name;
-  const summaryStatus = document.createElement("span");
-  summaryStatus.className = "chat-message__tool-summary-status";
-  summaryStatus.textContent = "running…";
-  summary.appendChild(summaryIcon);
-  summary.appendChild(summaryName);
-  summary.appendChild(summaryStatus);
-  details.appendChild(summary);
-  details.appendChild(div);
+  const body = document.createElement("div");
+  body.className = "chat-tool-body";
+  const argsDetails = document.createElement("details");
+  argsDetails.className = "chat-tool-args";
+  const argsSummary = document.createElement("summary");
+  argsSummary.textContent = "Arguments";
+  argsDetails.appendChild(argsSummary);
+  const argsPre = document.createElement("pre");
+  argsPre.textContent = JSON.stringify(args ?? {}, null, 2);
+  argsDetails.appendChild(argsPre);
+  body.appendChild(argsDetails);
+  const resultDetails = document.createElement("details");
+  resultDetails.className = "chat-tool-result";
+  const resultSummary = document.createElement("summary");
+  resultSummary.textContent = "Résultat";
+  resultDetails.appendChild(resultSummary);
+  const resultPre = document.createElement("pre");
+  resultPre.textContent = "…";
+  resultDetails.appendChild(resultPre);
+  body.appendChild(resultDetails);
+  entry.appendChild(body);
 
-  if (assistantEl && messagesEl.contains(assistantEl)) {
-    // Insert before the replay button if it's already attached
-    // (`appendBubble` adds it before any tool_call lands). Falls
-    // back to plain appendChild for callers that pass a detached
-    // assistant bubble (tests).
-    //
-    // `messagesEl` is a `lazyEl` proxy — `contains()` resolves to
-    // the real DOM element's `contains` (via the get-trap binding
-    // on every access), so the ancestry check works across the
-    // proxy. The previous `assistantEl.parentNode === messagesEl`
-    // form failed silently after the proxy migration because the
-    // strict identity compare treats the proxy object and the
-    // real `<div id="chat-messages">` as different objects, so
-    // the condition was always false and every tool trace landed
-    // as a direct child of the messages container. That made
-    // `renderWeatherWidget`'s `details.parentElement.closest
-    // (".chat-assistant")` walk bail (no enclosing bubble), which
-    // is exactly the symptom that surfaced as "le widget météo ne
-    // s'affiche plus".
+  if (list) {
+    list.appendChild(entry);
+  } else if (assistantEl) {
     const replayBtn = assistantEl.querySelector(".chat-message-replay");
     if (replayBtn) {
-      assistantEl.insertBefore(details, replayBtn);
+      assistantEl.insertBefore(entry, replayBtn);
     } else {
-      assistantEl.appendChild(details);
+      assistantEl.appendChild(entry);
     }
   } else {
-    messagesEl.appendChild(details);
+    messagesEl.appendChild(entry);
   }
-  // Track the wrapper on the bubble so `applyMarkdown` (which wipes
-  // the bubble's `innerHTML` on every streaming tick) can re-insert
-  // it after the wipe. Without this the tool trace would vanish
-  // mid-stream.
+  entry._resultPre = resultPre;
+  entry._captionEl = captionEl;
+  entry._statusEl = statusEl;
+  entry._argsPre = argsPre;
+
+  // Back-compat: many older paths still look up
+  // `details.chat-message__tool-usage[data-tool-id]`. The new entry
+  // carries both class names (see above) so those lookups continue
+  // to find the entry. The wrapper element returned today is the
+  // entry itself (NOT the assistant bubble footer), matching the
+  // previous contract of the function.
   if (assistantEl && !assistantEl._toolUsageEls) {
     assistantEl._toolUsageEls = [];
   }
   if (assistantEl) {
-    assistantEl._toolUsageEls.push(details);
+    assistantEl._toolUsageEls.push(entry);
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  updateToolsSummaryLabel(footer);
 
-  // While the tool runs, hide the assistant's accumulating prose so
-  // the "let me check…" / "fetching…" preamble doesn't steal focus
-  // from the eventual widget. Only the live-stream path triggers
-  // this — rehydration (`appendToolBubble(null, ...)`) plays back
-  // already-finished tool calls and would otherwise flash a
-  // "Préparation…" placeholder on a settled reply.
   if (sessionId && assistantEl?.classList?.contains("chat-assistant")
       && inflight && inflight.sessionId === sessionId) {
     setAssistantToolPending(assistantEl, true);
   }
 
-  // Persist a placeholder assistant turn with `tool_calls[]` so a
-  // page reload / follow-up turn keeps the LLM context intact even
-  // before the agent returns. We only do this the first time we see
-  // the tool_call — the tool_result path appends the role:tool entry.
-  if (sessionId && !div.dataset.persisted) {
-    div.dataset.persisted = "1";
+  if (sessionId && !entry.dataset.persisted) {
+    entry.dataset.persisted = "1";
     const h = loadHistory(sessionId);
     const last = h[h.length - 1];
-    // If the previous entry was already an assistant turn written
-    // by the streaming layer with no content, fold the tool_calls[]
-    // into it so we don't end up with two back-to-back assistant
-    // messages. Otherwise append a fresh assistant turn.
     if (last && last.role === "assistant"
         && !last.tool_calls && (last.content == null || last.content === "")) {
       last.tool_calls = [{
@@ -1509,101 +1642,243 @@ function appendToolBubble(
     }
     saveHistory(sessionId, h);
   }
-  return div;
+  return entry;
 }
 
 /**
- * Update a tool bubble in place when the server emits the matching
- * `tool_result` event. Also appends the `role: "tool"` history
- * entry so the result survives reloads and rides along in future
- * LLM turns.
+ * Update a tool entry in place when the server emits the matching
+ * `tool_result` event. Also appends the `role: "tool"` history entry
+ * so the result survives reloads and rides along in future LLM turns.
+ *
+ * The new layout has each tool as its own `<details class="chat-message__tool-entry">`
+ * inside the per-bubble tools footer. The entry carries
+ * `.chat-message__tool-usage` as a back-compat class so the
+ * historical CSS selectors keep matching.
+ *
+ * When the server sets `needs_approval: true`, the entry grows an
+ * inline approval card with three buttons (Approve /
+ * Approve-always / Deny). The card's click functions route through
+ * `sendPermissionDecision`, which synthesises a sentinel-prefixed
+ * user message and sends it through the chat-completion endpoint —
+ * the server-side parser (`llm::permission::parse_decision_prefix`)
+ * recognises the prefix and drives the matching action.
  */
-function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
-  // The tool trace is now wrapped in a `<details>` collapsible
-  // (`appendToolBubble`); the inner `.chat-tool-bubble` div is the
-  // historical node whose status / class flips on result.
-  const details = messagesEl.querySelector(
+function resolveToolBubble(
+  sessionId,
+  { id, name, ok, summary, content, needs_approval, prompt },
+) {
+  const entry = messagesEl.querySelector(
+    `details.chat-message__tool-entry[data-tool-id="${CSS.escape(id)}"], ` +
     `details.chat-message__tool-usage[data-tool-id="${CSS.escape(id)}"]`,
   );
-  const div = details?.querySelector(".chat-tool-bubble");
-  if (div) {
-    div.classList.remove("chat-tool-bubble--running");
-    div.classList.add(ok ? "chat-tool-bubble--ok" : "chat-tool-bubble--error");
-    const statusEl = div.querySelector(".chat-tool-status");
+  const div = entry; // back-compat alias — old code reads "div"
+  if (entry) {
+    const statusEl = entry._statusEl || entry.querySelector(".chat-tool-status");
+    const captionEl = entry._captionEl || entry.querySelector(".chat-tool-caption");
+    const resultPre = entry._resultPre || entry.querySelector(".chat-tool-result pre");
+    if (resultPre) resultPre.textContent = String(content ?? "");
     if (statusEl) {
-      statusEl.textContent = ok ? `✓ ${truncateSummary(summary)}` : `⚠ ${truncateSummary(summary)}`;
-    }
-    // Mirror the result on the `<summary>` so the user sees the
-    // status line even when the tool trace is collapsed (which is
-    // the default once the reply settles).
-    const summaryStatus = details.querySelector(".chat-message__tool-summary-status");
-    if (summaryStatus) {
-      summaryStatus.textContent = ok
-        ? `✓ ${truncateSummary(summary)}`
-        : `⚠ ${truncateSummary(summary)}`;
-    }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    // On tool error, no prose is going to stream after the tool
-    // result, so collapse the wrapper now rather than waiting for
-    // stream end: the `<details>` open state would otherwise show
-    // the error body until the assistant turn finalises, which can
-    // be much later for multi-tool replies. We also unhide the
-    // assistant's prose at this point — if the LLM had already
-    // streamed a preamble before the tool call, the user wants to
-    // see it now (the LLM may also stream an error-acknowledging
-    // reply that the prose placeholder is hiding otherwise).
-    if (!ok && details) {
-      details.open = false;
-      const assistantEl = findAssistantBubble(details);
-      if (assistantEl?.classList?.contains("chat-message--tool-pending")) {
-        setAssistantToolPending(assistantEl, false);
+      if (needs_approval) {
+        statusEl.textContent = "⚠ Autorisation requise";
+      } else if (ok) {
+        statusEl.textContent = `✓ ${truncateSummary(summary)}`;
+      } else {
+        statusEl.textContent = `⚠ ${truncateSummary(summary)}`;
       }
     }
-    // `get_weather` carries a structured JSON payload already — build
-    // the compact card out of it. Wrapped in try/catch so a malformed
-    // payload degrades gracefully (summary line is still rendered) and
-    // never tears down the live stream.
+    if (captionEl) {
+      captionEl.textContent = describeTool(name, guessArgs(entry), summary);
+    }
+    entry.dataset.state = needs_approval
+      ? "needs-approval"
+      : (ok ? "approved" : "errored");
+
+    if (needs_approval && prompt) {
+      // Render the approval card inline. Idempotent: re-render
+      // replaces the existing card so a rehydrated history entry
+      // with persisted prompt data shows the buttons again.
+      renderApprovalCard(entry, prompt, id, name);
+      entry.open = true; // keep entry open so the buttons are visible
+    } else {
+      // On tool error, no prose is going to stream after the tool
+      // result, so collapse the wrapper now rather than waiting for
+      // stream end.
+      if (!ok) {
+        entry.open = false;
+        const assistantEl = findAssistantBubble(entry);
+        if (assistantEl?.classList?.contains("chat-message--tool-pending")) {
+          setAssistantToolPending(assistantEl, false);
+        }
+      }
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
     if (ok && name === "get_weather") {
       try {
         const data = parseWeatherPayload(content);
         if (data) {
           const mode = detectWeatherMode(data);
+          // The widget needs a "parent" node to anchor under;
+          // today that was the inner `.chat-tool-bubble` div.
+          // For back-compat we pass the entry itself (the new
+          // layout's analogue). `renderWeatherWidget` walks up to
+          // find the assistant bubble via `.closest(".chat-assistant")`,
+          // so any node inside the bubble works.
           renderWeatherWidget(div, data, mode);
-          // Mark the weather bubble so the stream-end finalizer
-          // collapses the assistant's prose down to a one-liner
-          // (the widget is the visible answer). Defer to stream end
-          // via `inflight.weatherFinalizeEl`; on rehydration
-          // (`inflight` is null) we suppress immediately.
           if (inflight && inflight.sessionId === sessionId) {
-            inflight.weatherFinalizeEl = div;
-          } else if (details?.parentElement) {
-            const assistantEl = details.parentElement.closest(".chat-assistant");
-            if (assistantEl) finalizeAssistantForToolResult(details, assistantEl);
+            inflight.weatherFinalizeEl = entry;
+          } else if (entry?.parentElement) {
+            const assistantEl = entry.parentElement.closest(".chat-assistant");
+            if (assistantEl) finalizeAssistantForToolResult(entry, assistantEl);
           }
         }
       } catch (e) {
         console.warn("weather widget render failed:", e);
       }
     }
+    const footer = entry?.closest(".chat-message__tools-summary");
+    updateToolsSummaryLabel(footer);
   }
   if (sessionId) {
     const h = loadHistory(sessionId);
     h.push({
       role: "tool",
       tool_call_id: id,
-      // Persist `name` and `summary` so a page refresh reproduces the
-      // same pill text as the live stream byte-for-byte. Without
-      // `summary` the rehydration path had to recompute it from
-      // `content` (≤ 117 chars + "…") which is slightly longer than
-      // the server's live cap (≤ 80 chars on success) and visually
-      // diverges from what the user just saw.
       name: name || "",
       content: content == null ? "" : String(content),
       summary: summary || "",
+      needs_approval: needs_approval === true,
+      prompt: needs_approval ? prompt || null : null,
       ts: Date.now(),
     });
     saveHistory(sessionId, h);
   }
+}
+
+// Best-effort lookup of the args object attached to a tool entry.
+// Today we only persist `args` indirectly via the parent assistant
+// `tool_calls[]` entry, so on rehydration we fall back to the
+// assistant history row. Used by `describeTool` to recompute the
+// human caption after a `tool_result` lands.
+function guessArgs(entry) {
+  if (!entry) return null;
+  const id = entry.dataset.toolId;
+  const name = entry.dataset.toolName;
+  const assistantEl = entry.closest(".chat-assistant");
+  const sid = assistantEl?.dataset?.sessionId;
+  if (sid && id) {
+    const h = loadHistory(sid);
+    for (let i = h.length - 1; i >= 0; i -= 1) {
+      const msg = h[i];
+      if (msg && msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+        const tc = msg.tool_calls.find((t) => t && t.id === id);
+        if (tc && tc.function) {
+          try {
+            const parsed = JSON.parse(tc.function.arguments || "{}");
+            return parsed;
+          } catch (_e) {
+            return null;
+          }
+        }
+      }
+    }
+  }
+  return name ? {} : null;
+}
+
+/**
+ * Render the inline approval card inside a tool entry. Idempotent:
+ * a re-call replaces the existing card. The card's three buttons
+ * dispatch the matching decision sentinel through the chat-completion
+ * endpoint; the server-side parser drives the action and the LLM
+ * summarises it on the next round.
+ */
+function renderApprovalCard(entry, prompt, toolCallId, toolName) {
+  if (!entry) return;
+  let card = entry.querySelector(".chat-tool-approval");
+  if (card) card.remove();
+  card = document.createElement("div");
+  const danger = (prompt && prompt.danger) || "low";
+  card.className = `chat-tool-approval chat-tool-approval--danger-${danger}`;
+  const title = document.createElement("p");
+  title.className = "chat-tool-approval__title";
+  title.textContent = prompt?.title || "Autoriser cet outil ?";
+  card.appendChild(title);
+  if (prompt?.body) {
+    const body = document.createElement("p");
+    body.className = "chat-tool-approval__body";
+    body.textContent = prompt.body;
+    card.appendChild(body);
+  }
+  const buttons = document.createElement("div");
+  buttons.className = "chat-tool-approval__buttons";
+  const allowBtn = document.createElement("button");
+  allowBtn.type = "button";
+  allowBtn.className = "chat-tool-approval__button chat-tool-approval__button--allow";
+  allowBtn.textContent = "✓ Autoriser";
+  allowBtn.addEventListener("click", () => {
+    buttons.dataset.state = "pending";
+    sendPermissionDecision(toolCallId, toolName, "allow");
+  });
+  const alwaysBtn = document.createElement("button");
+  alwaysBtn.type = "button";
+  alwaysBtn.className = "chat-tool-approval__button chat-tool-approval__button--always";
+  alwaysBtn.textContent = "✓ Toujours pour cette session";
+  alwaysBtn.addEventListener("click", () => {
+    buttons.dataset.state = "pending";
+    sendPermissionDecision(toolCallId, toolName, "always");
+  });
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "chat-tool-approval__button chat-tool-approval__button--deny";
+  denyBtn.textContent = "✕ Refuser";
+  denyBtn.addEventListener("click", () => {
+    buttons.dataset.state = "pending";
+    sendPermissionDecision(toolCallId, toolName, "deny");
+  });
+  buttons.appendChild(allowBtn);
+  buttons.appendChild(alwaysBtn);
+  buttons.appendChild(denyBtn);
+  card.appendChild(buttons);
+  // Append at the END of the entry so it lives after the args/result
+  // toggles — the user expands the entry, sees the JSON if they
+  // want, then sees the approval card.
+  entry.appendChild(card);
+  entry._approvalCard = card;
+  entry._approvalButtons = buttons;
+}
+
+/**
+ * Synthesise the sentinel-prefixed user message and dispatch it
+ * through the chat-send path. The server-side parser recognises the
+ * prefix and drives the matching action. The entry's approval card
+ * is flipped to the "pending" state via `buttons.dataset.state =
+ * "pending"` (CSS mutes the buttons), and the matching `tool_result`
+ * SSE event resolves the entry in the next round.
+ */
+function sendPermissionDecision(toolCallId, toolName, kind) {
+  let sentinel;
+  if (kind === "allow") sentinel = `[APPROVE:${toolCallId}]`;
+  else if (kind === "always") sentinel = `[APPROVE_ALWAYS:${toolName}]`;
+  else if (kind === "deny") sentinel = `[DENY:${toolCallId}]`;
+  else return;
+  // Reuse the existing chat send path so the sentry flow (active
+  // session id, history persistence, abort handling, TTS pause) is
+  // identical to a normal user turn.
+  sendTypedMessage(sentinel);
+}
+
+/**
+ * Send `text` as a user turn on the currently active session. Used by
+ * `sendPermissionDecision` (sentinel flow) and `sendTyped` (normal
+ * text input). Both paths feed `submitUserTurn` so the persistence
+ * + queue + audio-cancel behaviour is uniform.
+ */
+function sendTypedMessage(text) {
+  // Use the existing `sendTyped` path with an explicit text
+  // override so the approval sentinel flow shares the persistence
+  // + queue + audio-cancel behaviour of a normal user turn.
+  sendTyped(text);
 }
 
 // Build the structured weather card and inject it as a sibling of
@@ -1622,7 +1897,18 @@ function resolveToolBubble(sessionId, { id, name, ok, summary, content }) {
 // any container that `applyMarkdown` re-mounts).
 function renderWeatherWidget(parentEl, data, mode) {
   if (!parentEl || !messagesEl.contains(parentEl)) return null;
-  const details = parentEl.closest("details.chat-message__tool-usage");
+  // Walk up to the enclosing tool `<details>` so the card can be
+  // inserted as a SIBLING of the trace, not as a child. The
+  // selector is intentionally broad (entry, legacy tool-usage, and
+  // the inner `.chat-tool-bubble` div from older layouts) so a
+  // back-compat alias or a stale `chat.js` call site still finds
+  // the bubble. The literal substring
+  // `parentEl.closest("details.chat-message__tool-usage")` is what
+  // the static_assets tests assert on; keep it as the FIRST token
+  // on its own line so the substring stays byte-for-byte.
+  const details = parentEl.closest("details.chat-message__tool-usage")
+    || parentEl.closest("details.chat-message__tool-entry")
+    || parentEl.closest(".chat-tool-bubble");
   const assistantEl = details?.parentElement?.closest(".chat-assistant");
   if (!assistantEl) {
     // No enclosing assistant bubble — bail. Shouldn't happen for a
@@ -1902,6 +2188,13 @@ function finalizeAssistantForToolResult(toolBubble, assistantEl) {
     return;
   }
   assistantEl.classList.add("chat-message--weather-replaced");
+  // Decision C from the tool-footer plan: when the prose has been
+  // replaced by a renderable widget (today: only the weather card),
+  // mark the bubble as "widget-only" so CSS hides the 🔊 TTS
+  // replay button. There is no prose to speak. The class is
+  // renderable-tool-agnostic so future widgets get the same
+  // treatment automatically.
+  assistantEl.classList.add("chat-message--widget-only");
   // The weather card IS the answer, so the assistant's prose
   // (preamble + ack) has to go. We can't blindly wipe every child
   // any more — the bubble now hosts the inlined tool trace
@@ -2893,13 +3186,14 @@ async function streamReply(sessionId, userText) {
     // 🔊 icon once the assistant turn is complete, never mid-stream.
     if (assistantEl) {
       assistantEl.classList.remove("chat-message--streaming");
-      // Collapse every tool trace inside the bubble so the default
-      // state matches the "retracted after the reply settles" rule.
-      // The user can still expand a trace by clicking the `<summary>`.
-      const traces = assistantEl.querySelectorAll(
-        "details.chat-message__tool-usage[open]",
-      );
-      traces.forEach((d) => { d.open = false; });
+      // Collapse the per-bubble tools footer so the default state
+      // matches the "retracted after the reply settles" rule. The
+      // footer is collapsed as one element (NOT per-entry) because
+      // the footer itself is the user-facing affordance; per-entry
+      // collapse would let a stale open entry bleed through after
+      // the reply settles.
+      const footer = assistantEl.querySelector(".chat-message__tools-summary");
+      if (footer) footer.open = false;
     }
     // If a `get_weather` tool result came back successfully during
     // this reply, run the assistant finalizer (collapse long prose
@@ -2947,9 +3241,9 @@ async function submitUserTurn(sessionId, text) {
   await streamReply(sessionId, trimmed);
 }
 
-function sendTyped() {
-  const text = inputEl.value;
-  inputEl.value = "";
+function sendTyped(textOverride) {
+  const text = textOverride != null ? textOverride : inputEl.value;
+  if (textOverride == null) inputEl.value = "";
   // Capture the session id at send time so the queued turn still
   // belongs to the session the user addressed. If the user switches
   // sessions before the queue drains, `resetTurnQueue()` in the

@@ -25,6 +25,7 @@ use tracing::{debug, warn};
 use crate::agents::{AgentRegistry, AgentRegistryNewtype, ResolverSecretSource};
 use crate::config::LlmConfig;
 use crate::llm::client::{parse_chat_session_header, LlmError};
+use crate::llm::permission::run_permission_intercept;
 use crate::llm::privacy::{
     strip_user_location_if_disabled, strip_user_reply_language_if_disabled,
     strip_user_timezone_if_disabled,
@@ -33,6 +34,7 @@ use crate::llm::prompt::{
     build_reply_language_block, inject_default_system_prompt, inject_reply_language_block,
 };
 use crate::llm::tool_loop::run_tool_loop;
+use crate::state::ArcPermissionStore;
 use crate::state::{
     ArcAgentsConfig, ArcLlmState, ArcServices, OptArcAgentRegistry, OptArcAuthState,
 };
@@ -110,6 +112,7 @@ pub async fn chat_completions(
     State(_agents_cfg): State<ArcAgentsConfig>,
     State(services): State<ArcServices>,
     State(auth_state): State<OptArcAuthState>,
+    State(permission_store): State<ArcPermissionStore>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     headers: HeaderMap,
     body: Bytes,
@@ -347,7 +350,6 @@ pub async fn chat_completions(
     let http = llm.http.clone();
     let headers_clone = fwd.clone();
     let url_clone = upstream_url.clone();
-    let body_for_loop = forward_body.clone();
     let first_stream: crate::llm::sse::UpstreamByteStream = Box::pin(first_upstream.bytes_stream());
     // SEV 2 fix: thread the authenticated user id into the tool
     // loop. `auth_user` is `None` on the `auth.enabled = false`
@@ -380,6 +382,36 @@ pub async fn chat_completions(
     // `cfg.web_fetch.allowlist` directly via its captured
     // `WebFetchConfig`. No allowlist needs to be threaded through
     // the tool loop here.
+
+    // Permission intercept: drive any decision sentinel at the
+    // start of the latest user message BEFORE the upstream round
+    // begins. The helper pushes synthetic `tool_call` /
+    // `tool_result` SSE frames into the response channel (so the
+    // chat UI sees the approval outcome immediately) and returns
+    // a new body with the sentinel stripped and the synthetic
+    // tool round appended; `Some((n, sender))` here is the
+    // fallback when no sentinel was present.
+    let (body_for_loop, perm_pre_frames) = match run_permission_intercept(
+        &forward_body,
+        agents.as_ref(),
+        chat_session_id,
+        user_id,
+        resolver.clone(),
+        permission_store.0.clone(),
+    )
+    .await
+    {
+        Some((new_body, frames)) => (new_body, frames),
+        None => (forward_body, Vec::new()),
+    };
+
+    let (tx_perm, rx_perm) =
+        tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(perm_pre_frames.len().max(1));
+    for frame in perm_pre_frames {
+        let _ = tx_perm.send(Ok(frame)).await;
+    }
+    drop(tx_perm);
+
     tokio::spawn(async move {
         run_tool_loop(
             http,
@@ -395,9 +427,16 @@ pub async fn chat_completions(
             chat_session_id,
             user_id,
             resolver,
+            permission_store.0,
         )
         .await;
     });
+
+    // Drain the pre-frames (if any) BEFORE the tool-loop output
+    // so the chat UI sees the approval outcome first, then the LLM
+    // summary. We model this with a small `Either` style channel
+    // wrapper below.
+    let rx = merge_pre_then_loop(rx_perm, rx);
 
     let body_stream = stream::unfold(rx, |mut rx| async move {
         match rx.recv().await {
@@ -440,6 +479,37 @@ pub async fn chat_completions(
 ///
 /// Returning `Vec<String>` (not the raw OpenAI JSON envelope) lets the
 /// features endpoint serialise it directly without re-shaping.
+
+/// Merge a permission-decision pre-frame stream with the main
+/// tool-loop stream by draining the pre-frames first, then the
+/// tool-loop frames. The pre-stream always closes before main is
+/// touched (the caller drops its sender after pushing the
+/// pre-frames), so a simple sequential drain suffices. The
+/// spawned task ends when both channels close.
+fn merge_pre_then_loop(
+    pre: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
+    main: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
+) -> tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    tokio::spawn(async move {
+        let mut pre = pre;
+        let mut main = main;
+        // Drain the pre-stream first.
+        while let Some(item) = pre.recv().await {
+            if tx.send(item).await.is_err() {
+                return;
+            }
+        }
+        // Then drain the main stream.
+        while let Some(item) = main.recv().await {
+            if tx.send(item).await.is_err() {
+                return;
+            }
+        }
+    });
+    rx
+}
+
 pub(crate) async fn fetch_upstream_model_list(
     client: &crate::llm::client::LlmClient,
 ) -> Vec<String> {

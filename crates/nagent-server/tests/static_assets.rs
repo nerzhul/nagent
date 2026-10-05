@@ -819,6 +819,158 @@ async fn css_carries_weather_card_rules() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn css_carries_tools_footer_rules() {
+    // The compact tool-footer (plan
+    // `.kilo/plans/1791229183545-tool-bubble-footer-pill.md`)
+    // relies on a chain of BEM class names that JS produces in
+    // `ensureToolsFooter` / `appendToolBubble`. A future CSS
+    // refactor that drops any of them would break the footer:
+    // the user would see a layout regression where tool calls
+    // either disappear entirely or stack back into the old
+    // per-tool `<details>` pile. The assertions below guard the
+    // contract.
+    let base = serve_once().await;
+    let css = reqwest::get(format!("{base}/static/style.css"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        css.contains(".chat-message__tools-summary"),
+        "style.css no longer defines `.chat-message__tools-summary`. The per-bubble tools footer is unstyled."
+    );
+    assert!(
+        css.contains(".chat-message__tool-entry"),
+        "style.css no longer defines `.chat-message__tool-entry`. Per-tool entries collapse back to default `<details>` styling."
+    );
+    assert!(
+        css.contains(".chat-tool-caption"),
+        "style.css no longer defines `.chat-tool-caption`. The human-readable one-line caption reverts to the default block flow and breaks the summary layout."
+    );
+    assert!(
+        css.contains(".chat-tool-args") && css.contains(".chat-tool-result"),
+        "style.css is missing one of `.chat-tool-args` / `.chat-tool-result`. The JSON toggle elements fall back to default `<details>` look and the layout breaks."
+    );
+    assert!(
+        css.contains(".chat-tool-approval"),
+        "style.css is missing the `.chat-tool-approval` block. The inline approval card renders unstyled (no padding, no left accent border)."
+    );
+    assert!(
+        css.contains("chat-tool-approval__button--allow")
+            && css.contains("chat-tool-approval__button--always")
+            && css.contains("chat-tool-approval__button--deny"),
+        "style.css is missing one of the three button variants (--allow / --always / --deny). At least one approval button falls back to the default browser look."
+    );
+
+    // Widget-only bubble: 🔊 replay must be hidden via CSS.
+    assert!(
+        css.contains("chat-message--widget-only")
+            && css.contains(".chat-message-replay")
+            && css.contains("display: none"),
+        "style.css is missing the `.chat-message--widget-only .chat-message-replay` `display: none` rule. The replay button stays visible on widget-only bubbles, which is the exact regression the user reported."
+    );
+
+    // The `--tool-pending` exemption list must keep the new
+    // tools footer + approval card visible (same walker logic
+    // as `css_carries_weather_card_rules`).
+    let mut tool_pending_rule_has_footer_exemption = false;
+    let mut depth = 0;
+    let mut rule = String::new();
+    for ch in css.chars() {
+        if ch == '{' {
+            depth += 1;
+            rule.push(ch);
+            continue;
+        }
+        if ch == '}' {
+            rule.push(ch);
+            depth -= 1;
+            if depth == 0 {
+                if rule.contains("chat-message--tool-pending")
+                    && rule.contains(":not(.chat-message__tools-summary)")
+                    && rule.contains(":not(.chat-tool-approval)")
+                {
+                    tool_pending_rule_has_footer_exemption = true;
+                    break;
+                }
+                rule.clear();
+            }
+            continue;
+        }
+        rule.push(ch);
+    }
+    assert!(
+        tool_pending_rule_has_footer_exemption,
+        "style.css hides every non-tool child of `.chat-message--tool-pending`; the new tools footer (`.chat-message__tools-summary`) and the approval card (`.chat-tool-approval`) are not in the `:not(...)` exemption list and become invisible while a tool is in flight — the user can't see what the LLM is doing."
+    );
+}
+
+/// Regression guard for the "footer invisible after applyMarkdown
+/// wipe" bug. `applyMarkdown` runs `bubbleEl.innerHTML = …` on
+/// every streaming tick — the wipe disconnects the footer (and
+/// its per-tool entries) from the DOM, leaving the JS references
+/// on `bubbleEl._toolsFooterEl` orphaned. The re-mount step must
+/// NOT be guarded by `_toolsFooterEl.isConnected` (which would be
+/// `false` right after the wipe) and MUST use `insertBefore` so
+/// the footer lands just before the replay button (the position
+/// the user expects from the live stream).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_js_remounts_tools_footer_after_apply_markdown_wipe() {
+    let base = serve_once().await;
+    let body = reqwest::get(format!("{base}/static/chat.js"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The footer must be tracked on the bubble as `_toolsFooterEl`
+    // so applyMarkdown can re-insert it after every wipe.
+    assert!(
+        body.contains("_toolsFooterEl"),
+        "chat.js no longer tracks the tools footer on `bubbleEl._toolsFooterEl`. `applyMarkdown`'s per-tick `innerHTML = \"\"` reset wipes the footer (and its per-tool entries) along with the prose, leaving the user with no UI affordance for the tools that ran."
+    );
+
+    // The re-mount block must NOT be guarded by `isConnected`. After
+    // the innerHTML wipe, the footer is detached and `isConnected`
+    // is `false` — a guard skips the re-mount and the footer never
+    // comes back. The user reported exactly this symptom: "je ne
+    // vois rien dans l'UI, je vois juste la réponse".
+    let mut apply_markdown_re_mounts_footer = false;
+    let mut depth = 0;
+    let mut block = String::new();
+    for ch in body.chars() {
+        if ch == '{' {
+            depth += 1;
+            block.push(ch);
+            continue;
+        }
+        if ch == '}' {
+            block.push(ch);
+            depth -= 1;
+            if depth == 0 {
+                if block.contains("_toolsFooterEl")
+                    && block.contains("insertBefore")
+                    && !block.contains("_toolsFooterEl.isConnected")
+                {
+                    apply_markdown_re_mounts_footer = true;
+                    break;
+                }
+                block.clear();
+            }
+            continue;
+        }
+        block.push(ch);
+    }
+    assert!(
+        apply_markdown_re_mounts_footer,
+        "chat.js `applyMarkdown` re-mount of `_toolsFooterEl` is either missing, guarded by `_toolsFooterEl.isConnected` (which is `false` right after the innerHTML wipe), or uses `appendChild` without `insertBefore`. The footer must be re-mounted unconditionally after the per-tick `innerHTML = \"\"` so the user can see the tools that ran — see the bug report from the user where only the final assistant text was visible."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn css_pins_inline_voice_graph_to_natural_height() {
     // The Discussion-mode voice oscilloscope (docs/ui_features.md
     // §4.10) lives inside `#chat-messages`, a flex column container

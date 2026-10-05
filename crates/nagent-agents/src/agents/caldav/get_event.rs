@@ -92,6 +92,10 @@ impl Agent for GetEventAgent {
     fn description(&self) -> &str {
         "Fetch a single CalDAV event by its UID. Returns the full VEVENT (summary, start, end, \
          description, location, rrule). Pass `uid` (the value returned by `caldav_list_events`). \
+         The LLM must ask the user to confirm before this call runs (the agent refuses on the \
+         first invocation in a turn) — calendar contents are sensitive. Re-invoke \
+         `caldav_get_event` with the same arguments on the next turn to proceed; the second \
+         invocation runs the read. \
          Ce plugin supporte uniquement la lecture et l'ajout d'événements. L'édition et la \
          suppression ne sont pas disponibles dans cette version — utilisez votre client CalDAV \
          habituel pour ces opérations."
@@ -111,8 +115,24 @@ impl Agent for GetEventAgent {
         })
     }
 
-    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
-        ConfirmationDecision::Allow
+    fn requires_confirmation(&self, ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        // Same pattern as `caldav_list_events` / `caldav_create_event`:
+        // first invocation refuses with a reason the LLM relays
+        // to the user; the second invocation (after the user has
+        // confirmed) runs the read.
+        if ctx.was_invoked(self.name()) {
+            ConfirmationDecision::Allow
+        } else {
+            ConfirmationDecision::NeedsConfirmation {
+                reason: format!(
+                    "`{name}` reads a single event from the user's CalDAV calendar. Calendar \
+                     contents are sensitive. The user must explicitly confirm the read in chat \
+                     before this call runs. Re-invoke `{name}` with the same arguments on the \
+                     next turn to proceed; the second invocation runs the read.",
+                    name = self.name(),
+                ),
+            }
+        }
     }
 
     fn untrusted_output(&self) -> bool {
@@ -217,6 +237,30 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
+    use std::sync::Arc;
+
+    #[test]
+    fn requires_confirmation_first_call_then_allow() {
+        // Mirrors `caldav_list_events`: even single-event reads
+        // gate on confirmation so the user is in control.
+        let agent = GetEventAgent::new(CalDavAgentConfig::default());
+        let mut ctx = UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            Arc::new(crate::ServiceRegistry::empty()),
+        );
+        let d1 = agent.requires_confirmation(&ctx, &json!({"uid": "x"}));
+        assert!(
+            matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }),
+            "first call must require confirmation; got {d1:?}"
+        );
+        ctx.record_invocation(agent.name());
+        let d2 = agent.requires_confirmation(&ctx, &json!({"uid": "x"}));
+        assert!(
+            matches!(d2, ConfirmationDecision::Allow),
+            "second call in the same turn must be `Allow`; got {d2:?}"
+        );
+    }
 
     #[test]
     fn name_and_schema_are_stable() {

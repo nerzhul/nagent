@@ -11,13 +11,38 @@ a new one. Edit and delete are explicitly out of scope (see
 
 | Tool | Kind | Confirmation | Args |
 | --- | --- | --- | --- |
-| `caldav_list_events` | read | allow | `start`, `end`, `calendar_url?`, `max_events?` |
-| `caldav_get_event` | read | allow | `uid` |
-| `caldav_create_event` | write | confirm | `summary`, `start`, `end?`, `description?`, `location?` |
+| `caldav_list_events` | read | confirm (inline card) | `start`, `end`, `calendar_url?`, `max_events?` |
+| `caldav_get_event` | read | confirm (inline card) | `uid` |
+| `caldav_create_event` | write | confirm (inline card) | `summary`, `start`, `end?`, `description?`, `location?` |
 
 The agent reads per-user credentials from the existing
 AES-GCM vault (service id `caldav`, fields `url`,
 `username`, `password`).
+
+Every CalDAV tool triggers the inline approval card. Calendar
+contents are sensitive (event titles, locations, descriptions),
+so even reads hit a third-party service with the user's
+credentials — the same per-call gate that protects writes also
+protects reads. The chat UI surfaces the card with three buttons
+(Autoriser / Toujours pour cette session / Refuser); the user's
+choice is dispatched through the chat-completion endpoint as a
+sentinel-prefixed user message and the server-side
+[`parse_decision_prefix`](../../crates/nagent-server/src/llm/permission.rs)
+in `llm::permission` drives the matching action. The "Toujours
+pour cette session" button persists a session-wide override on
+the `PermissionStore`, so subsequent calls of the same tool in
+the same chat session skip the card entirely. See
+`docs/architecture.md` §3.4.1 for the full wire-level contract.
+
+**Why reads require confirmation.** An earlier revision left the
+two read tools at `ConfirmationDecision::Allow`, so the LLM could
+respond to a "list my events" prompt without any per-call gate.
+That gap made the model invent a permission flow in plain text
+("do you want me to list your events?") and then go ahead and
+call the tool anyway — the user saw a fabricated ask with no
+system backing it. Gating the reads at the agent level makes the
+LLM's text-level permission ask map to a real system gate, so the
+LLM can never fabricate a flow that doesn't exist.
 
 `caldav_list_calendars` is **not** an LLM tool — it is a
 setup-only HTTP endpoint

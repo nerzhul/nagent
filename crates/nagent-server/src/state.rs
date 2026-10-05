@@ -38,6 +38,7 @@ use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::auth::{OidcState, PasskeyState};
 use crate::config::{AuthConfig, Config, LlmConfig};
 use crate::credentials::{CredentialResolver, CredentialsKey};
+use crate::llm::permission::PermissionStore;
 use crate::rate_limit::RateLimiter;
 use crate::stt::session::SessionMap;
 use crate::stt::ws_concurrency::WsConcurrency;
@@ -233,6 +234,10 @@ pub struct AppState {
     pub documents: Option<DocumentsState>,
     pub chat_sessions: Option<ChatSessionsState>,
     pub tts: Option<TtsState>,
+    /// Per-session pending approvals and session-wide tool overrides.
+    /// Always present; consulted by the tool loop's confirmation
+    /// short-circuit and the chat-completion intercept path.
+    pub permission_store: PermissionStore,
     pub config: Arc<Config>,
 }
 
@@ -252,6 +257,7 @@ impl std::fmt::Debug for AppState {
                 &self.chat_sessions.as_ref().map(|_| "<ChatSessionsState>"),
             )
             .field("tts", &self.tts.as_ref().map(|_| "<TtsState>"))
+            .field("permission_store", &self.permission_store)
             .field("config", &self.config)
             .finish()
     }
@@ -595,5 +601,33 @@ impl std::ops::Deref for ArcAgentsConfig {
 impl FromRef<Arc<AppState>> for ArcAgentsConfig {
     fn from_ref(state: &Arc<AppState>) -> Self {
         ArcAgentsConfig(Arc::new(state.config.agents.clone()))
+    }
+}
+
+/// `PermissionStore` newtype wrapper. axum's `State<T>` extractor
+/// needs a `FromRef<Arc<AppState>>` impl, and Rust's orphan rule
+/// forbids the blanket `impl FromRef<Arc<AppState>> for PermissionStore`
+/// because `Arc<AppState>` is a foreign type wrapping a local one.
+/// The local newtype satisfies the orphan rule and gives the LLM
+/// proxy handler a thin extractor.
+pub struct ArcPermissionStore(pub PermissionStore);
+
+impl Clone for ArcPermissionStore {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for ArcPermissionStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArcPermissionStore")
+            .field("store", &self.0)
+            .finish()
+    }
+}
+
+impl FromRef<Arc<AppState>> for ArcPermissionStore {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        ArcPermissionStore(state.permission_store.clone())
     }
 }

@@ -404,6 +404,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         documents: documents_state,
         chat_sessions: chat_sessions_state,
         tts,
+        permission_store: crate::llm::permission::PermissionStore::new(),
         config: cfg,
     }))
 }

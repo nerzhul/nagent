@@ -1547,6 +1547,277 @@ select, input[type="checkbox"] {
   white-space: normal;
 }
 
+/* ---- Widget-only bubble (no prose to speak) ----------------------------
+ * When the assistant's prose has been replaced by a renderable widget
+ * (today: only the weather card), the per-bubble 🔊 TTS replay button
+ * would otherwise sit on top of a 4-word italic stub. Hide it
+ * entirely; the bubble has no body to speak. The class name is
+ * renderable-tool-agnostic so future widgets (future plans) get the
+ * same treatment without code changes. The class is only added by
+ * `finalizeAssistantForToolResult` after `chat-message--streaming`
+ * has been removed, so the streaming-state CSS gate already lifted. */
+.chat-message--widget-only > .chat-message-replay {
+  display: none;
+}
+
+/* ---- Compact tools footer ---------------------------------------------
+ * Replaces the previous per-tool `<details>` stack with a single
+ * collapsible footer pinned at the bottom of the assistant bubble.
+ * The footer holds one entry per tool call (`chat-message__tool-entry`);
+ * the summary line shows the icon, name, status, and a human-readable
+ * caption. JSON args / result live behind nested toggles so the user
+ * sees a clean line by default and dives into the payload on demand.
+ *
+ * Visual contract: full-bubble-width, muted mono summary, slightly
+ * indented to align with the prose. The footer summary is the same
+ * muted chip look as the previous per-tool summary, so existing
+ * users see a familiar pill at the bottom of the bubble.
+ *
+ * The footer is created lazily on the first `tool_call` event (see
+ * `ensureToolsFooter` in chat.js) and survives the per-tick
+ * `innerHTML = ""` reset in `applyMarkdown` via the bubble's
+ * `_toolsFooterEl` tracker (mirroring `_weatherCards`). */
+.chat-message__tools-summary {
+  display: block;
+  margin: 0.5rem 0 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.chat-message__tools-summary > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  color: var(--fg-mute);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  user-select: none;
+}
+.chat-message__tools-summary > summary::-webkit-details-marker {
+  display: none;
+}
+.chat-message__tools-summary > summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  color: var(--fg-mute);
+  transition: transform 120ms ease;
+  flex: 0 0 auto;
+}
+.chat-message__tools-summary[open] > summary::before {
+  transform: rotate(90deg);
+}
+.chat-message__tools-summary > summary:hover {
+  background: var(--bg-elev);
+}
+.chat-message__tools-icon {
+  flex: 0 0 auto;
+}
+.chat-message__tools-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-message__tools-status {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+}
+.chat-message__tools-list {
+  border-top: 1px solid var(--border);
+  padding: 0.3rem 0;
+}
+
+/* Per-entry summary: icon + name + status badge + human caption. */
+.chat-message__tool-entry {
+  margin: 0 0.4rem;
+  padding: 0;
+}
+.chat-message__tool-entry > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.45rem;
+  border-radius: 6px;
+  color: var(--fg-mute);
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  user-select: none;
+}
+.chat-message__tool-entry > summary:hover {
+  background: var(--bg-elev);
+}
+.chat-message__tool-entry > summary::-webkit-details-marker {
+  display: none;
+}
+.chat-message__tool-entry .chat-tool-icon {
+  flex: 0 0 auto;
+}
+.chat-message__tool-entry .chat-tool-name {
+  flex: 0 0 auto;
+  color: var(--fg);
+  font-weight: 600;
+}
+.chat-message__tool-entry .chat-tool-status {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+}
+.chat-message__tool-entry[data-state="pending"] > summary {
+  color: var(--accent);
+}
+.chat-message__tool-entry[data-state="approved"] > summary {
+  color: var(--ok);
+}
+.chat-message__tool-entry[data-state="denied"] > summary {
+  color: var(--error);
+}
+.chat-message__tool-entry[data-state="errored"] > summary {
+  color: var(--error);
+}
+
+/* ---- Inline approval card ---------------------------------------------
+ * Surfaced on a tool entry when the underlying agent returned
+ * `ConfirmationDecision::NeedsConfirmation`. Three actions:
+ *   - ✓ Autoriser             (this call only)
+ *   - ✓ Toujours pour cette session (session-wide override)
+ *   - ✕ Refuser               (cancel)
+ *
+ * Variants: --danger-low (default, neutral border),
+ * --danger-medium (amber), --danger-high (red, ⛔ icon). The card lives
+ * INSIDE the entry `<details>`, not as a sibling of the bubble, so
+ * it never escapes the per-entry collapse and never stacks on top of
+ * the bubble's 🔊 button.
+ *
+ * Buttons muted in [data-state="pending"] (the click handler flips
+ * this AFTER dispatching the sentinel user message). */
+.chat-tool-approval {
+  margin: 0.2rem 0.4rem 0.4rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--fg);
+}
+.chat-tool-approval--danger-low {
+  border-left-color: var(--accent);
+}
+.chat-tool-approval--danger-medium {
+  border-left-color: #d99a3c;
+}
+.chat-tool-approval--danger-medium .chat-tool-approval__title::before {
+  content: "⚠ ";
+}
+.chat-tool-approval--danger-high {
+  border-left-color: var(--error);
+}
+.chat-tool-approval--danger-high .chat-tool-approval__title::before {
+  content: "⛔ ";
+}
+.chat-tool-approval__title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+.chat-tool-approval__body {
+  margin: 0;
+  color: var(--fg-mute);
+  font-size: 0.83rem;
+}
+.chat-tool-approval__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.2rem;
+}
+.chat-tool-approval__button {
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.chat-tool-approval__button:hover {
+  border-color: var(--fg-mute);
+}
+.chat-tool-approval__button--allow {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+.chat-tool-approval__button--allow:hover {
+  filter: brightness(1.1);
+}
+.chat-tool-approval__button--always,
+.chat-tool-approval__button--deny {
+  background: var(--bg);
+  color: var(--fg);
+}
+.chat-tool-approval__buttons[data-state="pending"] .chat-tool-approval__button {
+  pointer-events: none;
+  opacity: 0.5;
+}
+.chat-tool-caption {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-mute);
+  font-weight: 400;
+}
+.chat-tool-body {
+  padding: 0.25rem 0.4rem 0.4rem 1.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.chat-tool-args,
+.chat-tool-result {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+.chat-tool-args > summary,
+.chat-tool-result > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.74rem;
+  color: var(--fg-mute);
+  font-family: var(--font-mono);
+  user-select: none;
+}
+.chat-tool-args > summary::-webkit-details-marker,
+.chat-tool-result > summary::-webkit-details-marker {
+  display: none;
+}
+.chat-tool-args pre,
+.chat-tool-result pre {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  max-height: 12rem;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ---- Pending-tool assistant bubble -------------------------------------
  * While a tool runs, the assistant's streamed prose is hidden via
  * `display: none` so the user doesn't see "let me check the weather…"
@@ -1555,15 +1826,12 @@ select, input[type="checkbox"] {
  * is visible — so the prose can stream back into view cleanly when
  * the tool resolves.
  *
- * `.chat-weather-card` is also kept visible: once the `get_weather`
- * tool result lands, `resolveToolBubble` injects the card right next
- * to the `<details>` tool trace. The `chat-message--tool-pending`
- * class itself is only cleared in `streamReply`'s `finally` block
- * (so the LLM can stream post-tool preamble without clobbering it),
- * which means without this exemption the weather widget would stay
- * hidden for the rest of the reply. The prose around it is still
- * hidden — only the widget itself is visible alongside the tool trace. */
-.chat-message--tool-pending > :not(.chat-message__tool-loading):not(details.chat-message__tool-usage):not(.chat-weather-card) {
+ * The exemption list keeps the tool footer, the weather card, and
+ * the approval card visible while the rest of the bubble (prose)
+ * stays hidden. The footer stays visible so the user sees the tool
+ * running; the approval card stays visible so the buttons stay
+ * interactive while the LLM streams the post-tool preamble. */
+.chat-message--tool-pending > :not(.chat-message__tool-loading):not(.chat-message__tools-summary):not(.chat-tool-approval):not(.chat-weather-card) {
   display: none;
 }
 .chat-message__tool-loading {

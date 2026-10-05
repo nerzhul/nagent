@@ -368,6 +368,7 @@ impl AppStateBuilder {
             documents,
             chat_sessions,
             tts,
+            permission_store: crate::llm::permission::PermissionStore::new(),
             config: self.config,
         })
     }

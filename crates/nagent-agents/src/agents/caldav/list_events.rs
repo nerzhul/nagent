@@ -115,7 +115,10 @@ impl Agent for ListEventsAgent {
         "List events from the user's CalDAV calendar in a time range. Returns JSON with `events[]` \
          (uid, summary, start, end, description?, location?, rrule?). Accepts RFC 3339 `start` and \
          `end` timestamps and an optional `calendar_url` override (defaults to the one stored in \
-         the user's CalDAV connector config). \
+         the user's CalDAV connector config). The LLM must ask the user to confirm before this \
+         call runs (the agent refuses on the first invocation in a turn) — calendar contents are \
+         sensitive and the user expects a per-call gate. Re-invoke `caldav_list_events` with the \
+         same arguments on the next turn to proceed; the second invocation runs the read. \
          Ce plugin supporte uniquement la lecture et l'ajout d'événements. L'édition et la \
          suppression ne sont pas disponibles dans cette version — utilisez votre client CalDAV \
          habituel pour ces opérations."
@@ -151,9 +154,31 @@ impl Agent for ListEventsAgent {
         })
     }
 
-    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
-        // Read-only tool: no extra user confirmation.
-        ConfirmationDecision::Allow
+    fn requires_confirmation(&self, ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        // Calendar contents are sensitive: even read access
+        // hits a third-party service with the user's
+        // credentials and exposes event titles, locations,
+        // attendees. The first invocation in a chat turn
+        // refuses with a reason the LLM is expected to relay
+        // to the user; the second invocation (after the user
+        // has confirmed) returns `Allow` and runs the read.
+        // The tool loop's `ctx.record_invocation(self.name())`
+        // bridge makes this stateful without keeping the
+        // history inside the agent.
+        if ctx.was_invoked(self.name()) {
+            ConfirmationDecision::Allow
+        } else {
+            ConfirmationDecision::NeedsConfirmation {
+                reason: format!(
+                    "`{name}` reads the user's CalDAV calendar. Calendar contents are \
+                     sensitive (event titles, locations, descriptions). The user must \
+                     explicitly confirm the read in chat before this call runs. Re-invoke \
+                     `{name}` with the same arguments on the next turn to proceed; the \
+                     second invocation runs the read.",
+                    name = self.name(),
+                ),
+            }
+        }
     }
 
     fn untrusted_output(&self) -> bool {
@@ -264,6 +289,35 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::UserContext;
+    use std::sync::Arc;
+
+    #[test]
+    fn requires_confirmation_first_call_then_allow() {
+        // Same pattern as `caldav_create_event`: first invocation
+        // in a turn refuses with a reason the LLM relays to the
+        // user; the second invocation (after the user has confirmed)
+        // runs the read. Calendar contents are sensitive enough
+        // that even reads hit the per-call gate (regression guard
+        // for the bug where the LLM invented a permission flow in
+        // text and went ahead without confirmation).
+        let agent = ListEventsAgent::new(CalDavAgentConfig::default());
+        let mut ctx = UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            Arc::new(crate::ServiceRegistry::empty()),
+        );
+        let d1 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(
+            matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }),
+            "first call must require confirmation; got {d1:?}"
+        );
+        ctx.record_invocation(agent.name());
+        let d2 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(
+            matches!(d2, ConfirmationDecision::Allow),
+            "second call in the same turn must be `Allow`; got {d2:?}"
+        );
+    }
 
     #[test]
     fn name_and_schema_are_stable() {

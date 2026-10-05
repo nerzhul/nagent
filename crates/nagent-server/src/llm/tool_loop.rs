@@ -26,9 +26,10 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::agents::{AgentRegistry, SecretSource, UserContext};
+use crate::llm::permission::{approval_prompt, approval_prompt_json, PermissionStore};
 use crate::llm::sse::{
     drain_upstream_round, sse_error_event, sse_tool_call_event, sse_tool_result_event,
-    UpstreamByteStream,
+    sse_tool_result_needs_approval, UpstreamByteStream,
 };
 
 /// Run the tool loop until the LLM stops or we hit `max_rounds`.
@@ -63,6 +64,13 @@ use crate::llm::sse::{
 /// path; per-user agents then surface `CredentialsMissing`
 /// without touching the DB, which is the right behaviour on
 /// that trust boundary.
+///
+/// `permission_store` carries the per-session pending approvals and
+/// session-wide overrides; the tool loop pushes a `PendingApproval`
+/// on every `NeedsConfirmation` and consults the override set
+/// before calling `Agent::requires_confirmation` so the
+/// `[APPROVE_ALWAYS:...]` sentinel can skip the confirmation card
+/// for subsequent calls of the same tool in the same session.
 ///
 /// `max_rounds` is the maximum number of tool-call rounds a
 /// single user turn may trigger before the proxy bails out and
@@ -99,6 +107,7 @@ pub(crate) async fn run_tool_loop(
     chat_session_id: Option<uuid::Uuid>,
     user_id: uuid::Uuid,
     resolver: Option<Arc<dyn SecretSource>>,
+    permission_store: PermissionStore,
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
@@ -400,116 +409,125 @@ pub(crate) async fn run_tool_loop(
                 .await;
 
             let args_value: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
-            // Security plan #10 (now generic via
-            // `Agent::requires_confirmation`, plan 4.C). The tool
-            // loop never knows a specific agent by name — the rule
-            // lives in the agent's `requires_confirmation` impl,
-            // which gets to inspect `ctx.invoked_this_turn` to
-            // enforce cross-agent invariants (e.g. `web_fetch` after
-            // `read_document`). When the predicate fires, we
-            // replace the tool result with the agent's own reason
-            // so the model reformulates ("please confirm") and the
-            // user sees the request in chat. The next turn
-            // restarts with `ctx.invoked_this_turn` empty so a
-            // user-confirmed URL fetches normally.
-            if let Some(decision) =
-                agents
-                    .get(&name)
-                    .and_then(|agent| -> Option<nagent_agents::ConfirmationDecision> {
-                        let services = nagent_agents::ServiceRegistry::empty().into_arc();
-                        let resolver = resolver.clone();
-                        let ctx = match chat_session_id {
-                            Some(sid) => UserContext::for_chat_session(
-                                user_id, services, resolver, None, sid,
-                            ),
-                            None => UserContext::for_tests(user_id, services),
-                        };
-                        Some(agent.requires_confirmation(&ctx, &args_value))
-                    })
-            {
-                if let nagent_agents::ConfirmationDecision::NeedsConfirmation { reason } = decision
-                {
-                    warn!(
-                        agent = %name,
-                        id = %tc.id,
-                        "tool loop: refusing {} without confirmation",
-                        name
-                    );
-                    let _ = tx
-                        .send(Ok(Bytes::from(sse_tool_result_event(
-                            &tc.id,
-                            &name,
-                            false,
-                            #[allow(clippy::needless_borrow)]
-                            &reason,
-                        ))))
-                        .await;
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": reason,
-                    }));
-                    continue;
-                }
-            }
-            let result = match agents.get(&name) {
-                Some(agent) => {
-                    // Per-tool-round `UserContext`. Carries the
-                    // authenticated `user_id` (SEV 2 fix) AND the
-                    // per-user credential `resolver` so agents like
-                    // `caldav_list_events` / `x_timeline` that read
-                    // `ctx.secret(...)` actually hit the vault.
-                    // Without the resolver, every per-user secret
-                    // lookup would short-circuit to
-                    // `CredentialsMissing` regardless of whether the
-                    // user has configured the integration. `resolver`
-                    // is `None` on the `auth.enabled = false` trust
-                    // boundary; in that mode per-user agents surface
-                    // a clear tool error instead of panicking.
-                    //
-                    // When `chat_session_id` is set (browser sent
-                    // `X-Chat-Session-Id`), use `for_chat_session`
-                    // so agents like `read_document` can scope their
-                    // queries to the right session. Otherwise fall
-                    // back to `for_tests` and let the session-scoped
-                    // agents surface a clear tool error.
-                    let services = nagent_agents::ServiceRegistry::empty().into_arc();
-                    let resolver = resolver.clone();
-                    let mut ctx = match chat_session_id {
-                        Some(sid) => {
-                            UserContext::for_chat_session(user_id, services, resolver, None, sid)
+
+            // Per-tool-round `UserContext`. Carries the
+            // authenticated `user_id` (SEV 2 fix) AND the per-user
+            // credential `resolver` so agents like
+            // `caldav_list_events` / `x_timeline` that read
+            // `ctx.secret(...)` actually hit the vault. Without
+            // the resolver, every per-user secret lookup would
+            // short-circuit to `CredentialsMissing` regardless of
+            // whether the user has configured the integration.
+            // `resolver` is `None` on the `auth.enabled = false`
+            // trust boundary; in that mode per-user agents surface
+            // a clear tool error instead of panicking.
+            //
+            // When `chat_session_id` is set (browser sent
+            // `X-Chat-Session-Id`), use `for_chat_session` so
+            // agents like `read_document` can scope their queries
+            // to the right session. Otherwise fall back to
+            // `for_tests` and let the session-scoped agents
+            // surface a clear tool error.
+            let services = nagent_agents::ServiceRegistry::empty().into_arc();
+            let resolver = resolver.clone();
+            let mut ctx = match chat_session_id {
+                Some(sid) => UserContext::for_chat_session(user_id, services, resolver, None, sid),
+                None => UserContext::for_tests(user_id, services),
+            };
+            // Plan 4.C: record the invocation so the next tool
+            // call in this turn can ask the agent's
+            // `requires_confirmation` impl whether to gate (e.g.
+            // `web_fetch` after `read_document`).
+            ctx.record_invocation(&name);
+
+            // Session-wide override short-circuit: if the user
+            // clicked "Toujours pour cette session" earlier in the
+            // session for this tool, skip `requires_confirmation`
+            // entirely. The agent's `requires_confirmation` impl is
+            // untouched — the bypass happens at this call site only,
+            // which keeps the trait contract clean and the
+            // direct-invoke route (`/v1/agents/:name/invoke`) honest.
+            let session_override = chat_session_id
+                .map(|sid| permission_store.has_override(sid, &name))
+                .unwrap_or(false);
+            let force_allow = session_override;
+
+            if let Some(agent) = agents.get(&name) {
+                if !force_allow {
+                    let decision = agent.requires_confirmation(&ctx, &args_value);
+                    if let nagent_agents::ConfirmationDecision::NeedsConfirmation { reason } =
+                        decision
+                    {
+                        warn!(
+                            agent = %name,
+                            id = %tc.id,
+                            "tool loop: refusing {} without confirmation",
+                            name
+                        );
+                        // Record the pending entry so the
+                        // [APPROVE:…] / [DENY:…] sentinel on the
+                        // next user turn can resolve it; emit the
+                        // enriched SSE frame so the chat UI
+                        // renders the inline approval card.
+                        let prompt = approval_prompt(&name, &args_value);
+                        if let Some(sid) = chat_session_id {
+                            permission_store.set_pending(
+                                sid,
+                                tc.id.clone(),
+                                name.clone(),
+                                args_value.clone(),
+                            );
                         }
-                        None => UserContext::for_tests(user_id, services),
-                    };
-                    // Plan 4.C: record the invocation so the next
-                    // tool call in this turn can ask the agent's
-                    // `requires_confirmation` impl whether to gate
-                    // (e.g. `web_fetch` after `read_document`).
-                    ctx.record_invocation(&name);
-                    match agent.invoke(&ctx, args_value).await {
-                        Ok(s) => Ok(s),
-                        Err(e) => Err(e.to_string()),
+                        let _ = tx
+                            .send(Ok(Bytes::from(sse_tool_result_needs_approval(
+                                &tc.id,
+                                &name,
+                                &reason,
+                                approval_prompt_json(&prompt),
+                            ))))
+                            .await;
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": reason,
+                        }));
+                        continue;
                     }
                 }
-                None => Err(format!("unknown agent: `{name}`")),
-            };
-            let (ok, payload) = match &result {
-                Ok(s) => (true, s.clone()),
-                Err(e) => {
-                    warn!(agent = %name, id = %tc.id, error = %e, "tool loop: agent invocation failed");
-                    (false, format!("[error] {e}"))
-                }
-            };
-            let _ = tx
-                .send(Ok(Bytes::from(sse_tool_result_event(
-                    &tc.id, &name, ok, &payload,
-                ))))
-                .await;
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": payload,
-            }));
+                let result = match agent.invoke(&ctx, args_value).await {
+                    Ok(s) => Ok(s),
+                    Err(e) => Err(e.to_string()),
+                };
+                let (ok, payload) = match &result {
+                    Ok(s) => (true, s.clone()),
+                    Err(e) => {
+                        warn!(agent = %name, id = %tc.id, error = %e, "tool loop: agent invocation failed");
+                        (false, format!("[error] {e}"))
+                    }
+                };
+                let _ = tx
+                    .send(Ok(Bytes::from(sse_tool_result_event(
+                        &tc.id, &name, ok, &payload,
+                    ))))
+                    .await;
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": payload,
+                }));
+            } else {
+                let payload = format!("unknown agent: `{name}`");
+                let _ = tx
+                    .send(Ok(Bytes::from(sse_tool_result_event(
+                        &tc.id, &name, false, &payload,
+                    ))))
+                    .await;
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": payload,
+                }));
+            }
         }
     }
 }

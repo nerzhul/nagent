@@ -346,14 +346,18 @@ one post-stream affordance:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ [Tools ▶]            ← collapsed "Tools" row (only if    │
-│                       ←  the LLM emitted any tool calls) │
+│ [reasoning]        ← collapsed reasoning <details>        │
 ├──────────────────────────────────────────────────────────┤
-│ <widget inset>       ← generic widget card (only if the  │
-│                       ←  tool emitted a renderable one)  │
+│ <widget inset>     ← generic widget card (only if the      │
+│                       tool emitted a renderable one)       │
 ├──────────────────────────────────────────────────────────┤
-│ Markdown prose…      ← the LLM reply body                │
+│ <weather hint>     ← "Détails ci-dessous." when the widget│
+│                       replaced the prose                  │
+├──────────────────────────────────────────────────────────┤
+│ Markdown prose…    ← the LLM reply body                  │
 │                                                          │
+│ [Tools footer ▶]   ← collapsed compact footer (only if    │
+│                       the LLM emitted any tool calls)     │
 │                                       🔊  ← TTS replay   │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -374,39 +378,56 @@ with a tool that has no widget renderer has no widget inset, and so on.
   starts accumulating. If the LLM emits a `tool_call` first, the
   loader is replaced by the tools row instead.
 
-#### 4.6.2 Tool row (when tools were used)
+#### 4.6.2 Tools footer (when tools were used)
 
-- **Position**: the tools row lives *inside* the assistant bubble, *above*
-  the widget inset and the prose body, so the visual order matches the
-  reading order: tool call → tool result widget → LLM prose.
-- **Disclosure**: by default the row is collapsed into a small,
-  discreet per-tool caption. The `<summary>` is built from
-  `<icon> <name> <status>` (`chat.js:939-950`); the user sees e.g.
-  "🔎 web_fetch ✓ <summary>" once the tool completes. The native
-  `<details>` chevron provides the expand / collapse arrow.
-- **During a tool run**: the row is open so progress is visible
-  (running spinner, live status text). On tool success the wrapper
-  stays open until `streamReply`'s `finally` block runs and the
-  bubble is finalised (chat.js:1982-1984, which also drops
-  `chat-message--streaming`); on tool error `resolveToolBubble`
-  collapses the `<details>` eagerly (chat.js:1068-1069) so a failed
+- **Position**: the tools footer lives *inside* the assistant bubble,
+  *below* the prose body and just above the 🔊 replay button, so
+  the visual flow reads: reasoning → weather card → hint →
+  prose → **tools footer** → 🔊. The previous layout stacked one
+  per-tool trace above the prose; the compact footer (plan
+  `.kilo/plans/1791229183545-tool-bubble-footer-pill.md`,
+  "Décision A") keeps the prose as the dominant element and the
+  tools as a small status pill.
+- **Disclosure**: by default the footer is collapsed into a small
+  "N outils utilisés" line. The native `<details>` chevron provides
+  the expand / collapse arrow. Each entry inside is itself a
+  `<details>` so the user can dive into a specific tool without
+  expanding the others.
+- **During a tool run**: the footer is open so progress is visible
+  (running spinner per entry). The footer is collapsed in
+  `streamReply`'s `finally` block (chat.js:2902-2904, which also
+  drops `chat-message--streaming`); on tool error
+  `resolveToolBubble` collapses the entry eagerly so a failed
   tool trace does not stay expanded in front of the error prose.
-- **Multiple tools**: each tool call gets its own entry inside the
-  same collapsible region. Order matches the order in which the LLM
-  emitted `tool_call` SSE events.
-- **Implementation**: the row is a `<details class="chat-message__tool-usage">`
-  with a `<summary>` carrying the "Tools" caption; the `<details>`'s
-  native open / close semantics provide the arrow affordance. The
-  inner body is a stack of `.chat-tool-bubble` rows built by
-  `appendToolBubble` (one per tool call).
-- **Visibility during tool runs**: while a tool call is in flight, the
-  assistant prose body is hidden via the `chat-message--tool-pending`
-  class on the bubble. The CSS for that class explicitly preserves
-  the tool trace (`details.chat-message__tool-usage`) and any
-  widget card (`chat-weather-card`) so progress is never invisible.
-  Both the `finally` block in `streamReply` and `resolveToolBubble`
-  drop the class on success **and** on tool error so the prose
-  becomes visible regardless of which tool ran.
+- **Per-entry layout**: `<icon> <name> <status> <caption>` — the
+  caption is a human-readable one-liner produced by
+  `describeTool` (chat.js). `get_datetime` shows the local
+  timestamp; `caldav_list_events` shows the date range and count;
+  `web_fetch` shows the URL; `wikipedia` shows the query; etc.
+  The args / result JSON live behind nested
+  `<details class="chat-tool-args">` and
+  `<details class="chat-tool-result">` toggles (Decision B) so
+  the user sees a clean line by default and dives into the
+  payload on demand.
+- **Implementation**: the footer is a
+  `<details class="chat-message__tools-summary">` lazily created
+  by `ensureToolsFooter` (chat.js); its body is a
+  `<div class="chat-message__tools-list">` that grows one
+  `<details class="chat-message__tool-entry">` per `tool_call`
+  SSE event. The entry carries `.chat-message__tool-usage` as a
+  back-compat alias so existing selectors (weather-widget
+  walk, sanity tests) keep matching. The footer survives the
+  per-tick `innerHTML = ""` reset in `applyMarkdown` via the
+  bubble's `_toolsFooterEl` tracker (mirroring `_weatherCards`).
+- **Visibility during tool runs**: while a tool call is in flight,
+  the assistant prose body is hidden via the
+  `chat-message--tool-pending` class on the bubble. The CSS for
+  that class exempts the tools footer, the weather card, and the
+  approval card so progress and the approval buttons stay
+  visible (style.css:~1700). Both the `finally` block in
+  `streamReply` and `resolveToolBubble` drop the class on
+  success **and** on tool error so the prose becomes visible
+  regardless of which tool ran.
 
 #### 4.6.3 Widget inset
 
@@ -447,6 +468,27 @@ with a tool that has no widget renderer has no widget inset, and so on.
   trace and the weather card stay visible. Short replies
   (≤ 120 chars, single line) are kept verbatim and the class is not
   applied.
+
+#### 4.6.6 Finalised state — Widget-only bubble
+
+- When the assistant's prose has been replaced by a renderable
+  widget (today: only the weather card via
+  `finalizeAssistantForToolResult`), the bubble gets the
+  `chat-message--widget-only` class alongside the historical
+  `chat-message--weather-replaced`. The new class is
+  renderable-tool-agnostic so future widgets get the same
+  treatment automatically.
+- **🔊 suppressed** (Decision C from the tool-footer plan): CSS at
+  style.css hides the per-bubble `.chat-message-replay` button on
+  widget-only bubbles — there is no prose to speak, the button
+  would otherwise sit on top of a 4-word italic stub. The class
+  is only added by `finalizeAssistantForToolResult`, which runs
+  after `chat-message--streaming` has been removed, so the
+  streaming-state CSS gate already lifted.
+- The class is renderable-tool-agnostic; once a second widget is
+  added (future plan), no CSS or JS change is needed — the
+  `finalizeAssistantForToolResult` helper picks up the new
+  widget and applies the same class.
 
 #### 4.6.4 Prose body
 

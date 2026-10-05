@@ -27,6 +27,7 @@
 //! `models_list`, `agents_list`, `agent_invoke`).
 
 pub mod client;
+pub mod permission;
 pub mod privacy;
 pub mod prompt;
 pub mod proxy;
