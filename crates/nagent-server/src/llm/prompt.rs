@@ -170,10 +170,47 @@ posts qui parlent du même sujet\". Returns the ~20 most recent posts \
 pre-sorted newest-first with author, date, text, hashtags, and URLs. \
 Read-only — never posts, replies, or writes. Requires the user to have \
 connected their X account via /settings/integrations.
+- caldav_list_events: list events from the user's CalDAV calendar in a \
+time range. Returns `events[]` (uid, summary, start, end, description?, \
+location?, rrule?). Required: `start` and `end` as RFC 3339 timestamps. \
+Optional: `calendar_url` override (defaults to the one in the user's \
+CalDAV connector config). The agent refuses the first call in a turn and \
+asks the user to confirm — calendar contents are sensitive and the user \
+expects a per-call gate; re-invoke with the same arguments on the next \
+turn to proceed. Use for \"qu'ai-je demain\", \"what's on my calendar \
+this week\", \"liste mes rendez-vous du mois\". Read-only — this plugin \
+supports reading and adding events, not updating or deleting them; route \
+those to the user's CalDAV client.
+- caldav_get_event: fetch a single CalDAV event by its UID (the value \
+returned by `caldav_list_events`). Returns the full VEVENT (summary, \
+start, end, description, location, rrule). Same per-session permission \
+gate as `caldav_list_events`: refuses on the first call, re-invoke on \
+the next turn with the same `uid` to run the read. Use for \"détails de \
+mon rendez-vous de 14h\", \"who is attending X\", \"what's the location \
+of Y\".
+- caldav_create_event: add a new VEVENT to the user's CalDAV calendar. \
+Required: `summary` (event title), `start` (RFC 3339). Optional: `end` \
+(RFC 3339, defaults to start + 1h), `description`, `location`. Returns \
+the new event's UID and href. Same per-session permission gate as \
+`caldav_list_events`: refuses on the first call, re-invoke on the next \
+turn with the same arguments to run the create. Use for \"planifie un \
+dentiste mardi à 14h\", \"add 'lunch with Alice' Friday at noon to my \
+calendar\".
+- read_document: read the text content of a document the user uploaded \
+to this chat session (PDF or Markdown). Pass `name` — the document UUID \
+returned by `GET /v1/documents`. For large PDFs, optionally restrict \
+with `page_range` (e.g. \"3-7\"). Output is capped at `max_extracted_chars` \
+characters; when the document is truncated, ask the user for the \
+specific section you need. Use for \"résume le PDF que je viens \
+d'uploader\", \"what does page 4 say\", \"extrais les chiffres du \
+tableau\". Documents are operator-controlled (not untrusted remote text), \
+so the indirect-prompt-injection fence below does not apply to their \
+contents.
 
 Tool-usage rules:
 - NEVER invent specific factual data: weather, current date or time, \
-stock prices, unit-conversion factors, or the content of a fetched URL. \
+stock prices, unit-conversion factors, the content of a fetched URL, or \
+calendar entries (event titles, dates, attendees, locations, recurrence). \
 For these domains you either call the matching tool or you say you \
 cannot answer. Guessing is a regression that breaks user trust. \
 \
@@ -746,12 +783,12 @@ mod tests {
     #[test]
     fn default_prompt_documents_user_memories_block() {
         // Plan 1791267136806 §7.7: the default prompt must mention
-        /// the `USER_MEMORIES_MARKER` so the model knows it can rely
-        /// on the auto-injected block AND must describe the four
-        /// `memory_*` agents it can call. The marker-string guard is
-        /// the same one used for the reply-language block — a future
-        /// prompt rewrite cannot quietly desync the defensive
-        /// filter in `privacy.rs`.
+        // the `USER_MEMORIES_MARKER` so the model knows it can rely
+        // on the auto-injected block AND must describe the four
+        // `memory_*` agents it can call. The marker-string guard is
+        // the same one used for the reply-language block — a future
+        // prompt rewrite cannot quietly desync the defensive
+        // filter in `privacy.rs`.
         let prompt = DEFAULT_SYSTEM_PROMPT;
         assert!(
             prompt.contains(USER_MEMORIES_MARKER),
@@ -859,30 +896,45 @@ mod tests {
     }
 
     #[test]
-    fn default_prompt_lists_all_seven_agents() {
+    fn default_prompt_lists_every_registered_agent() {
         // Wire contract: the prompt must mention every agent name the
         // server can register so the LLM knows it can call them. A
-        // silent drop here would leave the new agents un-callable in
-        // the default deployment — the operator would have to override
-        // the prompt to recover them.
+        // silent drop here leaves the affected agent effectively
+        // un-callable in the default deployment — small/local Ollama
+        // models pattern-match on the prose inventory and route the
+        // request to a general-knowledge answer instead of the tool.
+        // The CalDAV plugin was the original regression (operators
+        // kept reporting "the model forgets it has a calendar"), so
+        // this guard now iterates the canonical [`AGENT_DESCRIPTORS`]
+        // table in `nagent-agents` instead of a stale hardcoded list.
         let prompt = DEFAULT_SYSTEM_PROMPT;
-        for tool in [
-            "get_datetime",
-            "get_weather",
-            "get_stock_quote",
-            "web_fetch",
-            "calculate",
-            "unit_convert",
-            "wikipedia",
-            "dictionary",
-        ] {
+        for descriptor in nagent_agents::agents::AGENT_DESCRIPTORS {
+            let tool = descriptor.id;
+            // The four `memory_*` agents are documented in the
+            // long-term-memory block (not the bullet inventory) and
+            // are guarded separately by
+            // `default_prompt_documents_user_memories_block`. We
+            // still require the names to appear somewhere in the
+            // prompt so the LLM can match the schema's
+            // `function.name` to a referenced identifier in prose.
             assert!(
                 prompt.contains(tool),
                 "DEFAULT_SYSTEM_PROMPT is missing the `{tool}` tool name — the LLM \
-                 won't know to call it in the default deployment. Update the prompt \
-                 or this guard will keep failing."
+                 won't know to call it in the default deployment. Add a bullet or a \
+                 referenced block to the prompt (see existing entries for get_weather / \
+                 x_timeline), or this guard will keep failing."
             );
         }
+        // `read_document` is added to the registry via
+        // `push_agent_boxed` after `AGENT_DESCRIPTORS` is walked
+        // (see `crates/nagent-server/src/agents/mod.rs:281`), so it
+        // does not appear in the descriptor table. Guard it
+        // explicitly so a future prompt rewrite cannot drop the entry.
+        assert!(
+            prompt.contains("read_document"),
+            "DEFAULT_SYSTEM_PROMPT is missing `read_document` — uploaded-document Q&A \
+             will fall back to a generic 'I cannot read documents' answer."
+        );
     }
 
     #[test]
