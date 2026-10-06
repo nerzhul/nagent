@@ -206,10 +206,42 @@ pub struct LlmConfig {
     /// reasoning + tool-call round in one upstream request, so the
     /// auto-continue heuristic rarely fires. `None` (the default)
     /// leaves the upstream's `num_predict` untouched — the proxy
-    /// only injects the field when the operator opts in. Env var
-    /// `LLM_NUM_PREDICT`, TOML key `[llm].num_predict`. See
+    /// only injects the field when the operator opts in.
+    /// **Ollama-specific**: the field name comes from Ollama's
+    /// native parameters and is forwarded under the
+    /// `options.*` slot of the OpenAI-compatible
+    /// `/v1/chat/completions` body. Other upstreams (llama.cpp's
+    /// llama-server, vLLM, OpenRouter) do not honour this key.
+    /// Env var `LLM_OLLAMA_NUM_PREDICT`, TOML key
+    /// `[llm].ollama_num_predict`. See
     /// `docs/llm-configuration.md` for the full contract.
-    pub num_predict: Option<u32>,
+    pub ollama_num_predict: Option<u32>,
+    /// Optional context-window size forwarded to the upstream as
+    /// `options.num_ctx`. Ollama defaults to a 2048-token context
+    /// window, which is too small for reasoning models
+    /// (deepseek-r1, qwen3.5 with thinking on): they truncate
+    /// mid-thought and trip the `llm_max_auto_continues`
+    /// heuristic.
+    ///
+    /// Setting this to `32768` or `65536` lets the model finish
+    /// a long reasoning + tool-call round in one upstream
+    /// request, so the auto-continue heuristic rarely fires.
+    ///
+    /// `None` (the default) leaves the upstream's `num_ctx`
+    /// untouched — the proxy only injects the field when the
+    /// operator opts in, so a deployment that already pins
+    /// `num_ctx` via the Modelfile or `OLLAMA_CONTEXT_LENGTH`
+    /// keeps working without modification.
+    ///
+    /// **Ollama-specific**: the field name comes from Ollama's
+    /// native parameters and is forwarded under the
+    /// `options.*` slot of the OpenAI-compatible
+    /// `/v1/chat/completions` body. Other upstreams (llama.cpp's
+    /// llama-server, vLLM, OpenRouter) do not honour this key.
+    /// Env var `LLM_OLLAMA_NUM_CTX`, TOML key
+    /// `[llm].ollama_num_ctx`. See
+    /// `docs/llm-configuration.md` for the full contract.
+    pub ollama_num_ctx: Option<u32>,
 }
 
 impl Default for LlmConfig {
@@ -230,7 +262,8 @@ impl Default for LlmConfig {
             allow_user_memory: true,
             llm_max_tool_rounds: 64,
             llm_max_auto_continues: 32,
-            num_predict: None,
+            ollama_num_predict: None,
+            ollama_num_ctx: None,
         }
     }
 }
@@ -321,14 +354,20 @@ impl LlmConfig {
             "LLM_MAX_AUTO_CONTINUES",
         )?
         .clamp(0, 64);
-        // `None` is the contract: the proxy only injects
-        // `options.num_predict` when the operator opts in. Resolving
-        // an env var on top of `None` keeps the three-way merge
-        // (env > TOML > default) intact.
-        let num_predict = resolve_opt_primitive(
-            env_opt("LLM_NUM_PREDICT").as_deref(),
-            toml.num_predict,
-            "LLM_NUM_PREDICT",
+        // `None` is the contract for both Ollama-native knobs: the proxy
+        // only injects `options.num_predict` / `options.num_ctx`
+        // when the operator opts in. Resolving an env var on top of
+        // `None` keeps the three-way merge (env > TOML > default)
+        // intact.
+        let ollama_num_predict = resolve_opt_primitive(
+            env_opt("LLM_OLLAMA_NUM_PREDICT").as_deref(),
+            toml.ollama_num_predict,
+            "LLM_OLLAMA_NUM_PREDICT",
+        )?;
+        let ollama_num_ctx = resolve_opt_primitive(
+            env_opt("LLM_OLLAMA_NUM_CTX").as_deref(),
+            toml.ollama_num_ctx,
+            "LLM_OLLAMA_NUM_CTX",
         )?;
 
         Ok(Self {
@@ -347,7 +386,8 @@ impl LlmConfig {
             allow_user_memory,
             llm_max_tool_rounds,
             llm_max_auto_continues,
-            num_predict,
+            ollama_num_predict,
+            ollama_num_ctx,
         })
     }
 }

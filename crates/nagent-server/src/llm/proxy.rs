@@ -60,25 +60,12 @@ struct ChatRequest {
 ///
 /// Only `stream=true` is supported (the proxy exists to stream).
 /// The `model` field is honoured when present; otherwise the
-/// server-configured `OLLAMA_MODEL` is used.
-///
-/// `auth_user` is `Some` when `RequireAuth` middleware injected
-/// Merge the admin-configured `num_predict` into the
-/// `options.num_predict` slot of the upstream body so reasoning
-/// models (deepseek-r1, qwen3.5 with thinking on, o1/o3) get a
-/// per-response generation budget that lets them finish a
-/// reasoning + tool-call round in one upstream request. The
-/// Ollama default of `128` tokens otherwise cuts them off mid-
-/// thought and trips the `llm_max_auto_continues` heuristic
-/// into a loop. A no-op when the operator has not opted in
-/// (`num_predict = None`) so the upstream keeps its own default;
-/// the proxy only injects the field when explicitly told to.
-/// Preserves any pre-existing `options.num_predict` the client
-/// set on the body — the server knob wins on conflict so a
-/// misbehaving client cannot force a tiny `num_predict` on a
-/// reasoning model and re-create the loop.
-fn inject_num_predict(forward_body: &mut Value, num_predict: Option<u32>) {
-    let Some(np) = num_predict else { return };
+/// server-configured `OLLAMA_MODEL` is used. `auth_user` is
+/// threaded into the tool loop for per-user agents
+/// (`read_document`, `caldav_*`, `x_timeline`, …) — see
+/// [`run_tool_loop`] for the user-scoping consequences.
+fn inject_ollama_num_predict(forward_body: &mut Value, ollama_num_predict: Option<u32>) {
+    let Some(np) = ollama_num_predict else { return };
     let Some(obj) = forward_body.as_object_mut() else {
         return;
     };
@@ -98,6 +85,44 @@ fn inject_num_predict(forward_body: &mut Value, num_predict: Option<u32>) {
         return;
     };
     options_obj.insert("num_predict".into(), json!(np));
+}
+
+/// Merge the admin-configured `ollama_num_ctx` into the
+/// `options.num_ctx` slot of the upstream body so reasoning
+/// models (deepseek-r1, qwen3.5 with thinking on) see enough
+/// context to finish a long reasoning + tool-call round in one
+/// upstream request. The Ollama default `num_ctx` of `2048`
+/// otherwise cuts them off mid-thought and trips the
+/// `llm_max_auto_continues` heuristic into a loop. A no-op
+/// when the operator has not opted in (`ollama_num_ctx = None`)
+/// so the upstream keeps its own default (e.g. a Modelfile
+/// `PARAMETER num_ctx 32768`, or a server-wide
+/// `OLLAMA_CONTEXT_LENGTH`); the proxy only injects the field
+/// when explicitly told to. Preserves any pre-existing
+/// `options.num_ctx` the browser set on the request — the
+/// server knob wins on conflict so a misbehaving client
+/// cannot shrink the context window.
+fn inject_ollama_num_ctx(forward_body: &mut Value, ollama_num_ctx: Option<u32>) {
+    let Some(ctx) = ollama_num_ctx else { return };
+    let Some(obj) = forward_body.as_object_mut() else {
+        return;
+    };
+    let options = if let Some(existing) = obj.get_mut("options") {
+        existing
+    } else {
+        obj.insert("options".into(), json!({}));
+        obj.get_mut("options")
+            .expect("just inserted `options` as object")
+    };
+    let Some(options_obj) = options.as_object_mut() else {
+        // `options` was set by the client to a non-object
+        // (e.g. a string). Don't overwrite — let the upstream
+        // surface the mismatch. Logging here is enough; the
+        // request is malformed regardless.
+        tracing::warn!("forward body `options` is not an object; skipping num_ctx injection");
+        return;
+    };
+    options_obj.insert("num_ctx".into(), json!(ctx));
 }
 
 /// an `AuthUser` into the request extensions (production path
@@ -192,12 +217,22 @@ pub async fn chat_completions(
     // here; the tool loop below reuses the same `forward_body` for
     // every round, so the prepend propagates automatically.
     inject_default_system_prompt(&mut forward_body, llm.cfg.system_prompt.as_deref());
-    // Forward the admin-configured `num_predict` (env `LLM_NUM_PREDICT`
-    // or TOML `[llm].num_predict`) as `options.num_predict`. The merge
-    // is done before any tool-loop round so every round (auto-continues
-    // included) carries the same per-response generation cap. A no-op
-    // when the operator has not opted in.
-    inject_num_predict(&mut forward_body, llm.cfg.num_predict);
+    // Forward the admin-configured `ollama_num_predict` (env
+    // `LLM_OLLAMA_NUM_PREDICT` or TOML `[llm].ollama_num_predict`)
+    // as `options.num_predict`. The merge is done before any
+    // tool-loop round so every round (auto-continues included)
+    // carries the same per-response generation cap. A no-op when
+    // the operator has not opted in.
+    inject_ollama_num_predict(&mut forward_body, llm.cfg.ollama_num_predict);
+    // Forward the admin-configured `ollama_num_ctx` (env
+    // `LLM_OLLAMA_NUM_CTX` or TOML `[llm].ollama_num_ctx`) as
+    // `options.num_ctx`. The merge is done before any tool-loop
+    // round so every round (auto-continues included) sees the
+    // same context window. A no-op when the operator has not
+    // opted in — deployments that already pin `num_ctx` via the
+    // Modelfile or `OLLAMA_CONTEXT_LENGTH` keep working
+    // unchanged.
+    inject_ollama_num_ctx(&mut forward_body, llm.cfg.ollama_num_ctx);
     // Inject the per-user reply-language block (after the admin
     // prompt so the admin's instructions stay authoritative at
     // `messages[0]`). The block is server-prepended because the

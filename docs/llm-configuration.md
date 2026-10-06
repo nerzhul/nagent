@@ -5,9 +5,9 @@ The chat proxy is upstream-agnostic: it speaks the OpenAI
 (Ollama, llama-server, vLLM, LM Studio, OpenRouter, …) works out
 of the box. This page documents the two knobs the operator
 controls server-side (`llm_max_tool_rounds`, `llm_max_auto_continues`)
-and the one knob the operator controls upstream-side
-(`num_ctx` / `n_ctx`) that has the biggest impact on long
-reasoning chains.
+and the two Ollama-native knobs the operator controls
+upstream-side (`ollama_num_predict`, `ollama_num_ctx`) that have
+the biggest impact on long reasoning chains.
 
 ## Server-side knobs
 
@@ -48,12 +48,13 @@ leaving continuation to an explicit "continue" prompt).
 - Env var: `LLM_MAX_AUTO_CONTINUES`
 - Clamp: `0..=64`
 
-## Upstream-side knob: `n_ctx` (the actual lever for long thinking)
+## Upstream-side knob: `ollama_num_ctx` (the actual lever for long thinking)
 
-`num_ctx` controls how much conversation history + system prompt
-the model can see at once. `num_predict` (next section) controls
-how many tokens it can emit per response. Both matter; bumping
-only one often hides the other.
+`ollama_num_ctx` (forwarded to the upstream as `options.num_ctx`)
+controls how much conversation history + system prompt the model
+can see at once. `ollama_num_predict` (next section) controls how
+many tokens it can emit per response. Both matter; bumping only
+one often hides the other.
 
 `llm_max_auto_continues` is a fallback. The real fix for
 "the model ran out of context mid-reasoning" is to give the
@@ -107,6 +108,28 @@ curl -s http://localhost:11434/api/show -d '{"name": "deepseek-r1:32b"}' | jq .m
 # Look for "deepseek_r1.context_length": 32768
 ```
 
+### Setting `num_ctx` through the proxy
+
+The proxy exposes two equivalent paths for operators that prefer
+not to touch the Modelfile:
+
+- Env var: `LLM_OLLAMA_NUM_CTX=32768`
+- TOML key: `[llm] ollama_num_ctx = 32768`
+
+When set, the proxy forwards `options.num_ctx` on every
+`/v1/chat/completions` request, including every tool-loop round
+and every auto-continue round. The proxy wins on conflict: any
+`options.num_ctx` the browser sets on a request body is
+overridden by the server knob, so a misbehaving client cannot
+shrink the context window. A `None` / unset value leaves the
+upstream's `num_ctx` untouched — deployments that already pin
+it via the Modelfile or `OLLAMA_CONTEXT_LENGTH` keep working
+unchanged. The proxy only injects the field when the operator
+opts in.
+
+Recommended values mirror §5: `32768` for 9B–14B reasoners,
+`65536` for 32B+ reasoners.
+
 ### llama-server (`llama.cpp`)
 
 `llama-server` accepts the `-c` / `--ctx-size` flag at startup:
@@ -134,13 +157,14 @@ honours whatever `-c` is set to.
   matters — it lets the model keep producing across the
   provider's hard cap.
 
-## Upstream-side knob: `num_predict` (the actual lever for per-response length)
+## Upstream-side knob: `ollama_num_predict` (the actual lever for per-response length)
 
-`num_predict` is **how many tokens the model may emit in a single
-response**, distinct from `num_ctx` (how much history the model
-can see). It is the most common cause of "the model keeps
-reasoning but never produces an answer" symptoms on reasoning
-models.
+`ollama_num_predict` (forwarded to the upstream as
+`options.num_predict`) is **how many tokens the model may emit
+in a single response**, distinct from `ollama_num_ctx` (how much
+history the model can see). It is the most common cause of "the
+model keeps reasoning but never produces an answer" symptoms on
+reasoning models.
 
 ### The Ollama default that bites
 
@@ -150,32 +174,32 @@ visible text:
 
 ```
 1203 chars of reasoning  → ~250 tokens wanted
-128-token cap           → cut off mid-thought
-finish_reason: "length" → triggers llm_max_auto_continues
-"please continue" prompt → model re-derives from scratch
+128-token cap           -> cut off mid-thought
+finish_reason: "length" -> triggers llm_max_auto_continues
+"please continue" prompt -> model re-derives from scratch
                             (~50 chars of reasoning before
                             the next truncation)
 ```
 
 …which produces a 30+ round auto-continue loop on a question
 that should take one or two rounds. The model is not stupid;
-it is being denied the budget to finish a thought.
+it's being denied the budget to finish a thought.
 
 ### Fix
 
-Set `num_predict` to `2048` (safe for 9B-class reasoners like
-`qwen3.5:9b`) or `4096` (for 32B+ reasoners like
+Set `ollama_num_predict` to `2048` (safe for 9B-class reasoners
+like `qwen3.5:9b`) or `4096` (for 32B+ reasoners like
 `deepseek-r1:32b`). One line:
 
 ```bash
-LLM_NUM_PREDICT=2048
+LLM_OLLAMA_NUM_PREDICT=2048
 ```
 
 …or in `config.toml`:
 
 ```toml
 [llm]
-num_predict = 2048
+ollama_num_predict = 2048
 ```
 
 The proxy forwards this to the upstream as
@@ -183,9 +207,13 @@ The proxy forwards this to the upstream as
 including the tool-loop rounds. Setting it is purely additive —
 operators who do not opt in keep the upstream's choice (e.g.
 Ollama's 128-token default for non-reasoning models is fine).
+The proxy wins on conflict: any `options.num_predict` the
+browser sets on the request body is overridden by the server
+knob, so a misbehaving client cannot force a tiny
+`num_predict` on a reasoning model.
 
-- Env var: `LLM_NUM_PREDICT`
-- TOML key: `[llm].num_predict`
+- Env var: `LLM_OLLAMA_NUM_PREDICT`
+- TOML key: `[llm].ollama_num_predict`
 - Recommended: `2048` for 9B reasoners, `4096` for 32B+ reasoners
 - A `None` / unset value leaves the upstream's default alone —
   the proxy only injects the field when the operator opts in.
@@ -193,7 +221,7 @@ Ollama's 128-token default for non-reasoning models is fine).
 This is the single most effective knob for stopping the
 auto-continue loop. Bumping `llm_max_auto_continues` is a
 safety net for cloud-hosted providers with fixed small caps;
-bumping `num_predict` is the actual fix for local Ollama.
+bumping `ollama_num_predict` is the actual fix for local Ollama.
 
 ## How auto-continue interacts with the upstream cap
 

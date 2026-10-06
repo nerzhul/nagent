@@ -59,7 +59,8 @@ async fn start_test_server_with(
         allow_user_reply_language: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 0,
-        num_predict: None,
+        ollama_num_predict: None,
+        ollama_num_ctx: None,
     };
     builder = builder
         .with_stt_rate_per_min(rate_limit.stt_per_min)

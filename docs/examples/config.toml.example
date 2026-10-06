@@ -111,7 +111,8 @@
 # [llm]
 # llm_max_tool_rounds = 64                  # hard cap on tool-call rounds per user turn (defends against tool loops)
 # llm_max_auto_continues = 32              # max reasoning-truncation auto-continue rounds (set 0 to disable; see docs/llm-configuration.md)
-# num_predict = 2048                       # per-response generation cap (in tokens) forwarded as options.num_predict; 2048 for 9B reasoners, 4096 for 32B+ (see docs/llm-configuration.md)
+# ollama_num_predict = 2048                # Ollama-specific per-response generation cap (in tokens) forwarded as options.num_predict; 2048 for 9B reasoners, 4096 for 32B+ (see docs/llm-configuration.md)
+# ollama_num_ctx = 32768                   # Ollama-specific context-window size forwarded as options.num_ctx; 32768 for 9B-14B reasoners, 65536 for 32B+ (see docs/llm-configuration.md)
 
 # `web_fetch` agent — sandbox + transfer knobs
 # [agents.web_fetch]

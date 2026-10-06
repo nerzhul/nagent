@@ -272,11 +272,30 @@ pub struct TomlLlmConfig {
     /// trips the `llm_max_auto_continues` heuristic into a loop.
     /// Setting this to `2048` or `4096` lets the model finish a
     /// single reasoning + tool-call round in one upstream
-    /// request. Mirrors the `LLM_NUM_PREDICT` env var; env wins
-    /// when both are set. `None` (the default) leaves the
-    /// upstream's `num_predict` untouched. See
+    /// request. Mirrors the `LLM_OLLAMA_NUM_PREDICT` env var;
+    /// env wins when both are set. `None` (the default) leaves
+    /// the upstream's `num_predict` untouched.
+    /// **Ollama-specific**: the field name is forwarded under the
+    /// `options.*` slot of the OpenAI-compatible
+    /// `/v1/chat/completions` body. See
     /// `docs/llm-configuration.md` for the full contract.
-    pub num_predict: Option<u32>,
+    pub ollama_num_predict: Option<u32>,
+    /// Optional context-window size forwarded to the upstream as
+    /// `options.num_ctx`. Ollama defaults to a 2048-token context
+    /// window, which truncates reasoning models mid-thought and
+    /// trips the `llm_max_auto_continues` heuristic. Setting
+    /// this to `32768` or `65536` lets the model finish a long
+    /// reasoning + tool-call round in one upstream request.
+    /// Mirrors the `LLM_OLLAMA_NUM_CTX` env var; env wins when
+    /// both are set. `None` (the default) leaves the upstream's
+    /// `num_ctx` untouched — deployments that already pin
+    /// `num_ctx` via the Modelfile or `OLLAMA_CONTEXT_LENGTH`
+    /// keep working without modification.
+    /// **Ollama-specific**: the field name is forwarded under the
+    /// `options.*` slot of the OpenAI-compatible
+    /// `/v1/chat/completions` body. See
+    /// `docs/llm-configuration.md` for the full contract.
+    pub ollama_num_ctx: Option<u32>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -886,7 +905,8 @@ fn merge_toml_llm(
             allow_user_memory: l.allow_user_memory.or(e.allow_user_memory),
             llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
             llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
-            num_predict: l.num_predict.or(e.num_predict),
+            ollama_num_predict: l.ollama_num_predict.or(e.ollama_num_predict),
+            ollama_num_ctx: l.ollama_num_ctx.or(e.ollama_num_ctx),
         }),
     }
 }

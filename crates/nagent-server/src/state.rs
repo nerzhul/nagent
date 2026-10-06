@@ -85,8 +85,9 @@ pub struct LlmState {
     /// from. Carrying the config on the state (rather than just
     /// `Arc<Config>`) keeps the proxy's signature narrow: the
     /// per-tool-loop knobs (`llm_max_tool_rounds`,
-    /// `llm_max_auto_continues`) and the per-response generation
-    /// cap (`num_predict`) live on the LLM subtree, not on
+    /// `llm_max_auto_continues`) and the Ollama-native
+    /// generation + context knobs (`ollama_num_predict`,
+    /// `ollama_num_ctx`) live on the LLM subtree, not on
     /// `AgentConfig`, and the proxy needs both the runtime state
     /// (client + rate limiter) and the config (knobs).
     pub cfg: LlmConfig,
