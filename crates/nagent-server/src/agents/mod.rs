@@ -288,6 +288,27 @@ pub fn build_registry(
         #[cfg(not(feature = "read-document-agent"))]
         let _ = (store, chat_sessions);
     }
+    // Startup surface tool inventory. Logged once per registry build
+    // so the operator can sanity-check what the proxy will inject
+    // into every `/v1/chat/completions` body as `tools=[]`. Mirrors
+    // the same `tools_schema()` call the proxy uses on the hot path,
+    // so anything we log here is guaranteed to reach the wire. The
+    // count + names are emitted on a single line so a quick
+    // `grep agents:` against the startup log is enough to spot a
+    // regression like the CalDAV / `read_document` omissions of
+    // earlier sessions.
+    let tool_names: Vec<String> = registry.iter().map(|a| a.name().to_string()).collect();
+    if cfg.enabled {
+        tracing::info!(
+            count = tool_names.len(),
+            tools = ?tool_names,
+            "agents: tools registered (will be exposed to LLM via /v1/chat/completions tools=[])"
+        );
+    } else {
+        tracing::info!(
+            "agents: tools disabled by config; proxy will send no tools=[] payload to the upstream LLM"
+        );
+    }
     registry
 }
 
