@@ -221,7 +221,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     }
 
     // ---- LLM client + per-LLM rate limiter -------------------------------
-    let llm = if cfg.llm.enabled {
+    let mut llm = if cfg.llm.enabled {
         info!(
             base_url = %cfg.llm.base_url,
             default_model = %cfg.llm.default_model,
@@ -234,6 +234,11 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
             client,
             rate_limiter: llm_limiter,
             cfg: cfg.llm.clone(),
+            // Plan 1791267136806 §7.6: filled in by the post-boot
+            // patch below (the credentials key + DB clone are not
+            // in scope yet at this point — they live behind the
+            // `has_credentials` gate a few lines below).
+            memory_source: None,
         })
     } else {
         info!("LLM proxy disabled (set LLM_ENABLED=true to enable)");
@@ -366,7 +371,11 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     }
 
     // ---- Compose AuthState ----------------------------------------------
-    let auth = auth_store.map(|store: nagent_db::Db| {
+    // Capture clones BEFORE the move so the LLM memory builder
+    // (which runs after this closure) can share the key + DB.
+    let auth_credentials_key_for_memory = credentials_key.clone();
+    let auth_store_for_memory = auth_store.clone();
+    let auth = auth_store.clone().map(|store: nagent_db::Db| {
         let hash_concurrency = cfg.auth.password.hash_concurrency.max(1);
         AuthState {
             store,
@@ -382,6 +391,20 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
             password_semaphore: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
         }
     });
+
+    // ---- Patch LlmState with the per-user memory source ----------------
+    //
+    // Plan 1791267136806 §7.6: the source is built AFTER
+    // `credentials_key` so it can share the encryption key with
+    // the per-user vault. The `disable_key` sentinel leaves the
+    // source as `None` so the LLM proxy threads a None
+    // `MemorySource` into every chat-session `UserContext` —
+    // the four `memory_*` agents then fail closed with a clean
+    // error instead of attempting to encrypt.
+    if let Some(llm_ref) = llm.as_mut() {
+        llm_ref.memory_source =
+            build_memory_source(&cfg, auth_credentials_key_for_memory, auth_store_for_memory);
+    }
 
     // ---- SttState -------------------------------------------------------
     let stt = SttState {
@@ -430,6 +453,39 @@ async fn build_backend(cfg: &Config) -> anyhow::Result<Arc<dyn WhisperBackend>> 
         let backend = stt_core::MockBackend::new(model_id);
         Ok(Arc::new(backend))
     }
+}
+
+/// Build the per-user long-term memory source (plan
+/// 1791267136806, §7.6). `Some(_)` when:
+/// - `[auth.credentials].key` was successfully parsed (so we can
+///   encrypt / decrypt the value / notes columns), AND
+/// - `LLM_ALLOW_USER_MEMORY` is not explicitly `false`
+///   (`LLM_ALLOW_USER_MEMORY=false` is the operator kill switch,
+///   plan §1.5; default is `true`), AND
+/// - the auth DB connection succeeded (the `memories` table lives
+///   on the auth DB, so without one there is nothing to read /
+///   write from).
+///
+/// Returning `None` is the safe degraded mode: the proxy threads
+/// a `None` into every chat-session `UserContext`, and the four
+/// `memory_*` agents surface a clean
+/// `AgentError::AgentFailed("memory: source not wired in this
+/// context")` instead of attempting to encrypt.
+fn build_memory_source(
+    cfg: &Config,
+    credentials_key: Option<Arc<crate::credentials::CredentialsKey>>,
+    db: Option<nagent_db::Db>,
+) -> Option<Arc<dyn nagent_agents::agents::MemorySource>> {
+    if !cfg.llm.allow_user_memory {
+        info!("memory subsystem killed by LLM_ALLOW_USER_MEMORY=false");
+        return None;
+    }
+    let (Some(key), Some(db)) = (credentials_key, db) else {
+        info!("memory subsystem disabled (no credentials key or DB)");
+        return None;
+    };
+    let source = crate::memories::adapter::UserDbMemorySource::new(db, key.clone());
+    Some(Arc::new(source))
 }
 
 /// Locate the directory containing the bundled `espeak-ng-data/`

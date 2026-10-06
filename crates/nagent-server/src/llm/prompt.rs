@@ -54,6 +54,24 @@ pub const USER_INTEGRATIONS_MARKER: &str = "The user has the following integrati
 /// one without touching the others.
 pub const USER_REPLY_LANGUAGE_MARKER: &str = "The user's preferred reply language is";
 
+/// Marker prefix for the per-user long-term memory system block
+/// (plan 1791267136806, §1.5). When the authenticated user has
+/// opted in (`memory_enabled` on `user_preferences`) AND has at
+/// least one stored memory row, the proxy inserts a system
+/// message at index 1 (right after the admin prompt) beginning
+/// with this prefix; the defensive kill-switch in
+/// `llm::privacy::strip_user_memories_if_disabled` matches on the
+/// same prefix so an operator running with
+/// `LLM_ALLOW_USER_MEMORY=false` can drop the block before it
+/// reaches the upstream model without touching the per-user
+/// `memory_enabled` flag.
+///
+/// Kept distinct from `USER_REPLY_LANGUAGE_MARKER`,
+/// `USER_LOCATION_MARKER`, `USER_TIMEZONE_MARKER` so the four
+/// kill-switches are independent — an operator may forbid one
+/// without touching the others.
+pub const USER_MEMORIES_MARKER: &str = "The user's long-term memories include:";
+
 /// Build the "configured integrations" system block for the calling
 /// user. Returns `None` when the user has no configured integrations
 /// (saves a useless system message).
@@ -259,7 +277,46 @@ reply language is\". Reply in that language for the entire turn \
 unless the user explicitly asks for another language in the same \
 message. The block is request-scoped — it is not persisted in the \
 browser session history, so it appears only on the request that \
-triggered it.";
+triggered it.
+
+Long-term memory (opt-in, durable):
+- When the user has enabled the memory subsystem in Settings → \
+Memory, the request also carries a durable system message that \
+starts with the marker \"The user's long-term memories include:\". \
+Each line is one stored fact (`- <subject> <predicate>: <value>`). \
+Treat those facts as the user's explicit statements about themselves \
+and answer from them directly (e.g. \"what's my doctor's name?\" — \
+look up `doctor name`). Do not invent facts that are not in the \
+list; if the user asks about a fact you cannot find, say you don't \
+have one stored.
+- Memory store (proactive): you may call `memory_store` when the \
+user clearly expresses a durable fact about themselves, their \
+preferences, or their relationships (\"my doctor is Dr Martin\", \
+\"I'm allergic to penicillin\", \"my wife's name is Alice\", \
+\"j'ai un chat qui s'appelle Pixel\"). Pass `subject` (categorical \
+key like \"doctor\" / \"spouse\" / \"user\"), `predicate` (categorical \
+key like \"name\" / \"allergy\" / \"birthday\"), and `value` (the \
+fact itself). Optional: `notes`, `tags` (comma-separated), \
+`confidence` (0.0..1.0, default 1.0), `source_kind` (\"user_stated\" \
+| \"llm_inferred\", default \"user_stated\"). The store is \
+idempotent on (subject, predicate) — re-storing the same fact \
+returns the same memory id.
+- Memory store: never store transient task state, transient \
+context, or facts about third parties without consent. When in \
+doubt, ask the user before storing. The taxonomy columns \
+(`subject` / `predicate` / `tags`) are visible to the operator \
+in the audit log — only the `value` and `notes` columns are \
+encrypted at rest. Do not store passwords, API keys, or other \
+secrets under any circumstances; route those to the user's \
+credentials vault instead.
+- Memory recall / list / forget: when the user asks for a fact \
+the auto-injected block did not cover (\"what was the dosage?\", \
+\"remind me what I told you about my mom's birthday\"), call \
+`memory_recall` with the matching `subject` / `predicate` / `tags` \
+filters. `memory_list` returns metadata only (no value) — pair with \
+`memory_recall` to retrieve the value of a specific id. \
+`memory_forget` requires explicit user confirmation; do not \
+call it without first asking the user which memory to remove.";
 
 /// Prepend the admin's system prompt as `messages[0]`.
 ///
@@ -316,6 +373,80 @@ pub fn inject_reply_language_block(forward_body: &mut Value, block: &str) {
     // the admin prompt is absent (a stack-injected block from a
     // future operator override), the reply-language block still
     // lands before every user turn, which is what matters.
+    let insert_at = if messages.is_empty() { 0 } else { 1 };
+    messages.insert(insert_at, json!({ "role": "system", "content": block }));
+}
+
+/// Build the per-user long-term memory system block. `None` when
+/// the user has no stored memories — the caller should skip the
+/// inject in that case so we don't insert an empty placeholder
+/// system message that wastes context window.
+///
+/// Plan §1.4: the block lists each row as `- <subject> <predicate>:
+/// <value>` (one row per `\n`, columns are described as plain
+/// English so the LLM can pick the right one when the user asks
+/// "what's my doctor's name?"). Rows are already ranked by
+/// `confidence DESC, last_used_at DESC` by the repository — we
+/// just render them.
+pub fn build_memories_block(rows: &[nagent_agents::agents::DecryptedMemory]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    use secrecy::ExposeSecret;
+    let mut out = String::from(USER_MEMORIES_MARKER);
+    out.push('\n');
+    for row in rows {
+        // Trim whitespace from the value so the reply language
+        // reminder (a one-line sentence) does not dominate the
+        // context window. Subject / predicate / notes are
+        // plaintext columns and have already been trimmed by the
+        // adapter.
+        let value = row.value.expose_secret().trim();
+        if let Some(notes) = row.notes.as_ref() {
+            out.push_str(&format!(
+                "- {} {}: {} (notes: {})\n",
+                row.subject,
+                row.predicate,
+                value,
+                notes.expose_secret().trim(),
+            ));
+        } else {
+            out.push_str(&format!("- {} {}: {}\n", row.subject, row.predicate, value));
+        }
+    }
+    out.push('\n');
+    out.push_str(
+        "Use these facts to answer the user's questions accurately. \
+         If the user shares a new durable fact, you may call `memory_store` \
+         (subject, predicate, value) to persist it for future turns; \
+         never store facts about third parties without consent, and \
+         never store information that's only relevant to the current turn.",
+    );
+    Some(out)
+}
+
+/// Insert the per-user memory system block at index 1 (right
+/// after the admin prompt at index 0). Mirrors
+/// [`inject_reply_language_block`] so the two blocks compose
+/// without colliding — the call order in the proxy is:
+///
+/// 1. `inject_reply_language_block` (when the user has set one)
+/// 2. `inject_memories_block` (when `memory_enabled` AND rows exist)
+/// 3. `strip_user_reply_language_if_disabled`
+/// 4. `strip_user_memories_if_disabled`
+///
+/// so a turn that needs neither block simply skips the inject
+/// step and the defensive kill-switches are no-ops.
+pub fn inject_memories_block(forward_body: &mut Value, block: &str) {
+    let Some(obj) = forward_body.as_object_mut() else {
+        return;
+    };
+    let Some(messages) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    // Insert at index 1 (admin prompt) when the admin prompt is
+    // there, index 0 otherwise. Mirrors `inject_reply_language_block`
+    // so the two blocks always stack in the same order.
     let insert_at = if messages.is_empty() { 0 } else { 1 };
     messages.insert(insert_at, json!({ "role": "system", "content": block }));
 }
@@ -575,6 +706,41 @@ mod tests {
         assert!(
             prompt.contains("ephemeral") || prompt.contains("never persisted"),
             "DEFAULT_SYSTEM_PROMPT must make clear the timezone block is ephemeral and not persisted, so the model treats it as request-scoped context."
+        );
+    }
+
+    #[test]
+    fn default_prompt_documents_user_memories_block() {
+        // Plan 1791267136806 §7.7: the default prompt must mention
+        /// the `USER_MEMORIES_MARKER` so the model knows it can rely
+        /// on the auto-injected block AND must describe the four
+        /// `memory_*` agents it can call. The marker-string guard is
+        /// the same one used for the reply-language block — a future
+        /// prompt rewrite cannot quietly desync the defensive
+        /// filter in `privacy.rs`.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains(USER_MEMORIES_MARKER),
+            "DEFAULT_SYSTEM_PROMPT must mention the '{USER_MEMORIES_MARKER}' marker so the model knows it can rely on the block for long-term memory recall."
+        );
+        for tool in [
+            "memory_store",
+            "memory_recall",
+            "memory_list",
+            "memory_forget",
+        ] {
+            assert!(
+                prompt.contains(tool),
+                "DEFAULT_SYSTEM_PROMPT is missing the `{tool}` agent name — the LLM won't know it can call it in the default deployment."
+            );
+        }
+        assert!(
+            prompt.contains("subject") && prompt.contains("predicate") && prompt.contains("value"),
+            "DEFAULT_SYSTEM_PROMPT must spell out the three required memory_store fields."
+        );
+        assert!(
+            prompt.contains("third parties") || prompt.contains("without consent"),
+            "DEFAULT_SYSTEM_PROMPT must explicitly warn the LLM against storing facts about third parties without consent (plan §1.1)."
         );
     }
 

@@ -27,11 +27,12 @@ use crate::config::LlmConfig;
 use crate::llm::client::{parse_chat_session_header, LlmError};
 use crate::llm::permission::run_permission_intercept;
 use crate::llm::privacy::{
-    strip_user_location_if_disabled, strip_user_reply_language_if_disabled,
-    strip_user_timezone_if_disabled,
+    strip_user_location_if_disabled, strip_user_memories_if_disabled,
+    strip_user_reply_language_if_disabled, strip_user_timezone_if_disabled,
 };
 use crate::llm::prompt::{
-    build_reply_language_block, inject_default_system_prompt, inject_reply_language_block,
+    build_memories_block, build_reply_language_block, inject_default_system_prompt,
+    inject_memories_block, inject_reply_language_block,
 };
 use crate::llm::tool_loop::run_tool_loop;
 use crate::state::ArcPermissionStore;
@@ -216,6 +217,34 @@ pub async fn chat_completions(
                 if let Some(block) = build_reply_language_block(prefs.reply_language.as_deref()) {
                     inject_reply_language_block(&mut forward_body, &block);
                 }
+                // Plan 1791267136806 §1.5 + §7.7: when the user has
+                // opted in (`memory_enabled = true`) AND the LLM
+                // state has a wired `MemorySource`, decrypt the
+                // top-N rows and inject the summary block. The
+                // `MemorySource` is `None` when the subsystem was
+                // killed (`LLM_ALLOW_USER_MEMORY=false`) so the
+                // inject is skipped silently — the kill-switch
+                // strip then runs for symmetry with the reply-
+                // language block.
+                if prefs.memory_enabled {
+                    if let Some(mem_src) = llm_state.memory_source.as_ref() {
+                        let rows = mem_src.recall(user.id, None, None, None, 10).await;
+                        match rows {
+                            Ok(rows) => {
+                                if let Some(block) = build_memories_block(&rows) {
+                                    inject_memories_block(&mut forward_body, &block);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    user_id = %user.id,
+                                    error = %e,
+                                    "failed to recall memories for short-term injection; skipping"
+                                );
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 // A read failure on the per-user preferences row must
@@ -252,6 +281,13 @@ pub async fn chat_completions(
     // are independent so operators can forbid one without touching
     // the others.
     strip_user_reply_language_if_disabled(&mut forward_body, llm.cfg.allow_user_reply_language);
+    // Plan 1791267136806 §1.5: the fourth kill-switch. When
+    // `LLM_ALLOW_USER_MEMORY=false`, strip the
+    // `USER_MEMORIES_MARKER`-prefixed system message before it
+    // reaches the upstream model. The four kill-switches are
+    // independent; an operator may forbid one without touching
+    // the others.
+    strip_user_memories_if_disabled(&mut forward_body, llm.cfg.allow_user_memory);
 
     // Forward a few well-known request headers. `Authorization` is
     // handled separately so we never leak the server-side key when it
@@ -375,6 +411,15 @@ pub async fn chat_completions(
         .as_ref()
         .and_then(|auth| auth.credential_resolver.clone())
         .map(|r| std::sync::Arc::new(ResolverSecretSource::new(r)) as _);
+    // Plan 1791267136806 §7.6: the per-user memory source is
+    // wired into the LLM state at boot time
+    // (`LlmState.memory_source`). The proxy threads it into the
+    // per-tool-round `UserContext` so the four `memory_*` agents
+    // can run; `None` here means the subsystem was killed
+    // (`LLM_ALLOW_USER_MEMORY=false`) or the encryption key was
+    // not loaded at boot, in which case the agents fail closed.
+    let memory_source: Option<std::sync::Arc<dyn nagent_agents::agents::MemorySource>> =
+        llm_state.memory_source.clone();
     // Plan 4.C: the tool loop is now generic over
     // `Agent::requires_confirmation`. The cross-agent rule (e.g.
     // "`read_document` → `web_fetch` needs confirmation") lives
@@ -427,6 +472,7 @@ pub async fn chat_completions(
             chat_session_id,
             user_id,
             resolver,
+            memory_source,
             permission_store.0,
         )
         .await;

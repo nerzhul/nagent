@@ -102,7 +102,7 @@ The subsystems it stitches together:
 | LLM proxy | `llm/` | Optional OpenAI-compatible proxy to a local LLM. Hosts the tool loop (§3). |
 | Agents | `agents/` + `nagent-agents` | Chat-agent subsystem (§2). |
 | Documents | `documents/` | Discussion-mode document uploads, extraction, the `read_document` tool. |
-| Auth | `auth/`, `credentials/`, `oauth/` | Multi-user auth (password / OIDC / passkey) + per-user credentials vault + per-user UI preferences row (location / timezone sharing opt-ins + reply-language picker, migration `0007`; additional-instructions textarea + per-turn temperature via migration `0008`). |
+| Auth | `auth/`, `credentials/`, `oauth/`, `memories/` | Multi-user auth (password / OIDC / passkey) + per-user credentials vault + per-user UI preferences row (location / timezone sharing opt-ins + reply-language picker, migration `0007`; additional-instructions textarea + per-turn temperature via migration `0008`; long-term memory opt-in via migration `0009` + `memories` table via `0010`). |
 | TTS | `tts/` | Local Piper text-to-speech engine. |
 | Static frontend | `static/`, `static_assets.rs` | Vendored UI served by the static handler. |
 
@@ -208,6 +208,10 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `caldav_get_event` | `caldav-agent` | Per-user CalDAV calendar: fetch a single `VEVENT` by `UID`. Confirm-on-read. |
 | `caldav_create_event` | `caldav-agent` | Per-user CalDAV calendar: append a new `VEVENT` (confirm-on-write). |
 | `x_timeline` | `x-agent` | Per-user X (Twitter) home timeline via the v2 API (mode "Abonnements" / "Pour Vous"). Read-only. Refreshes the OAuth access token itself on 401. |
+| `memory_store` | `memory-agent` | Persist one durable fact for the calling user (AES-256-GCM encrypted at rest, dedup on `(subject, predicate)`). Idempotent — re-storing the same fact returns the same memory id. |
+| `memory_recall` | `memory-agent` | Decrypt + return up to `recalled_top_k` rows matching the supplied `subject` / `predicate` / `tags` LIKE filters. |
+| `memory_list` | `memory-agent` | List metadata-only rows for the calling user. Pairs with `memory_recall` to retrieve the value of a specific id (the list shape never includes plaintext). |
+| `memory_forget` | `memory-agent` | Forget one memory by id. `NeedsConfirmation` (even though reversible through `memory_store`) so the chat UI surfaces a "forget this memory?" bubble. |
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:

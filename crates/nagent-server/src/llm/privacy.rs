@@ -24,7 +24,9 @@
 
 use serde_json::Value;
 
-use crate::llm::prompt::{USER_LOCATION_MARKER, USER_REPLY_LANGUAGE_MARKER, USER_TIMEZONE_MARKER};
+use crate::llm::prompt::{
+    USER_LOCATION_MARKER, USER_MEMORIES_MARKER, USER_REPLY_LANGUAGE_MARKER, USER_TIMEZONE_MARKER,
+};
 
 /// Drop the ephemeral `User's approximate location:` system message
 /// the browser prepends when the admin has switched the feature off.
@@ -136,6 +138,41 @@ pub fn strip_user_reply_language_if_disabled(forward_body: &mut Value, allow: bo
         }
         match m.get("content").and_then(|v| v.as_str()) {
             Some(text) => !text.starts_with(USER_REPLY_LANGUAGE_MARKER),
+            None => true,
+        }
+    });
+}
+
+/// Drop the per-user long-term memory system message
+/// (`USER_MEMORIES_MARKER`) when the kill-switch is forced
+/// (`LLM_ALLOW_USER_MEMORY=false`). Plan 1791267136806 §1.5.
+///
+/// Four kill-switches (`USER_LOCATION`, `USER_TIMEZONE`,
+/// `USER_REPLY_LANGUAGE`, `USER_MEMORIES`) are independent —
+/// each matches on its own prefix and never on a different one.
+/// The strhime test (`strip_user_memories_does_not_drop_other_marker_blocks`)
+/// pins this so a kill-switch flip on one cannot accidentally
+/// clobber the others.
+pub fn strip_user_memories_if_disabled(forward_body: &mut Value, allow: bool) {
+    if allow {
+        return;
+    }
+    let Some(messages) = forward_body
+        .as_object_mut()
+        .and_then(|o| o.get_mut("messages"))
+        .and_then(|m| m.as_array_mut())
+    else {
+        return;
+    };
+    messages.retain(|m| {
+        let Some(role) = m.get("role").and_then(|v| v.as_str()) else {
+            return true;
+        };
+        if role != "system" {
+            return true;
+        }
+        match m.get("content").and_then(|v| v.as_str()) {
+            Some(text) => !text.starts_with(USER_MEMORIES_MARKER),
             None => true,
         }
     });

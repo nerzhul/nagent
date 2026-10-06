@@ -175,6 +175,76 @@ pub struct UserCredentialRow {
     pub ciphertext: Vec<u8>,
 }
 
+// ---- Memory row primitives ------------------------------------------------
+//
+// Plaintext view of the `memories` table (plan 1791267136806).
+// `value_nonce` / `value_ciphertext` and `notes_nonce` /
+// `notes_ciphertext` are AES-256-GCM outputs; the encryption key
+// lives in `nagent-server` (`[auth.credentials].key`). The
+// decryption lives in the `MemorySource` adapter on the server
+// side, and the agents crate sees only the zeroising
+// `DecryptedMemory` variant (kept in `nagent-agents` to preserve
+// the "agents do not depend on nagent-db" rule, mirroring
+// `DocumentPayload`).
+
+/// One row from the `memories` table. Mirrors the schema verbatim;
+/// callers that need the decrypted view use the `MemorySource`
+/// adapter in `nagent-server` and receive the agents-side
+/// `DecryptedMemory` type.
+#[derive(Debug, Clone)]
+pub struct MemoryRow {
+    pub id: Uuid,
+    pub subject: String,
+    pub predicate: String,
+    pub value_nonce: Vec<u8>,
+    pub value_ciphertext: Vec<u8>,
+    pub notes_nonce: Option<Vec<u8>>,
+    pub notes_ciphertext: Option<Vec<u8>>,
+    pub tags: String,
+    pub confidence: f32,
+    pub source_session_id: Option<String>,
+    pub source_kind: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Metadata-only view of a memory row (no ciphertext, no value).
+/// Returned by the `GET /api/memories` and the `memory_list`
+/// agent so the browser and the LLM never see the encrypted bytes
+/// outside the auto-injected system block.
+#[derive(Debug, Clone)]
+pub struct MemoryMeta {
+    pub id: Uuid,
+    pub subject: String,
+    pub predicate: String,
+    pub tags: String,
+    pub confidence: f32,
+    pub source_session_id: Option<String>,
+    pub source_kind: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Parameters for `Memories::store`. The caller (the
+/// `MemorySource` adapter in `nagent-server`) encrypts `value`
+/// and `notes` before constructing this struct; the repository
+/// stores the bytes verbatim.
+#[derive(Debug, Clone)]
+pub struct NewMemoryRequest {
+    pub subject: String,
+    pub predicate: String,
+    pub value_nonce: Vec<u8>,
+    pub value_ciphertext: Vec<u8>,
+    pub notes_nonce: Option<Vec<u8>>,
+    pub notes_ciphertext: Option<Vec<u8>>,
+    pub tags: String,
+    pub confidence: f32,
+    pub source_session_id: Option<String>,
+    pub source_kind: String,
+}
+
 /// Per-user UI preferences.
 #[derive(Debug, Clone)]
 pub struct UserPreferences {
@@ -202,6 +272,11 @@ pub struct UserPreferences {
     /// Settings-tab `<input type="number" min="0" max="2">`
     /// contract does the client-side clamp.
     pub temperature: Option<f32>,
+    /// Opt-in flag for the LLM-driven long-term memory subsystem
+    /// (plan 1791267136806, §1.6). Defaults to `false` so a user
+    /// who never opens Settings → Memory is never auto-injected
+    /// and the LLM is told to refuse `memory_store` calls.
+    pub memory_enabled: bool,
     pub updated_at: DateTime<Utc>,
 }
 

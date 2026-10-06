@@ -6,8 +6,8 @@
 
 pub use crate::agents::config_doc::{
     CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig, DictionaryAgentConfig,
-    ReadDocumentAgentConfig, StockAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig,
-    WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
+    MemoryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig, UnitConvertAgentConfig,
+    WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
 };
 
 /// Bag of every per-agent config. Plain data only — the server
@@ -25,4 +25,5 @@ pub struct AgentConfigs {
     pub read_document: ReadDocumentAgentConfig,
     pub caldav: CalDavAgentConfig,
     pub x_timeline: XTimelineAgentConfig,
+    pub memory: MemoryAgentConfig,
 }

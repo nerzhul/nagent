@@ -242,6 +242,14 @@ pub struct TomlLlmConfig {
     /// the other two kill-switches: an operator may forbid one
     /// without touching the others.
     pub allow_user_reply_language: Option<bool>,
+    /// Whether the proxy is allowed to inject the per-user long-term
+    /// memory system message (`USER_MEMORIES_MARKER`) when the
+    /// authenticated user has `memory_enabled = true`. Mirrors the
+    /// `LLM_ALLOW_USER_MEMORY` env var; env wins when both are set.
+    /// Defaults to `true`. Independent from the three other
+    /// kill-switches: an operator may forbid one without touching
+    /// the others (plan 1791267136806, §1.5).
+    pub allow_user_memory: Option<bool>,
     /// Maximum number of tool-call rounds a single user turn may
     /// trigger before the proxy bails out and surfaces an error
     /// bubble. Mirrors the `LLM_MAX_TOOL_ROUNDS` env var; env wins
@@ -305,6 +313,21 @@ pub struct TomlAgentConfig {
     /// registered when the `x-agent` cargo feature is on.
     #[serde(default)]
     pub x_timeline: Option<TomlXTimelineConfig>,
+    /// Knobs for the four `memory_*` agents (plan 1791267136806).
+    /// Mirrors [`crate::config::MemoryAgentConfig`]. Parsed
+    /// unconditionally so a TOML typo surfaces at boot; the agents
+    /// are only registered when the `memory-agent` cargo feature is
+    /// on. The `[agents.memory]` sub-table holds the
+    /// `recalled_top_k` cap (default `10`).
+    #[serde(default)]
+    pub memory: Option<TomlMemoryConfig>,
+}
+
+/// Knobs for the `memory_*` agents (plan 1791267136806).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlMemoryConfig {
+    pub recalled_top_k: Option<usize>,
 }
 
 /// Sandbox and transfer knobs for the built-in `web_fetch` tool.
@@ -860,6 +883,7 @@ fn merge_toml_llm(
             allow_user_location: l.allow_user_location.or(e.allow_user_location),
             allow_user_timezone: l.allow_user_timezone.or(e.allow_user_timezone),
             allow_user_reply_language: l.allow_user_reply_language.or(e.allow_user_reply_language),
+            allow_user_memory: l.allow_user_memory.or(e.allow_user_memory),
             llm_max_tool_rounds: l.llm_max_tool_rounds.or(e.llm_max_tool_rounds),
             llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
             num_predict: l.num_predict.or(e.num_predict),
@@ -890,6 +914,21 @@ fn merge_toml_agents(
             read_document_enabled: l.read_document_enabled.or(e.read_document_enabled),
             caldav: merge_toml_caldav(e.caldav.as_ref(), l.caldav.as_ref()),
             x_timeline: merge_toml_x_timeline(e.x_timeline.as_ref(), l.x_timeline.as_ref()),
+            memory: merge_toml_memory(e.memory.as_ref(), l.memory.as_ref()),
+        }),
+    }
+}
+
+fn merge_toml_memory(
+    earlier: Option<&TomlMemoryConfig>,
+    later: Option<&TomlMemoryConfig>,
+) -> Option<TomlMemoryConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlMemoryConfig {
+            recalled_top_k: l.recalled_top_k.or(e.recalled_top_k),
         }),
     }
 }

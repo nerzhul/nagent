@@ -23,6 +23,13 @@ web-agent = []
 read-document-agent = []
 caldav-agent = ["dep:icalendar", "dep:chrono-tz"]
 x-agent = []
+# Plan 1791267136806 — the four `memory_*` chat tools
+# (`memory_store`, `memory_recall`, `memory_list`,
+# `memory_forget`). The feature is empty because the agents only need
+# the existing `secrecy` + `chrono` deps; the encryption itself
+# happens server-side and the agents reach the per-user store
+# through the `MemorySource` capability trait.
+memory-agent = []
 # Convenience meta-feature that turns on every agent. The Makefile
 # targets list it once so an operator does not need to enumerate
 # the whole set in CI.
@@ -38,6 +45,7 @@ all-agents = [
     "read-document-agent",
     "caldav-agent",
     "x-agent",
+    "memory-agent",
 ]
 
 [dependencies]

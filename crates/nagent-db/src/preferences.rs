@@ -47,6 +47,7 @@ impl Preferences {
         reply_language: Option<String>,
         additional_instructions: Option<String>,
         temperature: Option<f32>,
+        memory_enabled: bool,
     ) -> Result<UserPreferences, Error> {
         match self {
             Preferences::Sqlite(s) => {
@@ -57,6 +58,7 @@ impl Preferences {
                     reply_language,
                     additional_instructions,
                     temperature,
+                    memory_enabled,
                 )
                 .await
             }
@@ -68,6 +70,7 @@ impl Preferences {
                     reply_language,
                     additional_instructions,
                     temperature,
+                    memory_enabled,
                 )
                 .await
             }
@@ -116,6 +119,7 @@ impl ScopedPreferences {
         reply_language: Option<String>,
         additional_instructions: Option<String>,
         temperature: Option<f32>,
+        memory_enabled: bool,
     ) -> Result<UserPreferences, Error> {
         self.inner
             .upsert(
@@ -125,6 +129,7 @@ impl ScopedPreferences {
                 reply_language,
                 additional_instructions,
                 temperature,
+                memory_enabled,
             )
             .await
     }
@@ -151,7 +156,7 @@ pub(crate) mod sqlite {
         pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
             let row = sqlx::query(
                 "SELECT share_location_enabled, share_timezone_enabled, reply_language, \
-                        additional_instructions, temperature, updated_at \
+                        additional_instructions, temperature, memory_enabled, updated_at \
                  FROM user_preferences WHERE user_id = ?",
             )
             .bind(user_id.to_string())
@@ -164,6 +169,7 @@ pub(crate) mod sqlite {
                     reply_language: None,
                     additional_instructions: None,
                     temperature: None,
+                    memory_enabled: false,
                     updated_at: Utc::now(),
                 });
             };
@@ -174,6 +180,7 @@ pub(crate) mod sqlite {
                 additional_instructions: r
                     .try_get::<Option<String>, _>("additional_instructions")?,
                 temperature: r.try_get::<Option<f32>, _>("temperature")?,
+                memory_enabled: row_to_bool(&r, "memory_enabled")?,
                 updated_at: parse_rfc3339(&r.try_get::<String, _>("updated_at")?),
             })
         }
@@ -186,19 +193,22 @@ pub(crate) mod sqlite {
             reply_language: Option<String>,
             additional_instructions: Option<String>,
             temperature: Option<f32>,
+            memory_enabled: bool,
         ) -> Result<UserPreferences, Error> {
             let user_id_str = user_id.to_string();
             sqlx::query(
                 "INSERT INTO user_preferences \
                     (user_id, share_location_enabled, share_timezone_enabled, \
-                     reply_language, additional_instructions, temperature, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
+                     reply_language, additional_instructions, temperature, \
+                     memory_enabled, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
                  ON CONFLICT(user_id) DO UPDATE SET \
                      share_location_enabled = excluded.share_location_enabled, \
                      share_timezone_enabled = excluded.share_timezone_enabled, \
                      reply_language = excluded.reply_language, \
                      additional_instructions = excluded.additional_instructions, \
                      temperature = excluded.temperature, \
+                     memory_enabled = excluded.memory_enabled, \
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(&user_id_str)
@@ -207,6 +217,7 @@ pub(crate) mod sqlite {
             .bind(reply_language)
             .bind(additional_instructions)
             .bind(temperature)
+            .bind(if memory_enabled { 1_i64 } else { 0_i64 })
             .execute(&self.pool)
             .await?;
             self.get(user_id).await
@@ -246,7 +257,7 @@ pub(crate) mod postgres {
         pub async fn get(&self, user_id: Uuid) -> Result<UserPreferences, Error> {
             let row = sqlx::query(
                 "SELECT share_location_enabled, share_timezone_enabled, reply_language, \
-                        additional_instructions, temperature, updated_at \
+                        additional_instructions, temperature, memory_enabled, updated_at \
                  FROM user_preferences WHERE user_id = $1",
             )
             .bind(user_id)
@@ -259,6 +270,7 @@ pub(crate) mod postgres {
                     reply_language: None,
                     additional_instructions: None,
                     temperature: None,
+                    memory_enabled: false,
                     updated_at: Utc::now(),
                 });
             };
@@ -269,6 +281,7 @@ pub(crate) mod postgres {
                 additional_instructions: r
                     .try_get::<Option<String>, _>("additional_instructions")?,
                 temperature: r.try_get::<Option<f32>, _>("temperature")?,
+                memory_enabled: row_to_bool(&r, "memory_enabled")?,
                 updated_at: parse_rfc3339(&r.try_get::<String, _>("updated_at")?),
             })
         }
@@ -281,18 +294,21 @@ pub(crate) mod postgres {
             reply_language: Option<String>,
             additional_instructions: Option<String>,
             temperature: Option<f32>,
+            memory_enabled: bool,
         ) -> Result<UserPreferences, Error> {
             sqlx::query(
                 "INSERT INTO user_preferences \
                     (user_id, share_location_enabled, share_timezone_enabled, \
-                     reply_language, additional_instructions, temperature, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP) \
+                     reply_language, additional_instructions, temperature, \
+                     memory_enabled, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP) \
                  ON CONFLICT (user_id) DO UPDATE SET \
                      share_location_enabled = EXCLUDED.share_location_enabled, \
                      share_timezone_enabled = EXCLUDED.share_timezone_enabled, \
                      reply_language = EXCLUDED.reply_language, \
                      additional_instructions = EXCLUDED.additional_instructions, \
                      temperature = EXCLUDED.temperature, \
+                     memory_enabled = EXCLUDED.memory_enabled, \
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(user_id)
@@ -301,6 +317,7 @@ pub(crate) mod postgres {
             .bind(reply_language)
             .bind(additional_instructions)
             .bind(temperature)
+            .bind(if memory_enabled { 1_i64 } else { 0_i64 })
             .execute(&self.pool)
             .await?;
             self.get(user_id).await

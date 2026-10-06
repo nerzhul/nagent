@@ -59,6 +59,10 @@ pub struct AgentConfig {
     /// field is always parsed; the actual agent is only
     /// registered when the `x-agent` cargo feature is on.
     pub x_timeline: XTimelineConfig,
+    /// Knobs for the four `memory_*` agents (plan 1791267136806).
+    /// The field is always parsed; the actual agents are only
+    /// registered when the `memory-agent` cargo feature is on.
+    pub memory: MemoryConfig,
 }
 
 impl Default for AgentConfig {
@@ -75,6 +79,7 @@ impl Default for AgentConfig {
             read_document_enabled: false,
             caldav: CalDavConfig::default(),
             x_timeline: XTimelineConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }
@@ -105,6 +110,50 @@ impl AgentConfig {
             )?,
             caldav: CalDavConfig::from_env_with_toml(toml.caldav.as_ref())?,
             x_timeline: XTimelineConfig::from_env_with_toml(toml.x_timeline.as_ref())?,
+            memory: MemoryConfig::from_env_with_toml(toml.memory.as_ref())?,
+        })
+    }
+}
+
+/// Knobs for the four `memory_*` agents (plan 1791267136806).
+///
+/// The `[agents.memory]` table only exposes `recalled_top_k` — a
+/// single cap that bounds the number of rows the LLM ever sees in
+/// one round. A larger config surface (per-call `limit`, throttling
+/// window, etc.) is reserved for a follow-up plan once we have
+/// usage data on the auto-prompt size.
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    /// Maximum number of decrypted rows the `memory_recall` agent
+    /// returns in one call. The repository already caps at
+    /// `nagent_db::memories::RECALL_HARD_LIMIT = 64`; this knob
+    /// trims it further so the LLM only sees a digestable slice.
+    /// Env var `MEMORY_TOP_K`, TOML key
+    /// `[agents.memory].recalled_top_k`. Default of `10` mirrors
+    /// the plan §1.4.
+    pub recalled_top_k: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self { recalled_top_k: 10 }
+    }
+}
+
+impl MemoryConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlMemoryConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            recalled_top_k: resolve_primitive(
+                env_opt("MEMORY_TOP_K").as_deref(),
+                toml.recalled_top_k,
+                defaults.recalled_top_k,
+                "MEMORY_TOP_K",
+            )?
+            .clamp(1, 64),
         })
     }
 }

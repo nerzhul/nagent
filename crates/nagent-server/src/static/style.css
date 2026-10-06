@@ -1985,6 +1985,88 @@ select, input[type="checkbox"] {
   word-break: break-word;
 }
 
+/*
+ * Plan 1791267136806 §7.10: long-term memory Settings tab card.
+ * The toggle follows the location / timezone rhythm (label +
+ * status). The metadata list is a simple `<ul>` so the renderer
+ * stays vanilla-DOM and the per-row Forget button can attach
+ * listeners without a framework. No new design tokens.
+ */
+.chat-memory-advanced {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--fg-mute);
+}
+
+.chat-memory-toggle-label {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0 !important;
+  font-size: 0.85rem;
+  color: var(--fg);
+  cursor: pointer;
+}
+.chat-memory-toggle-label input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.chat-memory-toggle-help {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+  line-height: 1.35;
+}
+
+.chat-memory-list {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.chat-memory-list-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  font-size: 0.78rem;
+}
+.chat-memory-list-label {
+  flex: 1 1 auto;
+  font-family: var(--font-mono);
+  color: var(--fg);
+  word-break: break-word;
+}
+.chat-memory-list-tags {
+  font-size: 0.72rem;
+  color: var(--fg-mute);
+  font-style: italic;
+}
+.chat-memory-list-row button {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+}
+.chat-memory-list-empty {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+  font-style: italic;
+}
+
 #chat-form {
   display: flex;
   gap: 0.5rem;

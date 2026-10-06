@@ -215,6 +215,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .merge(identity)
             .merge(credentials_routes)
             .merge(caldav_probe_routes)
+            .merge(mount_memories(state.clone()))
             .layer(auth_layer);
         // Layer order is applied bottom-up; the LAST `.layer()`
         // becomes the OUTERMOST. The access log is the outermost
@@ -346,4 +347,15 @@ fn mount_tts(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/audio/speech", post(crate::tts::audio_speech))
         .route("/v1/audio/voices", get(crate::tts::audio_voices));
     v1_envelope(&state, tts_app)
+}
+
+/// Memory audit / forget routes — `GET /api/memories` and
+/// `DELETE /api/memories/:id` (plan 1791267136806, §7.9). Mounted
+/// under the auth-protected subtree (`RequireAuth` + CSRF
+/// middleware) so the SPA can list + forget without a separate
+/// envelope. The router is a no-op when `auth.enabled = false`
+/// because the call site only fires in the `if
+/// state.config.auth.enabled { ... }` block.
+fn mount_memories(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    crate::memories::routes::build_memories_router(state)
 }

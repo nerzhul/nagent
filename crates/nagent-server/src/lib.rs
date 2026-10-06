@@ -72,6 +72,7 @@ pub mod credentials;
 pub mod documents;
 pub mod http;
 pub mod llm;
+pub mod memories;
 pub mod oauth;
 pub mod probe;
 pub mod rate_limit;

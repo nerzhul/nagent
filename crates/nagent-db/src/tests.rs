@@ -232,18 +232,23 @@ mod preferences {
             "default reply_language is None (Auto)"
         );
         // Scoped upsert writes only the bound user's row.
-        let updated = scoped.upsert(true, false, None, None, None).await.unwrap();
+        let updated = scoped
+            .upsert(true, false, None, None, None, false)
+            .await
+            .unwrap();
         assert!(updated.share_location_enabled);
         assert!(!updated.share_timezone_enabled);
         assert!(updated.reply_language.is_none());
         assert!(updated.additional_instructions.is_none());
         assert!(updated.temperature.is_none());
+        assert!(!updated.memory_enabled);
         let reread = scoped.get().await.expect("reread");
         assert!(reread.share_location_enabled);
         assert!(!reread.share_timezone_enabled);
         assert!(reread.reply_language.is_none());
         assert!(reread.additional_instructions.is_none());
         assert!(reread.temperature.is_none());
+        assert!(!reread.memory_enabled);
     }
 
     #[cfg(feature = "db-sqlite")]
@@ -264,12 +269,12 @@ mod preferences {
             .unwrap();
         db.for_user(alice)
             .preferences()
-            .upsert(true, false, Some("fr".into()), None, None)
+            .upsert(true, false, Some("fr".into()), None, None, true)
             .await
             .unwrap();
         db.for_user(bob)
             .preferences()
-            .upsert(false, true, None, None, None)
+            .upsert(false, true, None, None, None, false)
             .await
             .unwrap();
         let alice_prefs = db.for_user(alice).preferences().get().await.unwrap();
@@ -277,9 +282,11 @@ mod preferences {
         assert!(alice_prefs.share_location_enabled);
         assert!(!alice_prefs.share_timezone_enabled);
         assert_eq!(alice_prefs.reply_language.as_deref(), Some("fr"));
+        assert!(alice_prefs.memory_enabled);
         assert!(!bob_prefs.share_location_enabled);
         assert!(bob_prefs.share_timezone_enabled);
         assert!(bob_prefs.reply_language.is_none());
+        assert!(!bob_prefs.memory_enabled);
     }
 
     #[cfg(feature = "db-sqlite")]
@@ -300,30 +307,34 @@ mod preferences {
         let scoped = db.for_user(user).preferences();
 
         let updated = scoped
-            .upsert(false, false, Some("es".into()), None, None)
+            .upsert(false, false, Some("es".into()), None, None, false)
             .await
             .expect("upsert with Some");
         assert_eq!(updated.reply_language.as_deref(), Some("es"));
+        assert!(!updated.memory_enabled);
 
         let reread = scoped.get().await.expect("reread Some");
         assert_eq!(reread.reply_language.as_deref(), Some("es"));
         assert!(!reread.share_location_enabled);
         assert!(!reread.share_timezone_enabled);
+        assert!(!reread.memory_enabled);
 
         // Clearing the language (PUT with `null`) must NOT touch the
         // boolean opt-ins — the row is a strict atomic replace of the
         // triple, not a partial update.
         let cleared = scoped
-            .upsert(true, true, None, None, None)
+            .upsert(true, true, None, None, None, false)
             .await
             .expect("upsert with None");
         assert!(cleared.reply_language.is_none());
         assert!(cleared.share_location_enabled);
         assert!(cleared.share_timezone_enabled);
+        assert!(!cleared.memory_enabled);
         let reread = scoped.get().await.expect("reread None");
         assert!(reread.reply_language.is_none());
         assert!(reread.share_location_enabled);
         assert!(reread.share_timezone_enabled);
+        assert!(!reread.memory_enabled);
     }
 
     #[cfg(feature = "db-postgres")]
@@ -342,12 +353,12 @@ mod preferences {
             .unwrap();
         let scoped = db.for_user(user).preferences();
         let updated = scoped
-            .upsert(false, false, Some("ja".into()), None, None)
+            .upsert(false, false, Some("ja".into()), None, None, false)
             .await
             .expect("pg upsert Some");
         assert_eq!(updated.reply_language.as_deref(), Some("ja"));
         let cleared = scoped
-            .upsert(false, false, None, None, None)
+            .upsert(false, false, None, None, None, false)
             .await
             .expect("pg upsert None");
         assert!(cleared.reply_language.is_none());
@@ -378,6 +389,7 @@ mod preferences {
                 None,
                 Some("Reply concisely.".to_string()),
                 Some(0.5),
+                false,
             )
             .await
             .expect("upsert with Some");
@@ -386,6 +398,7 @@ mod preferences {
             Some("Reply concisely.")
         );
         assert_eq!(updated.temperature, Some(0.5));
+        assert!(!updated.memory_enabled);
 
         let reread = scoped.get().await.expect("reread Some");
         assert_eq!(
@@ -396,18 +409,20 @@ mod preferences {
         // Booleans untouched.
         assert!(!reread.share_location_enabled);
         assert!(!reread.share_timezone_enabled);
+        assert!(!reread.memory_enabled);
 
         // Clearing both (PUT with `null`) must NOT touch the boolean
         // opt-ins or the reply language — the row is a strict atomic
         // replace of the quintuple, not a partial update.
         let cleared = scoped
-            .upsert(true, true, Some("fr".into()), None, None)
+            .upsert(true, true, Some("fr".into()), None, None, false)
             .await
             .expect("upsert with None");
         assert!(cleared.additional_instructions.is_none());
         assert!(cleared.temperature.is_none());
         assert!(cleared.share_location_enabled);
         assert!(cleared.share_timezone_enabled);
+        assert!(!cleared.memory_enabled);
         assert_eq!(cleared.reply_language.as_deref(), Some("fr"));
 
         let reread = scoped.get().await.expect("reread None");
@@ -415,6 +430,7 @@ mod preferences {
         assert!(reread.temperature.is_none());
         assert!(reread.share_location_enabled);
         assert!(reread.share_timezone_enabled);
+        assert!(!reread.memory_enabled);
         assert_eq!(reread.reply_language.as_deref(), Some("fr"));
     }
 
@@ -435,7 +451,14 @@ mod preferences {
             .unwrap();
         let scoped = db.for_user(user).preferences();
         let updated = scoped
-            .upsert(false, false, None, Some("Be terse.".to_string()), Some(0.3))
+            .upsert(
+                false,
+                false,
+                None,
+                Some("Be terse.".to_string()),
+                Some(0.3),
+                false,
+            )
             .await
             .expect("pg upsert Some");
         assert_eq!(
@@ -448,12 +471,14 @@ mod preferences {
         // parity check.
         let t = updated.temperature.expect("temperature round-trip");
         assert!((t - 0.3_f32).abs() < 1e-5);
+        assert!(!updated.memory_enabled);
         let cleared = scoped
-            .upsert(false, false, None, None, None)
+            .upsert(false, false, None, None, None, false)
             .await
             .expect("pg upsert None");
         assert!(cleared.additional_instructions.is_none());
         assert!(cleared.temperature.is_none());
+        assert!(!cleared.memory_enabled);
     }
 }
 
@@ -857,4 +882,295 @@ async fn postgres_parity_credentials_scoped() {
         .expect("pg upsert");
     let row = creds.fetch("svc", "k").await.expect("fetch").expect("row");
     assert_eq!(row.nonce, nonce);
+}
+
+// ---- memories (scoped) ---------------------------------------------------
+//
+// Plan 1791267136806 §3.1: assert the per-user triple table's `upsert` /
+// `recall` / `list_meta` / `forget` paths round-trip the planned SQL
+// shape. The encryption itself is exercised end-to-end in the
+// `nagent-server` integration tests (where the AES-GCM key is
+// available); here we focus on the SQL plumbing.
+
+#[cfg(test)]
+mod memories {
+    use super::*;
+
+    use crate::types::NewMemoryRequest;
+
+    fn sample(
+        subject: &str,
+        predicate: &str,
+        value_ct: &[u8],
+        confidence: f32,
+        tags: &str,
+    ) -> NewMemoryRequest {
+        NewMemoryRequest {
+            subject: subject.into(),
+            predicate: predicate.into(),
+            value_nonce: vec![0xAA; 12],
+            value_ciphertext: value_ct.to_vec(),
+            notes_nonce: None,
+            notes_ciphertext: None,
+            tags: tags.into(),
+            confidence,
+            source_session_id: None,
+            source_kind: "user_stated".into(),
+        }
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn memories_store_dedup_replaces_existing_row() {
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("dedup@example.com", "Dedup", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let mem = db.for_user(user).memories();
+        let id1 = mem
+            .upsert(sample("doctor", "name", b"first", 1.0, ""))
+            .await
+            .expect("first upsert");
+        // Second upsert with the same (subject, predicate) REPLACES the row.
+        let id2 = mem
+            .upsert(sample("doctor", "name", b"second", 0.7, ""))
+            .await
+            .expect("second upsert");
+        assert_eq!(id1, id2, "dedup keeps the existing row id");
+        let rows = mem.recall(None, None, None, 64).await.expect("recall");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value_ciphertext, b"second");
+        // Confidence from the second call wins.
+        assert!((rows[0].confidence - 0.7).abs() < 1e-5);
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn memories_store_isolates_per_user() {
+        let db = sqlite_db().await;
+        let alice = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let bob = db
+            .admin()
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"h"))
+            .await
+            .unwrap();
+        db.for_user(alice)
+            .memories()
+            .upsert(sample("doctor", "name", b"a-doc", 1.0, ""))
+            .await
+            .unwrap();
+        // Bob's recall must NOT see Alice's row.
+        let bob_rows = db
+            .for_user(bob)
+            .memories()
+            .recall(None, None, None, 64)
+            .await
+            .unwrap();
+        assert!(bob_rows.is_empty());
+        let alice_rows = db
+            .for_user(alice)
+            .memories()
+            .recall(None, None, None, 64)
+            .await
+            .unwrap();
+        assert_eq!(alice_rows.len(), 1);
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn memories_recall_filters_subject_predicate_and_tag() {
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("filter@example.com", "Filter", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let mem = db.for_user(user).memories();
+        mem.upsert(sample("doctor", "name", b"doc-1", 1.0, "medical"))
+            .await
+            .unwrap();
+        mem.upsert(sample("allergy", "type", b"penicillin", 1.0, "medical"))
+            .await
+            .unwrap();
+        mem.upsert(sample("wife", "name", b"Alice", 0.9, "family"))
+            .await
+            .unwrap();
+
+        // subject LIKE %doctor% → 1 row
+        let r = mem.recall(Some("doctor"), None, None, 64).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].subject, "doctor");
+        // predicate LIKE %type% → 1 row
+        let r = mem.recall(None, Some("type"), None, 64).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].predicate, "type");
+        // tags LIKE %family% → 1 row
+        let r = mem.recall(None, None, Some("family"), 64).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].subject, "wife");
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn memories_recall_respects_limit_and_orders_by_confidence() {
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("limit@example.com", "Limit", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let mem = db.for_user(user).memories();
+        // 12 rows with distinct (subject, predicate) pairs so the
+        // dedup upsert doesn't collapse — and with descending
+        // confidence so the order check is meaningful. The limit
+        // is enforced first (LIMIT 5).
+        for i in 0..12 {
+            let conf = 1.0 - (i as f32) * 0.05;
+            mem.upsert(sample(
+                &format!("subject-{i}"),
+                "name",
+                format!("v-{i}").as_bytes(),
+                conf,
+                "",
+            ))
+            .await
+            .unwrap();
+        }
+        let rows = mem.recall(None, None, None, 5).await.unwrap();
+        assert_eq!(rows.len(), 5);
+        // First five confidences, descending.
+        let confidences: Vec<f32> = rows.iter().map(|r| r.confidence).collect();
+        let mut sorted = confidences.clone();
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert_eq!(confidences, sorted, "recall returns confidence-DESC order");
+        // And the bound: a `limit` larger than RECALL_HARD_LIMIT
+        // still returns at most RECALL_HARD_LIMIT rows.
+        let big = mem.recall(None, None, None, 10_000).await.unwrap();
+        assert_eq!(big.len(), crate::memories::RECALL_HARD_LIMIT.min(12));
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn memories_recall_bumps_last_used_at() {
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("recency@example.com", "Recency", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let mem = db.for_user(user).memories();
+        mem.upsert(sample("doctor", "name", b"doc", 1.0, ""))
+            .await
+            .unwrap();
+        // First recall: the upsert set last_used_at = NULL, so the
+        // row pre-recall has no timestamp.
+        let pre = mem
+            .list_meta(64)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject == "doctor")
+            .expect("row");
+        assert!(pre.last_used_at.is_none());
+        // After a recall the bumped timestamp is set.
+        let _ = mem.recall(None, None, None, 64).await.unwrap();
+        let post = mem
+            .list_meta(64)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject == "doctor")
+            .expect("row");
+        assert!(post.last_used_at.is_some());
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn memories_forget_scoped_to_user() {
+        let db = sqlite_db().await;
+        let alice = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let bob = db
+            .admin()
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let id = db
+            .for_user(alice)
+            .memories()
+            .upsert(sample("doctor", "name", b"x", 1.0, ""))
+            .await
+            .unwrap();
+        // Bob forgetting Alice's row returns Ok(0): the row exists
+        // but Bob cannot see / delete it.
+        let deleted = db.for_user(bob).memories().forget(id).await.unwrap();
+        assert_eq!(deleted, 0);
+        // Alice's row is still there.
+        let alice_rows = db
+            .for_user(alice)
+            .memories()
+            .recall(None, None, None, 64)
+            .await
+            .unwrap();
+        assert_eq!(alice_rows.len(), 1);
+        // Alice can delete her own row.
+        let deleted = db.for_user(alice).memories().forget(id).await.unwrap();
+        assert_eq!(deleted, 1);
+        let after = db
+            .for_user(alice)
+            .memories()
+            .recall(None, None, None, 64)
+            .await
+            .unwrap();
+        assert!(after.is_empty());
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn memories_value_round_trip_preserves_bytes() {
+        // The repository stores ciphertext verbatim and returns it
+        // verbatim; this test pins the bytes so a future change
+        // (e.g. accidentally hashing the value) is caught.
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("roundtrip@example.com", "RT", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let payload = b"the secret of life is 42, with padding \x00\x01\x02\x03";
+        let id = db
+            .for_user(user)
+            .memories()
+            .upsert(sample("answer", "value", payload, 1.0, ""))
+            .await
+            .unwrap();
+        let rows = db
+            .for_user(user)
+            .memories()
+            .recall(None, None, None, 64)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].value_ciphertext, payload);
+        assert_eq!(rows[0].value_nonce, vec![0xAA; 12]);
+    }
 }

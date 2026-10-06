@@ -75,6 +75,7 @@ import {
 } from "/static/geolocation.js";
 import {
   currentFlags as acquireCurrentPreferenceFlags,
+  getMemoryEnabled,
   getReplyLanguage,
   getSystem as acquireSystemPreference,
   getTemperature as acquireTemperaturePreference,
@@ -775,6 +776,13 @@ const locationStatusEl  = lazyEl("chat-location-status");
 // app-shell template and only resolve once the shell mounts.
 const timezoneToggleEl  = lazyEl("chat-timezone-toggle");
 const timezoneStatusEl  = lazyEl("chat-timezone-status");
+
+// Plan 1791267136806 §7.10: Settings-tab Memory opt-in toggle + the
+// metadata list rendered when memory is enabled. Both elements live
+// in the Settings tab; they resolve lazily through `lazyEl` so the
+// chat panel can boot without the Settings tab mounted yet.
+const memoryToggleEl = lazyEl("chat-memory-toggle");
+const memoryListEl   = lazyEl("chat-memory-list");
 
 // The active session id is read at every operation rather than
 // cached, so a same-tab mutation (delete, new chat, switch from the
@@ -2565,6 +2573,16 @@ function renderTimezoneUi() {
   }
 }
 
+/// Plan 1791267136806 §7.10: paint the Memory opt-in toggle from
+/// the cached `memory_enabled` flag. The metadata list is
+/// populated separately by `refreshMemoryList` so the spinner
+/// state is observable while the request is in flight.
+function renderMemoryUi() {
+  if (memoryToggleEl) {
+    memoryToggleEl.checked = !!getMemoryEnabled();
+  }
+}
+
 /// Click handler for `#chat-timezone-toggle`. The persisted flag is
 /// read at message-build time so a reload picks up the latest choice
 /// without any further bookkeeping.
@@ -2583,7 +2601,127 @@ function handleTimezoneToggleChange() {
     flags.reply_language,
     flags.additional_instructions,
     flags.temperature,
+    flags.memory_enabled,
   );
+}
+
+/// Plan 1791267136806 §7.10: click handler for `#chat-memory-toggle`.
+/// Same contract as the location / timezone toggles — `acquireCurrentPreferenceFlags`
+/// returns the cached state populated by `loadPreferencesFromServer`
+/// at boot, and the PUT body carries the *full* sextuple so the
+/// server-side atomic-replace doesn't accidentally flip the other
+/// five preferences.
+function handleMemoryToggleChange() {
+  const flags = acquireCurrentPreferenceFlags();
+  savePreferencesToServer(
+    flags.location,
+    flags.timezone,
+    flags.reply_language,
+    flags.additional_instructions,
+    flags.temperature,
+    !!memoryToggleEl?.checked,
+  );
+  // Repaint the metadata list — flipping the toggle on triggers a
+  // fresh fetch so the "Loading stored memories…" placeholder is
+  // replaced with the actual rows (or the empty state).
+  refreshMemoryList();
+}
+
+/// Fetch the metadata-only list of memories and paint it into
+/// `#chat-memory-list`. Mirrors the auto-prompt block shape (one
+/// `<li>` per row with the `subject predicate` label) so the user
+/// sees what the LLM is reasoning over. Per-row Forget action is a
+/// follow-up — plan §8 reserves the full editor for v2.
+async function refreshMemoryList() {
+  if (!memoryListEl) return;
+  try {
+    const resp = await fetch("/api/memories", {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: window.nagentAuth?.csrfHeaders?.() || {},
+    });
+    if (!resp.ok) {
+      // 401 = anonymous on an auth-enabled server; 404 = the route
+      // is not mounted (memory feature off). Either way the list
+      // collapses to "Memory is disabled." so the user is not
+      // surprised by a spinner that never resolves.
+      if (resp.status !== 401 && resp.status !== 404) {
+        console.warn("memories fetch failed:", resp.status);
+      }
+      memoryListEl.innerHTML = "";
+      const li = document.createElement("li");
+      li.className = "chat-memory-list-empty";
+      li.textContent = "Memory subsystem disabled or unavailable.";
+      memoryListEl.appendChild(li);
+      return;
+    }
+    const body = await resp.json();
+    const rows = Array.isArray(body?.data) ? body.data : [];
+    memoryListEl.innerHTML = "";
+    if (rows.length === 0) {
+      const li = document.createElement("li");
+      li.className = "chat-memory-list-empty";
+      li.textContent = "No stored memories yet — the LLM will offer to remember durable facts as you share them.";
+      memoryListEl.appendChild(li);
+      return;
+    }
+    for (const r of rows) {
+      const li = document.createElement("li");
+      li.className = "chat-memory-list-row";
+      li.dataset.memoryId = r.id || "";
+      const label = document.createElement("span");
+      label.className = "chat-memory-list-label";
+      label.textContent = `${r.subject || "?"} · ${r.predicate || "?"} (${r.source_kind || "user_stated"})`;
+      li.appendChild(label);
+      if (r.tags) {
+        const tags = document.createElement("span");
+        tags.className = "chat-memory-list-tags";
+        tags.textContent = ` ${r.tags}`;
+        li.appendChild(tags);
+      }
+      // Forget action (per-row). The plan §2.3 sets the LLM-side
+      // memory_forget tool as destructive-but-confirmable; the
+      // SPA just needs a plain DELETE so we surface a confirm()
+      // before issuing it. Encryption is per-row (no plaintext
+      // ever leaves the auto-prompt block), so the "delete" is
+      // just a row removal.
+      const forget = document.createElement("button");
+      forget.type = "button";
+      forget.className = "ghost";
+      forget.textContent = "Forget";
+      forget.addEventListener("click", async () => {
+        if (!confirm("Forget this stored memory?")) return;
+        try {
+          const r2 = await fetch(
+            `/api/memories/${encodeURIComponent(li.dataset.memoryId)}`,
+            {
+              method: "DELETE",
+              credentials: "same-origin",
+              headers: window.nagentAuth?.csrfHeaders?.() || {},
+            },
+          );
+          if (!r2.ok) {
+            if (r2.status === 404) {
+              // Already gone (race) — repaint and call it good.
+              refreshMemoryList();
+              return;
+            }
+            if (r2.status !== 401) {
+              console.warn("memory forget failed:", r2.status);
+            }
+            return;
+          }
+          refreshMemoryList();
+        } catch (e) {
+          console.warn("memory forget error:", e);
+        }
+      });
+      li.appendChild(forget);
+      memoryListEl.appendChild(li);
+    }
+  } catch (e) {
+    console.warn("memories fetch error:", e);
+  }
 }
 
 /// Update every geolocation control from the current cache + toggle.
@@ -2655,6 +2793,7 @@ async function handleShareLocationClick() {
     savePreferencesToServer(
       true, flags.timezone, flags.reply_language,
       flags.additional_instructions, flags.temperature,
+      flags.memory_enabled,
     );
     renderLocationUi();
   } catch (err) {
@@ -2686,6 +2825,7 @@ function handleLocationToggleChange() {
     flags.reply_language,
     flags.additional_instructions,
     flags.temperature,
+    flags.memory_enabled,
   );
   renderLocationUi();
 }
@@ -2700,6 +2840,7 @@ async function handleLocationRefreshClick() {
     savePreferencesToServer(
       true, flags.timezone, flags.reply_language,
       flags.additional_instructions, flags.temperature,
+      flags.memory_enabled,
     );
     if (locationToggleEl) locationToggleEl.checked = true;
     renderLocationUi();
@@ -2719,6 +2860,7 @@ function handleLocationForgetClick() {
   savePreferencesToServer(
     false, flags.timezone, flags.reply_language,
     flags.additional_instructions, flags.temperature,
+    flags.memory_enabled,
   );
   if (locationToggleEl) locationToggleEl.checked = false;
   renderLocationUi();
@@ -2751,6 +2893,7 @@ async function refreshLocationOnBoot() {
     savePreferencesToServer(
       false, flags.timezone, flags.reply_language,
       flags.additional_instructions, flags.temperature,
+      flags.memory_enabled,
     );
   }
   renderLocationUi();
@@ -4197,6 +4340,7 @@ function handleReplyLanguageChange() {
     next || null,
     flags.additional_instructions,
     flags.temperature,
+    flags.memory_enabled,
   );
 }
 
@@ -4217,6 +4361,7 @@ function handleSystemInput() {
     flags.reply_language,
     next || null,
     flags.temperature,
+    flags.memory_enabled,
   );
 }
 
@@ -4238,6 +4383,7 @@ function handleTemperatureInput() {
     flags.reply_language,
     flags.additional_instructions,
     next,
+    flags.memory_enabled,
   );
 }
 
@@ -4261,6 +4407,7 @@ function handleLlmResetClick() {
     flags.reply_language,
     null,
     temperature,
+    flags.memory_enabled,
   );
 }
 
@@ -4301,6 +4448,13 @@ function wireLocationControlsOnce() {
     ?.addEventListener("input", handleTemperatureInput);
   document.getElementById("settings-llm-reset")
     ?.addEventListener("click", handleLlmResetClick);
+  // Plan 1791267136806 §7.10: long-term memory opt-in. The toggle
+  // shares the existing `savePreferencesToServer` atomic-replace
+  // contract — the Settings-tab card is a regular preferences
+  // field, just with a richer UI than the location / timezone
+  // toggles.
+  document.getElementById("chat-memory-toggle")
+    ?.addEventListener("change", handleMemoryToggleChange);
   // Elements are now live — paint the cached state and kick off the
   // boot-time position refresh. Both are no-ops on a fresh visit (no
   // cached fix, toggle off).
@@ -4319,6 +4473,8 @@ function wireLocationControlsOnce() {
     renderTimezoneUi();
     renderReplyLanguageUi();
     renderLlmSettingsUi();
+    renderMemoryUi();
+    refreshMemoryList();
   });
   // Reply-language picker bootstrap: seed from the localStorage
   // mirror first (synchronous, runs before the server fetch so
@@ -4331,6 +4487,7 @@ function wireLocationControlsOnce() {
   // when it resolves — see the `.then()` handler above.
   renderReplyLanguageUi();
   renderLlmSettingsUi();
+  renderMemoryUi();
   preselectFromBrowser($("chat-reply-language"));
   renderLocationUi();
   renderTimezoneUi();

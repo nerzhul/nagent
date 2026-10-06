@@ -538,6 +538,30 @@
         </div>
         <p id="chat-location-status" class="chat-location-status">…</p>
       </div>
+      <!--
+        Plan 1791267136806 §7.10: long-term memory opt-in. The
+        toggle is off by default; flipping it on tells the LLM it
+        may call `memory_store` proactively when the user shares a
+        durable fact, and exposes the auto-injected "The user's long-
+        term memories include:" block at the start of every chat
+        turn. The "Stored memories" list + per-row Forget action is
+        rendered below the toggle (initial population deferred — plan
+        §8 reserves the metadata-only SPA view for a follow-up).
+      -->
+      <div class="chat-memory-advanced settings-row">
+        <label class="chat-memory-toggle-label">
+          <input id="chat-memory-toggle" type="checkbox">
+          Remember durable facts across chats (encrypted at rest)
+        </label>
+        <p class="chat-memory-toggle-help">
+          When this is on, it remembers things like "my doctor is Dr Martin" or "I'm allergic to penicillin"
+          and surfaces them automatically. Plaintext is AES-256-GCM encrypted at rest; the operator cannot
+          read your stored facts. You can view + delete any stored fact in the list below.
+        </p>
+        <ul id="chat-memory-list" class="chat-memory-list">
+          <li class="chat-memory-list-empty">Loading stored memories…</li>
+        </ul>
+      </div>
     </section>
 
     <section class="settings-section" id="settings-llm" aria-labelledby="settings-llm-title">

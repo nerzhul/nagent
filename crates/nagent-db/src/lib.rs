@@ -53,6 +53,7 @@ pub mod credentials;
 pub mod documents;
 pub mod error;
 pub mod events;
+pub mod memories;
 pub mod migrate;
 pub mod passkeys;
 pub mod pool;
@@ -73,9 +74,9 @@ pub use pool::{DbEngine, DbOptions};
 // domain module they came from.
 pub use error::Error;
 pub use types::{
-    AuthUser, AuthUserRecord, DocumentRow, MigrationRow, MigrationStatus, NewAuthEvent,
-    NewPasskeyRecord, PasskeyRecord, SessionRecord, SessionSource, SessionTokenHash,
-    UserCredentialRow, UserPreferences, SESSION_HASH_BYTES, SESSION_TOKEN_BYTES,
+    AuthUser, AuthUserRecord, DocumentRow, MemoryMeta, MemoryRow, MigrationRow, MigrationStatus,
+    NewAuthEvent, NewMemoryRequest, NewPasskeyRecord, PasskeyRecord, SessionRecord, SessionSource,
+    SessionTokenHash, UserCredentialRow, UserPreferences, SESSION_HASH_BYTES, SESSION_TOKEN_BYTES,
 };
 
 /// Engine-agnostic DB handle. Cheap to clone (each repository wraps
@@ -150,9 +151,9 @@ impl Db {
 
     /// Capability-narrowed handle for unscoped, cross-user
     /// operations. Production code reaches for it only from the
-    /// `nagent-server` CLI subcommands and the documents purge
-    /// job; the layering guard (package E) bans the call site
-    /// anywhere else.
+    /// `nagent-server` CLI subcommands and the documents purge job;
+    /// the layering guard (package E) bans the call site anywhere
+    /// else.
     pub fn admin(&self) -> AdminDb {
         AdminDb {
             users: users::Users::new(&self.pool),
@@ -163,6 +164,7 @@ impl Db {
             preferences: preferences::Preferences::new(&self.pool),
             documents: documents::Documents::new(&self.pool),
             chat_sessions: chat_sessions::ChatSessions::new(&self.pool),
+            memories: memories::Memories::new(&self.pool),
         }
     }
 
@@ -411,6 +413,15 @@ impl UserDb {
     pub fn sessions(&self) -> sessions::ScopedSessions {
         sessions::Sessions::new(&self.inner.pool).for_user(self.user_id)
     }
+
+    /// Scoped memories: `upsert` / `recall` / `list_meta` /
+    /// `forget` filter by `user_id` automatically. Plan
+    /// 1791267136806 §1.4 (memory row stays encrypted at rest;
+    /// the server-side `MemorySource` adapter owns the
+    /// `[auth.credentials].key` and decrypts inside the request).
+    pub fn memories(&self) -> memories::ScopedMemories {
+        memories::Memories::new(&self.inner.pool).for_user(self.user_id)
+    }
 }
 
 /// Capability-narrowed handle for unscoped, cross-user
@@ -432,6 +443,7 @@ pub struct AdminDb {
     pub preferences: preferences::Preferences,
     pub documents: documents::Documents,
     pub chat_sessions: chat_sessions::ChatSessions,
+    pub memories: memories::Memories,
 }
 
 impl AdminDb {
@@ -448,6 +460,7 @@ impl AdminDb {
             preferences: preferences::Preferences::new(pool),
             documents: documents::Documents::new(pool),
             chat_sessions: chat_sessions::ChatSessions::new(pool),
+            memories: memories::Memories::new(pool),
         }
     }
 }

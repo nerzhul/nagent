@@ -90,6 +90,13 @@ pub struct LlmState {
     /// `AgentConfig`, and the proxy needs both the runtime state
     /// (client + rate limiter) and the config (knobs).
     pub cfg: LlmConfig,
+    /// Per-user encrypted long-term memory source (plan
+    /// 1791267136806, §2.2). `None` when the operator killed the
+    /// subsystem (`LLM_ALLOW_USER_MEMORY=false` / no
+    /// `[auth.credentials].key`). The proxy threads a per-request
+    /// `Arc<dyn MemorySource>` into every chat-session
+    /// `UserContext` so the four `memory_*` agents can run.
+    pub memory_source: Option<Arc<dyn nagent_agents::agents::MemorySource>>,
 }
 
 impl std::fmt::Debug for LlmState {
@@ -97,6 +104,10 @@ impl std::fmt::Debug for LlmState {
         f.debug_struct("LlmState")
             .field("client", &"<LlmClient>")
             .field("rate_limiter", &self.rate_limiter)
+            .field(
+                "memory_source",
+                &self.memory_source.as_ref().map(|_| "<memory source>"),
+            )
             .finish()
     }
 }

@@ -321,6 +321,7 @@ impl AppStateBuilder {
             client,
             rate_limiter: llm_limiter.clone(),
             cfg: self.config.llm.clone(),
+            memory_source: None,
         });
 
         let auth = self.auth_store.map(|store| {
@@ -435,6 +436,7 @@ fn default_test_config() -> Config {
             allow_user_location: true,
             allow_user_timezone: true,
             allow_user_reply_language: true,
+            allow_user_memory: true,
             llm_max_tool_rounds: 4,
             llm_max_auto_continues: 0,
             num_predict: None,

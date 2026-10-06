@@ -1,4 +1,31 @@
 //! Auth events repository.
+//!
+//! ## Audit row kinds
+//!
+//! Every per-user action through the auth subtree writes one row
+//! to `auth_events`. The `kind` column is the discriminator; the
+//! `target_service` column carries the integration id when the
+//! event is scoped to a credential vault row (currently `caldav`,
+//! `x_account`, or — plan 1791267136806 — `memory`).
+//!
+//! | `kind`                        | `target_service` | Emitted by                                |
+//! |-------------------------------|------------------|-------------------------------------------|
+//! | `login_success`               | (none)           | `auth::routes::login_handler`             |
+//! | `login_failure`               | (none)           | `auth::routes::login_handler`             |
+//! | `logout`                      | (none)           | `auth::routes::logout_handler`            |
+//! | `credential_access`          | service id       | `credentials::resolver` (read or write)   |
+//! | `credential_missing`          | service id       | `credentials::resolver` (no row)         |
+//! | `credential_decrypt_failed`   | service id       | `credentials::resolver` (AES-GCM auth)    |
+//! | `memory_store`                | `memory`         | `memories::adapter` (plan 1791267136806) |
+//! | `memory_recall`               | `memory`         | `memories::adapter` (plan 1791267136806) |
+//! | `memory_forget`               | `memory`         | `memories::adapter` (plan 1791267136806) |
+//! | `memory_inject`               | `memory`         | reserved for follow-up per-row throttling|
+//! | `memory_decrypt_failed`       | `memory`         | `memories::adapter` (AES-GCM auth)        |
+//!
+//! Rows are appended by the `record_event` helper, which fires the
+//! insert on a `tokio::spawn` so a slow DB never blocks the hot path.
+//! All errors are logged at WARN; the caller's response is
+//! unaffected.
 
 use crate::pool::AnyPool;
 use crate::types::NewAuthEvent;

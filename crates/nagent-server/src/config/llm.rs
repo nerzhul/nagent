@@ -150,6 +150,21 @@ pub struct LlmConfig {
     /// from the other two flags: an operator may forbid one without
     /// touching the others.
     pub allow_user_reply_language: bool,
+    /// Whether the proxy is allowed to inject the per-user long-term
+    /// memory system message (`USER_MEMORIES_MARKER`) when the
+    /// authenticated user has opted in via `memory_enabled`. The
+    /// kill-switch exists for symmetry with `allow_user_location` /
+    /// `allow_user_timezone` / `allow_user_reply_language` so
+    /// operators handling sensitive deployments can forbid the
+    /// memory hint from reaching the upstream model regardless of
+    /// what the user picked in Settings → Memory. Env var
+    /// `LLM_ALLOW_USER_MEMORY`, TOML key
+    /// `[llm].allow_user_memory`. Defaults to `true` — the user's
+    /// `memory_enabled` opt-in is the primary gate; the auto-prompt
+    /// injection is skipped regardless when this flag is `false`.
+    /// Independent from the other three flags: an operator may
+    /// forbid one without touching the others.
+    pub allow_user_memory: bool,
     /// Maximum number of tool-call rounds a single user turn may
     /// trigger before the proxy bails out and surfaces an error
     /// bubble. Defends against models that loop on a tool call.
@@ -212,6 +227,7 @@ impl Default for LlmConfig {
             allow_user_location: true,
             allow_user_timezone: true,
             allow_user_reply_language: true,
+            allow_user_memory: true,
             llm_max_tool_rounds: 64,
             llm_max_auto_continues: 32,
             num_predict: None,
@@ -285,6 +301,12 @@ impl LlmConfig {
             defaults.allow_user_reply_language,
             "LLM_ALLOW_USER_REPLY_LANGUAGE",
         )?;
+        let allow_user_memory = resolve_primitive(
+            env_opt("LLM_ALLOW_USER_MEMORY").as_deref(),
+            toml.allow_user_memory,
+            defaults.allow_user_memory,
+            "LLM_ALLOW_USER_MEMORY",
+        )?;
         let llm_max_tool_rounds = resolve_primitive(
             env_opt("LLM_MAX_TOOL_ROUNDS").as_deref(),
             toml.llm_max_tool_rounds,
@@ -322,6 +344,7 @@ impl LlmConfig {
             allow_user_location,
             allow_user_timezone,
             allow_user_reply_language,
+            allow_user_memory,
             llm_max_tool_rounds,
             llm_max_auto_continues,
             num_predict,

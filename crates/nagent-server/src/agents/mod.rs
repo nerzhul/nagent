@@ -268,6 +268,7 @@ pub fn build_registry(
         read_document: cfg.read_document.clone().into(),
         caldav: cfg.caldav.clone().into(),
         x_timeline: cfg.x_timeline.clone().into(),
+        memory: cfg.memory.clone().into(),
     };
     // Plan 4.C (C): one shared `EgressPool` is built per process
     // and passed to every agent. Strict-class agents
@@ -382,6 +383,19 @@ impl From<crate::config::agents::XTimelineConfig> for nagent_agents::XTimelineAg
             allowlist: c.allowlist,
             cache_ttl_secs: c.cache_ttl_secs,
             base_url: c.base_url,
+        }
+    }
+}
+
+impl From<crate::config::agents::MemoryConfig> for nagent_agents::config::MemoryAgentConfig {
+    fn from(c: crate::config::agents::MemoryConfig) -> Self {
+        // The runtime config is field-for-field identical to the
+        // agents-crate struct; the only reason for the pair is
+        // that the TOML / env parsing lives in `nagent-server`'s
+        // `config::agents` module while the agents crate stays
+        // TOML-free.
+        Self {
+            recalled_top_k: c.recalled_top_k,
         }
     }
 }

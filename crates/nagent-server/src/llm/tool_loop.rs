@@ -31,6 +31,7 @@ use crate::llm::sse::{
     drain_upstream_round, sse_error_event, sse_tool_call_event, sse_tool_result_event,
     sse_tool_result_needs_approval, UpstreamByteStream,
 };
+use nagent_agents::agents::MemorySource;
 
 /// Run the tool loop until the LLM stops or we hit `max_rounds`.
 ///
@@ -107,6 +108,7 @@ pub(crate) async fn run_tool_loop(
     chat_session_id: Option<uuid::Uuid>,
     user_id: uuid::Uuid,
     resolver: Option<Arc<dyn SecretSource>>,
+    memory_source: Option<Arc<dyn MemorySource>>,
     permission_store: PermissionStore,
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
@@ -428,11 +430,27 @@ pub(crate) async fn run_tool_loop(
             // to the right session. Otherwise fall back to
             // `for_tests` and let the session-scoped agents
             // surface a clear tool error.
+            //
+            // The `memory_source` (plan 1791267136806, §7.6) is
+            // attached via `for_chat_session_with_memories` whenever
+            // the operator compiled the `memory-agent` feature AND
+            // `LLM_ALLOW_USER_MEMORY=true`. When the source is
+            // absent, the four `memory_*` agents fail closed with
+            // `AgentError::AgentFailed("memory: source not wired
+            // in this context")` — the chat UI shows a clear
+            // "memory subsystem disabled" error rather than a
+            // confusing 500.
             let services = nagent_agents::ServiceRegistry::empty().into_arc();
             let resolver = resolver.clone();
-            let mut ctx = match chat_session_id {
-                Some(sid) => UserContext::for_chat_session(user_id, services, resolver, None, sid),
-                None => UserContext::for_tests(user_id, services),
+            let memory_source = memory_source.clone();
+            let mut ctx = match (chat_session_id, memory_source.clone()) {
+                (Some(sid), Some(mem)) => UserContext::for_chat_session_with_memories(
+                    user_id, services, resolver, None, mem, sid,
+                ),
+                (Some(sid), None) => {
+                    UserContext::for_chat_session(user_id, services, resolver, None, sid)
+                }
+                (None, _) => UserContext::for_tests(user_id, services),
             };
             // Plan 4.C: record the invocation so the next tool
             // call in this turn can ask the agent's

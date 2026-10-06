@@ -263,3 +263,26 @@ impl Default for XTimelineAgentConfig {
         }
     }
 }
+
+/// Knobs for the four memory agents
+/// (`memory_store` / `memory_recall` / `memory_list` /
+/// `memory_forget`, plan 1791267136806).
+#[derive(Debug, Clone)]
+pub struct MemoryAgentConfig {
+    /// Maximum number of decrypted rows the `memory_recall` agent
+    /// returns in one call. The repository already caps at
+    /// `nagent_db::memories::RECALL_HARD_LIMIT = 64`; this knob
+    /// trims it further so the LLM only sees a digestable slice.
+    pub recalled_top_k: usize,
+}
+
+impl Default for MemoryAgentConfig {
+    fn default() -> Self {
+        // Default mirrors the plan §1.4 "K = 10 for the
+        // auto-prompt". Both the auto-prompt injection and the
+        // `memory_recall` agent use this knob; the two paths
+        // share the same effect because the system block is
+        // decrypted at most once per turn.
+        Self { recalled_top_k: 10 }
+    }
+}

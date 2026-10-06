@@ -180,6 +180,166 @@ pub struct DocumentPayload {
     pub text: String,
 }
 
+/// What an agent needs from the memory subtree to read / write /
+/// list / forget per-user long-term memories. Plan 1791267136806.
+///
+/// The crate boundary is the same shape as the other capability
+/// traits: the agents crate never sees the raw `nagent_db::Db` or
+/// the AES-GCM key. The implementation lives in `nagent-server`
+/// (`UserDbMemorySource`, which holds an `Arc<CredentialsKey>` and
+/// wraps `nagent_db::memories::Memories`).
+///
+/// Recall returns `DecryptedMemory` so the agents receive the
+/// plaintext `value` / `notes` inside a `SecretString`; the per-
+/// request plaintext lifetime is bounded by the calling scope
+/// (the `UserContext::Drop` impl zeroises the secret cache, and the
+/// `DecryptedMemory` itself is held only for the duration of the
+/// `Agent::invoke` call).
+#[async_trait]
+pub trait MemorySource: Send + Sync {
+    /// Persist one (plaintext) memory for `user_id`. The
+    /// implementation encrypts `value` + `notes` with the server-
+    /// side `[auth.credentials].key` (reusing the existing AES-256-
+    /// GCM helpers from `nagent_server::credentials::crypto`) and
+    /// upserts the row through `nagent_db::memories::Memories`.
+    /// Returns the new (or pre-existing, on `(subject, predicate)`
+    /// collision) memory id.
+    async fn store(&self, user_id: Uuid, request: MemoryWriteRequest) -> Result<Uuid, AgentError>;
+
+    /// Decrypt + return up to `limit` memories for `user_id`,
+    /// optionally filtered by `subject` / `predicate` / `tags`
+    /// (case-insensitive `LIKE` patterns with `%` wildcards).
+    /// `limit` is hard-capped at the repository level
+    /// (`memories::RECALL_HARD_LIMIT = 64`) so a corrupt row cannot
+    /// drive unbounded decrypt work.
+    async fn recall(
+        &self,
+        user_id: Uuid,
+        subject: Option<&str>,
+        predicate: Option<&str>,
+        tags: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DecryptedMemory>, AgentError>;
+
+    /// List metadata for `user_id`, newest first. Metadata-only —
+    /// the encrypted bytes are NOT returned (the SPA renders the
+    /// Settings tab Memory list with `subject` / `predicate` /
+    /// `tags` / `confidence` and a "Forget" button).
+    async fn list_meta(&self, user_id: Uuid, limit: usize) -> Result<Vec<MemoryMeta>, AgentError>;
+
+    /// Forget one memory by id. Cross-user attempts return
+    /// `AgentError::AgentFailed("memory: cross-user forget refused")`
+    /// so the LLM cannot tell "exists but other user" from "does
+    /// not exist".
+    async fn forget(&self, user_id: Uuid, id: Uuid) -> Result<(), AgentError>;
+}
+
+/// Plaintext input to [`MemorySource::store`].
+///
+/// Lives at the agents layer (not under `nagent_db`) because the
+/// agents crate must not depend on `nagent_db` (the "agents do not
+/// see the DB" layering rule, see `docs/architecture.md`
+/// §Workspace layout). The `nagent-server` adapter encrypts each
+/// `SecretString` field with the server-side
+/// `[auth.credentials].key` and forwards the ciphertext to
+/// `nagent_db::memories::Memories::upsert` as a
+/// `nagent_db::NewMemoryRequest`.
+#[derive(Clone)]
+pub struct MemoryWriteRequest {
+    pub subject: String,
+    pub predicate: String,
+    pub value: secrecy::SecretString,
+    pub notes: Option<secrecy::SecretString>,
+    pub tags: String,
+    pub confidence: f32,
+    pub source_session_id: Option<String>,
+    pub source_kind: String,
+}
+
+impl std::fmt::Debug for MemoryWriteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryWriteRequest")
+            .field("subject", &self.subject)
+            .field("predicate", &self.predicate)
+            .field("value", &"<redacted SecretString>")
+            .field(
+                "notes",
+                &self.notes.as_ref().map(|_| "<redacted SecretString>"),
+            )
+            .field("tags", &self.tags)
+            .field("confidence", &self.confidence)
+            .field("source_session_id", &self.source_session_id)
+            .field("source_kind", &self.source_kind)
+            .finish()
+    }
+}
+
+/// Decrypted view of one memory row. Returned by
+/// [`MemorySource::recall`].
+///
+/// The `value` and `notes` fields are `SecretString` so the
+/// plaintext buffer zeroises on drop. The struct itself is `Debug`
+/// but the `Display` impl (and the `tracing` "value" field)
+/// intentionally never prints the plaintext — same posture as
+/// `BasicAuth::Debug`.
+#[derive(Clone)]
+pub struct DecryptedMemory {
+    pub id: Uuid,
+    pub subject: String,
+    pub predicate: String,
+    pub value: secrecy::SecretString,
+    pub notes: Option<secrecy::SecretString>,
+    pub tags: String,
+    pub confidence: f32,
+    pub source_session_id: Option<String>,
+    pub source_kind: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl std::fmt::Debug for DecryptedMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedMemory")
+            .field("id", &self.id)
+            .field("subject", &self.subject)
+            .field("predicate", &self.predicate)
+            .field("value", &"<redacted SecretString>")
+            .field(
+                "notes",
+                &self.notes.as_ref().map(|_| "<redacted SecretString>"),
+            )
+            .field("tags", &self.tags)
+            .field("confidence", &self.confidence)
+            .field("source_session_id", &self.source_session_id)
+            .field("source_kind", &self.source_kind)
+            .field("created_at", &self.created_at)
+            .field("last_used_at", &self.last_used_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Metadata-only view of a memory row. Returned by
+/// [`MemorySource::list_meta`]. Mirrors the `nagent_db::MemoryMeta`
+/// row shape verbatim; the `nagent-server` adapter does the trivial
+/// field-for-field conversion so the agents crate never depends on
+/// `nagent-db` (the "agents do not depend on nagent-db" layering
+/// rule, see `docs/architecture.md` §"Workspace layout").
+#[derive(Debug, Clone)]
+pub struct MemoryMeta {
+    pub id: Uuid,
+    pub subject: String,
+    pub predicate: String,
+    pub tags: String,
+    pub confidence: f32,
+    pub source_session_id: Option<String>,
+    pub source_kind: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 // ---------------------------------------------------------------------------
 // Confirmation metadata
 // ---------------------------------------------------------------------------
@@ -287,6 +447,21 @@ pub struct UserContext {
     /// so refresh-style agents fail closed outside the chat-session
     /// constructor.
     sink: Option<Arc<dyn SecretSink>>,
+    /// `None` for `for_tests()` contexts and any path that has
+    /// not been wired with a memory source (the LLM tool loop
+    /// outside the chat-session constructor, direct
+    /// `/v1/agents/:name/invoke`, integration tests that do not
+    /// exercise the memory subsystem). When `None`, the memory
+    /// agents fail closed with
+    /// `AgentError::AgentFailed("memory: source not wired in this
+    /// context")`.
+    ///
+    /// Mirrors the `resolver` / `sink` pattern: production code
+    /// that owns a `MemorySource` attaches it once at the chat
+    /// boundary, and the four memory agents (`memory_store`,
+    /// `memory_recall`, `memory_list`, `memory_forget`) reach for
+    /// it through [`UserContext::memories`].
+    memories: Option<Arc<dyn MemorySource>>,
     cache: crate::agents::credential_cache::SecretCache,
     /// Active chat session id, when the agent was invoked from the
     /// `/v1/chat/completions` tool loop. The id is propagated from
@@ -312,6 +487,10 @@ impl std::fmt::Debug for UserContext {
             .field("services", &self.services)
             .field("resolver", &self.resolver.as_ref().map(|_| "<resolver>"))
             .field("sink", &self.sink.as_ref().map(|_| "<sink>"))
+            .field(
+                "memories",
+                &self.memories.as_ref().map(|_| "<memory source>"),
+            )
             .field("cache_entries", &self.cache.len())
             .field("chat_session_id", &self.chat_session_id)
             .field("invoked_this_turn", &self.invoked_this_turn)
@@ -334,6 +513,7 @@ impl UserContext {
             services,
             resolver: Some(resolver),
             sink: None,
+            memories: None,
             cache: crate::agents::credential_cache::SecretCache::new(),
             chat_session_id: None,
             invoked_this_turn: Vec::new(),
@@ -352,6 +532,7 @@ impl UserContext {
             services,
             resolver: None,
             sink: None,
+            memories: None,
             cache: crate::agents::credential_cache::SecretCache::new(),
             chat_session_id: None,
             invoked_this_turn: Vec::new(),
@@ -374,6 +555,36 @@ impl UserContext {
             services,
             resolver,
             sink,
+            memories: None,
+            cache: crate::agents::credential_cache::SecretCache::new(),
+            chat_session_id: Some(chat_session_id),
+            invoked_this_turn: Vec::new(),
+        }
+    }
+
+    /// Chat-session constructor with the [`MemorySource`] attached
+    /// (plan 1791267136806, §2.2). The memory subsystem is
+    /// optional — a build without the `memory-agent` cargo feature
+    /// (or with the operator kill-switch
+    /// `LLM_ALLOW_USER_MEMORY=false`) calls
+    /// [`UserContext::for_chat_session`] and the `memory_*` agents
+    /// simply never run. With the source wired, the four memory
+    /// agents read / write the per-user encrypted store through
+    /// [`UserContext::memories`].
+    pub fn for_chat_session_with_memories(
+        user_id: Uuid,
+        services: Arc<ServiceRegistry>,
+        resolver: Option<Arc<dyn SecretSource>>,
+        sink: Option<Arc<dyn SecretSink>>,
+        memory_source: Arc<dyn MemorySource>,
+        chat_session_id: Uuid,
+    ) -> Self {
+        Self {
+            user_id,
+            services,
+            resolver,
+            sink,
+            memories: Some(memory_source),
             cache: crate::agents::credential_cache::SecretCache::new(),
             chat_session_id: Some(chat_session_id),
             invoked_this_turn: Vec::new(),
@@ -466,7 +677,7 @@ impl UserContext {
     /// Write back one or more `(field, plaintext)` rows under
     /// `service` for the calling user (plan 1790695073418 — the X
     /// OAuth "refresh handled by the agent itself" locked
-    /// decision). The companion of [`Self::secret`]; the impl is
+    /// decision). The companion of [`Self::user`]; the impl is
     /// the inverse direction of [`SecretSource`] and lives next to
     /// it on the server side.
     ///
@@ -490,6 +701,22 @@ impl UserContext {
             ));
         };
         sink.update(self.user_id, service, fields).await
+    }
+
+    /// Borrow the wired [`MemorySource`] (plan 1791267136806, §2.2).
+    /// Returns `None` for any context that was not built with a
+    /// memory source — test contexts, direct-invoke routes, and
+    /// chat contexts where the operator disabled memory at boot
+    /// (`LLM_ALLOW_USER_MEMORY=false`).
+    ///
+    /// The `memory_store` / `memory_list` / `memory_recall` /
+    /// `memory_forget` agents refuse to run with
+    /// `AgentError::AgentFailed("memory: source not wired in this
+    /// context")` when this returns `None`, so the chat UI shows a
+    /// clear "memory subsystem disabled" error rather than a
+    /// confusing 500.
+    pub fn memories(&self) -> Option<&dyn MemorySource> {
+        self.memories.as_deref()
     }
 }
 
@@ -896,6 +1123,53 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
             )))
         },
     },
+    // Plan 1791267136806 §2.3: four memory agents (memory_store /
+    // memory_recall / memory_list / memory_forget). They share the
+    // `MemoryAgentConfig` knob (currently just `recalled_top_k`)
+    // and the `MemorySource` capability (the per-request adapter
+    // is wired by the chat-session constructor on the server
+    // side). The agents themselves are stateless — every
+    // store / recall / forget round-trips through the trait.
+    #[cfg(feature = "memory-agent")]
+    AgentDescriptor {
+        id: "memory_store",
+        feature: "memory-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(memory::MemoryStoreAgent::from_config(
+                cfgs.memory.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "memory-agent")]
+    AgentDescriptor {
+        id: "memory_recall",
+        feature: "memory-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(memory::MemoryRecallAgent::from_config(
+                cfgs.memory.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "memory-agent")]
+    AgentDescriptor {
+        id: "memory_list",
+        feature: "memory-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(memory::MemoryListAgent::from_config(
+                cfgs.memory.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "memory-agent")]
+    AgentDescriptor {
+        id: "memory_forget",
+        feature: "memory-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(memory::MemoryForgetAgent::from_config(
+                cfgs.memory.clone(),
+            )))
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -1013,6 +1287,8 @@ pub mod calculate_agent;
 pub mod datetime_agent;
 #[cfg(feature = "dictionary-agent")]
 pub mod dictionary_agent;
+#[cfg(feature = "memory-agent")]
+pub mod memory;
 #[cfg(feature = "read-document-agent")]
 pub mod read_document;
 #[cfg(feature = "stock-agent")]

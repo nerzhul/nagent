@@ -43,6 +43,12 @@ pub async fn me_handler(axum::Extension(user): axum::Extension<AuthUser>) -> Jso
 /// choice" from "fall back to input language". `additional_instructions`
 /// and `temperature` follow the same `null` convention: `null` means
 /// "no user-supplied value" / "fall back to the proxy default".
+///
+/// `memory_enabled` is the opt-in flag for the LLM-driven
+/// long-term memory subsystem (plan 1791267136806, §1.6). Defaults
+/// to `false`; flipping it on in Settings → Memory reveals the
+/// "Stored memories" list and tells the LLM it may call
+/// `memory_store` proactively.
 pub async fn get_preferences_handler(
     State(state): State<crate::AuthState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -55,18 +61,19 @@ pub async fn get_preferences_handler(
         "reply_language": prefs.reply_language,
         "additional_instructions": prefs.additional_instructions,
         "temperature": prefs.temperature,
+        "memory_enabled": prefs.memory_enabled,
         "updated_at": prefs.updated_at.to_rfc3339(),
     }))
     .into_response())
 }
 
-/// Body shape for `PUT /api/me/preferences`. All five fields
-/// are required so a PUT always represents the full desired
-/// state — a UI that wants to flip just `share_location_enabled`
-/// reads the current value, flips the bit, and writes all five
-/// back. This avoids the partial-update ambiguity the original
-/// localStorage flags had (one write per flag, no atomicity,
-/// possible drift between two browser tabs).
+/// Body shape for `PUT /api/me/preferences`. All six fields are
+/// required so a PUT always represents the full desired state —
+/// a UI that wants to flip just `share_location_enabled` reads the
+/// current value, flips the bit, and writes all six back. This
+/// avoids the partial-update ambiguity the original localStorage
+/// flags had (one write per flag, no atomicity, possible drift
+/// between two browser tabs).
 ///
 /// `reply_language` is `Option<String>` because the "Auto" entry
 /// on the picker serialises to JSON `null` by design; the handler
@@ -91,6 +98,8 @@ pub struct PutPreferencesBody {
     pub additional_instructions: Option<String>,
     #[serde(default)]
     pub temperature: Option<f32>,
+    #[serde(default)]
+    pub memory_enabled: Option<bool>,
 }
 
 /// `PUT /api/me/preferences` — atomic replace of the per-user
@@ -113,6 +122,9 @@ pub async fn put_preferences_handler(
         return Err(AuthError::BadRequest(
             "share_timezone_enabled is required".into(),
         ));
+    };
+    let Some(memory_enabled) = body.memory_enabled else {
+        return Err(AuthError::BadRequest("memory_enabled is required".into()));
     };
     // Treat `null`, a missing key, and `""` (the All flag for
     // the Auto entry on the picker) all as "no explicit
@@ -159,6 +171,7 @@ pub async fn put_preferences_handler(
             reply_language,
             additional_instructions,
             temperature,
+            memory_enabled,
         )
         .await?;
     Ok(Json(json!({
@@ -167,6 +180,7 @@ pub async fn put_preferences_handler(
         "reply_language": prefs.reply_language,
         "additional_instructions": prefs.additional_instructions,
         "temperature": prefs.temperature,
+        "memory_enabled": prefs.memory_enabled,
         "updated_at": prefs.updated_at.to_rfc3339(),
     }))
     .into_response())

@@ -45,6 +45,12 @@ import {
 /// `localStorage.clear()` wipes everything together.
 export const REPLY_LANGUAGE_LS_KEY = "nagent.chat.replyLanguage";
 
+/// `localStorage` key that mirrors the per-user long-term memory
+/// opt-in (plan 1791267136806, §7.10). Same `nagent.chat.*`
+/// namespace as the other mirrors so a `localStorage.clear()` wipes
+/// the lot together.
+export const MEMORY_ENABLED_LS_KEY = "nagent.chat.memoryEnabled";
+
 /// UI defaults for the two LLM preferences. Mirrored here (rather
 /// than read from `chat.js`) so the localStorage fall-back path
 /// uses the same baseline the server-side default (`0.8` for
@@ -57,11 +63,11 @@ const DEFAULT_TEMPERATURE = 0.8;
 
 /// Cache of the latest server-side preferences. Lets the toggle
 /// handlers PUT the *current* full state (location + timezone +
-/// reply_language + additional_instructions + temperature)
-/// without re-reading localStorage at toggle time — keeping all
-/// five flags in lockstep so a PUT always reflects the user's
-/// current intent for *every* preference, not just the one that
-/// was just clicked.
+/// reply_language + additional_instructions + temperature +
+/// memory_enabled) without re-reading localStorage at toggle time
+/// — keeping all six flags in lockstep so a PUT always reflects
+/// the user's current intent for *every* preference, not just the
+/// one that was just clicked.
 ///
 /// `reply_language`, `additional_instructions`, and `temperature`
 /// use `null` (not `""` / `0`) for the "Auto" / unset case so the
@@ -75,6 +81,7 @@ let _cachedPrefs = {
   reply_language: null,
   additional_instructions: null,
   temperature: null,
+  memory_enabled: null,
 };
 
 function csrfHeaders() {
@@ -100,6 +107,7 @@ function _readLocal() {
       reply_language: null,
       additional_instructions: null,
       temperature: null,
+      memory_enabled: false,
     };
   }
   let location = false;
@@ -107,6 +115,7 @@ function _readLocal() {
   let reply_language = null;
   let additional_instructions = null;
   let temperature = null;
+  let memory_enabled = false;
   try { location = ls.getItem(LOCATION_ENABLED_KEY) === "true"; } catch (_) {}
   try { timezone = ls.getItem(TIMEZONE_ENABLED_KEY) === "true"; } catch (_) {}
   try {
@@ -135,14 +144,17 @@ function _readLocal() {
       if (Number.isFinite(n)) temperature = n;
     }
   } catch (_) {}
+  try { memory_enabled = ls.getItem(MEMORY_ENABLED_LS_KEY) === "true"; } catch (_) {}
   return {
     location, timezone, reply_language, additional_instructions, temperature,
+    memory_enabled,
   };
 }
 
 function _writeLocal(
   location, timezone, reply_language,
   additional_instructions, temperature,
+  memory_enabled,
 ) {
   const ls = (typeof globalThis !== "undefined" && globalThis.localStorage)
     ? globalThis.localStorage
@@ -187,6 +199,10 @@ function _writeLocal(
     } else {
       ls.removeItem(TEMPERATURE_KEY);
     }
+  } catch (_) { /* quota or disabled storage */ }
+  try {
+    if (memory_enabled) ls.setItem(MEMORY_ENABLED_LS_KEY, "true");
+    else ls.removeItem(MEMORY_ENABLED_LS_KEY);
   } catch (_) { /* quota or disabled storage */ }
 }
 
@@ -237,13 +253,22 @@ export async function loadFromServer() {
       && Number.isFinite(body.temperature))
       ? body.temperature
       : null;
+    // Plan 1791267136806 §1.6: `memory_enabled` defaults to
+    // `false` on the server side (the migration sets
+    // `INTEGER NOT NULL DEFAULT 0`). Older server builds that
+    // pre-date the column return `undefined` — we coerce to
+    // `false` so the Settings-tab Memory section defaults to
+    // "off" on a fresh boot.
+    const memory_enabled = !!body?.memory_enabled;
     _cachedPrefs = {
       location, timezone, reply_language,
       additional_instructions, temperature,
+      memory_enabled,
     };
     _writeLocal(
       location, timezone, reply_language,
       additional_instructions, temperature,
+      memory_enabled,
     );
     return _cachedPrefs;
   } catch (e) {
@@ -252,20 +277,21 @@ export async function loadFromServer() {
   }
 }
 
-/// Persist the supplied quintuple to the server and mirror them
+/// Persist the supplied sextuple to the server and mirror them
 /// into localStorage. The localStorage write happens *first* so a
 /// slow PUT never blocks the UI; the PUT is fire-and-forget and
 /// any server-side error is logged but does NOT roll back the
 /// local state.
 ///
-/// Pass the *full* quintuple (location + timezone + reply_language
-/// + additional_instructions + temperature), not just the one the
-/// user just clicked: the server treats a PUT as an atomic
-/// replace of the row, so a partial body would silently flip the
-/// other flags off.
+/// Pass the *full* sextuple (location + timezone + reply_language
+/// + additional_instructions + temperature + memory_enabled), not
+/// just the one the user just clicked: the server treats a PUT as
+/// an atomic replace of the row, so a partial body would silently
+/// flip the other flags off.
 export function saveToServer(
   location, timezone, reply_language,
   additional_instructions, temperature,
+  memory_enabled,
 ) {
   // Normalise the reply_language argument: empty / whitespace /
   // explicit `null` all collapse to `null` (Auto) so every
@@ -289,10 +315,12 @@ export function saveToServer(
     reply_language: normalisedLang,
     additional_instructions: normalisedInstructions,
     temperature: normalisedTemp,
+    memory_enabled: !!memory_enabled,
   };
   _writeLocal(
     location, timezone, normalisedLang,
     normalisedInstructions, normalisedTemp,
+    !!memory_enabled,
   );
   // Fire-and-forget: the localStorage mirror above already
   // satisfies the user's intent on this device, the PUT just
@@ -316,6 +344,7 @@ export function saveToServer(
           reply_language: normalisedLang,
           additional_instructions: normalisedInstructions,
           temperature: normalisedTemp,
+          memory_enabled: !!memory_enabled,
         }),
       });
       if (!resp.ok) {
@@ -329,7 +358,7 @@ export function saveToServer(
   })();
 }
 
-/// Return the latest cached quintuple. Used by the toggle handlers
+/// Return the latest cached sextuple. Used by the toggle handlers
 /// so a `PUT` body always reflects the *current* full state, never
 /// just the flag the user just clicked.
 export function currentFlags() {
@@ -337,7 +366,8 @@ export function currentFlags() {
       && _cachedPrefs.timezone !== null
       && _cachedPrefs.reply_language !== undefined
       && _cachedPrefs.additional_instructions !== undefined
-      && _cachedPrefs.temperature !== undefined) {
+      && _cachedPrefs.temperature !== undefined
+      && _cachedPrefs.memory_enabled !== undefined) {
     return { ..._cachedPrefs };
   }
   // First call before `loadFromServer` resolved — read from
@@ -395,6 +425,16 @@ export function getSystem() {
 export function getTemperature() {
   const v = currentFlags().temperature;
   return (typeof v === "number" && Number.isFinite(v)) ? v : null;
+}
+
+/// Plan 1791267136806 §7.10: return the cached long-term memory
+/// opt-in flag. The Settings-tab Memory card wires this to its
+/// `<input type="checkbox">` and to the future `memory_list` /
+/// `memory_forget` UI. `false` is the safe default — a user who
+/// never opened the toggle gets nothing stored, nothing injected,
+/// and the LLM is told to refuse `memory_store` calls.
+export function getMemoryEnabled() {
+  return !!currentFlags().memory_enabled;
 }
 
 /// UI defaults exposed so the Settings-tab "Reset to defaults"

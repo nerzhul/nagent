@@ -38,6 +38,12 @@ pub enum AuthError {
     /// registration). Maps to 409.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// The requested resource does not exist (or, for
+    /// cross-user scoped deletes, the row belongs to another
+    /// user and is therefore invisible to the caller). Maps to
+    /// 404.
+    #[error("not found")]
+    NotFound,
     /// Underlying database error.
     #[error("database error: {0}")]
     Database(nagent_db::Error),
@@ -176,6 +182,13 @@ impl From<nagent_db::Error> for AuthError {
             nagent_db::Error::BadRequest(msg) => AuthError::BadRequest(msg),
             nagent_db::Error::Conflict(msg) => AuthError::Conflict(msg),
             nagent_db::Error::Internal(msg) => AuthError::Internal(msg),
+            // A TEXT-shaped column failed to parse as a UUID. The
+            // server-side thiserror preserves the display string but
+            // does not leak it to the client (a schema drift is a
+            // 500, not user-actionable).
+            nagent_db::Error::InvalidUuid(err) => {
+                AuthError::Internal(format!("invalid uuid in database column: {err}"))
+            }
         }
     }
 }
@@ -220,6 +233,7 @@ impl IntoResponse for AuthError {
                 return resp;
             }
             AuthError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
+            AuthError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AuthError::Database(e) => {
                 // Avoid leaking DB internals (table names, SQL
                 // fragments) over the wire; log full detail and

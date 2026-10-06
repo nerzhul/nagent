@@ -48,6 +48,6 @@ pub use egress::{
     MIN_TIMEOUT_MS,
 };
 pub use services::{
-    ECHO_ON_EDIT_NON_PASSWORD, ECHO_ON_EDIT_PASSWORD, FieldDef, FieldKind, FieldSummary,
-    ServiceDef, ServiceRegistry, ServiceSummary,
+    FieldDef, FieldKind, FieldSummary, ServiceDef, ServiceRegistry, ServiceSummary,
+    ECHO_ON_EDIT_NON_PASSWORD, ECHO_ON_EDIT_PASSWORD,
 };
