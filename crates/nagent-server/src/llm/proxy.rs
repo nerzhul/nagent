@@ -25,6 +25,7 @@ use tracing::{debug, warn};
 use crate::agents::{AgentRegistry, AgentRegistryNewtype, ResolverSecretSource};
 use crate::config::LlmConfig;
 use crate::llm::client::{parse_chat_session_header, LlmError};
+use crate::llm::discovered_tools::DiscoveredTools;
 use crate::llm::permission::run_permission_intercept;
 use crate::llm::privacy::{
     strip_user_location_if_disabled, strip_user_memories_if_disabled,
@@ -35,10 +36,12 @@ use crate::llm::prompt::{
     inject_memories_block, inject_reply_language_block,
 };
 use crate::llm::tool_loop::run_tool_loop;
+use crate::state::ArcDiscoveredToolsStore;
 use crate::state::ArcPermissionStore;
 use crate::state::{
     ArcAgentsConfig, ArcLlmState, ArcServices, OptArcAgentRegistry, OptArcAuthState,
 };
+use nagent_agents::ToolsRouter;
 
 /// Subset of the OpenAI chat request we care about.
 ///
@@ -139,6 +142,7 @@ pub async fn chat_completions(
     State(services): State<ArcServices>,
     State(auth_state): State<OptArcAuthState>,
     State(permission_store): State<ArcPermissionStore>,
+    State(discovered_tools): State<ArcDiscoveredToolsStore>,
     auth_user: Option<axum::Extension<crate::auth::session::AuthUser>>,
     headers: HeaderMap,
     body: Bytes,
@@ -184,24 +188,32 @@ pub async fn chat_completions(
     if let Some(obj) = forward_body.as_object_mut() {
         obj.insert("model".into(), json!(model));
         obj.insert("stream".into(), json!(true));
-        // Merge the agent tools array into the request body. We do
-        // this once, up front, so every round of the tool-loop carries
-        // the same `tools` definition (Ollama expects the field on
-        // every call). Client-supplied `tools` are preserved.
-        let server_tools = agents
-            .0
-            .as_ref()
-            .map(|a| a.tools_schema())
-            .unwrap_or_default();
+        // Build the round's `tools=[]` via the dynamic helper.
+        // Round 0 is special: there is no router pre-selection
+        // source yet (the discovery store is empty for a fresh
+        // session) and the LLM hasn't invoked anything. Pass
+        // `None` for both so the helper still ships
+        // `search_tools` + the rest of the registry's static
+        // `tools_schema()` projection. Subsequent rounds (in
+        // `run_tool_loop`) re-run this helper with the live
+        // router + discovered set folded in.
+        let router_ref = llm_state.tools_router.as_deref();
+        let initial_tools = build_tools_for_round(
+            agents.0.as_ref().map(|arc| arc.as_ref()),
+            router_ref,
+            &DiscoveredTools::new(),
+            None,
+            "",
+        );
         // Drop the `services` shadow so the parameter is used.
         let _ = services;
-        if !server_tools.is_empty() {
+        if !initial_tools.is_empty() {
             let client_tools = obj
                 .get("tools")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let mut merged = server_tools;
+            let mut merged = initial_tools;
             // Append client tools verbatim — server tools take
             // precedence on name collisions to keep the wire-format
             // consistent for the LLM.
@@ -509,6 +521,13 @@ pub async fn chat_completions(
             resolver,
             memory_source,
             permission_store.0,
+            llm_state.tools_router.clone(),
+            // Plan 1791317253718: the per-session discovered-tools
+            // store the tool loop writes to after every successful
+            // dispatch and reads from on every round-level rebuild.
+            // The boot path always builds the store so this is
+            // `Some` in production.
+            Some(discovered_tools.0.clone()),
         )
         .await;
     });
@@ -560,6 +579,117 @@ pub async fn chat_completions(
 ///
 /// Returning `Vec<String>` (not the raw OpenAI JSON envelope) lets the
 /// features endpoint serialise it directly without re-shaping.
+
+/// Build the `tools=[]` array for a single chat-completions
+/// round (plan 1791317253718). Composes three sources:
+///
+/// 1. The `search_tools` meta-agent (always present, first in
+///    the list — some upstreams cache the schema by position
+///    and `search_tools` must stay at the same slot).
+/// 2. The BM25 router's pre-selection over the user's most
+///    recent message (`router` is `None` on round 0 or when
+///    agents are off — empty contribution).
+/// 3. The per-session discovered-tools store (every agent the
+///    LLM has successfully called earlier in this
+///    `chat_session_id`).
+///
+/// `history_names` is the set of tool names the LLM has
+/// invoked earlier in the conversation (collected from the
+/// `messages[*].tool_calls[*].function.name` entries already
+/// on the outgoing body). Folded into the result so the round
+/// the LLM was about to call a tool carries that tool's schema
+/// even if neither the router nor the store has indexed it
+/// yet.
+///
+/// `latest_user_msg` is the latest user message text — the
+/// router scores against it. Empty when there is no recent user
+/// turn (e.g. round 0 with no messages); the router returns
+/// empty in that case.
+///
+/// Output order:
+/// `[search_tools] + router hits + discovered + history_names`,
+/// de-duplicated by name (first wins). The full agent
+/// projection for each name comes from
+/// `AgentRegistry::tools_schema()` so the wire format is
+/// identical to the historical static merge.
+///
+/// `None` for `agents` → empty (the caller injects nothing). The
+/// `search_tools` agent is excluded from the router hits
+/// inside [`ToolsRouter::pre_select`]; the helper itself
+/// prepends `search_tools` unconditionally so the caller does
+/// not have to care about the feature flag.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_tools_for_round(
+    agents: Option<&AgentRegistry>,
+    router: Option<&ToolsRouter>,
+    discovered: &DiscoveredTools,
+    chat_session_id: Option<uuid::Uuid>,
+    latest_user_msg: &str,
+) -> Vec<Value> {
+    let Some(registry) = agents else {
+        return Vec::new();
+    };
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<Value> = Vec::new();
+
+    // 1. search_tools first.
+    if let Some(st) = registry.get(nagent_agents::SEARCH_TOOLS_NAME) {
+        seen.insert(st.name().to_string());
+        out.push(json!({
+            "type": "function",
+            "function": {
+                "name": st.name(),
+                "description": st.description(),
+                "parameters": st.parameters_schema(),
+            },
+        }));
+    }
+
+    // 2. Router pre-selection. `router == None` when agents
+    // were built without a router wired in (the
+    // `search_tools` feature off path, or the boot path
+    // skipped it).
+    if let Some(router) = router {
+        let pre_selected = router.pre_select(latest_user_msg, 5);
+        for name in pre_selected {
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+            if let Some(agent) = registry.get(&name) {
+                out.push(json!({
+                    "type": "function",
+                    "function": {
+                        "name": agent.name(),
+                        "description": agent.description(),
+                        "parameters": agent.parameters_schema(),
+                    },
+                }));
+            }
+        }
+    }
+
+    // 3. Discovered set (per-session).
+    if let Some(sid) = chat_session_id {
+        for name in discovered.snapshot(sid) {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(agent) = registry.get(&name) {
+                out.push(json!({
+                    "type": "function",
+                    "function": {
+                        "name": agent.name(),
+                        "description": agent.description(),
+                        "parameters": agent.parameters_schema(),
+                    },
+                }));
+            }
+        }
+    }
+
+    out
+}
 
 /// Merge a permission-decision pre-frame stream with the main
 /// tool-loop stream by draining the pre-frames first, then the
@@ -721,3 +851,235 @@ pub async fn agent_invoke(
 // methods.
 #[allow(dead_code)]
 fn _phantom(_: &LlmConfig, _: &AgentRegistry) {}
+
+#[cfg(test)]
+mod build_tools_for_round_tests {
+    //! Unit tests for the round-level `tools=[]` builder
+    //! (plan 1791317253718). Composition order, de-duplication,
+    //! and the empty-registry / no-router / no-discovered-set
+    //! edges all live here so a future refactor that
+    //! accidentally re-orders the three sources trips the
+    //! guards.
+    use super::*;
+    use crate::llm::discovered_tools::DiscoveredTools;
+    use async_trait::async_trait;
+    use nagent_agents::agents::Agent;
+    use nagent_agents::agents::AgentError;
+    use nagent_agents::UserContext;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    struct StubAgent {
+        name: &'static str,
+        description: &'static str,
+    }
+
+    #[async_trait]
+    impl Agent for StubAgent {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            self.description
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            })
+        }
+        async fn invoke(&self, _ctx: &UserContext, _args: Value) -> Result<String, AgentError> {
+            Ok("{}".to_string())
+        }
+    }
+
+    fn weather() -> StubAgent {
+        StubAgent {
+            name: "get_weather",
+            description: "Current / forecast weather at a location.",
+        }
+    }
+    fn calculate() -> StubAgent {
+        StubAgent {
+            name: "calculate",
+            description: "Evaluate an arithmetic expression.",
+        }
+    }
+    fn search_tools_agent() -> StubAgent {
+        StubAgent {
+            name: nagent_agents::SEARCH_TOOLS_NAME,
+            description: "Discover the tools you have for a task.",
+        }
+    }
+
+    fn names(tools: &[Value]) -> Vec<String> {
+        tools
+            .iter()
+            .filter_map(|t| {
+                t.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    fn registry(agents: Vec<StubAgent>) -> AgentRegistry {
+        let mut reg = AgentRegistry::empty();
+        for a in agents {
+            reg.push_agent(a);
+        }
+        reg
+    }
+
+    #[test]
+    fn empty_registry_returns_empty() {
+        let reg = AgentRegistry::empty();
+        let out = build_tools_for_round(Some(&reg), None, &DiscoveredTools::new(), None, "");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn none_registry_returns_empty() {
+        let out = build_tools_for_round(None, None, &DiscoveredTools::new(), None, "");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn search_tools_is_first_and_always_present() {
+        let reg = registry(vec![search_tools_agent(), weather(), calculate()]);
+        let router = Arc::new(ToolsRouter::from_registry(&reg));
+        let out = build_tools_for_round(
+            Some(&reg),
+            Some(&router),
+            &DiscoveredTools::new(),
+            None,
+            "weather in Paris",
+        );
+        let n = names(&out);
+        assert!(!n.is_empty(), "build must return at least search_tools");
+        assert_eq!(
+            n[0],
+            nagent_agents::SEARCH_TOOLS_NAME,
+            "search_tools must be the first entry"
+        );
+        // The router excludes `search_tools` from its index, so
+        // the only path it lands in `out` is the helper's
+        // unconditional prepend.
+        assert!(n.contains(&"get_weather".to_string()));
+    }
+
+    #[test]
+    fn router_hits_come_after_search_tools() {
+        let reg = registry(vec![search_tools_agent(), weather(), calculate()]);
+        let router = Arc::new(ToolsRouter::from_registry(&reg));
+        let out = build_tools_for_round(
+            Some(&reg),
+            Some(&router),
+            &DiscoveredTools::new(),
+            None,
+            "weather forecast today",
+        );
+        let n = names(&out);
+        // search_tools first, then the router hit.
+        assert_eq!(n[0], nagent_agents::SEARCH_TOOLS_NAME);
+        assert_eq!(n[1], "get_weather");
+    }
+
+    #[test]
+    fn discovered_set_lands_after_router_hits() {
+        let reg = registry(vec![search_tools_agent(), weather(), calculate()]);
+        let router = Arc::new(ToolsRouter::from_registry(&reg));
+        let sid = uuid::Uuid::new_v4();
+        let discovered = DiscoveredTools::new();
+        discovered.add(sid, "calculate");
+        let out = build_tools_for_round(
+            Some(&reg),
+            Some(&router),
+            &discovered,
+            Some(sid),
+            "weather in Lyon",
+        );
+        let n = names(&out);
+        assert_eq!(n[0], nagent_agents::SEARCH_TOOLS_NAME);
+        // Router hit + discovered.
+        assert!(n.contains(&"get_weather".to_string()));
+        assert!(n.contains(&"calculate".to_string()));
+    }
+
+    #[test]
+    fn deduplication_keeps_first_occurrence() {
+        let reg = registry(vec![search_tools_agent(), weather()]);
+        let router = Arc::new(ToolsRouter::from_registry(&reg));
+        let sid = uuid::Uuid::new_v4();
+        let discovered = DiscoveredTools::new();
+        // The router hit already includes get_weather; the
+        // discovered set adds the same name. The result must
+        // still be de-duplicated.
+        discovered.add(sid, "get_weather");
+        let out = build_tools_for_round(
+            Some(&reg),
+            Some(&router),
+            &discovered,
+            Some(sid),
+            "weather today",
+        );
+        let n = names(&out);
+        let weather_occurrences = n.iter().filter(|s| *s == "get_weather").count();
+        assert_eq!(
+            weather_occurrences, 1,
+            "duplicate get_weather must collapse"
+        );
+    }
+
+    #[test]
+    fn empty_query_yields_only_search_tools() {
+        let reg = registry(vec![search_tools_agent(), weather(), calculate()]);
+        let router = Arc::new(ToolsRouter::from_registry(&reg));
+        let out =
+            build_tools_for_round(Some(&reg), Some(&router), &DiscoveredTools::new(), None, "");
+        let n = names(&out);
+        // search_tools is always first; the router contributes
+        // nothing on an empty query.
+        assert_eq!(n, vec![nagent_agents::SEARCH_TOOLS_NAME.to_string()]);
+    }
+
+    #[test]
+    fn no_router_falls_back_to_search_tools_only() {
+        let reg = registry(vec![search_tools_agent(), weather(), calculate()]);
+        let out = build_tools_for_round(
+            Some(&reg),
+            None,
+            &DiscoveredTools::new(),
+            None,
+            "weather in Paris",
+        );
+        let n = names(&out);
+        // No router means no pre-selection; the only entry is
+        // the meta-tool itself.
+        assert_eq!(n, vec![nagent_agents::SEARCH_TOOLS_NAME.to_string()]);
+    }
+
+    #[test]
+    fn unknown_session_id_yields_only_search_tools() {
+        let reg = registry(vec![search_tools_agent(), weather(), calculate()]);
+        let router = Arc::new(ToolsRouter::from_registry(&reg));
+        let out = build_tools_for_round(
+            Some(&reg),
+            Some(&router),
+            &DiscoveredTools::new(),
+            // `None` for chat_session_id: the discovered set
+            // does not contribute.
+            None,
+            "weather in Paris",
+        );
+        let n = names(&out);
+        assert_eq!(n[0], nagent_agents::SEARCH_TOOLS_NAME);
+        // The router still hits.
+        assert!(n.contains(&"get_weather".to_string()));
+        // No "calculate" / unknown tool names leaked in.
+        assert!(!n.contains(&"calculate".to_string()));
+    }
+}

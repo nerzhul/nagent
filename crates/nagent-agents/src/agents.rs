@@ -372,6 +372,16 @@ impl ConfirmationDecision {
 ///
 /// `Send + Sync` is required because `AppState` is cloned into every
 /// axum handler task; the registry is shared across all of them.
+///
+/// Plan 1791317253718: the LLM-facing surface is now a single
+/// meta-agent ([`crate::agents::tool_search::ToolSearchAgent`])
+/// plus a per-round BM25 pre-selection (see
+/// [`crate::tools_router::ToolsRouter`]) plus the per-session
+/// discovered-tools set on the server. All other registered
+/// agents are reached through `search_tools` (or directly when
+/// the router pre-selects them on a clear-fit query). The trait
+/// shape is unchanged: a new agent just adds a descriptor entry,
+/// and the round-level builder picks it up automatically.
 #[async_trait]
 pub trait Agent: Send + Sync {
     /// Stable, lowercase name used in the `tools[].function.name`
@@ -419,6 +429,28 @@ pub trait Agent: Send + Sync {
     fn untrusted_output(&self) -> bool {
         true
     }
+
+    /// Extra indexable terms the BM25 pre-selection router should
+    /// associate with this agent. Default = empty. Agents whose
+    /// `name()` and `description()` already cover the obvious
+    /// search terms (e.g. `get_weather`, `wikipedia`) leave this
+    /// alone; agents whose canonical name does not match the
+    /// natural-language query ("weather", "météo") list a few
+    /// synonyms here so the router pre-selects them without
+    /// forcing the LLM through `search_tools` first.
+    fn keywords(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Post-build wiring hook called once per agent right after
+    /// the registry is built. Default = no-op. The
+    /// [`ToolSearchAgent`](crate::agents::tool_search::ToolSearchAgent)
+    /// overrides this to attach the [`crate::tools_router::ToolsRouter`]
+    /// the registry was indexed against, so its `invoke` can do
+    /// the actual BM25 walk. The default keeps the trait free of
+    /// any router / wiring concept for the (large) majority of
+    /// agents that never need it.
+    fn wire_router(&self, _router: std::sync::Arc<crate::tools_router::ToolsRouter>) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -856,6 +888,22 @@ impl AgentRegistry {
         self.inner.agents.iter().cloned()
     }
 
+    /// Post-build wiring hook. Walks every registered agent
+    /// and hands it a clone of `router` so any meta-agent that
+    /// consults a BM25 index (today: [`crate::agents::tool_search::ToolSearchAgent`])
+    /// has the index in scope by the time the first
+    /// `/v1/chat/completions` round starts. Agents that do not
+    /// override [`Agent::wire_router`] receive the call as a
+    /// no-op — the trait default keeps the trait free of any
+    /// router concept for the (large) majority of agents that
+    /// never need it. `None` for an empty registry (the loop is
+    /// a no-op).
+    pub fn wire_router(&self, router: std::sync::Arc<crate::tools_router::ToolsRouter>) {
+        for agent in self.iter() {
+            agent.wire_router(router.clone());
+        }
+    }
+
     /// Concise description used by `GET /v1/agents`. Schema details
     /// are intentionally omitted — the LLM sees the schema via the
     /// `tools` array, not the browser.
@@ -1170,6 +1218,22 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
             )))
         },
     },
+    // Plan 1791317253718: `search_tools` meta-agent. The router
+    // is wired post-construction by the server's boot path
+    // (`AgentRegistry::wire_router`); the descriptor table only
+    // shapes the agent's config and registers the name. The
+    // tool loop treats it like every other agent — the generic
+    // `agents.get(&name)` dispatch is unchanged.
+    #[cfg(feature = "tool-search-agent")]
+    AgentDescriptor {
+        id: "search_tools",
+        feature: "tool-search-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(tool_search::ToolSearchAgent::from_config(
+                cfgs.tool_search.clone(),
+            )))
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -1293,6 +1357,13 @@ pub mod memory;
 pub mod read_document;
 #[cfg(feature = "stock-agent")]
 pub mod stock_agent;
+/// Plan 1791317253718: `search_tools` meta-agent. The BM25
+/// router it consults lives in `crate::tools_router`. The
+/// `tool-search-agent` feature follows the one-feature-per-
+/// agent convention so a slim build drops both the agent and
+/// its (small) router if it does not need tool discovery.
+#[cfg(feature = "tool-search-agent")]
+pub mod tool_search;
 #[cfg(feature = "unit-convert-agent")]
 pub mod unit_convert_agent;
 #[cfg(feature = "weather-agent")]

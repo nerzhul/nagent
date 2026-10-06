@@ -311,22 +311,41 @@ response stream.
 
 ### 3.1 Exposure
 
-`AgentRegistry::tools_schema()` projects every agent to a
-`Vec<Value>` of the shape:
+Plan 1791317253718: instead of projecting every agent into a
+flat `tools=[]` on every round, the LLM sees a small dynamic
+surface composed of three sources via
+`llm::proxy::build_tools_for_round`:
 
-```json
-{ "type": "function",
-  "function": {
-    "name": "<Agent::name()>",
-    "description": "<Agent::description()>",
-    "parameters": <Agent::parameters_schema()>
-  } }
+```
+[search_tools] + router_pre_select(top_k_naming) + already_discovered(session)
 ```
 
-The proxy (`llm/proxy.rs::chat_completions`) merges that array
-with the client-supplied `tools`, server tools take precedence on
-collision, and injects the result into the upstream request body
-on every round.
+1. `search_tools` is the user-facing tool-discovery meta-agent
+   (the Anthropic-style "tool search" pattern). It is always
+   present.
+2. The BM25 pre-selection over the latest user message is
+   produced by `nagent_agents::tools_router::ToolsRouter` — a
+   small hand-rolled BM25 (no stemming, no embeddings; matches
+   the crate's "no external services" posture) that scores
+   `name + description + keywords` against the query. Default
+   `top_k` = 5.
+3. The per-session
+   `llm::discovered_tools::DiscoveredTools` store tracks the
+   tool names the LLM has already invoked in the current
+   `chat_session_id` so the round-level rebuild keeps the
+   discovered JSON Schemas live (most upstreams forget tools
+   that disappear from `tools=[]` between rounds).
+
+`AgentRegistry::tools_schema()` is still available as a static
+helper for `/v1/agents` and debugging; the round-level helper
+sits next to it and is what `chat_completions` actually calls.
+
+The proxy (`llm/proxy.rs::chat_completions`) merges the dynamic
+array with the client-supplied `tools`, server tools take
+precedence on collision, and injects the result into the
+upstream request body on every round. The tool loop
+re-applies the same builder before each round-after-the-first so
+router hits + discovered tools stay authoritative.
 
 ### 3.2 The tool loop
 
@@ -339,8 +358,16 @@ drives the per-chat-completion round trip:
    else verbatim to the client channel.
 3. If the LLM emitted one or more tool calls, dispatch each one
    through `AgentRegistry`, append a `role: "tool"` message with
-   the result, and loop.
-4. When the LLM emits `finish_reason: "stop"` (no tool calls),
+   the result, and loop. On every successful dispatch, record
+   the agent name into the per-session
+   `llm::discovered_tools::DiscoveredTools` store so the next
+   round's `tools=[]` keeps the schema live.
+4. Before each round-after-the-first that opens a fresh upstream
+   connection, rebuild the outgoing body's `tools=[]` via
+   `build_tools_for_round` with the live router, the per-session
+   discovered set, and the `tool_calls` history (the
+   round-after-discovery gap fallback).
+5. When the LLM emits `finish_reason: "stop"` (no tool calls),
    close the channel with `data: [DONE]\n\n`.
 
 Round 1 reuses the body stream the proxy already opened; round

@@ -6,8 +6,9 @@
 
 pub use crate::agents::config_doc::{
     CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig, DictionaryAgentConfig,
-    MemoryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig, UnitConvertAgentConfig,
-    WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
+    MemoryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig, ToolSearchAgentConfig,
+    UnitConvertAgentConfig, WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig,
+    XTimelineAgentConfig,
 };
 
 /// Bag of every per-agent config. Plain data only — the server
@@ -26,4 +27,9 @@ pub struct AgentConfigs {
     pub caldav: CalDavAgentConfig,
     pub x_timeline: XTimelineAgentConfig,
     pub memory: MemoryAgentConfig,
+    /// `search_tools` meta-agent config. Today a single knob
+    /// (`default_top_k`); kept on the bag so the descriptor's
+    /// `build` closure receives it through the same
+    /// `AgentConfigs` handle every other agent reads.
+    pub tool_search: ToolSearchAgentConfig,
 }

@@ -38,12 +38,14 @@ use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::auth::{OidcState, PasskeyState};
 use crate::config::{AuthConfig, Config, LlmConfig};
 use crate::credentials::{CredentialResolver, CredentialsKey};
+use crate::llm::discovered_tools::DiscoveredTools;
 use crate::llm::permission::PermissionStore;
 use crate::rate_limit::RateLimiter;
 use crate::stt::session::SessionMap;
 use crate::stt::ws_concurrency::WsConcurrency;
 use crate::{agents, llm, tts};
 use nagent_agents::ServiceRegistry;
+use nagent_agents::ToolsRouter;
 
 #[cfg(feature = "x-agent")]
 use crate::oauth::x::XOAuthState;
@@ -98,6 +100,11 @@ pub struct LlmState {
     /// `Arc<dyn MemorySource>` into every chat-session
     /// `UserContext` so the four `memory_*` agents can run.
     pub memory_source: Option<Arc<dyn nagent_agents::agents::MemorySource>>,
+    /// Plan 1791317253718: the in-process BM25 router the proxy
+    /// uses to pre-select tools per round. Built once at boot
+    /// from the same `AgentRegistry` the rest of the server
+    /// sees; cloned cheaply into the per-round tool builder.
+    pub tools_router: Option<Arc<ToolsRouter>>,
 }
 
 impl std::fmt::Debug for LlmState {
@@ -250,6 +257,12 @@ pub struct AppState {
     /// Always present; consulted by the tool loop's confirmation
     /// short-circuit and the chat-completion intercept path.
     pub permission_store: PermissionStore,
+    /// Per-session tool-discovery store (plan 1791317253718).
+    /// Always present; the chat-completions route writes here
+    /// after every successful tool dispatch so the round-level
+    /// helper can ship the discovered JSON Schemas on the next
+    /// round.
+    pub discovered_tools: DiscoveredTools,
     pub config: Arc<Config>,
 }
 
@@ -641,5 +654,34 @@ impl std::fmt::Debug for ArcPermissionStore {
 impl FromRef<Arc<AppState>> for ArcPermissionStore {
     fn from_ref(state: &Arc<AppState>) -> Self {
         ArcPermissionStore(state.permission_store.clone())
+    }
+}
+
+/// `DiscoveredTools` newtype wrapper. axum's `State<T>` extractor
+/// needs a `FromRef<Arc<AppState>>` impl, and Rust's orphan rule
+/// forbids the blanket `impl FromRef<Arc<AppState>> for DiscoveredTools`
+/// because `Arc<AppState>` is a foreign type wrapping a local one.
+/// The local newtype satisfies the orphan rule and gives the LLM
+/// proxy handler a thin extractor that matches the
+/// `ArcPermissionStore` shape.
+pub struct ArcDiscoveredToolsStore(pub DiscoveredTools);
+
+impl Clone for ArcDiscoveredToolsStore {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for ArcDiscoveredToolsStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArcDiscoveredToolsStore")
+            .field("store", &self.0)
+            .finish()
+    }
+}
+
+impl FromRef<Arc<AppState>> for ArcDiscoveredToolsStore {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        ArcDiscoveredToolsStore(state.discovered_tools.clone())
     }
 }

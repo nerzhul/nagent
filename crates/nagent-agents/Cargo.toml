@@ -30,6 +30,13 @@ x-agent = []
 # happens server-side and the agents reach the per-user store
 # through the `MemorySource` capability trait.
 memory-agent = []
+# Plan 1791317253718 — the `search_tools` meta-agent + the
+# in-process BM25 router (the `tools_router` module). The agent
+# is a thin wrapper over the router; the router is a few hundred
+# lines of pure Rust. No new dependencies, matching the crate's
+# "no external services" posture. The agent is always paired
+# with the router in the boot path; one feature gates both.
+tool-search-agent = []
 # Convenience meta-feature that turns on every agent. The Makefile
 # targets list it once so an operator does not need to enumerate
 # the whole set in CI.
@@ -46,6 +53,7 @@ all-agents = [
     "caldav-agent",
     "x-agent",
     "memory-agent",
+    "tool-search-agent",
 ]
 
 [dependencies]

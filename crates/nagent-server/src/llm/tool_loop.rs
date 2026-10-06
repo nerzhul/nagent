@@ -26,12 +26,15 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::agents::{AgentRegistry, SecretSource, UserContext};
+use crate::llm::discovered_tools::DiscoveredTools;
 use crate::llm::permission::{approval_prompt, approval_prompt_json, PermissionStore};
+use crate::llm::proxy::build_tools_for_round;
 use crate::llm::sse::{
     drain_upstream_round, sse_error_event, sse_tool_call_event, sse_tool_result_event,
     sse_tool_result_needs_approval, UpstreamByteStream,
 };
 use nagent_agents::agents::MemorySource;
+use nagent_agents::ToolsRouter;
 
 /// Run the tool loop until the LLM stops or we hit `max_rounds`.
 ///
@@ -110,6 +113,18 @@ pub(crate) async fn run_tool_loop(
     resolver: Option<Arc<dyn SecretSource>>,
     memory_source: Option<Arc<dyn MemorySource>>,
     permission_store: PermissionStore,
+    // Plan 1791317253718: BM25 pre-selection router. `None`
+    // when agents are disabled; the loop then re-uses the
+    // initial `tools=[]` projection on every round (the
+    // historical behaviour). When `Some`, every round rebuilds
+    // `tools=[]` via [`build_tools_for_round`] so pre-selection
+    // + discovered tools stay authoritative.
+    tools_router: Option<Arc<ToolsRouter>>,
+    // Plan 1791317253718: per-session discovered-tools store.
+    // `None` for the integration tests that exercise the loop
+    // without a session binding; the loop falls back to an
+    // empty store so the round-level helper still works.
+    discovered_tools: Option<DiscoveredTools>,
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
@@ -128,6 +143,26 @@ pub(crate) async fn run_tool_loop(
         let stream = if let Some(s) = current_stream.take() {
             s
         } else {
+            // Plan 1791317253718: before the next round's
+            // outgoing body leaves the proxy, rebuild `tools=[]`
+            // so the router pre-selection + the discovered
+            // schema list stay authoritative. We fold in the
+            // names of tools the LLM has invoked earlier in the
+            // conversation (`messages[*].tool_calls[*]`) as a
+            // safety net for the round-after-discovery gap: the
+            // store records the name AFTER dispatch, so the
+            // `tool_calls[]` history carries the same
+            // information for free. The rebuild is a no-op when
+            // the router is `None` (agents disabled) or when
+            // the body does not carry a `tools` field yet.
+            rebuild_tools_for_next_round(
+                &mut body,
+                Some(&agents),
+                tools_router.as_deref(),
+                discovered_tools.as_ref(),
+                chat_session_id,
+            );
+
             // Subsequent rounds: open a fresh upstream connection.
             let upstream = match http
                 .post(&url)
@@ -533,6 +568,16 @@ pub(crate) async fn run_tool_loop(
                     "tool_call_id": tc.id,
                     "content": payload,
                 }));
+                // Plan 1791317253718: record every successfully
+                // dispatched agent into the per-session discovered
+                // store so the next round's `tools=[]` keeps the
+                // schema live. The meta-agent (`search_tools`)
+                // records itself too — every tool name the LLM
+                // has touched stays at the same wire slot on the
+                // following rounds.
+                if let (Some(sid), Some(store)) = (chat_session_id, discovered_tools.as_ref()) {
+                    store.add(sid, &name);
+                }
             } else {
                 let payload = format!("unknown agent: `{name}`");
                 let _ = tx
@@ -558,3 +603,166 @@ pub(crate) async fn run_tool_loop(
 // know any agent by name. The unit tests for those helpers are now
 // colocated with the agent impl (see `crates/nagent-agents/src/agents/
 // web_fetch.rs`).
+
+// ---------------------------------------------------------------------------
+// Per-round `tools=[]` rebuild (plan 1791317253718).
+//
+// Runs immediately before every tool-loop round that opens a
+// fresh upstream connection. The proxy's round-0 injection
+// (see [`crate::llm::proxy::chat_completions`]) already shipped
+// `search_tools` + the static projection; this helper keeps the
+// dynamic surfaces live for round 1+. The round-0 path on the
+// proxy side stays unchanged.
+//
+// Order:
+// 1. Router pre-selection over the latest user message.
+// 2. Per-session discovered set.
+// 3. Union with the `tool_calls` history already on the body
+//    (covers the round-after-discovery gap: the store records
+//    the name AFTER dispatch, so this round's history is the
+//    only authoritative signal that the LLM has touched the
+//    tool).
+// 4. De-duplicate by name (the helper does it internally too,
+//    but the round-level rebuild also keeps client-supplied
+//    tools verbatim).
+//
+// No-op when:
+// - `tools_router == None` (agents disabled or feature off);
+// - `body["tools"]` is missing (the LLM never asked for any
+//   tool surface — leave it alone so a `curl` caller that
+//   omitted the field stays a passthrough).
+fn rebuild_tools_for_next_round(
+    body: &mut Value,
+    agents: Option<&AgentRegistry>,
+    tools_router: Option<&ToolsRouter>,
+    discovered_tools: Option<&DiscoveredTools>,
+    chat_session_id: Option<uuid::Uuid>,
+) {
+    if tools_router.is_none() && discovered_tools.is_none() {
+        // Agents disabled: nothing to do; the round-0 injection
+        // already shipped the static `tools_schema()` projection
+        // (or none at all if the registry was empty).
+        return;
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    // Preserve client-supplied tools verbatim — same shape as
+    // the round-0 merge in `proxy.rs::chat_completions`.
+    let client_tools = obj
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // Drop the server-side tools; the rebuild below replaces
+    // them. The client tools ride along at the end.
+    let latest_user_msg = latest_user_message_text(obj.get("messages"));
+    let discovered_ref = discovered_tools.cloned().unwrap_or_default();
+    let mut rebuilt = build_tools_for_round(
+        agents,
+        tools_router,
+        &discovered_ref,
+        chat_session_id,
+        &latest_user_msg,
+    );
+    // Fold in the names the LLM has already invoked earlier in
+    // the conversation. `build_tools_for_round` only ships the
+    // agent's schema when the registry actually has an agent by
+    // that name, so unknown / deprecated tool calls are
+    // silently skipped here (the loop's dispatch site already
+    // surfaces the "unknown agent" tool error).
+    let history_names = history_tool_call_names(obj.get("messages"));
+    for name in history_names {
+        if rebuilt.iter().any(|tool| {
+            tool.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                == Some(name.as_str())
+        }) {
+            continue;
+        }
+        if let Some(registry) = agents {
+            if let Some(agent) = registry.get(&name) {
+                rebuilt.push(json!({
+                    "type": "function",
+                    "function": {
+                        "name": agent.name(),
+                        "description": agent.description(),
+                        "parameters": agent.parameters_schema(),
+                    },
+                }));
+            }
+        }
+    }
+    rebuilt.extend(client_tools);
+    obj.insert("tools".into(), Value::Array(rebuilt));
+}
+
+/// Extract the latest user-role message's text content from the
+/// outgoing body. Empty when no user message is present (e.g.
+/// round 0 of a brand-new chat that the browser has not seeded
+/// yet). Returns a borrowed slice — the caller passes it
+/// straight into the router.
+fn latest_user_message_text(messages: Option<&Value>) -> String {
+    let Some(arr) = messages.and_then(|m| m.as_array()) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for msg in arr.iter().rev() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        match msg.get("content") {
+            Some(Value::String(s)) => {
+                out = s.clone();
+                break;
+            }
+            Some(Value::Array(parts)) => {
+                // OpenAI's `content` can be an array of typed
+                // parts; take the first text part the LLM sent.
+                for p in parts {
+                    if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(s) = p.get("text").and_then(|t| t.as_str()) {
+                            out = s.to_string();
+                            break;
+                        }
+                    }
+                }
+                if !out.is_empty() {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Collect every `function.name` that appears in any
+/// `messages[*].tool_calls[*]` entry on the outgoing body. The
+/// set covers every tool the LLM has successfully dispatched
+/// earlier in the conversation (the tool loop appends the
+/// assistant entry before each set of invocations).
+fn history_tool_call_names(messages: Option<&Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(arr) = messages.and_then(|m| m.as_array()) else {
+        return out;
+    };
+    for msg in arr {
+        let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) else {
+            continue;
+        };
+        for tc in tcs {
+            if let Some(name) = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                if !out.iter().any(|existing| existing == name) {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}

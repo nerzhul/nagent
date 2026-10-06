@@ -94,12 +94,16 @@ through the `make` targets and the Dockerfile `BACKEND` arg.
 > (they live on a dependency).
 
 The three GPU features are mutually exclusive — enabling more than one
-wastes build time and can fight over system libraries. The seven
-`*-agent` features are independent: each adds exactly one tool to the
-LLM's `tools` array. All six `make run*` targets enable `web-agent`
-plus the six daily agents so a fresh build has the full set
-available; disable any of them by editing the target's `--features`
-list.
+wastes build time and can fight over system libraries. The
+`*-agent` features are independent: each adds one tool to the agent
+registry. The LLM-facing `tools=[]` is now a dynamic surface
+(plan 1791317253718) — the proxy always ships `search_tools`
+plus a per-round BM25 pre-selection plus the per-session
+discovered-tools set, so adding an agent no longer grows the
+`tools[]` payload on every round. All `make run*` targets enable
+`web-agent` plus the daily agents so a fresh build has the full
+set available; disable any of them by editing the target's
+`--features` list.
 
 ### Dockerfile build arguments
 
@@ -148,7 +152,7 @@ without a default and is required.
 | `LLM_ALLOW_USER_REPLY_LANGUAGE` | `true`                                     | LLM proxy      | Defence-in-depth kill-switch for the server-injected reply-language block. When `false`, the server strips any `{role:"system"}` message whose content starts with `The user's preferred reply language is` before forwarding to the upstream model. The block is emitted only when the authenticated user has set a non-default reply language on the Advanced drawer picker. Independent of the two flags above. |
 | `LLM_ALLOW_USER_MEMORY`       | `true`                                        | LLM proxy      | Defence-in-depth kill-switch for the per-user long-term memory subsystem. When `false`, the server strips any `{role:"system"}` message whose content starts with `The user's long-term memories include:` before forwarding to the upstream model. The block is emitted only when the authenticated user has set `memory_enabled = true` on the preferences row. Independent of the three flags above — see `docs/integrations/memory.md`. |
 | `MEMORY_TOP_K`                | `10`                                          | Long-term memory | Maximum number of decrypted memory rows injected at the start of every chat turn. Clamped `[1, 64]`. TOML key `[memory].recalled_top_k`. |
-| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents (`web_fetch`, `get_datetime`, `get_weather`, `get_stock_quote`, `calculate`, `unit_convert`, `wikipedia`, `dictionary`). When `false` the registry is empty. |
+| `AGENTS_ENABLED`             | `true`                                        | Chat agents    | Master switch for server-side chat agents. With the `tool-search-agent` feature on, the LLM-facing `tools=[]` is now a dynamic surface — the proxy always ships `search_tools` plus a per-round BM25 pre-selection plus the per-session discovered-tools set, so adding an agent no longer grows the payload on every round. When `false` the registry is empty and the proxy sends no `tools` field. |
 | `LLM_MAX_TOOL_ROUNDS`        | `4`                                           | LLM proxy      | Maximum tool-call rounds per user turn before the proxy aborts.                                                 |
 | `LLM_MAX_AUTO_CONTINUES`      | `1`                                           | LLM proxy      | Max number of auto-continue rounds when the upstream reasoning model hits `finish_reason: "length"` mid-reasoning (qwen3.5 with reasoning on, DeepSeek-R1). Set to `0` to disable. |
 | `WEB_FETCH_ALLOW_PUBLIC`     | `false`                                       | `web_fetch`    | When `true`, the agent may reach public IP ranges (SSRF defence still blocks loopback/RFC1918).               |

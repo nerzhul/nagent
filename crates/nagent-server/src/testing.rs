@@ -322,6 +322,7 @@ impl AppStateBuilder {
             rate_limiter: llm_limiter.clone(),
             cfg: self.config.llm.clone(),
             memory_source: None,
+            tools_router: None,
         });
 
         let auth = self.auth_store.map(|store| {
@@ -370,6 +371,7 @@ impl AppStateBuilder {
             chat_sessions,
             tts,
             permission_store: crate::llm::permission::PermissionStore::new(),
+            discovered_tools: crate::llm::discovered_tools::DiscoveredTools::new(),
             config: self.config,
         })
     }

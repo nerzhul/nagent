@@ -269,6 +269,13 @@ pub fn build_registry(
         caldav: cfg.caldav.clone().into(),
         x_timeline: cfg.x_timeline.clone().into(),
         memory: cfg.memory.clone().into(),
+        // Plan 1791317253718: the `search_tools` meta-agent has
+        // its own per-feature knob (`default_top_k`); the v1
+        // server-side config does not surface it — `default()` is
+        // the conservative starting point. A future operator knob
+        // can be threaded through `AgentConfig` the same way the
+        // other per-agent configs are.
+        tool_search: Default::default(),
     };
     // Plan 4.C (C): one shared `EgressPool` is built per process
     // and passed to every agent. Strict-class agents
@@ -289,20 +296,20 @@ pub fn build_registry(
         let _ = (store, chat_sessions);
     }
     // Startup surface tool inventory. Logged once per registry build
-    // so the operator can sanity-check what the proxy will inject
-    // into every `/v1/chat/completions` body as `tools=[]`. Mirrors
-    // the same `tools_schema()` call the proxy uses on the hot path,
-    // so anything we log here is guaranteed to reach the wire. The
-    // count + names are emitted on a single line so a quick
-    // `grep agents:` against the startup log is enough to spot a
-    // regression like the CalDAV / `read_document` omissions of
-    // earlier sessions.
+    // so the operator can sanity-check what the registry is
+    // shipping. The full list is no longer projected into
+    // `tools=[]` on every round (plan 1791317253718 — the
+    // round-level builder now ships only `search_tools` plus
+    // the BM25 pre-selection plus the per-session discovered
+    // set); the count + names are still useful for spotting
+    // regressions like the CalDAV / `read_document` omissions of
+    // earlier sessions, so the log line stays.
     let tool_names: Vec<String> = registry.iter().map(|a| a.name().to_string()).collect();
     if cfg.enabled {
         tracing::info!(
             count = tool_names.len(),
             tools = ?tool_names,
-            "agents: tools registered (will be exposed to LLM via /v1/chat/completions tools=[])"
+            "agents: tools registered (exposed to LLM via search_tools + BM25 pre-selection per round)"
         );
     } else {
         tracing::info!(

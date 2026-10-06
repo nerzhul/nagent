@@ -27,6 +27,12 @@
 //! `models_list`, `agents_list`, `agent_invoke`).
 
 pub mod client;
+/// Plan 1791317253718: per-session tool-discovery store. The
+/// chat-completions route writes here on every successful tool
+/// dispatch (and on `search_tools` itself) and reads it on every
+/// round to keep the discovered JSON Schemas in the round's
+/// `tools=[]`.
+pub mod discovered_tools;
 pub mod permission;
 pub mod privacy;
 pub mod prompt;

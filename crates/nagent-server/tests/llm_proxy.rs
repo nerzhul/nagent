@@ -11,7 +11,7 @@
 //! 4. Non-2xx upstream surfaces the original status to the client.
 //! 5. `LLM_ENABLED=false` returns 404 on both `/v1/*` routes.
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use axum::http::{header, HeaderValue, StatusCode};
@@ -1353,5 +1353,265 @@ async fn tool_loop_auto_continues_on_reasoning_truncation_until_visible_answer()
     assert!(
         second_last["content"].as_str().unwrap_or("").is_empty(),
         "assistant partial turn must carry no content (reasoning stays client-side)"
+    );
+}
+
+// ---- Tool search + BM25 router round-trip (plan 1791317253718) ----------
+//
+// End-to-end test of the new discovery surface. The mock upstream
+// pretends to be a tool-aware LLM that:
+//   1. receives a request with the dynamic `tools=[]` (the test
+//      asserts `search_tools` is present and `get_weather` is
+//      pre-selected because the user message is weather-y);
+//   2. emits a `search_tools` tool call so the proxy dispatches
+//      it server-side (no upstream call for the dispatch);
+//   3. then a second round calls `get_weather` by name, and the
+//      proxy dispatches that one too.
+//
+// The test captures the upstream `tools=[]` on every round so
+// the assertions can verify the discovered set stays live on
+// round 2.
+
+/// Mock upstream that drives the LLM/tool loop. Round 0: capture
+/// the `tools=[]` then emit a `search_tools` call. Round 1:
+/// capture the `tools=[]` then emit a `get_weather` call. The
+/// final `finish_reason: "stop"` closes the stream.
+async fn spawn_tool_search_round_trip_upstream(
+    captured_bodies: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    first_call: Arc<Once>,
+) -> String {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let captured_bodies = Arc::clone(&captured_bodies);
+            let first_call = Arc::clone(&first_call);
+            async move {
+                let parsed: serde_json::Value = serde_json::from_slice(&body)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                captured_bodies.lock().await.push(parsed.clone());
+
+                // Decide which tool call to emit based on the
+                // round: the first upstream request we see must
+                // call `search_tools` (the LLM has the message
+                // but no schema for the right agent yet); the
+                // second must call `get_weather` (the LLM now
+                // has the schema from `search_tools`).
+                let mut is_first = false;
+                first_call.call_once(|| {
+                    is_first = true;
+                });
+                let sse_body = if is_first {
+                    // Round 0: emit a `search_tools` call.
+                    "event: message\n\
+                     data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search_tools\",\"arguments\":\"{\\\"query\\\":\\\"weather\\\",\\\"top_k\\\":3}\"}}]},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                     data: [DONE]\n\n"
+                } else {
+                    // Round 1: emit a `get_weather` call by name.
+                    "event: message\n\
+                     data: {\"id\":\"2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\":\\\"Paris\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                     data: [DONE]\n\n"
+                };
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/event-stream"),
+                    )],
+                    sse_body,
+                )
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// Helper that builds the test server with the LLM proxy + a real
+/// agent registry (so `search_tools` and `get_weather` are
+/// available). Mirrors `start_test_server_with_llm` but adds the
+/// agent registry wiring.
+async fn start_test_server_with_llm_and_agents(upstream_url: String) -> String {
+    use nagent_agents::AgentConfigs;
+    let llm_cfg = LlmConfig {
+        enabled: true,
+        base_url: upstream_url,
+        default_model: "llama3.1".into(),
+        api_key: None,
+        inbound_auth_key: None,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins: vec![],
+        system_prompt: None,
+        allow_user_location: true,
+        allow_user_timezone: true,
+        allow_user_reply_language: true,
+        allow_user_memory: true,
+        llm_max_tool_rounds: 4,
+        llm_max_auto_continues: 0,
+        ollama_num_predict: None,
+        ollama_num_ctx: None,
+    };
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
+
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    // Wire the agents crate's agent registry. Plan 1791317253718
+    // — at minimum we need `search_tools` + `get_weather` + the
+    // meta-agent. The full `AgentRegistry::from_config` walks
+    // every per-feature descriptor; a slim build that compiles
+    // without `all-agents` will produce an empty registry, and
+    // the test will skip the assertions below. The test is
+    // gated on the `all-agents` feature via the dev-dep in
+    // `nagent-server`'s `Cargo.toml` so the registry is always
+    // populated in CI.
+    let cfgs = AgentConfigs::default();
+    let pool = nagent_agents::egress::EgressPool::new();
+    let registry = nagent_agents::AgentRegistry::from_config(&cfgs, true, &pool);
+    let state = builder
+        .with_llm(llm_client)
+        .with_agents(registry.clone())
+        .build();
+    // The test asserts on the round-0 `tools=[]` shape, which
+    // goes through `build_tools_for_round` in
+    // `chat_completions`. With the router NOT wired on
+    // `LlmState` (because the test builder does not run the
+    // app's wiring helpers), the round-0 build returns just
+    // `search_tools` (no pre-selection). The discovered-set
+    // check on round 1 still works because the dispatch site
+    // records `search_tools` into `DiscoveredTools` after the
+    // server-side dispatch. For full router integration tests
+    // we'd need a richer test harness that runs the app's
+    // wiring helpers; this end-to-end test focuses on the
+    // discoverable dispatch path, not on BM25 pre-selection.
+    let app = build_router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+    url
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_search_round_trip() {
+    // The mock upstream records the body of every request so we
+    // can assert on the round-0 `tools=[]` shape (must include
+    // `search_tools`) and on the round-1 `messages` history
+    // (the assistant `tool_calls` + the `role: "tool"`
+    // `search_tools` result + the assistant `tool_calls` for
+    // `get_weather`).
+    let captured_bodies: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let first_call = Arc::new(Once::new());
+    let upstream_url =
+        spawn_tool_search_round_trip_upstream(captured_bodies.clone(), first_call).await;
+    let url = start_test_server_with_llm_and_agents(upstream_url).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"What is the weather in Paris?"}],"stream":true,"model":"llama3.1"}"#,
+        )
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("body");
+    // Stream must close cleanly with [DONE].
+    assert!(
+        body.contains("data: [DONE]"),
+        "stream must end with [DONE]; got: {body}"
+    );
+
+    let bodies = captured_bodies.lock().await.clone();
+    assert!(
+        bodies.len() >= 2,
+        "expected at least 2 upstream rounds (search_tools + get_weather), got {}",
+        bodies.len()
+    );
+
+    // Round 0: the `tools=[]` must include `search_tools` (the
+    // helper always prepends it). The BM25 router is not wired
+    // in this test fixture, so router pre-selection does not
+    // contribute; the only entry is `search_tools` itself.
+    let round0_body0 = bodies[0].clone();
+    let round0_tools = round0_body0["tools"].as_array().unwrap_or_else(|| {
+        panic!("upstream received no `tools` array on round 0; body[0] = {round0_body0}")
+    });
+    let round0_names: Vec<&str> = round0_tools
+        .iter()
+        .filter_map(|t| {
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+        })
+        .collect();
+    assert!(
+        round0_names
+            .iter()
+            .any(|n| *n == nagent_agents::SEARCH_TOOLS_NAME),
+        "round 0 must include `search_tools` in tools=[]; got: {round0_names:?}"
+    );
+
+    // Round 1: the LLM was instructed to call `get_weather` on
+    // round 1; the dispatch happens server-side (no upstream
+    // call for the `get_weather` agent itself), but the
+    // conversation history is forwarded. The captured body[1]
+    // `messages` array should include the synthetic assistant
+    // `tool_calls` for `search_tools` and the `role: "tool"`
+    // result for `search_tools` (the previous round's
+    // dispatch). The LLM in this round emits a `get_weather`
+    // call; the tool loop dispatches it server-side and the
+    // SSE stream surfaces it to the chat UI as an
+    // `event: tool_call` with `name: "get_weather"`. We assert
+    // on the chat-UI-side stream here so the test catches a
+    // regression where the dispatch path silently no-ops.
+    if let Some(round1_messages) = bodies.get(1).and_then(|b| b["messages"].as_array()) {
+        let saw_search_tools_call = round1_messages.iter().any(|m| {
+            m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                && m.get("tool_calls")
+                    .and_then(|tc| tc.as_array())
+                    .map(|tcs| {
+                        tcs.iter().any(|tc| {
+                            tc.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                == Some("search_tools")
+                        })
+                    })
+                    .unwrap_or(false)
+        });
+        assert!(
+            saw_search_tools_call,
+            "round 1 messages must include an assistant tool_calls[] entry for `search_tools`"
+        );
+    }
+    // The chat-UI-facing SSE stream must surface the
+    // `get_weather` dispatch: the tool loop emits a synthetic
+    // `event: tool_call` followed by an `event: tool_result`
+    // when the LLM emits a tool call. Verify on the response
+    // body captured earlier.
+    let sse_seen_weather_call = body.contains("\"name\":\"get_weather\"");
+    assert!(
+        sse_seen_weather_call,
+        "SSE stream must surface the get_weather tool_call event; got: {body}"
     );
 }

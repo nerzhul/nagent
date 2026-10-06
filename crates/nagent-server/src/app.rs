@@ -22,6 +22,7 @@ use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::config::{AuthBackendKind, Config};
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::http::build_rate_limiters;
+use crate::llm::discovered_tools::DiscoveredTools;
 use crate::llm::LlmClient;
 use crate::state::{
     AppState, AuthState, ChatSessionsState, DocumentsState, LlmState, SttState, TtsState,
@@ -29,7 +30,7 @@ use crate::state::{
 use crate::stt::{result_router, session, watchdog};
 use crate::tts::TtsEngine;
 use crate::{agents, llm, tts};
-use nagent_agents::ServiceRegistry;
+use nagent_agents::{ServiceRegistry, ToolsRouter};
 
 /// Build the full application state from a resolved `Config`.
 ///
@@ -239,6 +240,10 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
             // in scope yet at this point — they live behind the
             // `has_credentials` gate a few lines below).
             memory_source: None,
+            // Plan 1791317253718: filled in after the agent
+            // registry is built (the router needs the registry's
+            // agents to index). `None` until that patch runs.
+            tools_router: None,
         })
     } else {
         info!("LLM proxy disabled (set LLM_ENABLED=true to enable)");
@@ -404,6 +409,21 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     if let Some(llm_ref) = llm.as_mut() {
         llm_ref.memory_source =
             build_memory_source(&cfg, auth_credentials_key_for_memory, auth_store_for_memory);
+        // Plan 1791317253718: build the BM25 router from the
+        // final registry (the agents we just built, including
+        // any server-side extras like `read_document`) and
+        // hand it to every agent that wants it (today:
+        // `search_tools`). Wired in one place so future
+        // contributors cannot accidentally skip the step.
+        if let Some(registry) = agents.as_ref() {
+            let router = Arc::new(ToolsRouter::from_registry(registry));
+            registry.wire_router(router.clone());
+            llm_ref.tools_router = Some(router);
+            info!(
+                indexed = registry.len(),
+                "tools_router (BM25) built and wired into the agent registry"
+            );
+        }
     }
 
     // ---- SttState -------------------------------------------------------
@@ -428,6 +448,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         chat_sessions: chat_sessions_state,
         tts,
         permission_store: crate::llm::permission::PermissionStore::new(),
+        discovered_tools: DiscoveredTools::new(),
         config: cfg,
     }))
 }

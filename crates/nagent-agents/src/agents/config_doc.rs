@@ -286,3 +286,24 @@ impl Default for MemoryAgentConfig {
         Self { recalled_top_k: 10 }
     }
 }
+
+/// Knobs for the `search_tools` meta-agent (plan 1791317253718).
+///
+/// Today the only knob is the `top_k` fallback. The hard cap
+/// (`<= 20`) and the lower bound (`>= 1`) live on the agent
+/// itself so a runaway request never gets past the argument
+/// gate regardless of what the operator sets here.
+#[derive(Debug, Clone)]
+pub struct ToolSearchAgentConfig {
+    /// Default `top_k` the agent returns when the LLM does not
+    /// pass one. Mirrors the proxy's pre-selection default
+    /// (`build_tools_for_round`) so the two paths ship a
+    /// consistent number of tools to the model.
+    pub default_top_k: usize,
+}
+
+impl Default for ToolSearchAgentConfig {
+    fn default() -> Self {
+        Self { default_top_k: 5 }
+    }
+}

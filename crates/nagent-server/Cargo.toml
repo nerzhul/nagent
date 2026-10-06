@@ -27,6 +27,12 @@ caldav-agent = ["nagent-agents/caldav-agent"]
 # Plan 1790695073418: X timeline agent — forwards the agent +
 # registry into the server.
 x-agent = ["nagent-agents/x-agent"]
+# Plan 1791317253718: `search_tools` meta-agent + BM25 router.
+# Always compiled in alongside `all-agents` (every target that
+# dispatches tools needs the discovery surface) — the agent
+# itself is a one-shot helper, the router is a few hundred
+# lines of pure Rust.
+tool-search-agent = ["nagent-agents/tool-search-agent"]
 # Convenience meta-feature: every agent compiled in.
 #
 # Cargo's feature forwarding has a sharp edge here: `nagent-agents/all-agents`
@@ -52,6 +58,7 @@ all-agents = [
     "read-document-agent",
     "caldav-agent",
     "x-agent",
+    "tool-search-agent",
 ]
 # Piper TTS; pulls piper-rs + ort + espeak-ng FFI through the
 # `nagent-tts` crate so the engine can be split into its own

@@ -127,59 +127,31 @@ pub fn build_reply_language_block(lang: Option<&str>) -> Option<String> {
 
 /// Built-in default system prompt. English by `AGENTS.md` rule #1;
 /// admins override it via `LLM_SYSTEM_PROMPT` or `[llm].system_prompt`
-/// in TOML. The agent names match `Agent::name()` in
-/// `crates/stt-server/src/agents/{datetime,weather,stock,web_fetch}_agent.rs`
-/// — keeping the spelling in sync matters: the LLM matches tool names
-/// verbatim when emitting `tool_calls`.
+/// in TOML. Plan 1791317253718: the prose no longer enumerates
+/// every agent — the discovery surface is now `search_tools` plus
+/// the per-round BM25 pre-selection, and the schemas in `tools=[]`
+/// carry the per-tool detail. The prose here is an orientation
+/// paragraph + the per-domain rules (memory, time-sensitivity,
+/// indirect prompt-injection, …) that still apply.
 ///
-/// Kept intentionally compact: every tool description in
-/// `tools[]` is already a structured JSON Schema with one-liner
-/// `description` strings the LLM can match against the inventory
-/// below. Repeating all of that in prose triples the system prompt
-/// without adding coverage. The bullet list here is an index so
-/// small local models know the *names* exist; the schemas in
-/// `tools=[]` carry the rest. Token-budget regression guard lives
-/// in [`tests::default_prompt_stays_under_token_budget`] below.
+/// Token-budget regression guard lives in
+/// [`tests::default_prompt_stays_under_token_budget`] below.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "\
 You are nagent, a local, privacy-respecting assistant embedded in a \
 speech-to-text and chat web app.
 
-Available tools (full JSON Schemas in tools=[]):
-- get_datetime: current date/time, optionally in an IANA timezone.
-- get_weather: current / forecast / hourly / astronomy at a location; \
-chat UI renders a card from the JSON response.
-- get_stock_quote: latest quote for a ticker symbol.
-- web_fetch: fetch a public URL and return its main text as Markdown.
-- calculate: local arithmetic (e.g. \"15% of 230\", \"sqrt(2)+1\"). \
-Pure-local, no I/O.
-- unit_convert: convert between units of the same category (length, \
-mass, volume, time, data, speed, area, temperature). Pure-local.
-- wikipedia: encyclopedic summary of a person / event / concept / \
-place-as-topic / work / species / organisation. Fresh, sourced.
-- dictionary: English word definitions, phonetics, examples, \
-synonyms. Scoped to vocabulary lookups — not encyclopedic questions.
-- x_timeline: read the user's X (Twitter) home timeline via v2 API \
-(read-only; needs /settings/integrations).
-- caldav_list_events: list events in a time range. First call per \
-session needs user confirmation.
-- caldav_get_event: fetch one event by UID. First call per session \
-needs user confirmation.
-- caldav_create_event: add a VEVENT. First call per session needs \
-user confirmation.
-- read_document: read an uploaded PDF / Markdown document by UUID.
-- memory_store: persist a durable user-stated fact (subject, \
-predicate, value).
-- memory_recall: retrieve a stored fact by subject / predicate / tags.
-- memory_list: list metadata for stored facts (no value column).
-- memory_forget: delete a stored fact (explicit user confirmation).
-
-Tool inventory transparency:
-- When the user asks \"what tools do you have\" / \"quels outils peux-tu \
-utiliser\" / \"what can you do\" / \"liste tes outils\", list EVERY \
-name above — including the read-only / no-confirm ones \
-(get_datetime, get_weather, get_stock_quote, web_fetch, calculate, \
-unit_convert, wikipedia, dictionary, read_document). Do not silently \
-elide tools that feel \"less interactive\".
+Tool discovery:
+- `search_tools` is your main entry point. Call it with a short \
+query (e.g. `weather forecast`, `definition of X`, `convert \
+units`, `wikipedia summary of Y`) to get back the matching tools' \
+names + JSON Schemas, then invoke the tool by name on the next \
+round.
+- The proxy pre-selects a small set of likely tools for your \
+message on every round, so trivial queries (date math, weather, \
+calculator, unit conversion, dictionary) often work without \
+`search_tools` — just call the tool by name when you know it fits.
+- Reserve `search_tools` for ambiguous tasks, multi-step flows, \
+or when no pre-selected tool matches.
 
 Tool-usage rules:
 - NEVER invent specific factual data: weather, current date/time, \
@@ -189,9 +161,9 @@ breaks user trust. (This overrides \"answer from general knowledge\" \
 for these domains only — that rule still applies to writing, code, \
 opinion, advice, chitchat.)
 - Time-sensitive (\"today\", \"this week\", a forecast, a stock \
-price): call `get_datetime` FIRST. Local models have no internal \
-clock. `get_weather` with an explicit date uses YYYY-MM-DD from \
-`get_datetime`; never invent a date.
+price): call `get_datetime` FIRST when the tool is pre-selected. \
+Local models have no internal clock. `get_weather` with an explicit \
+date uses YYYY-MM-DD from `get_datetime`; never invent a date.
 - General-knowledge questions (people, history, science, \
 geography-as-topic, species, organisations): prefer `wikipedia` \
 over training data (cut-off = stale biographies / recent events). \
@@ -784,44 +756,33 @@ mod tests {
     }
 
     #[test]
-    fn default_prompt_lists_every_registered_agent() {
-        // Wire contract: the prompt must mention every agent name the
-        // server can register so the LLM knows it can call them. A
-        // silent drop here leaves the affected agent effectively
-        // un-callable in the default deployment — small/local Ollama
-        // models pattern-match on the prose inventory and route the
-        // request to a general-knowledge answer instead of the tool.
-        // The CalDAV plugin was the original regression (operators
-        // kept reporting "the model forgets it has a calendar"), so
-        // this guard now iterates the canonical [`AGENT_DESCRIPTORS`]
-        // table in `nagent-agents` instead of a stale hardcoded list.
+    fn default_prompt_describes_search_tools() {
+        // Plan 1791317253718 §"Prompt rewrite": the LLM-facing
+        // system prompt must steer the model toward `search_tools`
+        // as the entry point for tool discovery. With the
+        // bullet-inventory removed, the prose carries the
+        // discovery paragraph + the per-domain rules; the
+        // schemas in `tools=[]` carry the per-tool detail. The
+        // new paragraph replaces the old "Tool inventory
+        // transparency" block (deleted alongside the inventory).
         let prompt = DEFAULT_SYSTEM_PROMPT;
-        for descriptor in nagent_agents::agents::AGENT_DESCRIPTORS {
-            let tool = descriptor.id;
-            // The four `memory_*` agents are documented in the
-            // long-term-memory block (not the bullet inventory) and
-            // are guarded separately by
-            // `default_prompt_documents_user_memories_block`. We
-            // still require the names to appear somewhere in the
-            // prompt so the LLM can match the schema's
-            // `function.name` to a referenced identifier in prose.
-            assert!(
-                prompt.contains(tool),
-                "DEFAULT_SYSTEM_PROMPT is missing the `{tool}` tool name — the LLM \
-                 won't know to call it in the default deployment. Add a bullet or a \
-                 referenced block to the prompt (see existing entries for get_weather / \
-                 x_timeline), or this guard will keep failing."
-            );
-        }
-        // `read_document` is added to the registry via
-        // `push_agent_boxed` after `AGENT_DESCRIPTORS` is walked
-        // (see `crates/nagent-server/src/agents/mod.rs:281`), so it
-        // does not appear in the descriptor table. Guard it
-        // explicitly so a future prompt rewrite cannot drop the entry.
         assert!(
-            prompt.contains("read_document"),
-            "DEFAULT_SYSTEM_PROMPT is missing `read_document` — uploaded-document Q&A \
-             will fall back to a generic 'I cannot read documents' answer."
+            prompt.contains("`search_tools`"),
+            "DEFAULT_SYSTEM_PROMPT must mention `search_tools` as the tool-discovery entry point."
+        );
+        assert!(
+            prompt.contains("pre-select")
+                || prompt.contains("pre-selected")
+                || prompt.contains("pre_select"),
+            "DEFAULT_SYSTEM_PROMPT must explain that the proxy pre-selects likely tools so the \
+             LLM does not call `search_tools` for trivial queries (weather, calculate, datetime, …)."
+        );
+        assert!(
+            prompt.contains("call it by name")
+                || prompt.contains("by name on the next round")
+                || prompt.contains("by name when you know it fits"),
+            "DEFAULT_SYSTEM_PROMPT must tell the LLM to call discovered tools by name on the \
+             next round (the Anthropic tool-search pattern)."
         );
     }
 
@@ -871,30 +832,26 @@ mod tests {
     }
 
     #[test]
-    fn default_prompt_requires_exhaustive_tool_inventory_on_inquiry() {
-        // Operators reported that the LLM answered "what tools do you
-        // have?" with a partial list (omitting `get_datetime`, `web_fetch`,
-        // `calculate`, `wikipedia`, etc.) — the model grouped "tools
-        // that need user confirmation" and dropped the rest. The
-        // prompt must spell out that inventory questions deserve an
-        // exhaustive enumeration so a future refactor cannot
-        // silently remove the rule.
+    fn default_prompt_drops_legacy_inventory() {
+        // Plan 1791317253718 §"Prompt rewrite": the old prose
+        // "Available tools (full JSON Schemas in tools=[]):"
+        // inventory and the "Tool inventory transparency"
+        // block are removed. The `search_tools` meta-agent and
+        // the per-round BM25 pre-selection replace them. A
+        // future contributor who tries to restore the inventory
+        // (out of habit) gets caught here before the change
+        // reaches main.
         let prompt = DEFAULT_SYSTEM_PROMPT;
         assert!(
-            prompt.contains("Tool inventory transparency"),
-            "DEFAULT_SYSTEM_PROMPT must have a 'Tool inventory transparency' block \
-             so the LLM enumerates every tool (including the read-only ones) when \
-             the user asks 'quels outils peux-tu utiliser' / 'what tools do you have'."
+            !prompt.contains("Available tools (full JSON Schemas in tools=[])"),
+            "DEFAULT_SYSTEM_PROMPT must not include the legacy bullet inventory — \
+             `search_tools` + the per-round BM25 pre-selection replace it. \
+             See plan 1791317253718 §'Prompt rewrite'."
         );
         assert!(
-            prompt.contains("get_datetime")
-                && prompt.contains("web_fetch")
-                && prompt.contains("calculate")
-                && prompt.contains("wikipedia")
-                && prompt.contains("dictionary"),
-            "DEFAULT_SYSTEM_PROMPT inventory-transparency rule must call out the \
-             read-only / no-confirm tools by name so the LLM does not elide them \
-             in its inventory answer."
+            !prompt.contains("Tool inventory transparency"),
+            "DEFAULT_SYSTEM_PROMPT must not include the legacy 'Tool inventory \
+             transparency' block — the discovery paragraph replaces it."
         );
     }
 
@@ -903,27 +860,29 @@ mod tests {
         // Token-budget regression guard. The default prompt is sent
         // on every round of the tool-loop (the proxy reuses
         // `forward_body` across rounds), so prompt bloat multiplies
-        // with the round count. The pre-compaction prompt was
-        // ~33 000 non-whitespace chars (~8 300 tokens); the compact
-        // form is ~6 200 chars (~1 550 tokens). We pin a budget well
-        // above the current measurement but well below the old
-        // bloat so a future regression is caught at PR time. The
-        // budget is in non-whitespace chars because that count is
-        // deterministic and free of tokeniser drift; the per-token
-        // conversion (~ chars / 4 for English prose) is left to
-        // the operator's preferred tokeniser.
+        // with the round count. Plan 1791317253718 §"Prompt
+        // rewrite" drops the bullet inventory (~3 000 chars) and
+        // tightens the budget to 5 000 non-whitespace chars; the
+        // pre-rewrite form was ~6 200 chars and the rewrite target
+        // is ~3 500 chars. The budget is in non-whitespace chars
+        // because that count is deterministic and free of
+        // tokeniser drift; the per-token conversion (~ chars / 4
+        // for English prose) is left to the operator's preferred
+        // tokeniser.
         let prompt = DEFAULT_SYSTEM_PROMPT;
         let non_ws_chars = prompt.chars().filter(|c| !c.is_whitespace()).count();
-        // ~30 % headroom over the current measurement; a regression
-        // past this point is the kind of bloat the compaction pass
-        // was designed to prevent.
-        const BUDGET: usize = 8_000;
+        // Headroom over the post-rewrite target so a contributor
+        // can refine the discovery paragraph without tripping
+        // the guard. Anything past the old bullet-inventory
+        // payload is a clear regression.
+        const BUDGET: usize = 5_000;
         assert!(
             non_ws_chars <= BUDGET,
             "DEFAULT_SYSTEM_PROMPT regressed past the {BUDGET}-char budget \
              (currently {non_ws_chars} non-whitespace chars; ~{} tokens). \
-             Compact the prose — the JSON Schemas in `tools[]` already carry \
-             the per-tool detail; the prompt should remain an index.",
+             The bullet inventory + Tool inventory transparency block were \
+             removed in plan 1791317253718; if the prompt grew back, the \
+             discovery paragraph is the right thing to trim first.",
             non_ws_chars / 4
         );
     }
