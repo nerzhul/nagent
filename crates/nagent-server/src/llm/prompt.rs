@@ -289,34 +289,68 @@ and answer from them directly (e.g. \"what's my doctor's name?\" — \
 look up `doctor name`). Do not invent facts that are not in the \
 list; if the user asks about a fact you cannot find, say you don't \
 have one stored.
-- Memory store (proactive): you may call `memory_store` when the \
-user clearly expresses a durable fact about themselves, their \
-preferences, or their relationships (\"my doctor is Dr Martin\", \
-\"I'm allergic to penicillin\", \"my wife's name is Alice\", \
-\"j'ai un chat qui s'appelle Pixel\"). Pass `subject` (categorical \
-key like \"doctor\" / \"spouse\" / \"user\"), `predicate` (categorical \
-key like \"name\" / \"allergy\" / \"birthday\"), and `value` (the \
-fact itself). Optional: `notes`, `tags` (comma-separated), \
-`confidence` (0.0..1.0, default 1.0), `source_kind` (\"user_stated\" \
-| \"llm_inferred\", default \"user_stated\"). The store is \
-idempotent on (subject, predicate) — re-storing the same fact \
-returns the same memory id.
+- The auto-injected block is authoritative: if the list is empty, \
+that is the source of truth — do NOT call `memory_list` to confirm \
+an empty state, do NOT greet the user with \"I have no memories \
+stored\", and do NOT speculate about facts that are not in the \
+list. A turn that starts with an empty memories block is a \
+prompt to listen for a fact to store, not a prompt to ask the user \
+to populate the list.
+- Memory store (REQUIRED, not optional): when the user clearly \
+expresses a durable fact about themselves, their preferences, or \
+their relationships (\"my doctor is Dr Martin\", \"I'm allergic to \
+penicillin\", \"my wife's name is Alice\", \"j'ai un chat qui \
+s'appelle Pixel\", \"mon anniversaire est au mois de janvier\"), you \
+MUST call `memory_store` IMMEDIATELY in the same turn. Do NOT ask \
+the user for permission first — the user has already opted in via \
+Settings → Memory, and the rule is the same as for `web_fetch` \
+/ `wikipedia`: just call the tool. Asking \"shall I memorize this?\" \
+before every fact forces the user to type \"yes\" after every \
+sentence and is a regression that loses facts. If the user has \
+typed an affirmative fact, the next assistant action is the tool \
+call, not a confirmation question.
+- If you did ask \"shall I memorize X?\" in a previous turn and the \
+user replies with an affirmative (\"oui\", \"yes\", \"vas-y\", \
+\"stocker\", \"enregistre\", \"ok\", \"yeah\", \"go ahead\", or a \
+similar single-word confirmation), treat that as the user \
+confirming the fact you just extracted and call `memory_store` \
+IMMEDIATELY in this turn. Do NOT switch to a generic greeting \
+(\"Bonjour, que puis-je faire pour vous?\"). The affirmative IS \
+the answer to the prior question — execute the queued tool call, \
+then briefly confirm the storage (\"stored: anniversaire.mois = \
+janvier\").
+- Pass `subject` (categorical key like \"doctor\" / \"spouse\" / \
+\"user\" / \"anniversary\"), `predicate` (categorical key like \
+\"name\" / \"allergy\" / \"birthday\" / \"month\"), and `value` \
+(the fact itself). Optional: `notes`, `tags` (comma-separated), \
+`confidence` (0.0..1.0, default 1.0), `source_kind` \
+(\"user_stated\" | \"llm_inferred\", default \"user_stated\"). \
+The store is idempotent on (subject, predicate) — re-storing \
+the same fact returns the same memory id and overwrites the \
+value. Use lowercase for `subject` and `predicate`; use the \
+shortest categorical key that uniquely identifies the slot \
+(\"anniversary\" not \"date-of-birth-anniversary\").
 - Memory store: never store transient task state, transient \
 context, or facts about third parties without consent. When in \
-doubt, ask the user before storing. The taxonomy columns \
-(`subject` / `predicate` / `tags`) are visible to the operator \
-in the audit log — only the `value` and `notes` columns are \
-encrypted at rest. Do not store passwords, API keys, or other \
-secrets under any circumstances; route those to the user's \
-credentials vault instead.
+doubt about the FACT itself (the user said something ambiguous), \
+extract the clearest interpretation and store it — but if you \
+genuinely cannot tell what fact the user meant, ask one short \
+clarification (\"just to confirm, your birthday is in January?\") \
+and store in the same turn once they answer. The taxonomy \
+columns (`subject` / `predicate` / `tags`) are visible to the \
+operator in the audit log — only the `value` and `notes` \
+columns are encrypted at rest. Do not store passwords, API \
+keys, or other secrets under any circumstances; route those to \
+the user's credentials vault instead.
 - Memory recall / list / forget: when the user asks for a fact \
 the auto-injected block did not cover (\"what was the dosage?\", \
 \"remind me what I told you about my mom's birthday\"), call \
-`memory_recall` with the matching `subject` / `predicate` / `tags` \
-filters. `memory_list` returns metadata only (no value) — pair with \
-`memory_recall` to retrieve the value of a specific id. \
-`memory_forget` requires explicit user confirmation; do not \
-call it without first asking the user which memory to remove.";
+`memory_recall` with the matching `subject` / `predicate` / \
+`tags` filters. `memory_list` returns metadata only (no value) \
+— pair with `memory_recall` to retrieve the value of a \
+specific id. `memory_forget` requires explicit user \
+confirmation; do not call it without first asking the user \
+which memory to remove.";
 
 /// Prepend the admin's system prompt as `messages[0]`.
 ///
@@ -741,6 +775,36 @@ mod tests {
         assert!(
             prompt.contains("third parties") || prompt.contains("without consent"),
             "DEFAULT_SYSTEM_PROMPT must explicitly warn the LLM against storing facts about third parties without consent (plan §1.1)."
+        );
+        // Post-screenshot fix (commit cfce143 follow-up): the
+        // prompt must be directive on memory_store, not permissive.
+        // Without the MUST rule, RLHF-trained models pattern-match
+        // on "may" / "optional" and ask permission first, which
+        // makes a turn-2 "oui" land on a generic greeting instead
+        // of a tool call.
+        assert!(
+            prompt.contains("MUST call `memory_store`"),
+            "DEFAULT_SYSTEM_PROMPT must require `memory_store` (not 'may' / 'should') so the LLM stores on the same turn the fact is stated."
+        );
+        assert!(
+            prompt.contains("Do NOT ask the user for permission"),
+            "DEFAULT_SYSTEM_PROMPT must explicitly forbid the pre-store permission step — the screenshot showed the LLM asking 'shall I store?' and then losing the user's 'oui' to a generic greeting."
+        );
+        // Confirmation flow: a single-word 'oui' / 'yes' / 'ok'
+        // after a 'shall I store X?' question must trigger a tool
+        // call, not a generic greeting.
+        assert!(
+            prompt.contains("\"oui\"")
+                && prompt.contains("\"yes\"")
+                && prompt.contains("\"vas-y\""),
+            "DEFAULT_SYSTEM_PROMPT must list the affirmative markers (\"oui\", \"yes\", \"vas-y\") so the LLM recognises a turn-3 confirmation and executes the queued store instead of switching to a greeting."
+        );
+        // Authoritative block: an empty auto-injected list is the
+        // source of truth — the LLM should not double-call
+        // memory_list to confirm an empty state.
+        assert!(
+            prompt.contains("auto-injected block is authoritative"),
+            "DEFAULT_SYSTEM_PROMPT must mark the auto-injected block as authoritative so the LLM does not double-call memory_list for an empty state."
         );
     }
 
