@@ -133,11 +133,21 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 # PDF parsing for read_document; runtime-gated by `[documents].enabled`.
 # `pdf-extract` re-exports `lopdf` transitively; we depend on `lopdf`
-# directly so we can iterate per-page at upload time (count the
-# pages, write one encrypted blob per page to the per-doc
-# `<uuid>/pages/` directory) instead of running the whole-document
+# directly so we can load the PDF once at upload time, iterate per
+# page, and write one encrypted blob per page into the per-doc
+# `<uuid>/pages/` directory instead of running the whole-document
 # extractor on every tool call. Version pinned to the transitive
 # version pdf-extract pulls in to keep the dep tree deduplicated.
+#
+# Per-page text extraction goes through `pdf_extract::output_doc_page`
+# (NOT `lopdf::Document::extract_text`): the latter uses lopdf 0.34's
+# bundled CMap parser, which raises `ToUnicodeCMap(Parse(Error))` on
+# a non-trivial slice of real-world PDFs (Microsoft Office + scanners
+# + a few publishing tools). `pdf-extract` routes ToUnicode through
+# `adobe-cmap-parser` instead and recovers the correct mapping on
+# the same files. The `five_steps_perform_2009.pdf` fixture under
+# `tests/fixtures/` is the regression pin — see
+# `extract_page_text_recovers_real_malformed_t_office_pdf`.
 pdf-extract = "0.7"
 lopdf = { version = "0.34", default-features = false, features = ["pom_parser"] }
 mime_guess = "2"

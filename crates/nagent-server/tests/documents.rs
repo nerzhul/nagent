@@ -884,29 +884,33 @@ async fn read_document_blocks_disk_path_escape() {
 // ---- Plan 1791384190579 follow-up: real-world fixture ----
 //
 // `tests/fixtures/five_steps_perform_2009.pdf` is a real 55-page
-// PDF that triggers the `lopdf` ToUnicode-CMap error on every
-// page — the exact failure mode that bit the operator in
-// production. We bake it in via `include_bytes!` so the test
-// is self-contained: no external network access, no
-// operator-side setup, runs in CI.
+// PDF that triggers the `lopdf 0.34` ToUnicode-CMap error on every
+// page when text goes through `lopdf::Document::extract_text`. We
+// bake it in via `include_bytes!` so the test is self-contained:
+// no external network access, no operator-side setup, runs in CI.
 //
-// The test pins the upload path on a real PDF: the upload
-// must succeed (not 422) even when every page fails, and the
-// per-page read must surface the unreadable-page marker so
-// the LLM can tell the document is unparseable.
+// The extraction path now routes through `pdf_extract::output_doc_page`
+// (see `extract_page_text` in `src/documents/pages.rs`), which uses
+// `adobe-cmap-parser` and recovers the correct glyph-to-Unicode
+// mapping on the same files lopdf rejects. This test pins that
+// recovery so a future regression that reverts to lopdf's extractor
+// (or upgrades `lopdf` past a working CMap parser) is caught here —
+// the assertion would flip to `unreadable_pages == 55` again,
+// exactly the symptom that bit the operator in production.
 const FIVE_STEPS_PDF: &[u8] = include_bytes!("fixtures/five_steps_perform_2009.pdf");
 
 #[tokio::test]
-async fn read_document_real_unreadable_pdf_upload_succeeds() {
+async fn read_document_real_pdf_with_malformed_cmap_extracts_cleanly() {
     // Sanity check: the fixture is the expected PDF.
     let doc = lopdf::Document::load_mem(FIVE_STEPS_PDF).expect("load");
     let pages = doc.get_pages();
     assert_eq!(pages.len(), 55, "fixture must be 55 pages");
 
-    // Drive the real `pages::extract_pages` path — the same
-    // one the upload route runs in production — to make sure
-    // it survives a real-world 422 scenario (lopdf raises on
-    // every page's CMap).
+    // Drive the real `pages::extract_pages` path — the same one
+    // the upload route runs in production. Every page must extract
+    // to real text (no `UNREADABLE_PAGE_MARKER`), proving that
+    // pdf-extract's `adobe-cmap-parser` recovers the CMap lopdf
+    // 0.34 chokes on.
     let key = CredentialsKey::from_bytes([0x77; 32]);
     let tmp = std::env::temp_dir().join(format!(
         "nagent-doc-real-pdf-{}-{}",
@@ -919,26 +923,35 @@ async fn read_document_real_unreadable_pdf_upload_succeeds() {
     let dir = tmp.join("pages");
     let index = nagent_server::documents::pages::extract_pages(FIVE_STEPS_PDF, &dir, &key)
         .expect("extract must succeed on real PDF with CMap failures");
-    let (page_count, unreadable_pages) = match &index {
+    let (page_count, unreadable_pages, preview) = match &index {
         nagent_server::documents::pages::PagesIndex::Indexed {
             page_count,
             unreadable_pages,
+            preview,
             ..
-        } => (*page_count, *unreadable_pages),
+        } => (*page_count, *unreadable_pages, preview.clone()),
         other => panic!("expected Indexed, got {other:?}"),
     };
     assert_eq!(page_count, 55, "all 55 pages must be in the index");
     assert_eq!(
-        unreadable_pages, 55,
-        "every page must be reported as unreadable (real-world ToUnicode CMap error)"
+        unreadable_pages, 0,
+        "every page must extract via pdf-extract (was 55 under lopdf 0.34, see plan 1791384190579)"
+    );
+    assert!(
+        preview.contains("PostgreSQL") || preview.contains("Five Steps"),
+        "preview should contain real document content, got: {preview:?}"
     );
 
-    // The page blobs exist + decrypt to the marker.
+    // The page blobs decrypt to real text, not the unreadable marker.
     let text =
         nagent_server::documents::pages::read_pages(&dir, &key, 1, 1).expect("read must decrypt");
     assert!(
-        text.contains(nagent_server::documents::pages::UNREADABLE_PAGE_MARKER),
-        "real PDF must yield the unreadable-page marker, got: {text:?}"
+        !text.contains(nagent_server::documents::pages::UNREADABLE_PAGE_MARKER),
+        "real PDF must NOT yield the unreadable-page marker (pdf-extract recovered it), got: {text:?}"
+    );
+    assert!(
+        text.contains("PostgreSQL") || text.contains("Five Steps"),
+        "page 1 should mention PostgreSQL or Five Steps, got: {text:?}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
