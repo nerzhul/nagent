@@ -8,21 +8,22 @@
 //!
 //! The module is always compiled (so the env / TOML plumbing always
 //! resolves the `[documents]` table), but the heavy deps
-//! (`pdf-extract` + `mime_guess`) are gated behind the `documents`
-//! cargo feature. When the feature is OFF the PDF code path is
-//! replaced by a "PDF support not compiled in" error at the route
-//! layer so a misconfigured binary fails fast rather than silently
-//! dropping PDFs.
+//! (`pdf-extract` + `lopdf` + `mime_guess`) are gated behind the
+//! `documents` cargo feature. When the feature is OFF the PDF
+//! code path is replaced by a "PDF support not compiled in" error
+//! at the route layer so a misconfigured binary fails fast rather
+//! than silently dropping PDFs.
 //!
 //! ## Sub-modules
 //!
 //! - [`storage`] — disk layout (UUID + 2-char shard) + the
 //! `DocumentStore` DB wrapper.
-//! - [`extract`] — text extraction (`.txt` passthrough, `.pdf` via
-//! `pdf-extract`). Gated on the `documents` feature.
-//! - [`agent`] — [`ReadDocumentAgent`], registered in
-//! [`crate::agents::AgentRegistry::from_config`] when both the
-//! cargo feature AND `documents.enabled = true` are on.
+//! - [`extract`] — text extraction for `.txt`/`.md`/`.log` files
+//!   (lossy UTF-8 passthrough). The PDF path moved to
+//!   [`pages::extract_pages`] which produces the per-page
+//!   encrypted store used by the agent.
+//! - [`pages`] — per-page encrypted text store + overview read +
+//!   range read + `PageRange` parsing.
 //! - [`routes`] — `POST/GET/DELETE /v1/documents*` HTTP handlers
 //! + multipart parsing.
 //! - [`purge`] — `purge_older_than(Duration)` helper used by the
@@ -46,6 +47,7 @@
 // `DocumentStore` + `ChatSessions` is in `crate::agents::mod`.
 pub mod db;
 pub mod extract;
+pub mod pages;
 pub mod purge;
 pub mod routes;
 pub mod storage;
@@ -73,6 +75,14 @@ struct DocumentStoreInner {
     /// Pulled from `DocumentsConfig` at boot so a reload (out of
     /// scope today) would pick it up.
     max_extracted_chars: usize,
+    /// Hard cap on the number of pages one range-mode
+    /// `read_document` call may return. Surfaces through the
+    /// `DocumentSource::max_pages_per_call` accessor.
+    max_pages_per_call: u32,
+    /// Hard cap on the total characters one range-mode read may
+    /// return. Surfaces through the
+    /// `DocumentSource::max_page_chars_per_call` accessor.
+    max_page_chars_per_call: usize,
     /// Absolute path to the on-disk cache directory. Captured at
     /// boot from `[documents].cache_dir` so the agent / download
     /// handler can validate `disk_path` against it without
@@ -95,6 +105,11 @@ impl std::fmt::Debug for DocumentStore {
         f.debug_struct("DocumentStore")
             .field("db", &"<nagent_db::Db>")
             .field("max_extracted_chars", &self.inner.max_extracted_chars)
+            .field("max_pages_per_call", &self.inner.max_pages_per_call)
+            .field(
+                "max_page_chars_per_call",
+                &self.inner.max_page_chars_per_call,
+            )
             .field("cache_dir", &self.inner.cache_dir)
             .field("pdf_semaphore", &"<Arc<Semaphore>>")
             .field("pdf_extract_timeout", &self.inner.pdf_extract_timeout)
@@ -108,9 +123,12 @@ impl DocumentStore {
     /// "half the host cores, clamped to `[1, 16]`".
     /// `pdf_extract_timeout_secs` is the per-call timeout passed to
     /// the bounded blocking pool for PDF parses.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: nagent_db::Db,
         max_extracted_chars: usize,
+        max_pages_per_call: u32,
+        max_page_chars_per_call: usize,
         cache_dir: std::path::PathBuf,
         pdf_extract_concurrency: usize,
         pdf_extract_timeout_secs: u64,
@@ -127,6 +145,8 @@ impl DocumentStore {
             inner: Arc::new(DocumentStoreInner {
                 db,
                 max_extracted_chars,
+                max_pages_per_call,
+                max_page_chars_per_call,
                 cache_dir,
                 pdf_semaphore: Arc::new(Semaphore::new(permits)),
                 pdf_extract_timeout: Duration::from_secs(pdf_extract_timeout_secs),
@@ -161,6 +181,20 @@ impl DocumentStore {
     /// Resolved from `[documents].max_extracted_chars` at boot.
     pub fn max_extracted_chars(&self) -> usize {
         self.inner.max_extracted_chars
+    }
+
+    /// Maximum number of pages one range-mode `read_document`
+    /// call may return. Resolved from
+    /// `[documents].max_pages_per_call` at boot.
+    pub fn max_pages_per_call(&self) -> u32 {
+        self.inner.max_pages_per_call
+    }
+
+    /// Maximum number of total characters one range-mode
+    /// `read_document` call may return. Resolved from
+    /// `[documents].max_page_chars_per_call` at boot.
+    pub fn max_page_chars_per_call(&self) -> usize {
+        self.inner.max_page_chars_per_call
     }
 
     /// Absolute path to the on-disk cache directory. Used by the

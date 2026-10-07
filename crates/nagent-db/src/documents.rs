@@ -112,6 +112,7 @@ impl Documents {
         extracted_chars: u64,
         page_count: Option<u32>,
         disk_path: &str,
+        pages_dir: Option<&str>,
     ) -> Result<(), DocumentError> {
         match self {
             Documents::Sqlite(s) => {
@@ -125,6 +126,7 @@ impl Documents {
                     extracted_chars,
                     page_count,
                     disk_path,
+                    pages_dir,
                 )
                 .await
             }
@@ -139,6 +141,7 @@ impl Documents {
                     extracted_chars,
                     page_count,
                     disk_path,
+                    pages_dir,
                 )
                 .await
             }
@@ -244,6 +247,7 @@ impl ScopedDocuments {
         extracted_chars: u64,
         page_count: Option<u32>,
         disk_path: &str,
+        pages_dir: Option<&str>,
     ) -> Result<(), DocumentError> {
         self.inner
             .insert(
@@ -256,6 +260,7 @@ impl ScopedDocuments {
                 extracted_chars,
                 page_count,
                 disk_path,
+                pages_dir,
             )
             .await
     }
@@ -270,6 +275,23 @@ impl ScopedDocuments {
         match &self.inner {
             Documents::Sqlite(s) => s.delete(id, self.user_id, session_id).await,
             Documents::Postgres(s) => s.delete(id, self.user_id, session_id).await,
+        }
+    }
+
+    /// Delete a row scoped by `(user, session)` and return both
+    /// the on-disk `disk_path` and the optional `pages_dir` so the
+    /// HTTP handler can unlink the encrypted per-page directory in
+    /// the same atomic step. Mirrors [`Self::delete`] and is the
+    /// preferred entry point for the `/v1/documents/{id}` DELETE
+    /// route since plan 1791384190579.
+    pub async fn delete_with_pages_dir(
+        &self,
+        id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<(PathBuf, Option<PathBuf>)>, DocumentError> {
+        match &self.inner {
+            Documents::Sqlite(s) => s.delete_with_pages_dir(id, self.user_id, session_id).await,
+            Documents::Postgres(s) => s.delete_with_pages_dir(id, self.user_id, session_id).await,
         }
     }
 }
@@ -302,7 +324,7 @@ pub(crate) mod sqlite {
         ) -> Result<Option<DocumentRow>, DocumentError> {
             let row = match session_id {
                 Some(sid) => sqlx::query(
-                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                      FROM uploaded_documents WHERE id = ?1 AND user_id = ?2 AND session_id = ?3",
                 )
                 .bind(id.to_string())
@@ -311,7 +333,7 @@ pub(crate) mod sqlite {
                 .fetch_optional(&self.pool)
                 .await?,
                 None => sqlx::query(
-                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                      FROM uploaded_documents WHERE id = ?1 AND user_id = ?2",
                 )
                 .bind(id.to_string())
@@ -334,11 +356,12 @@ pub(crate) mod sqlite {
             extracted_chars: u64,
             page_count: Option<u32>,
             disk_path: &str,
+            pages_dir: Option<&str>,
         ) -> Result<(), DocumentError> {
             sqlx::query(
                 "INSERT INTO uploaded_documents \
-                 (id, session_id, user_id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (id, session_id, user_id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )
             .bind(id.to_string())
             .bind(session_id.to_string())
@@ -349,6 +372,7 @@ pub(crate) mod sqlite {
             .bind(extracted_chars as i64)
             .bind(page_count.map(|p| p as i64))
             .bind(disk_path)
+            .bind(pages_dir)
             .execute(&self.pool)
             .await?;
             Ok(())
@@ -360,7 +384,7 @@ pub(crate) mod sqlite {
             session_id: Uuid,
         ) -> Result<Vec<DocumentRow>, DocumentError> {
             let rows = sqlx::query(
-                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                  FROM uploaded_documents WHERE user_id = ?1 AND session_id = ?2 \
                  ORDER BY created_at DESC",
             )
@@ -393,9 +417,21 @@ pub(crate) mod sqlite {
             user_id: Uuid,
             session_id: Uuid,
         ) -> Result<Option<PathBuf>, DocumentError> {
+            Ok(self
+                .delete_with_pages_dir(id, user_id, session_id)
+                .await?
+                .map(|(p, _)| p))
+        }
+
+        pub async fn delete_with_pages_dir(
+            &self,
+            id: Uuid,
+            user_id: Uuid,
+            session_id: Uuid,
+        ) -> Result<Option<(PathBuf, Option<PathBuf>)>, DocumentError> {
             let mut tx = self.pool.begin().await?;
             let row = sqlx::query(
-                "SELECT disk_path FROM uploaded_documents \
+                "SELECT disk_path, pages_dir FROM uploaded_documents \
                  WHERE id = ?1 AND user_id = ?2 AND session_id = ?3",
             )
             .bind(id.to_string())
@@ -408,12 +444,16 @@ pub(crate) mod sqlite {
                 return Ok(None);
             };
             let disk_path: String = row.try_get("disk_path")?;
+            let pages_dir: Option<String> = row.try_get("pages_dir")?;
             sqlx::query("DELETE FROM uploaded_documents WHERE id = ?1")
                 .bind(id.to_string())
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            Ok(Some(PathBuf::from(disk_path)))
+            Ok(Some((
+                PathBuf::from(disk_path),
+                pages_dir.map(PathBuf::from),
+            )))
         }
 
         pub async fn sweep_older_than(
@@ -421,7 +461,7 @@ pub(crate) mod sqlite {
             cutoff: DateTime<Utc>,
         ) -> Result<Vec<DocumentRow>, DocumentError> {
             let rows = sqlx::query(
-                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                  FROM uploaded_documents \
                  WHERE (expires_at IS NOT NULL AND expires_at <= ?1) \
                     OR created_at <= ?1 \
@@ -450,6 +490,7 @@ pub(crate) mod sqlite {
         let extracted_chars: i64 = row.try_get("extracted_chars")?;
         let page_count: Option<i64> = row.try_get("page_count")?;
         let disk_path: String = row.try_get("disk_path")?;
+        let pages_dir: Option<String> = row.try_get("pages_dir")?;
         Ok(DocumentRow {
             id: Uuid::parse_str(&id_str)
                 .map_err(|e| DocumentError::Sqlx(sqlx::Error::Protocol(e.to_string())))?,
@@ -459,6 +500,7 @@ pub(crate) mod sqlite {
             extracted_chars: extracted_chars.max(0) as u64,
             page_count: page_count.map(|p| p.max(0) as u32),
             disk_path: PathBuf::from(disk_path),
+            pages_dir: pages_dir.map(PathBuf::from),
         })
     }
 }
@@ -491,7 +533,7 @@ pub(crate) mod postgres {
         ) -> Result<Option<DocumentRow>, DocumentError> {
             let row = match session_id {
                 Some(sid) => sqlx::query(
-                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                      FROM uploaded_documents WHERE id = $1 AND user_id = $2 AND session_id = $3",
                 )
                 .bind(id)
@@ -500,7 +542,7 @@ pub(crate) mod postgres {
                 .fetch_optional(&self.pool)
                 .await?,
                 None => sqlx::query(
-                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                    "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                      FROM uploaded_documents WHERE id = $1 AND user_id = $2",
                 )
                 .bind(id)
@@ -523,11 +565,12 @@ pub(crate) mod postgres {
             extracted_chars: u64,
             page_count: Option<u32>,
             disk_path: &str,
+            pages_dir: Option<&str>,
         ) -> Result<(), DocumentError> {
             sqlx::query(
                 "INSERT INTO uploaded_documents \
-                 (id, session_id, user_id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 (id, session_id, user_id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             )
             .bind(id)
             .bind(session_id)
@@ -538,6 +581,7 @@ pub(crate) mod postgres {
             .bind(extracted_chars as i64)
             .bind(page_count.map(|p| p as i32))
             .bind(disk_path)
+            .bind(pages_dir)
             .execute(&self.pool)
             .await?;
             Ok(())
@@ -549,7 +593,7 @@ pub(crate) mod postgres {
             session_id: Uuid,
         ) -> Result<Vec<DocumentRow>, DocumentError> {
             let rows = sqlx::query(
-                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                  FROM uploaded_documents WHERE user_id = $1 AND session_id = $2 \
                  ORDER BY created_at DESC",
             )
@@ -582,9 +626,21 @@ pub(crate) mod postgres {
             user_id: Uuid,
             session_id: Uuid,
         ) -> Result<Option<PathBuf>, DocumentError> {
+            Ok(self
+                .delete_with_pages_dir(id, user_id, session_id)
+                .await?
+                .map(|(p, _)| p))
+        }
+
+        pub async fn delete_with_pages_dir(
+            &self,
+            id: Uuid,
+            user_id: Uuid,
+            session_id: Uuid,
+        ) -> Result<Option<(PathBuf, Option<PathBuf>)>, DocumentError> {
             let mut tx = self.pool.begin().await?;
             let row = sqlx::query(
-                "SELECT disk_path FROM uploaded_documents \
+                "SELECT disk_path, pages_dir FROM uploaded_documents \
                  WHERE id = $1 AND user_id = $2 AND session_id = $3",
             )
             .bind(id)
@@ -597,12 +653,16 @@ pub(crate) mod postgres {
                 return Ok(None);
             };
             let disk_path: String = row.try_get("disk_path")?;
+            let pages_dir: Option<String> = row.try_get("pages_dir")?;
             sqlx::query("DELETE FROM uploaded_documents WHERE id = $1")
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            Ok(Some(PathBuf::from(disk_path)))
+            Ok(Some((
+                PathBuf::from(disk_path),
+                pages_dir.map(PathBuf::from),
+            )))
         }
 
         pub async fn sweep_older_than(
@@ -610,7 +670,7 @@ pub(crate) mod postgres {
             cutoff: DateTime<Utc>,
         ) -> Result<Vec<DocumentRow>, DocumentError> {
             let rows = sqlx::query(
-                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path \
+                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
                  FROM uploaded_documents \
                  WHERE (expires_at IS NOT NULL AND expires_at <= $1) \
                     OR created_at <= $1 \
@@ -639,6 +699,7 @@ pub(crate) mod postgres {
         let extracted_chars: i64 = row.try_get("extracted_chars")?;
         let page_count: Option<i32> = row.try_get("page_count")?;
         let disk_path: String = row.try_get("disk_path")?;
+        let pages_dir: Option<String> = row.try_get("pages_dir")?;
         Ok(DocumentRow {
             id,
             original_name,
@@ -647,6 +708,7 @@ pub(crate) mod postgres {
             extracted_chars: extracted_chars.max(0) as u64,
             page_count: page_count.map(|p| p.max(0) as u32),
             disk_path: PathBuf::from(disk_path),
+            pages_dir: pages_dir.map(PathBuf::from),
         })
     }
 }

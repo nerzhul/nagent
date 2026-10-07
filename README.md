@@ -1082,7 +1082,9 @@ env-var overrides listed below):
 enabled = true
 cache_dir = "/var/cache/nagent/docs"   # must be writable; PVC in k8s
 max_file_size_bytes = 20_971_520
-max_extracted_chars = 100_000          # past the cap, a `[… truncated …]` marker is appended
+max_extracted_chars = 100_000          # per-call cap for non-PDF text rows (legacy truncation marker)
+max_pages_per_call = 20                # hard cap on pages per `read_document(page_range=…)` call
+max_page_chars_per_call = 20_000       # hard cap on chars per range-mode read
 max_docs_per_session = 50
 pdf_extract_timeout_secs = 30
 purge_interval_hours = 24              # 0 disables the periodic task
@@ -1091,16 +1093,18 @@ default_ttl_days = 30                  # rows + files older than this are purged
 
 Equivalent env vars (env always wins over TOML):
 
-| Setting                | Env var                 |
-| ---------------------- | ----------------------- |
-| `enabled`              | `DOCS_ENABLED`          |
-| `cache_dir`            | `DOCS_CACHE_DIR`        |
-| `max_file_size_bytes`  | `DOCS_MAX_FILE_BYTES`   |
-| `max_extracted_chars`  | `DOCS_MAX_CHARS`        |
-| `max_docs_per_session` | `DOCS_MAX_PER_SESSION`  |
-| `pdf_extract_timeout_secs` | `DOCS_PDF_TIMEOUT_SECS` |
-| `purge_interval_hours` | `DOCS_PURGE_INTERVAL_H` |
-| `default_ttl_days`     | `DOCS_TTL_DAYS`         |
+| Setting                     | Env var                         |
+| ---------------------- | -------------------------------- |
+| `enabled`              | `DOCS_ENABLED`                  |
+| `cache_dir`            | `DOCS_CACHE_DIR`                |
+| `max_file_size_bytes`  | `DOCS_MAX_FILE_BYTES`           |
+| `max_extracted_chars`  | `DOCS_MAX_CHARS`                |
+| `max_pages_per_call`   | `DOCS_MAX_PAGES_PER_CALL`       |
+| `max_page_chars_per_call` | `DOCS_MAX_PAGE_CHARS_PER_CALL` |
+| `max_docs_per_session` | `DOCS_MAX_PER_SESSION`          |
+| `pdf_extract_timeout_secs` | `DOCS_PDF_TIMEOUT_SECS`     |
+| `purge_interval_hours` | `DOCS_PURGE_INTERVAL_H`         |
+| `default_ttl_days`     | `DOCS_TTL_DAYS`                 |
 
 `documents.enabled = true` requires `auth.enabled = true` (the
 table lives in the auth DB). The server refuses to boot when the

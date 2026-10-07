@@ -29,7 +29,8 @@ pub mod x_account_service;
 
 pub use agents::{
     Agent, AgentError, AgentRegistry, AgentSummary, ConfirmationDecision, DocumentPayload,
-    DocumentSource, SecretSink, SecretSource, UserContext,
+    DocumentReadRequest, DocumentShape, DocumentSource, PageRange, SecretSink, SecretSource,
+    UserContext,
 };
 pub use config::{
     AgentConfigs, CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig,

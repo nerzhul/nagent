@@ -167,6 +167,15 @@ pub struct ReadDocumentAgentConfig {
     pub timeout_ms: u64,
     /// Maximum characters the agent returns to the LLM per call.
     pub max_extracted_chars: usize,
+    /// Hard cap on the number of pages one range-mode read may
+    /// return. Surfaces through `DocumentSource::max_pages_per_call`
+    /// so the agent can validate user-supplied `page_range`
+    /// arguments before opening a single page file.
+    pub max_pages_per_call: u32,
+    /// Hard cap on the total characters one range-mode read may
+    /// return. Surfaces through
+    /// `DocumentSource::max_page_chars_per_call`.
+    pub max_page_chars_per_call: usize,
 }
 
 impl Default for ReadDocumentAgentConfig {
@@ -174,6 +183,14 @@ impl Default for ReadDocumentAgentConfig {
         Self {
             timeout_ms: 5_000,
             max_extracted_chars: 100_000,
+            // Default 20 pages / 20 000 chars per range-mode read —
+            // a single PDF page rarely exceeds 2 000 chars and
+            // Ollama's default `num_ctx` of 2 048 tokens cannot
+            // absorb more than a handful of pages in a single tool
+            // result. Operators on a larger context window can
+            // raise both knobs.
+            max_pages_per_call: 20,
+            max_page_chars_per_call: 20_000,
         }
     }
 }

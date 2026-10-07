@@ -409,16 +409,29 @@ mod tests {
                           optionally restrict to a `page_range` (e.g. \"3-7\") to limit \
                           context size.",
             keywords: &[
-                "file", "files", "pdf", "txt", "md", "log", "markdown",
-                "fiche", "bulletin", "paie", "payslip", "statement",
-                "invoice", "facture", "notice",
+                "file",
+                "files",
+                "pdf",
+                "txt",
+                "md",
+                "log",
+                "markdown",
+                "fiche",
+                "bulletin",
+                "paie",
+                "payslip",
+                "statement",
+                "invoice",
+                "facture",
+                "notice",
             ],
         }
     }
     fn x_timeline() -> StubAgent {
         StubAgent {
             name: "x_timeline",
-            description: "Read the X (Twitter) home timeline of the user's connected X account via \
+            description:
+                "Read the X (Twitter) home timeline of the user's connected X account via \
                           the v2 API. Returns ~20 most recent posts, pre-sorted newest-first.",
             keywords: &["twitter", "tweets", "x_account"],
         }
@@ -426,7 +439,8 @@ mod tests {
     fn caldav_list_events() -> StubAgent {
         StubAgent {
             name: "caldav_list_events",
-            description: "List events from the user's CalDAV calendar in a time range. Returns JSON \
+            description:
+                "List events from the user's CalDAV calendar in a time range. Returns JSON \
                           with `events[]` (uid, summary, start, end, description, location, rrule).",
             keywords: &["calendar", "events", "agenda"],
         }
@@ -567,11 +581,7 @@ mod tests {
     /// in `ReadDocumentAgent` is what closes the gap.
     #[test]
     fn pre_select_picks_read_document_for_file_or_doc_query() {
-        let reg = registry(vec![
-            read_document(),
-            x_timeline(),
-            caldav_list_events(),
-        ]);
+        let reg = registry(vec![read_document(), x_timeline(), caldav_list_events()]);
         let r = ToolsRouter::from_registry(&reg);
         let hits = r.pre_select("read a document or file", 1);
         assert_eq!(hits.len(), 1, "expected one match, got {hits:?}");
@@ -588,11 +598,7 @@ mod tests {
     /// has no stemming so the literal token has to appear.
     #[test]
     fn pre_select_picks_read_document_for_french_synonyms() {
-        let reg = registry(vec![
-            read_document(),
-            x_timeline(),
-            caldav_list_events(),
-        ]);
+        let reg = registry(vec![read_document(), x_timeline(), caldav_list_events()]);
         let r = ToolsRouter::from_registry(&reg);
         for query in [
             "lis ma fiche de paie",

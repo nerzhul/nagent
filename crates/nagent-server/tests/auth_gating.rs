@@ -297,6 +297,7 @@ fn _suppress_unused_warnings() {
         allow_user_location: false,
         allow_user_timezone: true,
         allow_user_reply_language: true,
+        allow_user_memory: false,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 0,
         ollama_num_predict: None,

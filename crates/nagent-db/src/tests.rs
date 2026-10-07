@@ -674,6 +674,7 @@ mod documents {
             100,
             None,
             "/tmp/test.txt",
+            None,
         )
         .await
         .expect("insert");
@@ -730,6 +731,7 @@ mod documents {
                 1,
                 None,
                 "/tmp/x",
+                None,
             )
             .await
             .expect("insert");
@@ -855,9 +857,19 @@ async fn postgres_parity_documents_scoped() {
     let docs = db.for_user(user).documents();
     let session = Uuid::new_v4();
     let id = Uuid::new_v4();
-    docs.insert(id, session, "x.txt", "text/plain", 1, 1, None, "/tmp/x")
-        .await
-        .expect("pg insert");
+    docs.insert(
+        id,
+        session,
+        "x.txt",
+        "text/plain",
+        1,
+        1,
+        None,
+        "/tmp/x",
+        None,
+    )
+    .await
+    .expect("pg insert");
     assert_eq!(docs.count_for_session(session).await.unwrap(), 1);
     let path = docs.delete(id, session).await.expect("delete");
     assert!(path.is_some());

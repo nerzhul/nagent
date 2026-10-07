@@ -294,6 +294,11 @@ pub struct DocumentRow {
     pub extracted_chars: u64,
     pub page_count: Option<u32>,
     pub disk_path: std::path::PathBuf,
+    /// Absolute path to the per-page directory the upload route
+    /// writes (`<disk>/pages/`), or `None` for pre-migration rows
+    /// that predate the encrypted-at-rest per-page index. `None`
+    /// triggers the legacy on-the-fly re-extraction path on read.
+    pub pages_dir: Option<std::path::PathBuf>,
 }
 
 // ---- AuthUser (request identity) ---------------------------------------

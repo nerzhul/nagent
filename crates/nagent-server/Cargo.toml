@@ -132,7 +132,14 @@ aes-gcm = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 # PDF parsing for read_document; runtime-gated by `[documents].enabled`.
+# `pdf-extract` re-exports `lopdf` transitively; we depend on `lopdf`
+# directly so we can iterate per-page at upload time (count the
+# pages, write one encrypted blob per page to the per-doc
+# `<uuid>/pages/` directory) instead of running the whole-document
+# extractor on every tool call. Version pinned to the transitive
+# version pdf-extract pulls in to keep the dep tree deduplicated.
 pdf-extract = "0.7"
+lopdf = { version = "0.34", default-features = false, features = ["pom_parser"] }
 mime_guess = "2"
 # Trusted-proxy CIDR parser for security plan #5.
 ipnet = "2"

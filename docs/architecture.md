@@ -174,10 +174,22 @@ The crate boundary is enforced by three capability traits:
   audit log reads uniformly across reads and writes.
   `UserContext::sink` is `None` outside the chat-session
   constructor so test / direct-invoke paths stay sink-free.
-- `DocumentSource` — `async fn read(user_id, chat_session_id, name)`.
+- `DocumentSource` — `async fn read(user_id, chat_session_id, name)`
+  + `read_with_request(user_id, chat_session_id, DocumentReadRequest)`.
   The only thing the agents crate sees of the documents
   subsystem. `nagent-server`'s `StoreDocumentSource` adapts the
-  `DocumentStore`.
+  `DocumentStore`. For PDFs the upload route extracts once via
+  `documents::pages::extract_pages` and persists an encrypted
+  per-page store (`<disk>/pages/page-NNNN.bin` + `meta.bin`,
+  same wire format as the credentials vault); the
+  `read_with_request` entry point decrypts the requested pages
+  on demand and surfaces either an `Overview` payload (page
+  count + preview + TOC + hint pointing at `page_range`) or a
+  `Range` payload (joined per-page text + applied range), capped
+  by `[documents].max_pages_per_call` and
+  `[documents].max_page_chars_per_call`. Plain-text rows still
+  use the legacy `read` path (full text under the
+  `[documents].max_extracted_chars` cap).
 
 ### 2.3 `AgentRegistry`
 

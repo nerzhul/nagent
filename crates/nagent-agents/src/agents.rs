@@ -159,16 +159,90 @@ pub trait DocumentSource: Send + Sync {
     /// surfaces it through this method so the agent does not have
     /// to know about the server config surface.
     fn max_extracted_chars(&self) -> usize;
+
+    /// Per-call page-range read entry point. Implementations
+    /// decrypt the requested pages from the per-doc encrypted
+    /// `<uuid>/pages/` directory and cap the response at
+    /// `max_pages_per_call` / `max_page_chars_per_call`. The
+    /// default implementation falls back to [`Self::read`] +
+    /// truncate, which keeps the trait extensible for downstream
+    /// `DocumentSource` impls that have not yet ported to the
+    /// per-page store.
+    ///
+    /// Returning `Ok(DocumentPayload::Range { .. })` is the
+    /// preferred response; the default delegates to
+    /// [`Self::read`] and packages the full text as a single-page
+    /// range so the existing wire shape still carries the
+    /// "showing X-Y of N" hint.
+    async fn read_with_request(
+        &self,
+        user_id: Uuid,
+        chat_session_id: Uuid,
+        request: DocumentReadRequest,
+    ) -> Result<DocumentPayload, AgentError> {
+        // Default: fetch the full payload via the legacy path
+        // and let the agent slice / cap it. Downstream
+        // implementers that do not have a per-page store can
+        // keep relying on this; only the server-side store
+        // overrides with the encrypted-blob path.
+        let _ = request; // not used in the legacy path
+        self.read(user_id, chat_session_id, &request.name).await
+    }
+
+    /// Hard cap on the number of pages one range-mode read may
+    /// return. Configured by `[documents].max_pages_per_call`.
+    fn max_pages_per_call(&self) -> u32;
+
+    /// Hard cap on the total characters one range-mode read may
+    /// return. Configured by `[documents].max_page_chars_per_call`.
+    fn max_page_chars_per_call(&self) -> usize;
 }
 
-/// Document payload returned by [`DocumentSource::read`]. Mirrors
-/// the columns the `nagent_db::DocumentRow` already exposes, plus
-/// the extracted text the agent returns verbatim to the LLM.
+/// Parsed page range applied to a [`DocumentSource::read_with_request`]
+/// call. Lives at the agents layer so the `DocumentSource` trait
+/// can reference the type unconditionally — implementations that
+/// have not migrated to the per-page store can simply ignore it
+/// (the default `read_with_request` does exactly that).
+///
+/// Both bounds are 1-indexed to match the LLM-facing
+/// `page_range` argument shape (`"3"`, `"3-7"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentReadRequest {
+    pub name: String,
+    pub page_range: Option<PageRange>,
+}
+
+/// Inclusive `[start, end]` 1-indexed page range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageRange {
+    pub start: u32,
+    pub end_inclusive: u32,
+}
+
+/// Document payload returned by [`DocumentSource::read`] and
+/// [`DocumentSource::read_with_request`].
 ///
 /// Lives at the `agents` module (not under `read_document`) so the
 /// `DocumentSource` trait can reference the type unconditionally —
-/// the trait is compiled even when the `read-document-agent`
-/// cargo feature is off.
+/// the trait is compiled even when the `read-document-agent` cargo
+/// feature is off.
+///
+/// Variants:
+///
+/// - `Overview` — full document summary returned when the LLM
+///   calls `read_document(name)` with no `page_range`. Carries the
+///   real `page_count`, a short `preview` (first ~2 000 chars),
+///   and an optional table of contents. The LLM is told to make
+///   follow-up calls with `page_range` to fetch specific pages.
+/// - `Range` — the joined text of the requested pages plus the
+///   applied range, capped at `max_pages_per_call` pages and
+///   `max_page_chars_per_call` characters. The agent's response
+///   envelope surfaces `pages X-Y of N` so the LLM knows how
+///   much of the document is still unread.
+/// - `FullText` — legacy mode used by the default
+///   [`DocumentSource::read_with_request`] impl; the full document
+///   text is returned verbatim (existing behaviour for
+///   `.txt`/`.md`/`.log` files where pagination does not apply).
 #[derive(Debug, Clone)]
 pub struct DocumentPayload {
     pub id: Uuid,
@@ -177,7 +251,87 @@ pub struct DocumentPayload {
     pub size_bytes: u64,
     pub page_count: Option<u32>,
     pub extracted_chars: u64,
-    pub text: String,
+    /// Number of pages whose text extraction failed at upload
+    /// time (e.g. an unparseable ToUnicode CMap). Always 0 for
+    /// plain-text rows. Surfaced in the overview envelope so
+    /// the LLM can tell when a document is entirely unreadable
+    /// and the preview is therefore empty.
+    pub unreadable_pages: u32,
+    pub shape: DocumentShape,
+}
+
+impl DocumentPayload {
+    /// Build a `FullText` payload with the legacy shape — the
+    /// extracted text is returned verbatim. Used by the default
+    /// [`DocumentSource::read`] path and by `.txt`/`.md`/`.log`
+    /// rows that have no per-page store.
+    pub fn full_text(
+        id: Uuid,
+        original_name: String,
+        mime: String,
+        size_bytes: u64,
+        page_count: Option<u32>,
+        extracted_chars: u64,
+        text: String,
+    ) -> Self {
+        Self {
+            id,
+            original_name,
+            mime,
+            size_bytes,
+            page_count,
+            extracted_chars,
+            unreadable_pages: 0,
+            shape: DocumentShape::FullText(text),
+        }
+    }
+
+    /// Re-shape the payload while keeping the metadata fields.
+    /// The agent side picks `Overview` / `Range` based on whether
+    /// the LLM requested a `page_range`; the document store hands
+    /// back a `FullText` payload first and then narrows it down
+    /// once the encryption round-trip has succeeded.
+    pub fn with_shape(mut self, shape: DocumentShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    /// Mark the payload as carrying N unreadable pages (PDF
+    /// only). The agent's overview envelope surfaces this count
+    /// so the LLM knows when a document is entirely
+    /// unparseable.
+    pub fn with_unreadable_pages(mut self, unreadable: u32) -> Self {
+        self.unreadable_pages = unreadable;
+        self
+    }
+
+    /// Borrow the returned text regardless of the underlying
+    /// shape. Range and FullText both carry the joined text;
+    /// Overview carries the preview text in the same field.
+    pub fn joined_text(&self) -> &str {
+        match &self.shape {
+            DocumentShape::FullText(s) | DocumentShape::Range(s) | DocumentShape::Overview(s) => s,
+        }
+    }
+}
+
+/// Underlying shape of a [`DocumentPayload`]. See the type-level
+/// docs on [`DocumentPayload`] for the per-variant contract.
+#[derive(Debug, Clone)]
+pub enum DocumentShape {
+    /// Overview-only payload. `String` is the short preview
+    /// (~2 000 chars). The agent's response envelope surfaces the
+    /// page count and the table-of-contents alongside this text.
+    Overview(String),
+    /// Range payload. `String` is the joined pages with per-page
+    /// separators (`--- page N ---`). The agent's response
+    /// envelope surfaces the applied range so the LLM knows what
+    /// it received.
+    Range(String),
+    /// Full-document payload. `String` is the entire extracted
+    /// text. The agent's response envelope surfaces `truncated`
+    /// when the truncation cap fires.
+    FullText(String),
 }
 
 /// What an agent needs from the memory subtree to read / write /

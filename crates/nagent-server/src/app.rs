@@ -120,6 +120,8 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
             store: crate::documents::DocumentStore::new(
                 store,
                 cfg.documents.max_extracted_chars,
+                cfg.documents.max_pages_per_call,
+                cfg.documents.max_page_chars_per_call,
                 cfg.documents.cache_dir.clone(),
                 cfg.documents.pdf_extract_concurrency,
                 cfg.documents.pdf_extract_timeout_secs,
@@ -254,11 +256,47 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // proxy is enabled, or discarded otherwise).
     let (stt_rate_limiter, _) = build_rate_limiters(&cfg);
 
+    // ---- Per-user credentials resolver ----------------------------------
+    //
+    // Required when `auth.enabled` AND at least one agent is
+    // registered — the boot fails loudly otherwise so a
+    // misconfigured deployment does not silently lose the ability
+    // to decrypt per-user credentials. The encryption key comes
+    // from `[auth.credentials].key` in the resolved config
+    // (TOML-only, no env-var indirection).
+    //
+    // Plan 1791384190579: the same key is also wired into the
+    // `StoreDocumentSource` so the per-page encrypted store can
+    // be decrypted at read time. The key is only resolved when
+    // `auth.enabled` and a non-empty agent registry is in scope;
+    // a slim build with documents-only auth receives `None`
+    // here — the upload route then refuses PDFs and the read path
+    // falls back to the legacy on-the-fly extraction.
+    let has_credentials = auth_store.is_some() && documents_state.is_some();
+    let (credentials_key, credentials_key_init_log) = if has_credentials {
+        match CredentialsKey::from_hex(&cfg.auth.credentials.key) {
+            Ok(k) => (Some(Arc::new(k)), "per-user credentials framework enabled"),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "[auth.credentials].key is required when auth.enabled and \
+                     documents.enabled (per-page encrypted store): {e}"
+                ));
+            }
+        }
+    } else {
+        (
+            None,
+            "per-user credentials framework disabled (auth.enabled or documents.enabled is off)",
+        )
+    };
+    info!("{credentials_key_init_log}");
+
     // ---- Agent registry ---------------------------------------------------
     let agents = agents::build_registry(
         &cfg.agents,
         documents_state.as_ref().map(|d| d.store.clone()),
         chat_sessions_state.as_ref().map(|c| c.sessions.clone()),
+        credentials_key.clone(),
     );
     if !agents.is_empty() {
         info!(count = agents.len(), "agent registry built");
@@ -282,50 +320,6 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         .map(|engine| TtsState {
             engine: Arc::new(engine),
         });
-
-    // ---- Per-user credentials resolver ----------------------------------
-    //
-    // Required when `auth.enabled` AND at least one agent is
-    // registered — the boot fails loudly otherwise so a
-    // misconfigured deployment does not silently lose the ability
-    // to decrypt per-user credentials. The encryption key comes
-    // from `[auth.credentials].key` in the resolved config
-    // (TOML-only, no env-var indirection).
-    //
-    // Plan 1790963194218: the `caldav` `ServiceDef` is appended
-    // to the registry when the `caldav-agent` cargo feature is
-    // on. The chat agents that consume the per-user vault
-    // (`caldav_list_events` / `caldav_get_event` /
-    // `caldav_create_event`) are feature-gated the same way; a
-    // build without the feature has no CalDAV surface and the
-    // registry stays empty (the historical default).
-    //
-    // Plan 1790695073418: when `x-agent` is on the `x_account`
-    // `ServiceDef` is appended; the X OAuth flow (`/api/auth/login/x/*`)
-    // and the `x_timeline` agent share the same encryption key.
-    let has_credentials = auth_store.is_some() && agents.as_ref().is_some_and(|a| !a.is_empty());
-    let (credential_resolver, credentials_key) = if has_credentials {
-        let key = match CredentialsKey::from_hex(&cfg.auth.credentials.key) {
-            Ok(k) => Arc::new(k),
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "[auth.credentials].key is required when auth.enabled and \
-                     agents.enabled (per-user credentials framework): {e}"
-                ));
-            }
-        };
-        let resolver = CredentialResolver::new(
-            auth_store.clone().expect("auth_store checked above"),
-            key.clone(),
-            None,
-            None,
-        );
-        info!("per-user credentials framework enabled");
-        (Some(Arc::new(resolver)), Some(key))
-    } else {
-        info!("per-user credentials framework disabled (auth.enabled or agents.enabled is off)");
-        (None, None)
-    };
 
     // ---- ServiceRegistry ------------------------------------------------
     //
@@ -375,6 +369,18 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     if auth_x_opt.is_some() {
         tracing::info!("X OAuth backend ready");
     }
+
+    // Build the per-user credential resolver against the same
+    // encryption key. The resolver is mounted even when no
+    // per-user agent (CalDAV / X) is enabled because the
+    // `/api/integrations*` HTTP routes consult it directly.
+    let credential_resolver = match (auth_store.clone(), credentials_key.clone()) {
+        (Some(store), Some(key)) => {
+            let r = CredentialResolver::new(store, key, None, None);
+            Some(Arc::new(r))
+        }
+        _ => None,
+    };
 
     // ---- Compose AuthState ----------------------------------------------
     // Capture clones BEFORE the move so the LLM memory builder

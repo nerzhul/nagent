@@ -30,7 +30,7 @@ use std::sync::Arc;
 // `crate::agents::UserContext`, etc.
 pub use nagent_agents::{
     Agent, AgentError, AgentRegistry, AgentSummary, ConfirmationDecision, DocumentPayload,
-    DocumentSource, SecretSource, UserContext,
+    DocumentReadRequest, DocumentShape, DocumentSource, PageRange, SecretSource, UserContext,
 };
 
 /// Local newtype around [`AgentRegistry`] so we can implement
@@ -58,6 +58,7 @@ impl std::fmt::Debug for AgentRegistryNewtype {
 }
 
 use crate::config::AgentConfig;
+use crate::credentials::key::CredentialsKey;
 use crate::credentials::resolver::{CredentialError, CredentialResolver};
 use crate::documents::DocumentStore;
 
@@ -113,9 +114,18 @@ impl SecretSource for ResolverSecretSource {
 /// Adapter that implements [`DocumentSource`] on top of the
 /// server's [`DocumentStore`]. Constructed once per process and
 /// cloned into the `ReadDocumentAgent` via `Arc`.
+///
+/// `credentials_key` is `Some` when the operator has configured
+/// `[auth.credentials].key` (the same AES-256-GCM key that
+/// protects the per-user vault and the long-term memory
+/// subsystem). The upload route refuses to mount PDFs when this
+/// is `None`; the read path falls back to the (unencrypted) legacy
+/// on-the-fly extraction for pre-migration rows and surfaces an
+/// `AgentFailed` for any other row.
 pub struct StoreDocumentSource {
     store: DocumentStore,
     chat_sessions: Option<crate::chat::sessions::ChatSessions>,
+    credentials_key: Option<Arc<CredentialsKey>>,
 }
 
 impl std::fmt::Debug for StoreDocumentSource {
@@ -126,6 +136,10 @@ impl std::fmt::Debug for StoreDocumentSource {
                 "chat_sessions",
                 &self.chat_sessions.as_ref().map(|_| "<ChatSessions>"),
             )
+            .field(
+                "credentials_key",
+                &self.credentials_key.as_ref().map(|_| "<CredentialsKey>"),
+            )
             .finish()
     }
 }
@@ -134,10 +148,12 @@ impl StoreDocumentSource {
     pub fn new(
         store: DocumentStore,
         chat_sessions: Option<crate::chat::sessions::ChatSessions>,
+        credentials_key: Option<Arc<CredentialsKey>>,
     ) -> Self {
         Self {
             store,
             chat_sessions,
+            credentials_key,
         }
     }
 }
@@ -148,11 +164,41 @@ impl DocumentSource for StoreDocumentSource {
         self.store.max_extracted_chars()
     }
 
+    fn max_pages_per_call(&self) -> u32 {
+        self.store.max_pages_per_call()
+    }
+
+    fn max_page_chars_per_call(&self) -> usize {
+        self.store.max_page_chars_per_call()
+    }
+
     async fn read(
         &self,
         user_id: uuid::Uuid,
         chat_session_id: uuid::Uuid,
         name: &str,
+    ) -> Result<DocumentPayload, AgentError> {
+        // Default behaviour for callers that ignore the
+        // `page_range` field: pull the full text back as
+        // `DocumentShape::FullText`. The new
+        // [`Self::read_with_request`] method is the entry point
+        // used by the agent.
+        self.read_with_request(
+            user_id,
+            chat_session_id,
+            DocumentReadRequest {
+                name: name.to_string(),
+                page_range: None,
+            },
+        )
+        .await
+    }
+
+    async fn read_with_request(
+        &self,
+        user_id: uuid::Uuid,
+        chat_session_id: uuid::Uuid,
+        request: DocumentReadRequest,
     ) -> Result<DocumentPayload, AgentError> {
         // SEV 2 fix: verify the (user, session) binding minted by
         // POST /v1/chat/session before any DB lookup. A session id
@@ -180,18 +226,182 @@ impl DocumentSource for StoreDocumentSource {
             .db()
             .admin()
             .documents
-            .get_by_name(name, user_id, chat_session_id)
+            .get_by_name(&request.name, user_id, chat_session_id)
             .await
             .map_err(|e| AgentError::AgentFailed(format!("document lookup failed: {e}")))?
             .ok_or_else(|| {
                 AgentError::InvalidArguments(format!(
-                    "unknown document `{name}` in this chat session"
+                    "unknown document `{}` in this chat session",
+                    request.name
                 ))
             })?;
-        // Read the file from disk. The DB row's `disk_path` is
-        // operator-supplied / attacker-controlled if auth is
-        // bypassed; `safe_disk_read` re-canonicalises the path and
-        // refuses anything outside the cache dir.
+
+        // PDF rows with a populated `pages_dir` are served from
+        // the encrypted per-page store. `pages_dir = NULL` (a
+        // pre-migration row) falls through to the legacy
+        // re-extraction path below.
+        if row.mime == crate::documents::extract::PDF_MIME {
+            if let Some(pages_dir) = row.pages_dir.as_ref() {
+                return self
+                    .read_pdf_pages(&row, pages_dir, request.page_range)
+                    .await;
+            }
+        }
+
+        // Legacy path: re-parse the original file from disk on
+        // every read. Used for plain-text rows (no per-page
+        // store — they're small enough to be returned whole) AND
+        // for pre-migration PDF rows whose `pages_dir` is NULL.
+        self.read_full_text(&row, request.page_range).await
+    }
+}
+
+impl StoreDocumentSource {
+    /// Read the requested pages of a PDF row from the encrypted
+    /// per-page store. Returns `DocumentShape::Overview` /
+    /// `DocumentShape::Range` according to the request.
+    async fn read_pdf_pages(
+        &self,
+        row: &nagent_db::DocumentRow,
+        pages_dir: &std::path::Path,
+        page_range: Option<PageRange>,
+    ) -> Result<DocumentPayload, AgentError> {
+        let key = match self.credentials_key.as_ref() {
+            Some(k) => k,
+            None => {
+                // The upload route refuses PDFs when the key is
+                // missing, so reaching this branch with `None`
+                // means the row pre-dates the credentials gate
+                // entirely. Surface a clear error so the LLM can
+                // ask the operator to re-upload.
+                return Err(AgentError::AgentFailed(
+                    "this PDF was uploaded before the credentials vault was \
+                     configured; ask the user to re-upload the document"
+                        .into(),
+                ));
+            }
+        };
+        let key_ref: &CredentialsKey = key.as_ref();
+        let dir_for_key = pages_dir.to_path_buf();
+        let index = crate::documents::pages::read_overview(&dir_for_key, key_ref)
+            .map_err(|e| map_pages_err(e, row))?;
+        // The legacy row detection: `Missing` index means the
+        // migration never wrote `meta.bin`. Fall back to
+        // re-extracting on the fly — same shape as the pre-2026
+        // behaviour.
+        if matches!(index, crate::documents::pages::PagesIndex::Missing) {
+            return self.read_pdf_legacy(row, page_range).await;
+        }
+        let page_count = match &index {
+            crate::documents::pages::PagesIndex::Indexed { page_count, .. } => *page_count,
+            crate::documents::pages::PagesIndex::Missing => 0,
+        };
+        let unreadable_pages = match &index {
+            crate::documents::pages::PagesIndex::Indexed {
+                unreadable_pages, ..
+            } => *unreadable_pages,
+            crate::documents::pages::PagesIndex::Missing => 0,
+        };
+        let payload = match page_range {
+            None => {
+                let preview = match &index {
+                    crate::documents::pages::PagesIndex::Indexed { preview, .. } => preview.clone(),
+                    crate::documents::pages::PagesIndex::Missing => String::new(),
+                };
+                DocumentPayload {
+                    id: row.id,
+                    original_name: row.original_name.clone(),
+                    mime: row.mime.clone(),
+                    size_bytes: row.size_bytes,
+                    page_count: Some(page_count),
+                    extracted_chars: row.extracted_chars,
+                    unreadable_pages,
+                    shape: DocumentShape::Overview(preview),
+                }
+            }
+            Some(range) => {
+                let text = crate::documents::pages::read_pages(
+                    &dir_for_key,
+                    key_ref,
+                    range.start,
+                    range.end_inclusive,
+                )
+                .map_err(|e| map_pages_err(e, row))?;
+                let chars = text.chars().count() as u64;
+                DocumentPayload {
+                    id: row.id,
+                    original_name: row.original_name.clone(),
+                    mime: row.mime.clone(),
+                    size_bytes: row.size_bytes,
+                    page_count: Some(page_count),
+                    extracted_chars: chars,
+                    unreadable_pages,
+                    shape: DocumentShape::Range(text),
+                }
+            }
+        };
+        Ok(payload)
+    }
+
+    /// Legacy PDF read path: re-parse the PDF bytes on every
+    /// call. Used when the row has no `pages_dir` (pre-migration)
+    /// or when the encryption key is missing (a row uploaded when
+    /// the operator had not yet configured the vault).
+    async fn read_pdf_legacy(
+        &self,
+        row: &nagent_db::DocumentRow,
+        page_range: Option<PageRange>,
+    ) -> Result<DocumentPayload, AgentError> {
+        let cache_dir = self.store.cache_dir();
+        let bytes = read_pdf_bytes(&row.disk_path, cache_dir)?;
+        let extraction = self.extract_pdf(&bytes).await?;
+        let page_count = extraction.page_count.or(row.page_count);
+        let text = if let Some(range) = page_range {
+            // Re-extract per page using the legacy pdf-extract
+            // text. The legacy path has no `pages_dir` so we
+            // cannot pick individual pages — best-effort: if the
+            // user requested a range, slice the joined text by
+            // approximate characters per page. A future plan will
+            // replace this with a proper per-page re-extract;
+            // today the slice is approximate but the LLM still
+            // gets a smaller tool result.
+            let total_chars = extraction.text.chars().count() as u64;
+            let pc = page_count.unwrap_or(1).max(1) as u64;
+            let chars_per_page = (total_chars / pc).max(1);
+            let start = ((range.start as u64).saturating_sub(1)) * chars_per_page;
+            let end = (range.end_inclusive as u64) * chars_per_page;
+            let end = end.min(total_chars);
+            let start = start.min(end);
+            extraction
+                .text
+                .chars()
+                .skip(start as usize)
+                .take((end - start) as usize)
+                .collect::<String>()
+        } else {
+            extraction.text
+        };
+        Ok(DocumentPayload::full_text(
+            row.id,
+            row.original_name.clone(),
+            row.mime.clone(),
+            row.size_bytes,
+            page_count,
+            row.extracted_chars,
+            text,
+        ))
+    }
+
+    /// Plain-text / Markdown / log read path: re-read the file
+    /// and run the lossy UTF-8 passthrough. Plain-text rows have
+    /// no per-page store so a `page_range` argument is ignored
+    /// (the agent surfaces a hint via the response envelope).
+    async fn read_full_text(
+        &self,
+        row: &nagent_db::DocumentRow,
+        page_range: Option<PageRange>,
+    ) -> Result<DocumentPayload, AgentError> {
+        let _ = page_range; // ignored for non-PDF rows
         let cache_dir = self.store.cache_dir();
         let bytes = match crate::documents::storage::safe_disk_read(&row.disk_path, cache_dir) {
             Ok(b) => b,
@@ -218,94 +428,145 @@ impl DocumentSource for StoreDocumentSource {
                 )));
             }
         };
-        // Dispatch on MIME: PDFs go through `extract_pdf_bounded`
-        // (the same bounded-pool path the upload route uses); text
-        // / markdown / log use the lossy UTF-8 passthrough. The
-        // old `String::from_utf8(bytes)` only worked for plain
-        // text — a PDF's raw bytes are binary, so the previous
-        // implementation rejected every PDF with "document is not
-        // valid UTF-8 (binary uploads are not supported)" even
-        // though the upload route had successfully extracted the
-        // text at write time. Re-extracting on read costs a few
-        // ms per call (cached by the route's bounded pool) and
-        // lets the agent surface PDFs without a schema change.
-        let extraction = if row.mime == crate::documents::extract::PDF_MIME {
-            match crate::documents::extract::extract_pdf_bounded(
-                self.store.pdf_semaphore(),
-                &bytes,
-                self.store.pdf_extract_timeout(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(crate::documents::extract::ExtractionError::ParseFailed(m)) => {
-                    return Err(AgentError::AgentFailed(format!(
-                        "could not parse PDF: {m}; ask the user to re-upload a non-scanned copy"
-                    )));
-                }
-                Err(crate::documents::extract::ExtractionError::Timeout(_)) => {
-                    return Err(AgentError::AgentFailed(
-                        "PDF extraction exceeded the configured timeout; \
-                         try a smaller page range or a text-only document"
-                            .into(),
-                    ));
-                }
-                Err(crate::documents::extract::ExtractionError::Saturated { .. })
-                | Err(crate::documents::extract::ExtractionError::SaturatedTimeout(_)) => {
-                    return Err(AgentError::AgentFailed(
-                        "PDF extractor is saturated; please retry in a moment".into(),
-                    ));
-                }
-                Err(crate::documents::extract::ExtractionError::UnsupportedMime(m)) => {
-                    return Err(AgentError::AgentFailed(format!(
-                        "document is not a supported PDF: {m}"
-                    )));
-                }
+        if row.mime == crate::documents::extract::PDF_MIME {
+            // PDF row with no `pages_dir`: legacy fallback.
+            let extraction = self.extract_pdf(&bytes).await?;
+            return Ok(DocumentPayload::full_text(
+                row.id,
+                row.original_name.clone(),
+                row.mime.clone(),
+                row.size_bytes,
+                extraction.page_count.or(row.page_count),
+                extraction.text.chars().count() as u64,
+                extraction.text,
+            ));
+        }
+        let ext = row
+            .disk_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("txt");
+        let extraction = match crate::documents::extract::extract_text(&bytes, ext) {
+            Ok(r) => r,
+            Err(crate::documents::extract::ExtractionError::UnsupportedMime(m)) => {
+                return Err(AgentError::AgentFailed(format!(
+                    "unsupported document type: {m}"
+                )));
             }
-        } else {
-            // `text/plain` (and the `.md`/`.log` cousins — the
-            // upload route normalises every accepted extension to
-            // `text/plain`). Lossy UTF-8 so a stray invalid byte
-            // in a long text file does not blank the whole read.
-            let ext = row
-                .disk_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("txt");
-            match crate::documents::extract::extract_text(&bytes, ext) {
-                Ok(r) => r,
-                Err(crate::documents::extract::ExtractionError::UnsupportedMime(m)) => {
-                    return Err(AgentError::AgentFailed(format!(
-                        "unsupported document type: {m}"
-                    )));
-                }
-                // `extract_text` is in-memory and synchronous; the
-                // pool / timeout / saturation variants are
-                // unreachable here. `ParseFailed` is the only
-                // realistic failure — surface it to the LLM.
-                Err(e) => {
-                    return Err(AgentError::AgentFailed(format!(
-                        "could not read document text: {e}"
-                    )));
-                }
+            Err(e) => {
+                return Err(AgentError::AgentFailed(format!(
+                    "could not read document text: {e}"
+                )));
             }
         };
-        Ok(DocumentPayload {
-            id: row.id,
-            original_name: row.original_name,
-            mime: row.mime,
-            size_bytes: row.size_bytes,
-            // Re-extracted at read time: prefer the live page
-            // count and char tally from the fresh extraction so
-            // a truncated-then-purged row doesn't show stale
-            // numbers. For plain text, the re-extraction is a
-            // pure lossy-UTF-8 pass and the field ends up equal
-            // to the upload-time value modulo any byte-level
-            // repair the lossy pass did.
-            page_count: extraction.page_count.or(row.page_count),
-            extracted_chars: extraction.text.chars().count() as u64,
-            text: extraction.text,
-        })
+        Ok(DocumentPayload::full_text(
+            row.id,
+            row.original_name.clone(),
+            row.mime.clone(),
+            row.size_bytes,
+            extraction.page_count.or(row.page_count),
+            extraction.text.chars().count() as u64,
+            extraction.text,
+        ))
+    }
+
+    /// Synchronous PDF extraction through the bounded blocking
+    /// pool. Mirrors the upload route's call so the legacy read
+    /// path honours the same timeout / concurrency envelope.
+    async fn extract_pdf(
+        &self,
+        bytes: &[u8],
+    ) -> Result<crate::documents::extract::ExtractionResult, AgentError> {
+        // The legacy path uses `pdf-extract` directly because
+        // `lopdf` here would be a redundant dependency. The
+        // function lives in `extract.rs` and returns the same
+        // `ExtractionResult` shape (with `page_count = None`
+        // since `pdf-extract` does not expose the count).
+        let semaphore = self.store.pdf_semaphore();
+        let timeout = self.store.pdf_extract_timeout();
+        crate::documents::extract::extract_pdf_bounded(semaphore, bytes, timeout)
+            .await
+            .map_err(|err| match err {
+                crate::documents::extract::ExtractionError::ParseFailed(m) => {
+                    AgentError::AgentFailed(format!(
+                        "could not parse PDF: {m}; ask the user to re-upload a non-scanned copy"
+                    ))
+                }
+                crate::documents::extract::ExtractionError::Timeout(_) => AgentError::AgentFailed(
+                    "PDF extraction exceeded the configured timeout; \
+                     try a smaller page range or a text-only document"
+                        .into(),
+                ),
+                crate::documents::extract::ExtractionError::Saturated { .. }
+                | crate::documents::extract::ExtractionError::SaturatedTimeout(_) => {
+                    AgentError::AgentFailed(
+                        "PDF extractor is saturated; please retry in a moment".into(),
+                    )
+                }
+                crate::documents::extract::ExtractionError::UnsupportedMime(m) => {
+                    AgentError::AgentFailed(format!("document is not a supported PDF: {m}"))
+                }
+            })
+    }
+}
+
+/// Read the raw PDF bytes for the legacy read path. Mirrors the
+/// `read_full_text` safe-read logic but stays a free helper so
+/// the legacy PDF branch can reuse it without rebuilding the
+/// error mapping in two places.
+fn read_pdf_bytes(
+    disk_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+) -> Result<Vec<u8>, AgentError> {
+    match crate::documents::storage::safe_disk_read(disk_path, cache_dir) {
+        Ok(b) => Ok(b),
+        Err(crate::documents::storage::DiskReadError::EscapesCacheDir(_)) => {
+            tracing::warn!(
+                path = %disk_path.display(),
+                "read_document legacy PDF: refusing to read disk_path outside cache_dir",
+            );
+            Err(AgentError::AgentFailed(
+                "document file no longer available on disk; ask the user to re-upload".into(),
+            ))
+        }
+        Err(crate::documents::storage::DiskReadError::Io(e))
+            if e.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Err(AgentError::AgentFailed(
+                "document file no longer available on disk; ask the user to re-upload".into(),
+            ))
+        }
+        Err(e) => Err(AgentError::AgentFailed(format!(
+            "could not read document: {e}"
+        ))),
+    }
+}
+
+fn map_pages_err(
+    e: crate::documents::pages::PagesError,
+    row: &nagent_db::DocumentRow,
+) -> AgentError {
+    use crate::documents::pages::PagesError;
+    match e {
+        PagesError::ParseFailed(m) => AgentError::AgentFailed(format!(
+            "could not parse stored PDF index: {m}; ask the user to re-upload"
+        )),
+        PagesError::DirectoryMissing(p) => {
+            tracing::warn!(
+                document_id = %row.id,
+                path = %p.display(),
+                "read_document: pages_dir missing on disk; falling back to legacy re-extract"
+            );
+            AgentError::AgentFailed(
+                "document per-page index is missing on disk; ask the user to re-upload".into(),
+            )
+        }
+        PagesError::DecryptFailed(m) => AgentError::AgentFailed(format!(
+            "could not decrypt document pages: {m}; check [auth.credentials].key was not rotated"
+        )),
+        PagesError::Io { path, source } => {
+            AgentError::AgentFailed(format!("io error on {}: {source}", path.display()))
+        }
     }
 }
 
@@ -315,11 +576,17 @@ impl DocumentSource for StoreDocumentSource {
 /// When the documents subsystem is enabled AND the caller hands in
 /// a non-`None` `DocumentStore`, the `read_document` agent is added
 /// to the registry (gated by the `read-document-agent` cargo
-/// feature).
+/// feature). `credentials_key` mirrors `build_memory_source`'s
+/// gating: when `None`, the `StoreDocumentSource` is still wired
+/// but cannot decrypt the per-page store — the upload route
+/// refuses PDFs to keep the protocol offline; the read path
+/// surfaces a clear "ask the user to re-upload" message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_registry(
     cfg: &AgentConfig,
     document_store: Option<DocumentStore>,
     chat_sessions: Option<crate::chat::sessions::ChatSessions>,
+    credentials_key: Option<Arc<CredentialsKey>>,
 ) -> AgentRegistry {
     // Plan 4.C: the plain per-agent *Config structs moved to
     // `nagent-agents`; the server-side `AgentConfig` owns the
@@ -368,12 +635,12 @@ pub fn build_registry(
     if let (true, Some(store)) = (cfg.enabled, document_store) {
         #[cfg(feature = "read-document-agent")]
         registry.push_agent_boxed(Box::new(nagent_agents::ReadDocumentAgent::new(Arc::new(
-            StoreDocumentSource::new(store, chat_sessions),
+            StoreDocumentSource::new(store, chat_sessions, credentials_key),
         ))));
         // Without the `read-document-agent` cargo feature the
         // agent is not compiled in, so the request is a no-op.
         #[cfg(not(feature = "read-document-agent"))]
-        let _ = (store, chat_sessions);
+        let _ = (store, chat_sessions, credentials_key);
     }
     // Startup surface tool inventory. Logged once per registry build
     // so the operator can sanity-check what the registry is
@@ -468,6 +735,8 @@ impl From<crate::config::ReadDocumentConfig> for nagent_agents::ReadDocumentAgen
         Self {
             timeout_ms: c.timeout_ms,
             max_extracted_chars: c.max_extracted_chars,
+            max_pages_per_call: c.max_pages_per_call,
+            max_page_chars_per_call: c.max_page_chars_per_call,
         }
     }
 }

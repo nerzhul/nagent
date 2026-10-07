@@ -94,6 +94,7 @@ async fn start_test_server_with_overrides(
         allow_user_location: true,
         allow_user_timezone: true,
         allow_user_reply_language: true,
+        allow_user_memory: true,
         llm_max_tool_rounds: 4,
         llm_max_auto_continues: 0,
         ollama_num_predict: None,

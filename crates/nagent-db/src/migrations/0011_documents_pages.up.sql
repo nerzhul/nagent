@@ -1,0 +1,23 @@
+-- 0011_documents_pages.up.sql — per-page encrypted text store.
+--
+-- Reversed by `0011_documents_pages.down.sql`; keep the two
+-- siblings in sync (sqlx 0.8.6 pairs them via the
+-- `<version>_<name>.up.sql` / `<version>_<name>.down.sql` filename
+-- convention).
+--
+-- The `read_document` tool now extracts PDFs once at upload time
+-- and stores one encrypted blob per page under
+-- `<cache_dir>/<aa>/<bb>/<uuid>.pdf/pages/page-NNNN.bin` (plus a
+-- `meta.bin` carrying the page count, a 2 000-char preview, and
+-- the optional table-of-contents). The DB-side projection of the
+-- page index is intentionally minimal — only `pages_dir` is
+-- persisted, the rest lives inside the encrypted `meta.bin` so the
+-- SQL schema does not duplicate ciphertext columns.
+--
+-- `pages_dir` is NULL for pre-existing rows uploaded before the
+-- feature landed; `StoreDocumentSource::read` detects the NULL
+-- and falls back to the legacy on-the-fly re-extraction path
+-- (still unencrypted at rest, matching today's behaviour) so the
+-- migration is non-destructive.
+
+ALTER TABLE uploaded_documents ADD COLUMN pages_dir TEXT;

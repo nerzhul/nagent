@@ -454,6 +454,15 @@ pub struct ReadDocumentConfig {
     pub timeout_ms: u64,
     /// Maximum characters the agent returns to the LLM per call.
     pub max_extracted_chars: usize,
+    /// Hard cap on the number of pages one range-mode read may
+    /// return. Mirrors the corresponding `[documents]` knob; the
+    /// agent's `read_document` config carries it separately so a
+    /// future per-agent override is possible without changing the
+    /// documents schema.
+    pub max_pages_per_call: u32,
+    /// Hard cap on the total characters one range-mode read may
+    /// return.
+    pub max_page_chars_per_call: usize,
 }
 
 impl Default for ReadDocumentConfig {
@@ -461,6 +470,8 @@ impl Default for ReadDocumentConfig {
         Self {
             timeout_ms: 5_000,
             max_extracted_chars: 100_000,
+            max_pages_per_call: 20,
+            max_page_chars_per_call: 20_000,
         }
     }
 }
@@ -483,6 +494,18 @@ impl ReadDocumentConfig {
                 toml.max_extracted_chars,
                 defaults.max_extracted_chars,
                 "READ_DOCUMENT_MAX_CHARS",
+            )?,
+            max_pages_per_call: resolve_primitive(
+                env_opt("READ_DOCUMENT_MAX_PAGES").as_deref(),
+                toml.max_pages_per_call,
+                defaults.max_pages_per_call,
+                "READ_DOCUMENT_MAX_PAGES",
+            )?,
+            max_page_chars_per_call: resolve_primitive(
+                env_opt("READ_DOCUMENT_MAX_PAGE_CHARS").as_deref(),
+                toml.max_page_chars_per_call,
+                defaults.max_page_chars_per_call,
+                "READ_DOCUMENT_MAX_PAGE_CHARS",
             )?,
         })
     }

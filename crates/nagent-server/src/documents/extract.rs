@@ -1,88 +1,50 @@
-//! Text extraction for uploaded documents.
+//! Text extraction for non-PDF uploaded documents.
 //!
-//! Supports two MIME families:
-//! - `text/plain` (`.txt`) — read as UTF-8 with lossy fallback.
-//! - `application/pdf` (`.pdf`) — extracted via the `pdf-extract`
-//! crate, gated behind the `documents` cargo feature.
+//! Supports one MIME family today:
+//! - `text/plain` (`.txt`, `.md`, `.log`) — read as UTF-8 with
+//!   lossy fallback.
 //!
-//! Everything else is rejected at the route layer with
-//! `415 Unsupported Media Type`. The extractor never throws a
-//! `Result::Err` for "no text could be extracted" — it returns the
-//! empty string so the upload still succeeds and the LLM sees a
-//! tool result that explains why the document was empty.
-//!
-//! The PDF path is synchronous (`pdf_extract::extract_text_from_mem`)
-//! and can take several seconds on a 200-page file. Callers MUST
-//! run it on the bounded blocking pool so a burst of uploads cannot
-//! starve the async runtime — see [`extract_pdf_bounded`] and the
-//! plan R1b entry. Hard-kill of a non-cancellingable PDF parse arrives
-//! with the agent-runner trust-zone split (plan H).
+//! Everything else (notably `application/pdf`) is refused at the
+//! route layer with `415 Unsupported Media Type`; the upload
+//! route branches on the extension BEFORE calling into this
+//! module so the PDF path (extraction-once at upload time +
+//! encrypted per-page store) lives in [`super::pages`]. The
+//! extractor never throws a `Result::Err` for "no text could be
+//! extracted" — it returns the empty string so the upload still
+//! succeeds and the LLM sees a tool result that explains why the
+//! document was empty.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use nagent_support::cpu::RunError;
-use tokio::sync::Semaphore;
-
-/// MIME types we know how to extract. Other types are rejected
-/// upstream with `415` so this list is intentionally small and
-/// versioned alongside the extractor implementations below.
+/// MIME types we know how to extract without a per-page index.
+/// PDFs go through [`super::pages::extract_pages`] instead.
 pub const TEXT_MIME: &str = "text/plain";
+
+/// MIME marker the upload route uses to sniff a PDF. Re-exported
+/// here so route / agent code that needs to branch on the MIME
+/// does not have to hard-code the string. Mirrors the historical
+/// `PDF_MIME` constant — kept under the old name so the route
+/// layer's `sniff_mime` helper and the `DocumentSource` impl can
+/// keep the same call pattern.
 pub const PDF_MIME: &str = "application/pdf";
 
-/// Extract text from a plain-text / Markdown / log buffer. Cheap
-/// (no copy, no allocation beyond the lossy UTF-8 conversion) and
-/// stays synchronous because `from_utf8_lossy` is not CPU-heavy
-/// and runs on the calling task. The PDF path lives in
-/// [`extract_pdf_bounded`] — the route layer branches on the
-/// extension before calling either helper.
-pub fn extract_text(bytes: &[u8], extension: &str) -> Result<ExtractionResult, ExtractionError> {
-    let ext_lower = extension.to_ascii_lowercase();
-    let ext_str = ext_lower.as_str();
-    if matches!(ext_str, "txt" | "md" | "log" | "") {
-        return Ok(ExtractionResult {
-            text: String::from_utf8_lossy(bytes).into_owned(),
-            page_count: None,
-            mime: TEXT_MIME.to_string(),
-        });
-    }
-    Err(ExtractionError::UnsupportedMime(format!(
-        "unsupported extension: .{ext_str}"
-    )))
-}
-
-/// PDF extraction on the bounded blocking pool (plan R1b). The
-/// semaphore is held for the duration of the parse, capping the
-/// number of concurrent `pdf_extract` runs at the configured
-/// limit. The `timeout` is enforced with `tokio::time::timeout`
-/// around `run_bounded` — the worker thread still keeps running
-/// after a timeout, so the route layer must unlink the partial
-/// file. Hard cancellation lands with the runner process (plan H).
+/// Legacy `pdf-extract` bounded-pool call. Today only the
+/// legacy read path (pre-migration rows with `pages_dir = NULL`)
+/// uses it; the upload route and the per-page read path go
+/// through [`super::pages::extract_pages`] instead. Kept here
+/// so the legacy path is reachable without re-adding `lopdf` or
+/// `pdf-extract` to the agents module.
 pub async fn extract_pdf_bounded(
-    semaphore: Arc<Semaphore>,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     bytes: &[u8],
-    timeout: Duration,
+    timeout: std::time::Duration,
 ) -> Result<ExtractionResult, ExtractionError> {
-    extract_pdf_bounded_with_queue(semaphore, None, bytes, timeout).await
-}
-
-/// Plan R1a variant: pair the concurrency semaphore with an
-/// optional queue gate so a saturated pool answers `503` +
-/// `Retry-After` instead of piling up unbounded.
-pub async fn extract_pdf_bounded_with_queue(
-    semaphore: Arc<Semaphore>,
-    queue: Option<nagent_support::cpu::BoundedQueue>,
-    bytes: &[u8],
-    timeout: Duration,
-) -> Result<ExtractionResult, ExtractionError> {
-    // The `pdf_extract` crate owns the bytes for the duration of
-    // the parse; clone once and hand the owned buffer to the
-    // worker. A `Bytes` clone is cheap if we later switch to the
-    // `bytes` crate; for now `Vec<u8>` is what the trait expects.
+    use nagent_support::cpu::RunError;
+    use std::time::Duration;
     let payload = bytes.to_vec();
     let cfg = nagent_support::cpu::BoundedConfig {
         semaphore: semaphore.clone(),
-        queue,
+        queue: None,
         timeout: None,
     };
     let parse = nagent_support::cpu::run_bounded(cfg, move |_permit| {
@@ -111,11 +73,36 @@ pub async fn extract_pdf_bounded_with_queue(
         Err(_elapsed) => return Err(ExtractionError::Timeout(timeout)),
     };
 
+    // The legacy `pdf-extract` path cannot recover the page
+    // count — `lopdf` is required for that. We leave the field
+    // as `None` so callers fall through to the row's stored
+    // value (the upload-route snapshot taken before the
+    // migration).
+    let _ = Duration::from_secs(0);
     Ok(ExtractionResult {
         text,
         page_count: None,
         mime: PDF_MIME.to_string(),
     })
+}
+
+/// Extract text from a plain-text / Markdown / log buffer. Cheap
+/// (no copy, no allocation beyond the lossy UTF-8 conversion) and
+/// stays synchronous because `from_utf8_lossy` is not CPU-heavy
+/// and runs on the calling task.
+pub fn extract_text(bytes: &[u8], extension: &str) -> Result<ExtractionResult, ExtractionError> {
+    let ext_lower = extension.to_ascii_lowercase();
+    let ext_str = ext_lower.as_str();
+    if matches!(ext_str, "txt" | "md" | "log" | "") {
+        return Ok(ExtractionResult {
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            page_count: None,
+            mime: TEXT_MIME.to_string(),
+        });
+    }
+    Err(ExtractionError::UnsupportedMime(format!(
+        "unsupported extension: .{ext_str}"
+    )))
 }
 
 /// Successful extraction payload. Returned to the route handler
@@ -137,24 +124,23 @@ pub enum ExtractionError {
     /// as `415 Unsupported Media Type`.
     #[error("unsupported mime: {0}")]
     UnsupportedMime(String),
-    /// The PDF parser returned a non-recoverable error. Surfaces
-    /// as `422 Unprocessable Entity` so the UI can show
-    /// "could not parse PDF" without polluting the access log.
+    /// Reserved for the (now-removed) PDF branch. The PDF path
+    /// lives in [`super::pages`] which surfaces its own error
+    /// variant set (`PagesError`). Kept here so the route layer's
+    /// match exhaustiveness does not break; mapping is to
+    /// `422 Unprocessable Entity`.
     #[error("pdf parse failed: {0}")]
     ParseFailed(String),
-    /// The PDF parse did not finish before the timeout. The
-    /// route layer unlinks the partial file before returning
-    /// `422`.
+    /// Reserved for the (now-removed) PDF branch. The route layer
+    /// maps this to `422`.
     #[error("pdf extract exceeded timeout of {0:?}")]
     Timeout(Duration),
-    /// Plan R1a: the bounded blocking pool rejected the call
-    /// because the queue was over capacity. The route layer
-    /// answers `503 Service Unavailable` with `Retry-After`.
+    /// Reserved for the (now-removed) PDF branch. The route layer
+    /// maps this to `503 + Retry-After`.
     #[error("pdf extract saturated: queue full ({max_waiters} waiters)")]
     Saturated { max_waiters: usize },
-    /// Plan R1a: the bounded blocking pool's wait timeout fired
-    /// before the call could acquire a permit. The route layer
-    /// answers `429 Too Many Requests` with `Retry-After`.
+    /// Reserved for the (now-removed) PDF branch. The route layer
+    /// maps this to `429 + Retry-After`.
     #[error("pdf extract saturated: wait timeout of {0:?}")]
     SaturatedTimeout(Duration),
 }
@@ -190,30 +176,5 @@ mod tests {
         let res = extract_text(bytes, "txt").expect("txt extract");
         assert!(res.text.contains("foo"));
         assert!(res.text.contains("bar"));
-    }
-
-    #[tokio::test]
-    async fn bounded_pdf_respects_semaphore() {
-        // Three concurrent calls on a semaphore of size 1 must
-        // serialise. Each call is a no-op for an empty buffer but
-        // the route is exercised end-to-end.
-        let sem = Arc::new(Semaphore::new(1));
-        let handles: Vec<_> = (0..3)
-            .map(|_| {
-                let sem = sem.clone();
-                let bytes = b"%PDF-1.4\n% fake\n".to_vec();
-                tokio::spawn(async move {
-                    extract_pdf_bounded(sem, &bytes, Duration::from_secs(2)).await
-                })
-            })
-            .collect();
-        for h in handles {
-            // The empty-buffer parse is not a valid PDF, but we
-            // only care that the call returns without panicking
-            // and respects the timeout / semaphore. Either an
-            // Err(_) or an Ok(_) with `text == ""` is acceptable;
-            // what matters is that we did not deadlock.
-            let _ = h.await.expect("task must join");
-        }
     }
 }

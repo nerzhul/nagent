@@ -86,6 +86,31 @@ pub async fn purge_older_than(
                 continue;
             }
         }
+        // Plan 1791384190579: PDFs since the per-page store
+        // landed carry a sibling `<doc>.pages/` directory of
+        // encrypted blobs (`meta.bin` + `page-NNNN.bin`). The
+        // periodic sweep unlinks the whole tree so a re-upload
+        // of the same UUID starts with a clean slate.
+        if let Some(pages_dir) = row.pages_dir.as_ref() {
+            match std::fs::remove_dir_all(pages_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already gone — nothing to do.
+                }
+                Err(e) => {
+                    // Best-effort: a leftover pages dir is not
+                    // dangerous (the DB row is going away) but it
+                    // would clutter the cache. Surface a warning
+                    // so an operator can sweep manually.
+                    tracing::warn!(
+                        document_id = %row.id,
+                        path = %pages_dir.display(),
+                        error = %e,
+                        "could not unlink document pages dir during purge sweep"
+                    );
+                }
+            }
+        }
         store
             .db()
             .admin()

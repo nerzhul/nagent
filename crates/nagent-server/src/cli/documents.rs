@@ -200,6 +200,8 @@ async fn connect_store(
     let doc_store = crate::documents::DocumentStore::new(
         db,
         cfg.documents.max_extracted_chars,
+        cfg.documents.max_pages_per_call,
+        cfg.documents.max_page_chars_per_call,
         cfg.documents.cache_dir.clone(),
         cfg.documents.pdf_extract_concurrency,
         cfg.documents.pdf_extract_timeout_secs,

@@ -19,7 +19,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Multipart, Path as AxPath, State};
@@ -367,58 +366,133 @@ pub async fn upload_handler(
         )));
     }
 
-    // Extract text. PDF path is feature-gated; on a build without
-    // the feature we return 501 with a clear message so the
-    // operator knows the binary needs rebuilding. The text path
-    // stays synchronous; the PDF path is routed through the
-    // bounded blocking pool (plan R1b).
-    let timeout = Duration::from_secs(state.cfg.pdf_extract_timeout_secs);
-    let extraction = if ext == "pdf" {
-        match super::extract::extract_pdf_bounded(state.store.pdf_semaphore(), &file.bytes, timeout)
-            .await
-        {
-            Ok(r) => r,
-            Err(ExtractionError::UnsupportedMime(m)) => {
-                return Err(DocumentRouteError::UnsupportedMediaType(m));
-            }
-            Err(ExtractionError::ParseFailed(m)) => {
+    // Extract text. The plain-text branch is synchronous; the
+    // PDF branch goes through `pages::extract_pages` which writes
+    // the per-page encrypted store and returns the page count.
+    // Refuse PDFs when the operator has not configured
+    // `[auth.credentials].key` (same gating as
+    // `build_memory_source`) — encryption is mandatory and we do
+    // not want a degraded mode that silently stores plaintext.
+    if ext == "pdf" {
+        let key = state
+            .app
+            .auth
+            .as_ref()
+            .and_then(|a| a.credentials_key.clone())
+            .ok_or_else(|| {
+                DocumentRouteError::ExtractFailed(
+                    "[auth.credentials].key is required for PDF uploads so the \
+                     per-page text store can be encrypted at rest; configure the key \
+                     and restart the server, or upload a text-only document instead"
+                        .into(),
+                )
+            })?;
+        let id = Uuid::new_v4();
+        let layout = DiskLayout::for_id(Path::new(&state.cfg.cache_dir), &id, &ext);
+        write_atomic(
+            &state.cfg.cache_dir.join(format!(".tmp-{id}")),
+            &layout.path,
+            &file.bytes,
+        )
+        .map_err(DocumentRouteError::DiskWrite)?;
+        let written_bytes = std::fs::metadata(&layout.path)
+            .map(|m| m.len())
+            .unwrap_or(file.bytes.len() as u64);
+        // Pages live at `<disk>.pages/` so the per-doc shards
+        // stay self-contained — purging a single document unlinks
+        // the whole tree.
+        let pages_root = layout.path.with_file_name(format!(
+            "{}.pages",
+            layout
+                .path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("doc")
+        ));
+        let key_ref: &crate::credentials::key::CredentialsKey = key.as_ref();
+        let index = match super::pages::extract_pages(&file.bytes, &pages_root, key_ref) {
+            Ok(i) => i,
+            Err(super::pages::PagesError::ParseFailed(m)) => {
+                let _ = std::fs::remove_file(&layout.path);
                 return Err(DocumentRouteError::ExtractFailed(m));
             }
-            Err(ExtractionError::Timeout(_)) => {
-                return Err(DocumentRouteError::ExtractFailed(
-                    "pdf extract exceeded the configured timeout".into(),
-                ));
+            Err(e) => {
+                let _ = std::fs::remove_file(&layout.path);
+                return Err(DocumentRouteError::ExtractFailed(format!(
+                    "per-page extract failed: {e}"
+                )));
             }
-            // Plan R1a: pool saturation. Both variants map to the
-            // same route-layer error (`ExtractSaturated`) so the
-            // route answers `503 + Retry-After` whether the queue
-            // was full or the wait timed out.
-            Err(ExtractionError::Saturated { .. }) | Err(ExtractionError::SaturatedTimeout(_)) => {
-                return Err(DocumentRouteError::ExtractSaturated);
-            }
+        };
+        let page_count = index.page_count();
+        // Sum the per-page ciphertext sizes is cheap (file
+        // metadata is one `stat` per page) and gives the agent a
+        // useful "extracted_chars" hint in the overview envelope.
+        let extracted_chars = pages_total_chars(&pages_root).unwrap_or(0);
+
+        // DB write. We do NOT wrap the disk write + DB insert in
+        // a single transaction (no two-phase commit available
+        // across the two stores); on a DB failure we best-effort
+        // unlink the file + pages dir so we don't leak bytes.
+        // The next periodic sweep catches any orphan.
+        //
+        // `user_id` comes from the authenticated session
+        // (SEV 1 + 2 fix): the row is keyed on
+        // `(user_id, session_id)` so cross-user / cross-tab reads
+        // are rejected at the DB layer.
+        let pages_dir_str = pages_root.to_string_lossy().into_owned();
+        let insert_res = state
+            .store
+            .db()
+            .for_user(user.id)
+            .documents()
+            .insert(
+                id,
+                session_id,
+                &file.name,
+                &mime,
+                written_bytes,
+                extracted_chars,
+                page_count,
+                layout.path.to_string_lossy().as_ref(),
+                Some(pages_dir_str.as_str()),
+            )
+            .await;
+        if let Err(e) = insert_res {
+            let _ = std::fs::remove_file(&layout.path);
+            let _ = std::fs::remove_dir_all(&pages_root);
+            return Err(DocumentRouteError::from(e));
         }
-    } else {
-        match super::extract::extract_text(&file.bytes, &ext) {
-            Ok(r) => r,
-            Err(ExtractionError::UnsupportedMime(m)) => {
-                return Err(DocumentRouteError::UnsupportedMediaType(m));
-            }
-            Err(ExtractionError::ParseFailed(m)) => {
-                return Err(DocumentRouteError::ExtractFailed(m));
-            }
-            Err(ExtractionError::Timeout(_)) => {
-                return Err(DocumentRouteError::ExtractFailed(
-                    "pdf extract exceeded the configured timeout".into(),
-                ));
-            }
-            // Plain-text extraction never goes through the bounded
-            // pool, so the saturation variants are unreachable
-            // here. Match them defensively (unreachable! in the
-            // tests would be a stronger assertion; today the
-            // route layer's match has to be exhaustive).
-            Err(ExtractionError::Saturated { .. }) | Err(ExtractionError::SaturatedTimeout(_)) => {
-                return Err(DocumentRouteError::ExtractSaturated);
-            }
+        let summary = super::DocumentSummary {
+            id,
+            name: file.name.clone(),
+            mime,
+            size_bytes: written_bytes,
+            page_count,
+            extracted_chars,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        return Ok((StatusCode::CREATED, Json(summary)).into_response());
+    }
+
+    // Plain-text branch.
+    let extraction = match super::extract::extract_text(&file.bytes, &ext) {
+        Ok(r) => r,
+        Err(ExtractionError::UnsupportedMime(m)) => {
+            return Err(DocumentRouteError::UnsupportedMediaType(m));
+        }
+        Err(ExtractionError::ParseFailed(m)) => {
+            return Err(DocumentRouteError::ExtractFailed(m));
+        }
+        Err(ExtractionError::Timeout(_)) => {
+            return Err(DocumentRouteError::ExtractFailed(
+                "pdf extract exceeded the configured timeout".into(),
+            ));
+        }
+        // Plain-text extraction never goes through the bounded
+        // pool, so the saturation variants are unreachable here.
+        // Match them defensively.
+        Err(ExtractionError::Saturated { .. }) | Err(ExtractionError::SaturatedTimeout(_)) => {
+            return Err(DocumentRouteError::ExtractSaturated);
         }
     };
 
@@ -439,6 +513,7 @@ pub async fn upload_handler(
     // payload is still on disk; the row records the count for
     // the agent to surface in its summary.
     let extracted_chars = extraction.text.chars().count() as u64;
+    let page_count = extraction.page_count;
 
     // DB write. We do NOT wrap the disk write + DB insert in a
     // single transaction (no two-phase commit available across
@@ -461,8 +536,9 @@ pub async fn upload_handler(
             &mime,
             written_bytes,
             extracted_chars,
-            extraction.page_count,
+            page_count,
             layout.path.to_string_lossy().as_ref(),
+            None,
         )
         .await
     {
@@ -475,11 +551,34 @@ pub async fn upload_handler(
         name: file.name.clone(),
         mime,
         size_bytes: written_bytes,
-        page_count: extraction.page_count,
+        page_count,
         extracted_chars,
         created_at: Utc::now().to_rfc3339(),
     };
     Ok((StatusCode::CREATED, Json(summary)).into_response())
+}
+
+/// Count the total characters of every per-page ciphertext in
+/// `<pages_dir>`. Counts the ciphertext length (which is
+/// `len(plaintext) + 16` GCM tag bytes) because we no longer
+/// have the plaintext after the upload route finishes. A more
+/// accurate measure would re-decrypt every page, but that costs
+/// ms × page_count per upload — the byte-length tally is good
+/// enough to populate `extracted_chars` for the upload summary.
+fn pages_total_chars(pages_dir: &std::path::Path) -> std::io::Result<u64> {
+    let mut total: u64 = 0;
+    for entry in std::fs::read_dir(pages_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("bin") {
+            // Skip meta.bin — it's a JSON index, not a page.
+            if path.file_name().and_then(|s| s.to_str()) == Some("meta.bin") {
+                continue;
+            }
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(total)
 }
 
 #[derive(Debug)]
@@ -593,16 +692,16 @@ pub async fn delete_handler(
     // delete by `(user, session)` so a user cannot delete another
     // user's docs.
     verify_session_binding(&state.app, user.id, session_id).await?;
-    let path = match state
+    let (path, pages_dir) = match state
         .store
         .db()
         .for_user(user.id)
         .documents()
-        .delete(id, session_id)
+        .delete_with_pages_dir(id, session_id)
         .await
         .map_err(DocumentRouteError::from)?
     {
-        Some(p) => p,
+        Some(t) => t,
         None => {
             return Err(DocumentRouteError::BadMultipart(format!(
                 "unknown document: {id}"
@@ -610,8 +709,13 @@ pub async fn delete_handler(
         }
     };
     // Best-effort unlink; missing file is fine (the periodic
-    // sweep would have caught it).
+    // sweep would have caught it). The pages dir unlink is also
+    // best-effort — the periodic sweep unlinks any leftover
+    // pages dir on the next iteration.
     let _ = std::fs::remove_file(&path);
+    if let Some(p) = pages_dir {
+        let _ = std::fs::remove_dir_all(&p);
+    }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

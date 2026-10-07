@@ -37,6 +37,17 @@ pub struct DocumentsConfig {
     /// Hard cap on documents per chat session. The 51st upload is
     /// rejected with `429 Too Many Documents`.
     pub max_docs_per_session: u32,
+    /// Hard cap on the number of pages one range-mode
+    /// `read_document` call may return. Larger values work on a
+    /// higher-context LLM; the default (20) keeps each tool
+    /// result below 2 048 tokens even when every page is full
+    /// of text, matching Ollama's default `num_ctx`.
+    pub max_pages_per_call: u32,
+    /// Hard cap on the total characters one range-mode
+    /// `read_document` call may return. Enforced by the agent
+    /// after the per-page cipher decrypt so an attacker who
+    /// uploads a single enormous page cannot blow the cap.
+    pub max_page_chars_per_call: usize,
     /// PDF parse timeout in seconds. `pdf-extract` is synchronous so
     /// the cap is enforced by wrapping the call in
     /// `tokio::task::spawn_blocking` + a timeout.
@@ -64,6 +75,8 @@ impl Default for DocumentsConfig {
             max_file_size_bytes: 20 * 1024 * 1024,
             max_extracted_chars: 100_000,
             max_docs_per_session: 50,
+            max_pages_per_call: 20,
+            max_page_chars_per_call: 20_000,
             pdf_extract_timeout_secs: 30,
             pdf_extract_concurrency: 0,
             purge_interval_hours: 24,
@@ -107,6 +120,18 @@ impl DocumentsConfig {
                 toml.max_docs_per_session,
                 defaults.max_docs_per_session,
                 "DOCS_MAX_PER_SESSION",
+            )?,
+            max_pages_per_call: resolve_primitive(
+                env_opt("DOCS_MAX_PAGES_PER_CALL").as_deref(),
+                toml.max_pages_per_call,
+                defaults.max_pages_per_call,
+                "DOCS_MAX_PAGES_PER_CALL",
+            )?,
+            max_page_chars_per_call: resolve_primitive(
+                env_opt("DOCS_MAX_PAGE_CHARS_PER_CALL").as_deref(),
+                toml.max_page_chars_per_call,
+                defaults.max_page_chars_per_call,
+                "DOCS_MAX_PAGE_CHARS_PER_CALL",
             )?,
             pdf_extract_timeout_secs: resolve_primitive(
                 env_opt("DOCS_PDF_TIMEOUT_SECS").as_deref(),

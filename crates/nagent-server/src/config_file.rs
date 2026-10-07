@@ -418,6 +418,8 @@ pub struct TomlStockConfig {
 pub struct TomlReadDocumentConfig {
     pub timeout_ms: Option<u64>,
     pub max_extracted_chars: Option<usize>,
+    pub max_pages_per_call: Option<u32>,
+    pub max_page_chars_per_call: Option<usize>,
 }
 
 /// Knobs for the CalDAV plugin. Mirrors
@@ -717,6 +719,12 @@ pub struct TomlDocumentsConfig {
     pub max_file_size_bytes: Option<usize>,
     pub max_extracted_chars: Option<usize>,
     pub max_docs_per_session: Option<u32>,
+    /// Hard cap on the number of pages one range-mode
+    /// `read_document` call may return (default 20).
+    pub max_pages_per_call: Option<u32>,
+    /// Hard cap on the total characters one range-mode read may
+    /// return (default 20_000).
+    pub max_page_chars_per_call: Option<usize>,
     pub pdf_extract_timeout_secs: Option<u64>,
     /// Max concurrent PDF extracts on the bounded blocking pool
     /// (plan R1b). `None` = half the host cores.
@@ -776,6 +784,8 @@ fn merge_toml_documents(
             max_file_size_bytes: l.max_file_size_bytes.or(e.max_file_size_bytes),
             max_extracted_chars: l.max_extracted_chars.or(e.max_extracted_chars),
             max_docs_per_session: l.max_docs_per_session.or(e.max_docs_per_session),
+            max_pages_per_call: l.max_pages_per_call.or(e.max_pages_per_call),
+            max_page_chars_per_call: l.max_page_chars_per_call.or(e.max_page_chars_per_call),
             pdf_extract_timeout_secs: l.pdf_extract_timeout_secs.or(e.pdf_extract_timeout_secs),
             pdf_extract_concurrency: l.pdf_extract_concurrency.or(e.pdf_extract_concurrency),
             purge_interval_hours: l.purge_interval_hours.or(e.purge_interval_hours),
@@ -1070,6 +1080,8 @@ fn merge_toml_read_document(
         (Some(e), Some(l)) => Some(TomlReadDocumentConfig {
             timeout_ms: l.timeout_ms.or(e.timeout_ms),
             max_extracted_chars: l.max_extracted_chars.or(e.max_extracted_chars),
+            max_pages_per_call: l.max_pages_per_call.or(e.max_pages_per_call),
+            max_page_chars_per_call: l.max_page_chars_per_call.or(e.max_page_chars_per_call),
         }),
     }
 }
