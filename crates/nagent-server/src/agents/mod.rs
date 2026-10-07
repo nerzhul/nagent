@@ -220,7 +220,12 @@ impl DocumentSource for StoreDocumentSource {
         }
         // Fetch the document row, scoped to the user AND the
         // session. SEV 2 fix: a user cannot reach another user's
-        // docs even if they guess the UUID.
+        // docs even if they guess the UUID. `read_with_request`
+        // is the UUID-only entry point; the LLM-facing flow
+        // goes through [`Self::resolve_and_read`] so a bare
+        // filename (the value shown in the chat UI attachment
+        // card) is accepted too. Callers that already have a
+        // UUID should keep using this method.
         let row = self
             .store
             .db()
@@ -253,6 +258,99 @@ impl DocumentSource for StoreDocumentSource {
         // store — they're small enough to be returned whole) AND
         // for pre-migration PDF rows whose `pages_dir` is NULL.
         self.read_full_text(&row, request.page_range).await
+    }
+
+    /// LLM-facing entry point that accepts either the document
+    /// UUID (existing path) OR the exact original filename
+    /// (session-scoped lookup). Used by the `read_document`
+    /// agent so the LLM can pass the filename shown in the chat
+    /// UI attachment card without first having to discover the
+    /// UUID.
+    ///
+    /// Resolution order:
+    /// 1. Try to parse `name_or_filename` as a UUID; on success,
+    ///    delegate to [`Self::read_with_request`] which runs the
+    ///    existing scoped-by-id path.
+    /// 2. Otherwise, look up the most recently uploaded row in
+    ///    `(user, session, original_name = name_or_filename)`.
+    ///    `find_by_original_name` returns `None` on no match;
+    ///    we surface an `InvalidArguments` error that names both
+    ///    valid inputs so the LLM can recover on its next call.
+    /// 3. Never both: a UUID hit wins over a filename hit even
+    ///    when a filename in the same session would also match —
+    ///    the LLM likely intends the UUID in that case.
+    async fn resolve_and_read(
+        &self,
+        user_id: uuid::Uuid,
+        chat_session_id: uuid::Uuid,
+        name_or_filename: &str,
+        page_range: Option<PageRange>,
+    ) -> Result<DocumentPayload, AgentError> {
+        // Fast-path: UUID-shaped input goes through the
+        // existing path verbatim. The inner `get_by_name` would
+        // also do the UUID parse, but a short-circuit keeps the
+        // filename fallback isolated to genuinely non-UUID
+        // inputs (which is what the LLM passes when it has only
+        // the chat UI attachment card in context).
+        if uuid::Uuid::parse_str(name_or_filename).is_ok() {
+            return self
+                .read_with_request(
+                    user_id,
+                    chat_session_id,
+                    DocumentReadRequest {
+                        name: name_or_filename.to_string(),
+                        page_range,
+                    },
+                )
+                .await;
+        }
+
+        // Filename path: same (user, session) verification +
+        // exact `original_name` lookup. We DO NOT do the session
+        // touch_and_verify twice when both paths would land on
+        // the same row, so the read_with_request call below is
+        // avoided in favour of calling the inner reader helpers
+        // directly.
+        if let Some(cs) = self.chat_sessions.as_ref() {
+            cs.touch_and_verify(chat_session_id, user_id)
+                .await
+                .map_err(|_| {
+                    AgentError::AgentFailed(
+                        "chat session is not bound to the current user; \
+                         ask the user to refresh the page"
+                            .to_string(),
+                    )
+                })?;
+        }
+        let row = self
+            .store
+            .db()
+            .for_user(user_id)
+            .documents()
+            .find_by_original_name(chat_session_id, name_or_filename)
+            .await
+            .map_err(|e| AgentError::AgentFailed(format!("document lookup failed: {e}")))?
+            .ok_or_else(|| {
+                AgentError::InvalidArguments(format!(
+                    "no document with name `{name_or_filename}` in this chat session; \
+                     pass either the document UUID (the `data.name` returned by \
+                     GET /v1/documents) or the exact original filename shown in the \
+                     chat UI attachment card"
+                ))
+            })?;
+        // Once the row is resolved, the per-row read path is
+        // identical to `read_with_request`'s, so we dispatch
+        // through it with the canonical UUID. This keeps the
+        // per-page + legacy branches in one place.
+        self.read_with_request(
+            user_id,
+            chat_session_id,
+            DocumentReadRequest {
+                name: row.id.to_string(),
+                page_range,
+            },
+        )
+        .await
     }
 }
 

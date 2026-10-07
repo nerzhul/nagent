@@ -67,6 +67,11 @@ fn ctx_with_session(session_id: Uuid) -> UserContext {
     UserContext::for_chat_session(Uuid::nil(), services, None, None, session_id)
 }
 
+fn ctx_with_session_and_user(session_id: Uuid, user_id: Uuid) -> UserContext {
+    let services = ServiceRegistry::empty().into_arc();
+    UserContext::for_chat_session(user_id, services, None, None, session_id)
+}
+
 fn ctx_without_session() -> UserContext {
     let services = ServiceRegistry::empty().into_arc();
     UserContext::for_tests(Uuid::nil(), services)
@@ -644,7 +649,14 @@ async fn read_document_invalid_page_range_is_rejected() {
 }
 
 #[tokio::test]
-async fn read_document_rejects_malformed_uuid() {
+async fn read_document_unknown_filename_surfaces_clear_error() {
+    // Plan 1791384190579 follow-up turned this scenario from
+    // "parse-time UUID validation rejects every filename" into
+    // "filename is a legitimate input; a missing match surfaces a
+    // clear InvalidArguments error". The store has no documents
+    // uploaded, so the filename path returns None and the agent
+    // surfaces an error that names both valid inputs (UUID OR
+    // exact original filename) so the LLM can recover.
     let (doc_store, _auth) = fresh_store().await;
     let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
         doc_store, None, None,
@@ -652,40 +664,34 @@ async fn read_document_rejects_malformed_uuid() {
     let err = agent
         .invoke(
             &ctx_with_session(Uuid::new_v4()),
-            json!({ "name": "not-a-uuid" }),
+            json!({ "name": "not-a-uuid-and-not-uploaded.pdf" }),
         )
         .await
-        .expect_err("malformed id must fail");
-    // The validation happens at parse time, so the error is
-    // `InvalidArguments` (recoverable by the LLM) not
-    // `AgentFailed` (the historical surface). The error must
-    // also echo that `name` is a UUID, not a filename, so the
-    // LLM knows to look up the value in `GET /v1/documents`.
+        .expect_err("unknown filename must surface a recoverable error");
     match err {
         nagent_server::agents::AgentError::InvalidArguments(msg) => {
             assert!(
-                msg.contains("UUID") && msg.contains("not the filename"),
-                "error must explain the UUID-vs-filename contract: {msg}"
+                msg.contains("UUID")
+                    && msg.contains("filename")
+                    && msg.contains("not-a-uuid-and-not-uploaded.pdf"),
+                "error must echo the offending value + name BOTH accepted inputs; got: {msg}"
             );
         }
         other => panic!("expected InvalidArguments, got {other:?}"),
     }
 }
 
-/// Plan 1791384190579 follow-up: the production failure mode
-/// that surfaced as
-///   agent failed: document lookup failed: encountered unexpected
-///   or invalid data: document id `five_steps_perform_2009.pdf`
-///   is not a valid UUID: invalid character: found `i` at 1
-/// was the LLM passing the *filename* in `data.name` instead of
-/// the *UUID* returned by `GET /v1/documents`. The fix is to
-/// validate the UUID shape at parse time and surface a clear
-/// `InvalidArguments` error pointing at the UUID contract
-/// rather than letting the SQL parse error escape. This test
-/// pins the behaviour using the exact filename that triggered
-/// the production failure.
+/// Plan 1791384190579 follow-up: the original production failure
+/// was the LLM passing the filename (`five_steps_perform_2009.pdf`)
+/// in `data.name` instead of the UUID. The fix lets the LLM pass
+/// either input. We pin the recoverable-error path here for the
+/// exact filename that triggered the production failure, without
+/// an upload in the store — so the call resolves to "no match" and
+/// the agent surfaces an `InvalidArguments` error naming both
+/// accepted inputs. The matching-upload happy path is covered by
+/// `read_document_resolves_filename_to_uploaded_doc` below.
 #[tokio::test]
-async fn read_document_filename_instead_of_uuid_surfaces_clear_error() {
+async fn read_document_unknown_filename_with_production_filename_is_recoverable() {
     let (doc_store, _auth) = fresh_store().await;
     let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
         doc_store, None, None,
@@ -696,23 +702,121 @@ async fn read_document_filename_instead_of_uuid_surfaces_clear_error() {
             json!({ "name": "five_steps_perform_2009.pdf" }),
         )
         .await
-        .expect_err("filename instead of UUID must fail at parse time");
+        .expect_err("filename without a matching upload must error");
     match err {
         nagent_server::agents::AgentError::InvalidArguments(msg) => {
-            // The error must echo the filename so the LLM can
-            // tell what it sent, and it must point at the UUID
-            // contract.
             assert!(
                 msg.contains("five_steps_perform_2009.pdf")
                     && msg.contains("UUID")
-                    && msg.contains("not the filename"),
-                "error must echo the offending value + UUID contract: {msg}"
+                    && msg.contains("filename"),
+                "error must echo the offending filename + name both inputs; got: {msg}"
             );
         }
-        other => {
-            panic!("expected InvalidArguments with a clear UUID-vs-filename message, got {other:?}")
-        }
+        other => panic!("expected InvalidArguments, got {other:?}"),
     }
+}
+
+/// Pin the happy-path filename resolution: when the LLM passes
+/// the original filename of a doc that was actually uploaded in
+/// the current chat session, `read_document` MUST resolve it to
+/// the same row as the UUID lookup. Same UUID, same page count,
+/// same size — only the wire-side input differs.
+#[tokio::test]
+async fn read_document_resolves_filename_to_uploaded_doc() {
+    let (doc_store, _auth) = fresh_store().await;
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store.clone(),
+        None,
+        None,
+    )));
+    let session_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let doc_id = Uuid::new_v4();
+    // Seed a row AND a stub file on disk so the legacy read
+    // path can decode the bytes — the row-level fields (size,
+    // page count, original_name) are what the filename path
+    // resolves on, the file contents are what the read pipeline
+    // returns.
+    let tmp = std::env::temp_dir().join(format!(
+        "nagent-filename-resolve-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp).expect("tmp dir");
+    // Use a plain-text seed so the test does not depend on the
+    // PDF code path (the PDF one needs a real on-disk PDF). The
+    // Filename resolution contract is mime-agnostic, so a .txt
+    // file exercises the same code path.
+    let disk_path = tmp.join("report.txt");
+    std::fs::write(&disk_path, b"hello world\n").expect("seed file");
+    doc_store
+        .db()
+        .for_user(user_id)
+        .documents()
+        .insert(
+            doc_id,
+            session_id,
+            "report.txt",
+            "text/plain",
+            disk_path.metadata().expect("meta").len(),
+            12,
+            None,
+            disk_path.to_str().expect("utf8 path"),
+            None,
+        )
+        .await
+        .expect("seed doc");
+
+    let ctx = ctx_with_session_and_user(session_id, user_id);
+
+    // 1) UUID lookup still works (existing contract preserved).
+    let by_uuid = agent
+        .invoke(&ctx, json!({ "name": doc_id.to_string() }))
+        .await
+        .expect("UUID lookup must succeed");
+    assert!(
+        by_uuid.contains(&doc_id.to_string()),
+        "UUID lookup payload must include the doc UUID; got: {by_uuid}"
+    );
+
+    // 2) Filename lookup returns the SAME row.
+    let by_name = agent
+        .invoke(&ctx, json!({ "name": "report.txt" }))
+        .await
+        .expect("filename lookup must succeed");
+    assert!(
+        by_name.contains(&doc_id.to_string()),
+        "filename-resolved payload must include the doc UUID; got: {by_name}"
+    );
+
+    // 3) Filename lookup is session-scoped: a different session
+    //    must NOT surface alice's doc.
+    let other_session_ctx = ctx_with_session_and_user(Uuid::new_v4(), user_id);
+    let err = agent
+        .invoke(&other_session_ctx, json!({ "name": "report.txt" }))
+        .await
+        .expect_err("filename in another session must not surface");
+    match err {
+        nagent_server::agents::AgentError::InvalidArguments(_) => {}
+        other => panic!("expected InvalidArguments, got {other:?}"),
+    }
+
+    // 4) Filename lookup is user-scoped: bob cannot resolve
+    //    alice's filename even when guessing the session id.
+    let bob_ctx = ctx_with_session_and_user(session_id, Uuid::new_v4());
+    let err = agent
+        .invoke(&bob_ctx, json!({ "name": "report.txt" }))
+        .await
+        .expect_err("filename from another user must not surface");
+    match err {
+        nagent_server::agents::AgentError::InvalidArguments(_) => {}
+        other => panic!("expected InvalidArguments, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// SEV 1 + 2 fix end-to-end: even with a valid UUID guess, user B

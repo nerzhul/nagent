@@ -189,6 +189,46 @@ pub trait DocumentSource: Send + Sync {
         self.read(user_id, chat_session_id, &request.name).await
     }
 
+    /// Resolve a document identifier (UUID or original filename)
+    /// and read it. The default implementation is the same as
+    /// [`Self::read_with_request`] — UUID-only contract, no
+    /// filename fallback — to stay backwards-compatible with trait
+    /// impls that have not opted in. The server-side
+    /// [`StoreDocumentSource`](crate) overrides this to also match
+    /// `(user, session, original_name)` so the LLM can pass the
+    /// filename shown in the chat UI attachment card without
+    /// having to discover the UUID first.
+    ///
+    /// Resolution order when overridden:
+    /// 1. If `name_or_filename` parses as a UUID, look it up by
+    ///    `(user, session, id)` — the existing path.
+    /// 2. Otherwise, look it up by `(user, session, original_name)`
+    ///    exact match. Multiple matches resolve to the most
+    ///    recently uploaded row (deterministic by
+    ///    `created_at DESC, id DESC`).
+    /// 3. No match → `AgentError::InvalidArguments` with a hint
+    ///    naming both valid inputs.
+    ///
+    /// `page_range` is forwarded verbatim; the override does not
+    /// reinterpret it.
+    async fn resolve_and_read(
+        &self,
+        user_id: Uuid,
+        chat_session_id: Uuid,
+        name_or_filename: &str,
+        page_range: Option<PageRange>,
+    ) -> Result<DocumentPayload, AgentError> {
+        self.read_with_request(
+            user_id,
+            chat_session_id,
+            DocumentReadRequest {
+                name: name_or_filename.to_string(),
+                page_range,
+            },
+        )
+        .await
+    }
+
     /// Hard cap on the number of pages one range-mode read may
     /// return. Configured by `[documents].max_pages_per_call`.
     fn max_pages_per_call(&self) -> u32;

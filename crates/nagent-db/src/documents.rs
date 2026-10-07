@@ -235,6 +235,33 @@ impl ScopedDocuments {
         self.inner.get_by_id(id, self.user_id, None).await
     }
 
+    /// Look up a document by its original filename within
+    /// `(user, session)`. Used by `read_document` so the LLM can
+    /// pass the filename shown in the chat UI attachment card
+    /// without first having to discover the UUID.
+    ///
+    /// Exact match on `original_name`; on duplicates the most
+    /// recently uploaded row wins (deterministic by
+    /// `created_at DESC, id DESC`). Returns `None` when no row
+    /// matches — callers convert that into an `InvalidArguments`
+    /// error.
+    pub async fn find_by_original_name(
+        &self,
+        session_id: Uuid,
+        original_name: &str,
+    ) -> Result<Option<DocumentRow>, DocumentError> {
+        match &self.inner {
+            Documents::Sqlite(s) => {
+                s.find_by_original_name(self.user_id, session_id, original_name)
+                    .await
+            }
+            Documents::Postgres(s) => {
+                s.find_by_original_name(self.user_id, session_id, original_name)
+                    .await
+            }
+        }
+    }
+
     /// Insert a fresh row. `session_id` is the chat-session binding.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(
@@ -393,6 +420,30 @@ pub(crate) mod sqlite {
             .fetch_all(&self.pool)
             .await?;
             rows.into_iter().map(decode_row).collect()
+        }
+
+        pub async fn find_by_original_name(
+            &self,
+            user_id: Uuid,
+            session_id: Uuid,
+            original_name: &str,
+        ) -> Result<Option<DocumentRow>, DocumentError> {
+            // `created_at DESC, id DESC` makes the most recent
+            // row win on duplicate filenames — ties are broken
+            // by id so the order is deterministic even when two
+            // uploads share the same `created_at` timestamp (which
+            // can happen on fast batch uploads on SQLite).
+            let row = sqlx::query(
+                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
+                 FROM uploaded_documents WHERE user_id = ?1 AND session_id = ?2 AND original_name = ?3 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(user_id.to_string())
+            .bind(session_id.to_string())
+            .bind(original_name)
+            .fetch_optional(&self.pool)
+            .await?;
+            row.map(decode_row).transpose()
         }
 
         pub async fn count_for_session(
@@ -602,6 +653,29 @@ pub(crate) mod postgres {
             .fetch_all(&self.pool)
             .await?;
             rows.into_iter().map(decode_row).collect()
+        }
+
+        pub async fn find_by_original_name(
+            &self,
+            user_id: Uuid,
+            session_id: Uuid,
+            original_name: &str,
+        ) -> Result<Option<DocumentRow>, DocumentError> {
+            // `created_at DESC, id DESC` makes the most recent
+            // row win on duplicate filenames — ties are broken
+            // by id so the order is deterministic even when two
+            // uploads share the same `created_at` timestamp.
+            let row = sqlx::query(
+                "SELECT id, original_name, mime, size_bytes, extracted_chars, page_count, disk_path, pages_dir \
+                 FROM uploaded_documents WHERE user_id = $1 AND session_id = $2 AND original_name = $3 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(user_id)
+            .bind(session_id)
+            .bind(original_name)
+            .fetch_optional(&self.pool)
+            .await?;
+            row.map(decode_row).transpose()
         }
 
         pub async fn count_for_session(

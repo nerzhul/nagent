@@ -7,11 +7,8 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use uuid::Uuid;
 
-use crate::agents::{
-    Agent, AgentError, DocumentReadRequest, DocumentShape, DocumentSource, PageRange, UserContext,
-};
+use crate::agents::{Agent, AgentError, DocumentShape, DocumentSource, PageRange, UserContext};
 
 /// `read_document` agent. Stateless — holds an `Arc<dyn
 /// DocumentSource>` so each `invoke` can run a single document
@@ -47,11 +44,14 @@ impl Agent for ReadDocumentAgent {
 
     fn description(&self) -> &str {
         "Read the text content of a file or document (PDF, TXT, MD, LOG) previously uploaded \
-         by the user to this chat session. Use the `name` field returned by GET /v1/documents \
-         (a UUID). The default call returns an OVERVIEW (page count, size, short preview); pass \
-         `page_range` (e.g. \"3-7\") to fetch only specific pages. Each range-mode call is capped \
-         at max_pages_per_call pages or max_page_chars_per_call characters. Make further calls \
-         with different `page_range` arguments to read additional sections."
+         by the user to this chat session. The `name` field accepts EITHER the document UUID \
+         (the value of `data.name` in GET /v1/documents) OR the original filename shown in \
+         the chat UI attachment card — exact filename match, scoped to this chat session; \
+         ties pick the most recent. The default call returns an OVERVIEW (page count, size, \
+         short preview); pass `page_range` (e.g. \"3-7\") to fetch only specific pages. Each \
+         range-mode call is capped at max_pages_per_call pages or max_page_chars_per_call \
+         characters. Make further calls with different `page_range` arguments to read \
+         additional sections."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -60,7 +60,7 @@ impl Agent for ReadDocumentAgent {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Document id (UUID) returned by GET /v1/documents."
+                    "description": "Document identifier: EITHER the document UUID (the value of `data.name` in GET /v1/documents) OR the exact original filename shown in the chat UI attachment card (e.g. \"report.pdf\"). Filename match is scoped to the current chat session; on duplicate names, the most recently uploaded document wins."
                 },
                 "page_range": {
                     "type": "string",
@@ -121,13 +121,9 @@ impl Agent for ReadDocumentAgent {
             None => None,
             Some(raw) => Some(parse_page_range(raw, self.source.max_pages_per_call())?),
         };
-        let request = DocumentReadRequest {
-            name: req.name.clone(),
-            page_range,
-        };
         let payload = self
             .source
-            .read_with_request(ctx.user_id(), session_id, request.clone())
+            .resolve_and_read(ctx.user_id(), session_id, &req.name, page_range)
             .await?;
 
         // Branch on the underlying shape to assemble the LLM-facing
@@ -318,21 +314,19 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, AgentError> {
             "`name` must not be empty".into(),
         ));
     }
-    // The `name` field is a document UUID, not a filename. We
-    // validate the shape here so a future regression that lets
-    // the LLM pass `original_name` (e.g. "report.pdf") instead
-    // of the UUID is caught at the agent boundary with a clear,
-    // recoverable error — not by a downstream `sqlx::Error`
-    // surfacing as a "not a valid UUID" parse failure that the
-    // LLM cannot easily recover from. The DB column is typed
-    // `TEXT` so a non-UUID string would otherwise fail the
-    // WHERE clause with a confusing `encountered unexpected or
-    // invalid data` error.
-    if Uuid::parse_str(&name).is_err() {
-        return Err(AgentError::InvalidArguments(format!(
-            "`name` must be a document UUID (the value returned by `data.name` in GET /v1/documents), not the filename; got `{name}`"
-        )));
-    }
+    // `name` accepts EITHER a document UUID (the value returned by
+    // `data.name` in GET /v1/documents) OR the original filename
+    // shown in the chat UI attachment card. The actual dispatch
+    // happens in `DocumentSource::resolve_and_read` (server-side
+    // override in `StoreDocumentSource`); this parser only does
+    // the shape check. We no longer reject bare filenames at the
+    // agent boundary — doing so made the first call from the LLM
+    // fail with an opaque validation error whenever the user
+    // attached a file via the chat UI (the LLM has only the
+    // filename in its context, not the UUID). Filenames are
+    // matched exactly within `(user, session, original_name)`,
+    // and a duplicate name resolves to the most recently
+    // uploaded row.
     let page_range = obj
         .get("page_range")
         .and_then(|v| v.as_str())
@@ -430,4 +424,129 @@ fn parse_page_range(raw: &str, max_pages: u32) -> Result<PageRange, AgentError> 
         start,
         end_inclusive: end,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Pin: `parse_args` accepts BOTH a document UUID and the
+    /// exact original filename shown in the chat UI attachment
+    /// card. The actual dispatch (UUID vs filename) happens in
+    /// `DocumentSource::resolve_and_read`; the parser must not
+    /// pre-reject non-UUID inputs — doing so would force the LLM
+    /// to guess the UUID on its first call after the user
+    /// attached a file, and the only identifier in its context
+    /// is the filename.
+    #[test]
+    fn parse_args_accepts_uuid() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let parsed = parse_args(&json!({ "name": &id })).expect("UUID must parse");
+        assert_eq!(parsed.name, id);
+        assert!(parsed.page_range_raw.is_none());
+    }
+
+    #[test]
+    fn parse_args_accepts_filename() {
+        let parsed = parse_args(&json!({ "name": "report.pdf" }))
+            .expect("filename must parse (no longer a hard error)");
+        assert_eq!(parsed.name, "report.pdf");
+    }
+
+    #[test]
+    fn parse_args_accepts_filename_with_page_range() {
+        let parsed = parse_args(&json!({
+            "name": "five_steps_perform_2009.pdf",
+            "page_range": "3-7"
+        }))
+        .expect("filename + page_range must parse");
+        assert_eq!(parsed.name, "five_steps_perform_2009.pdf");
+        assert_eq!(parsed.page_range_raw.as_deref(), Some("3-7"));
+    }
+
+    #[test]
+    fn parse_args_trims_whitespace() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let parsed =
+            parse_args(&json!({ "name": format!("  {id}  ") })).expect("trimmed UUID must parse");
+        assert_eq!(parsed.name, id);
+    }
+
+    #[test]
+    fn parse_args_rejects_missing_name() {
+        let err = parse_args(&json!({})).expect_err("missing name must error");
+        assert!(matches!(err, AgentError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_name() {
+        let err = parse_args(&json!({ "name": "   " })).expect_err("empty must error");
+        assert!(matches!(err, AgentError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn parse_args_rejects_non_string_name() {
+        let err = parse_args(&json!({ "name": 42 })).expect_err("non-string must error");
+        assert!(matches!(err, AgentError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn parse_args_rejects_bad_page_range() {
+        let err = parse_args(&json!({
+            "name": "report.pdf",
+            "page_range": "not-a-range"
+        }))
+        .expect_err("bad page_range must error");
+        assert!(matches!(err, AgentError::InvalidArguments(_)));
+    }
+
+    /// Pin: the description + parameter doc still mention BOTH
+    /// accepted inputs after the filename fallback landed.
+    /// Future drafts that drop the filename mention would
+    /// re-introduce the "agent rejects the LLM's first call"
+    /// bug.
+    #[test]
+    fn description_and_schema_mention_filename_fallback() {
+        let agent = ReadDocumentAgent::new(std::sync::Arc::new(NoopSource));
+        let desc = agent.description();
+        assert!(
+            desc.contains("filename"),
+            "description must mention the filename fallback; got: {desc}"
+        );
+        let schema = agent.parameters_schema();
+        let name_desc = schema["properties"]["name"]["description"]
+            .as_str()
+            .expect("name.description must be a string");
+        assert!(
+            name_desc.contains("filename"),
+            "name.description must mention the filename fallback; got: {name_desc}"
+        );
+    }
+
+    /// Stub `DocumentSource` used only by the description/schema
+    /// pin above. None of the agent methods that need a working
+    /// source are exercised in the unit tests (those tests go
+    /// through the live `StoreDocumentSource` integration suite).
+    struct NoopSource;
+    #[async_trait::async_trait]
+    impl DocumentSource for NoopSource {
+        async fn read(
+            &self,
+            _: uuid::Uuid,
+            _: uuid::Uuid,
+            _: &str,
+        ) -> Result<crate::agents::DocumentPayload, AgentError> {
+            unimplemented!()
+        }
+        fn max_extracted_chars(&self) -> usize {
+            0
+        }
+        fn max_pages_per_call(&self) -> u32 {
+            0
+        }
+        fn max_page_chars_per_call(&self) -> usize {
+            0
+        }
+    }
 }

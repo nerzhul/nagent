@@ -705,6 +705,114 @@ mod documents {
 
     #[cfg(feature = "db-sqlite")]
     #[tokio::test]
+    async fn find_by_original_name_session_scoped_and_most_recent_wins() {
+        // Pin the new filename-lookup path used by `read_document`
+        // when the LLM passes the chat UI attachment filename
+        // instead of the UUID.
+        let db = sqlite_db().await;
+        let alice = db
+            .admin()
+            .users
+            .create("alice@example.com", "Alice", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let docs = db.for_user(alice).documents();
+        let session = Uuid::new_v4();
+        let id_old = Uuid::new_v4();
+        let id_new = Uuid::new_v4();
+        // Two rows, same filename, same session. The new insert
+        // wins by `created_at DESC`. We sleep briefly between the
+        // two inserts so the schema's `created_at` is strictly
+        // different — otherwise both rows end up with the same
+        // second-precision timestamp and the SQL tie-break falls
+        // on the UUID, which is random for UUIDv4 and makes the
+        // test flaky.
+        docs.insert(
+            id_old,
+            session,
+            "report.pdf",
+            "application/pdf",
+            10,
+            0,
+            Some(1),
+            "/tmp/old",
+            None,
+        )
+        .await
+        .expect("insert old");
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        docs.insert(
+            id_new,
+            session,
+            "report.pdf",
+            "application/pdf",
+            20,
+            0,
+            Some(2),
+            "/tmp/new",
+            None,
+        )
+        .await
+        .expect("insert new");
+        let hit = docs
+            .find_by_original_name(session, "report.pdf")
+            .await
+            .expect("lookup")
+            .expect("must hit");
+        assert_eq!(
+            hit.id, id_new,
+            "most recent insert must win (got {:?}, expected {:?})",
+            hit.id, id_new
+        );
+
+        // Determinism: a second call must return the same row.
+        let hit2 = docs
+            .find_by_original_name(session, "report.pdf")
+            .await
+            .expect("lookup 2")
+            .expect("must hit");
+        assert_eq!(hit.id, hit2.id, "filename lookup must be deterministic");
+
+        // Session scope: the same filename in a DIFFERENT session
+        // for the same user must not surface here.
+        let other_session = Uuid::new_v4();
+        assert!(
+            docs.find_by_original_name(other_session, "report.pdf")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "filename lookup must be session-scoped"
+        );
+
+        // User scope: a different user must never see alice's
+        // document via filename, even with the right session id.
+        let bob = db
+            .admin()
+            .users
+            .create("bob@example.com", "Bob", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let bob_docs = db.for_user(bob).documents();
+        assert!(
+            bob_docs
+                .find_by_original_name(session, "report.pdf")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "filename lookup must be user-scoped"
+        );
+
+        // Unknown filename in the right session returns None
+        // (the caller converts that to InvalidArguments).
+        assert!(docs
+            .find_by_original_name(session, "nope.pdf")
+            .await
+            .expect("lookup")
+            .is_none());
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
     async fn sweep_older_than_is_admin_only() {
         // Sweep lives on the unscoped repository; the scoped view
         // does NOT expose it (a per-user route handler must never
@@ -873,6 +981,54 @@ async fn postgres_parity_documents_scoped() {
     assert_eq!(docs.count_for_session(session).await.unwrap(), 1);
     let path = docs.delete(id, session).await.expect("delete");
     assert!(path.is_some());
+}
+
+#[cfg(feature = "db-postgres")]
+#[tokio::test]
+#[ignore = "requires NAGENT_TEST_PG_URL; run with --include-ignored in CI"]
+async fn postgres_parity_find_by_original_name() {
+    let db = pg_or_skip!();
+    let user = db
+        .admin()
+        .users
+        .create("pg-fbn@example.com", "PG", "local", Some(b"h"))
+        .await
+        .unwrap();
+    let docs = db.for_user(user).documents();
+    let session = Uuid::new_v4();
+    docs.insert(
+        Uuid::new_v4(),
+        session,
+        "report.pdf",
+        "application/pdf",
+        10,
+        0,
+        Some(1),
+        "/tmp/old",
+        None,
+    )
+    .await
+    .expect("insert old");
+    let id_new = Uuid::new_v4();
+    docs.insert(
+        id_new,
+        session,
+        "report.pdf",
+        "application/pdf",
+        20,
+        0,
+        Some(2),
+        "/tmp/new",
+        None,
+    )
+    .await
+    .expect("insert new");
+    let hit = docs
+        .find_by_original_name(session, "report.pdf")
+        .await
+        .expect("lookup")
+        .expect("hit");
+    assert_eq!(hit.id, id_new);
 }
 
 #[cfg(feature = "db-postgres")]
