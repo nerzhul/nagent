@@ -218,12 +218,76 @@ impl DocumentSource for StoreDocumentSource {
                 )));
             }
         };
-        let text = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(AgentError::AgentFailed(
-                    "document is not valid UTF-8 (binary uploads are not supported)".into(),
-                ));
+        // Dispatch on MIME: PDFs go through `extract_pdf_bounded`
+        // (the same bounded-pool path the upload route uses); text
+        // / markdown / log use the lossy UTF-8 passthrough. The
+        // old `String::from_utf8(bytes)` only worked for plain
+        // text — a PDF's raw bytes are binary, so the previous
+        // implementation rejected every PDF with "document is not
+        // valid UTF-8 (binary uploads are not supported)" even
+        // though the upload route had successfully extracted the
+        // text at write time. Re-extracting on read costs a few
+        // ms per call (cached by the route's bounded pool) and
+        // lets the agent surface PDFs without a schema change.
+        let extraction = if row.mime == crate::documents::extract::PDF_MIME {
+            match crate::documents::extract::extract_pdf_bounded(
+                self.store.pdf_semaphore(),
+                &bytes,
+                self.store.pdf_extract_timeout(),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(crate::documents::extract::ExtractionError::ParseFailed(m)) => {
+                    return Err(AgentError::AgentFailed(format!(
+                        "could not parse PDF: {m}; ask the user to re-upload a non-scanned copy"
+                    )));
+                }
+                Err(crate::documents::extract::ExtractionError::Timeout(_)) => {
+                    return Err(AgentError::AgentFailed(
+                        "PDF extraction exceeded the configured timeout; \
+                         try a smaller page range or a text-only document"
+                            .into(),
+                    ));
+                }
+                Err(crate::documents::extract::ExtractionError::Saturated { .. })
+                | Err(crate::documents::extract::ExtractionError::SaturatedTimeout(_)) => {
+                    return Err(AgentError::AgentFailed(
+                        "PDF extractor is saturated; please retry in a moment".into(),
+                    ));
+                }
+                Err(crate::documents::extract::ExtractionError::UnsupportedMime(m)) => {
+                    return Err(AgentError::AgentFailed(format!(
+                        "document is not a supported PDF: {m}"
+                    )));
+                }
+            }
+        } else {
+            // `text/plain` (and the `.md`/`.log` cousins — the
+            // upload route normalises every accepted extension to
+            // `text/plain`). Lossy UTF-8 so a stray invalid byte
+            // in a long text file does not blank the whole read.
+            let ext = row
+                .disk_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("txt");
+            match crate::documents::extract::extract_text(&bytes, ext) {
+                Ok(r) => r,
+                Err(crate::documents::extract::ExtractionError::UnsupportedMime(m)) => {
+                    return Err(AgentError::AgentFailed(format!(
+                        "unsupported document type: {m}"
+                    )));
+                }
+                // `extract_text` is in-memory and synchronous; the
+                // pool / timeout / saturation variants are
+                // unreachable here. `ParseFailed` is the only
+                // realistic failure — surface it to the LLM.
+                Err(e) => {
+                    return Err(AgentError::AgentFailed(format!(
+                        "could not read document text: {e}"
+                    )));
+                }
             }
         };
         Ok(DocumentPayload {
@@ -231,9 +295,16 @@ impl DocumentSource for StoreDocumentSource {
             original_name: row.original_name,
             mime: row.mime,
             size_bytes: row.size_bytes,
-            page_count: row.page_count,
-            extracted_chars: row.extracted_chars,
-            text,
+            // Re-extracted at read time: prefer the live page
+            // count and char tally from the fresh extraction so
+            // a truncated-then-purged row doesn't show stale
+            // numbers. For plain text, the re-extraction is a
+            // pure lossy-UTF-8 pass and the field ends up equal
+            // to the upload-time value modulo any byte-level
+            // repair the lossy pass did.
+            page_count: extraction.page_count.or(row.page_count),
+            extracted_chars: extraction.text.chars().count() as u64,
+            text: extraction.text,
         })
     }
 }
@@ -285,7 +356,16 @@ pub fn build_registry(
     // the gains; per-agent SSRF policy still applies.
     let pool = nagent_agents::egress::EgressPool::new();
     let mut registry = AgentRegistry::from_config(&cfgs, cfg.enabled, &pool);
-    if let (true, Some(store), true) = (cfg.enabled, document_store, cfg.read_document_enabled) {
+    // The `read_document` agent is auto-registered when both
+    // `[agents].enabled = true` and the documents subsystem
+    // produced a `DocumentStore` at boot. The historical
+    // per-agent `read_document_enabled` toggle was redundant —
+    // the documents subsystem already had its own master
+    // switch (`[documents].enabled`). The old TOML key is
+    // still parsed for backward compat (see the comment on
+    // `TomlAgentConfig::read_document_enabled`) but its value
+    // is dropped on the floor by the merge layer.
+    if let (true, Some(store)) = (cfg.enabled, document_store) {
         #[cfg(feature = "read-document-agent")]
         registry.push_agent_boxed(Box::new(nagent_agents::ReadDocumentAgent::new(Arc::new(
             StoreDocumentSource::new(store, chat_sessions),

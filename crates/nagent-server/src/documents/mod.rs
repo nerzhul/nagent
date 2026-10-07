@@ -51,6 +51,7 @@ pub mod routes;
 pub mod storage;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -82,6 +83,11 @@ struct DocumentStoreInner {
     /// calls (plan R1b). Sized at boot; the route layer passes it
     /// through `nagent_support::cpu::run_bounded`.
     pdf_semaphore: Arc<Semaphore>,
+    /// Per-call timeout for the PDF extractor (seconds). Captured
+    /// at boot from `[documents].pdf_extract_timeout_secs` so the
+    /// agent's read path can use the same cap as the upload route
+    /// without reaching into `Config`.
+    pdf_extract_timeout: Duration,
 }
 
 impl std::fmt::Debug for DocumentStore {
@@ -91,6 +97,7 @@ impl std::fmt::Debug for DocumentStore {
             .field("max_extracted_chars", &self.inner.max_extracted_chars)
             .field("cache_dir", &self.inner.cache_dir)
             .field("pdf_semaphore", &"<Arc<Semaphore>>")
+            .field("pdf_extract_timeout", &self.inner.pdf_extract_timeout)
             .finish()
     }
 }
@@ -99,11 +106,14 @@ impl DocumentStore {
     /// Build the shared documents state. `pdf_extract_concurrency`
     /// is the cap on concurrent PDF extracts; `0` falls back to
     /// "half the host cores, clamped to `[1, 16]`".
+    /// `pdf_extract_timeout_secs` is the per-call timeout passed to
+    /// the bounded blocking pool for PDF parses.
     pub fn new(
         db: nagent_db::Db,
         max_extracted_chars: usize,
         cache_dir: std::path::PathBuf,
         pdf_extract_concurrency: usize,
+        pdf_extract_timeout_secs: u64,
     ) -> Self {
         let permits = if pdf_extract_concurrency == 0 {
             let cores = std::thread::available_parallelism()
@@ -119,15 +129,24 @@ impl DocumentStore {
                 max_extracted_chars,
                 cache_dir,
                 pdf_semaphore: Arc::new(Semaphore::new(permits)),
+                pdf_extract_timeout: Duration::from_secs(pdf_extract_timeout_secs),
             }),
         }
     }
 
     /// Borrow the shared semaphore for PDF extracts. The upload
-    /// route hands this to
+    /// route and the `read_document` agent's read path hand this to
     /// [`crate::documents::extract::extract_pdf_bounded`].
     pub fn pdf_semaphore(&self) -> Arc<Semaphore> {
         self.inner.pdf_semaphore.clone()
+    }
+
+    /// Per-call PDF extraction timeout. The `read_document` agent
+    /// uses this so a re-extraction at read time (a PDF row whose
+    /// raw bytes need parsing because the original was discarded)
+    /// hits the same cap as the upload route.
+    pub fn pdf_extract_timeout(&self) -> Duration {
+        self.inner.pdf_extract_timeout
     }
 
     /// Borrow the shared [`nagent_db::Db`]. Routes / CLI / agent

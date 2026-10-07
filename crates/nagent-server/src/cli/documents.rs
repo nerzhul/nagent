@@ -202,6 +202,7 @@ async fn connect_store(
         cfg.documents.max_extracted_chars,
         cfg.documents.cache_dir.clone(),
         cfg.documents.pdf_extract_concurrency,
+        cfg.documents.pdf_extract_timeout_secs,
     );
     Ok((doc_store, cfg.documents.cache_dir.clone()))
 }

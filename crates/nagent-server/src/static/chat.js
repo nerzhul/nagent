@@ -884,6 +884,14 @@ function setStreamingUi(streaming) {
     inputEl.disabled = false;
     inputEl.focus();
   }
+  // Mirror the streaming state to any module that owns
+  // per-turn composer widgets. The composer attachment module
+  // (`composer-attachments.js`) greys the paperclip + tray
+  // while a turn is in flight so the user can't `×` a chip
+  // mid-stream and re-add it during the same turn.
+  window.dispatchEvent(new CustomEvent("chat-stream-state", {
+    detail: { streaming: streaming === true },
+  }));
 }
 
 // ---- History ---------------------------------------------------------------
@@ -997,6 +1005,13 @@ function renderHistory(sessionId) {
       model: msg.model,
       markdown: false,
       sessionId,
+      // `attachments` is a per-user-bubble array carrying the
+      // `{id, name, mime, size_bytes}` summary that
+      // `submitUserTurn` persisted on the originating turn.
+      // The composer module's `renderChips` is what actually
+      // re-renders the chip row inside the bubble — historical
+      // chips are display-only (no remove button).
+      attachments: msg.attachments || null,
     });
     lastUserOrFinalAssistantEl = bubble;
     toolAnchorEl = null;
@@ -1024,6 +1039,7 @@ function renderHistory(sessionId) {
 
 function appendBubble(role, text, {
   persist = true, model = null, markdown = false, sessionId = null,
+  attachments = null,
 } = {}) {
   // `sessionId` is required on every persist path: a missing id is a
   // programming error, and silently dropping into the active session
@@ -1042,6 +1058,11 @@ function appendBubble(role, text, {
   // would inherit `white-space: pre-wrap` and show `## Heading`
   // literally instead of as a heading.
   if (markdown) classes.push("chat-message--markdown");
+  // `--has-attachments` is the marker the CSS uses to lay the
+  // per-bubble chip row directly under the user text. Only
+  // user bubbles get this class (assistant bubbles are not
+  // attachment senders in the current design).
+  if (attachments?.length) classes.push("chat-message--has-attachments");
   div.className = classes.join(" ");
   if (sid) div.dataset.sessionId = sid;
   if (model && role === "assistant") div.dataset.model = model;
@@ -1056,6 +1077,16 @@ function appendBubble(role, text, {
     // what they typed and we never try to render a hostile prompt as
     // a link.
     div.textContent = text;
+  }
+  // Attachment chips (composer feature). Rendered AFTER the
+  // text node so the text is always the bubble's first
+  // child — the live-stream loader and history hydration
+  // re-render the bubble body but never touch the chip row.
+  if (attachments?.length) {
+    const tray = document.createElement("ul");
+    tray.className = "chat-message-attachments";
+    div.appendChild(tray);
+    window.__nagentAttachments?.renderChips(tray, attachments);
   }
   // Replay button: appended AFTER the markdown render so it sits
   // outside the sanitized HTML and can't be stripped by DOMPurify.
@@ -1090,7 +1121,17 @@ function appendBubble(role, text, {
   }
   if (persist) {
     const history = loadHistory(sid);
-    history.push({ role, content: text, ts: Date.now(), model });
+    history.push({
+      role,
+      content: text,
+      ts: Date.now(),
+      model,
+      // Persist attachments so history hydration re-renders
+      // the chip row on reload. Omit the key when empty to
+      // keep the on-disk shape unchanged for turns without
+      // attachments (older clients ignore unknown fields).
+      attachments: attachments?.length ? attachments : undefined,
+    });
     saveHistory(sid, history);
     // First user message of a session seeds its title. We only do
     // this for the very first user turn so a long-running session
@@ -2914,13 +2955,21 @@ function openAdvancedForLocation() {
   if (privacy) privacy.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
-// `streamReply(sessionId, userText)` runs the LLM request bound to a
-// specific session. The session id is captured at call time and used
-// for every read/write — never re-read from `activeSessionId()` — so a
-// mid-flight session switch can't route the assistant bubble or its
-// persisted entry into the wrong conversation.
+// `streamReply(sessionId, userText, opts)` runs the LLM request bound
+// to a specific session. The session id is captured at call time and
+// used for every read/write — never re-read from `activeSessionId()` —
+// so a mid-flight session switch can't route the assistant bubble or
+// its persisted entry into the wrong conversation.
+//
+// `opts.attachmentsHint` is an optional ephemeral system block that
+// lists the documents the user just uploaded on this turn. The hint
+// travels in the request payload for this turn only and is never
+// written back to `loadHistory` (same rule as the location / timezone
+// blocks below); the persisted `attachments` array on the user
+// message record is what drives bubble re-render on history
+// hydration.
 
-async function streamReply(sessionId, userText) {
+async function streamReply(sessionId, userText, opts = {}) {
   // SEV 2 fix: mint (or reuse) the server-bound chat session id.
   // The first request on every page load triggers the POST. The
   // returned id is cached in localStorage so subsequent requests
@@ -3019,6 +3068,17 @@ async function streamReply(sessionId, userText) {
   // order keeps the most-recently-added block at index 0.
   const tzBlock = maybeBuildTimezoneBlock();
   if (tzBlock) messages.unshift(tzBlock);
+  // Ephemeral attachments hint (composer's staged documents).
+  // Travels only on this turn's request and is intentionally
+  // absent from `loadHistory` — the persisted `attachments`
+  // array on the user message is what drives bubble re-render
+  // on reload, so the LLM still knows the docs are available
+  // via `read_document` even though the hint is gone. Inserted
+  // AFTER location + timezone so the privacy-flavoured blocks
+  // remain at the very top.
+  if (opts.attachmentsHint) {
+    messages.unshift({ role: "system", content: opts.attachmentsHint });
+  }
   const body = { messages, stream: true };
   const temperature = parseFloat(tempEl.value);
   if (Number.isFinite(temperature)) body.temperature = temperature;
@@ -3380,8 +3440,15 @@ async function streamReply(sessionId, userText) {
 async function submitUserTurn(sessionId, text) {
   const trimmed = (text || "").trim();
   if (!trimmed) return;
-  appendBubble("user", trimmed, { sessionId });
-  await streamReply(sessionId, trimmed);
+  // Pull any staged documents the user queued via the
+  // composer's paperclip / drag-drop. The composer is the only
+  // owner of the pending slots, so a missing module (e.g. the
+  // documents feature is off, so the script tag was never
+  // loaded) is a no-op rather than a crash.
+  const { hint, summaries } = window.__nagentAttachments?.consumeOnSend()
+    ?? { hint: "", summaries: [] };
+  appendBubble("user", trimmed, { sessionId, attachments: summaries });
+  await streamReply(sessionId, trimmed, { attachmentsHint: hint });
 }
 
 function sendTyped(textOverride) {
@@ -3587,7 +3654,21 @@ export function readNagentConfig() {
 // via `subscribeFeatures` so a future feature toggle (e.g.
 // after a settings panel mutation) propagates without a page
 // reload.
-window.__nagentFeatures = nagentFeatures;
+//
+// `__nagentFeatures` is a getter (not a one-time assignment)
+// because `nagentFeatures` is REASSIGNED in `refreshFeatures` —
+// a plain `window.__nagentFeatures = nagentFeatures` would freeze
+// the property on the original DEFAULT_FEATURES object, leaving
+// every consumer (the Documents panel, the new composer attach
+// module) reading `documents: false` even after a successful
+// `/api/features` response. The getter returns the live binding
+// on every read. `__nagentFeature` is already a function
+// (closure over the same `nagentFeatures` binding) and is the
+// preferred reader — see `composer-attachments.js#feature()`.
+Object.defineProperty(window, "__nagentFeatures", {
+  get: () => nagentFeatures,
+  configurable: true,
+});
 window.__nagentFeature = feature;
 window.__nagentSubscribeFeatures = subscribeFeatures;
 
@@ -3631,6 +3712,14 @@ function applyFeatureGates() {
   if (discussionBtn) {
     discussionBtn.hidden = !feature("llm");
   }
+  // Document-attach surface (paperclip + chip tray). The
+  // composer module owns its own empty-tray visibility — it
+  // re-runs `applyGate()` on every feature emit, and the
+  // hidden-when-empty invariant is local to the tray state.
+  const attachBtn = document.getElementById("chat-attach-btn");
+  const attachTray = document.getElementById("chat-attach-chips");
+  if (attachBtn) attachBtn.toggleAttribute("hidden", !feature("documents"));
+  if (attachTray) attachTray.toggleAttribute("hidden", !feature("documents"));
   // Future: gate the TTS settings drawer on `feature("tts")`,
   // etc. Each addition is one branch — the loop over a small
   // map keeps the boot tidy.

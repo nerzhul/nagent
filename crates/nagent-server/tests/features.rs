@@ -77,6 +77,7 @@ async fn build_state_with_features(
             100_000,
             std::path::PathBuf::from("/tmp/features-test-cache"),
             0,
+            30,
         ))
     } else {
         None

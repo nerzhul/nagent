@@ -43,7 +43,7 @@ async fn fresh_store() -> (DocumentStore, nagent_db::Db) {
         .expect("sqlite in-memory store must connect");
     // Run the migrations so `uploaded_documents` exists.
     store.migrate().await.expect("migrations must run");
-    let doc_store = DocumentStore::new(store.clone(), 100_000, std::env::temp_dir(), 0);
+    let doc_store = DocumentStore::new(store.clone(), 100_000, std::env::temp_dir(), 0, 30);
     (doc_store, store)
 }
 
@@ -103,6 +103,149 @@ async fn read_document_happy_path_returns_extracted_text() {
     assert_eq!(parsed["data"]["original_name"], "test.txt");
     assert!(parsed["data"]["text"].as_str().unwrap().contains("Hello"));
     assert_eq!(parsed["data"]["truncated"], false);
+
+    // Clean up the cache dir.
+    let _ = std::fs::remove_dir_all(&cache_dir);
+}
+
+/// Build a minimal valid single-page PDF carrying the given
+/// `text` in its content stream. Computes the cross-reference
+/// table offsets on the fly so the byte stream is parseable by
+/// `pdf-extract` (the previous test fixture had hand-rolled
+/// offsets that drifted by a few bytes and tripped
+/// `pdf_extract`'s "Invalid file trailer" check).
+fn build_minimal_pdf(text: &str) -> Vec<u8> {
+    use std::fmt::Write;
+    // Compose the body first so we can measure each object
+    // header's byte offset for the `xref` table.
+    let mut head = String::new();
+    head.push_str("%PDF-1.4\n%\u{e2}\u{e3}\u{cf}\u{d3}\n"); // binary marker
+
+    let mut offsets: Vec<usize> = Vec::with_capacity(5);
+    offsets.push(head.len());
+    write!(
+        head,
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    )
+    .unwrap();
+
+    offsets.push(head.len());
+    write!(
+        head,
+        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+    )
+    .unwrap();
+
+    offsets.push(head.len());
+    write!(
+        head,
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+         /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n"
+    )
+    .unwrap();
+
+    let content = format!("BT /F1 12 Tf 100 700 Td ({}) Tj ET", text);
+    offsets.push(head.len());
+    write!(
+        head,
+        "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+        content.len(),
+        content
+    )
+    .unwrap();
+
+    offsets.push(head.len());
+    write!(
+        head,
+        "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+    )
+    .unwrap();
+
+    let xref_offset = head.len();
+    let mut xref = String::new();
+    xref.push_str(&format!("xref\n0 {}\n", offsets.len() + 1));
+    xref.push_str("0000000000 65535 f \n");
+    for off in &offsets {
+        xref.push_str(&format!("{:010} 00000 n \n", off));
+    }
+    write!(
+        head,
+        "{}trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
+        xref,
+        offsets.len() + 1,
+        xref_offset
+    )
+    .unwrap();
+    head.into_bytes()
+}
+
+/// Regression: a PDF row whose raw disk bytes are binary must
+/// still round-trip through the agent. The previous
+/// implementation called `String::from_utf8(bytes)` on the raw
+/// file, which failed with "document is not valid UTF-8 (binary
+/// uploads are not supported)" even though the upload route had
+/// already extracted the text at write time. The fix dispatches
+/// to `extract_pdf_bounded` on read so the same code path that
+/// ran at upload time runs again here, and a real PDF flows
+/// back to the LLM as expected.
+#[tokio::test]
+async fn read_document_pdf_round_trips_through_extractor() {
+    let pdf_bytes = build_minimal_pdf("Hello, PDF round-trip!");
+
+    let (doc_store, _auth) = fresh_store().await;
+    let session_id = Uuid::new_v4();
+    let doc_id = Uuid::new_v4();
+    let cache_dir = std::env::temp_dir().join(format!(
+        "nagent-doc-pdf-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(cache_dir.join("ab/cd")).unwrap();
+    let file_path = cache_dir.join("ab/cd").join(format!("{doc_id}.pdf"));
+    std::fs::write(&file_path, &pdf_bytes).unwrap();
+
+    doc_store
+        .db()
+        .for_user(Uuid::nil())
+        .documents()
+        .insert(
+            doc_id,
+            session_id,
+            "round-trip.pdf",
+            "application/pdf",
+            pdf_bytes.len() as u64,
+            // Upload-route would have written the real extracted
+            // count; for the regression we just need a sensible
+            // placeholder so the row insert does not error.
+            25,
+            None,
+            file_path.to_string_lossy().as_ref(),
+        )
+        .await
+        .expect("insert must succeed");
+
+    let agent = ReadDocumentAgent::new(Arc::new(nagent_server::agents::StoreDocumentSource::new(
+        doc_store, None,
+    )));
+    let ctx = ctx_with_session(session_id);
+    let result = agent
+        .invoke(&ctx, json!({ "name": doc_id.to_string() }))
+        .await
+        .expect("PDF read must succeed (was returning \
+                 'document is not valid UTF-8 (binary uploads are not supported)')");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(parsed["data"]["original_name"], "round-trip.pdf");
+    let text = parsed["data"]["text"]
+        .as_str()
+        .expect("text must be a string");
+    assert!(
+        text.contains("Hello") && text.contains("PDF") && text.contains("round-trip"),
+        "expected the PDF's text stream to come through the \
+         re-extract, got: {text:?}"
+    );
 
     // Clean up the cache dir.
     let _ = std::fs::remove_dir_all(&cache_dir);
@@ -310,6 +453,7 @@ async fn read_document_truncates_long_text() {
         5,
         std::env::temp_dir(),
         0,
+        30,
     );
     let session_id = Uuid::new_v4();
     let doc_id = Uuid::new_v4();
@@ -510,7 +654,7 @@ async fn read_document_blocks_disk_path_escape() {
             .as_nanos()
     ));
     std::fs::create_dir_all(cache_dir.join("ab/cd")).unwrap();
-    let doc_store = DocumentStore::new(auth, 100_000, cache_dir.clone(), 0);
+    let doc_store = DocumentStore::new(auth, 100_000, cache_dir.clone(), 0, 30);
 
     let outside_dir = std::env::temp_dir().join(format!(
         "nagent-doc-escape-outside-{}-{}",

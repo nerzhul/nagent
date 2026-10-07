@@ -393,6 +393,44 @@ mod tests {
             keywords: &["encyclopedia", "biography", "history"],
         }
     }
+    /// Mirrors the production `ReadDocumentAgent`'s description
+    /// + keywords so the BM25 walk can be regression-tested
+    /// against the exact registry the user typically has on
+    /// (`x_timeline` + CalDAV + `read_document`). The keywords
+    /// cover the file extensions + common French/English
+    /// synonyms for "doc / file" that the LLM actually asks
+    /// with in chat.
+    fn read_document() -> StubAgent {
+        StubAgent {
+            name: "read_document",
+            description: "Read the text content of a file or document (PDF, TXT, MD, LOG) \
+                          previously uploaded by the user to this chat session. Use the \
+                          `name` field returned by GET /v1/documents (a UUID). For PDFs, \
+                          optionally restrict to a `page_range` (e.g. \"3-7\") to limit \
+                          context size.",
+            keywords: &[
+                "file", "files", "pdf", "txt", "md", "log", "markdown",
+                "fiche", "bulletin", "paie", "payslip", "statement",
+                "invoice", "facture", "notice",
+            ],
+        }
+    }
+    fn x_timeline() -> StubAgent {
+        StubAgent {
+            name: "x_timeline",
+            description: "Read the X (Twitter) home timeline of the user's connected X account via \
+                          the v2 API. Returns ~20 most recent posts, pre-sorted newest-first.",
+            keywords: &["twitter", "tweets", "x_account"],
+        }
+    }
+    fn caldav_list_events() -> StubAgent {
+        StubAgent {
+            name: "caldav_list_events",
+            description: "List events from the user's CalDAV calendar in a time range. Returns JSON \
+                          with `events[]` (uid, summary, start, end, description, location, rrule).",
+            keywords: &["calendar", "events", "agenda"],
+        }
+    }
 
     #[test]
     fn from_registry_excludes_search_tools() {
@@ -517,5 +555,56 @@ mod tests {
         // keeps the words.
         let q = tokenise_query("Hello, WORLD! what_is-up?");
         assert_eq!(q, vec!["hello", "world", "what_is", "up"]);
+    }
+
+    /// Regression: a user asking "read a document or file" must
+    /// get `read_document` at the top of the BM25 walk, even
+    /// when `x_timeline` + CalDAV agents are registered too.
+    /// The original description-only token match
+    /// ("read the text content of a document") loses to
+    /// anything else because the description doesn't carry the
+    /// "file" / "pdf" / "fiche" tokens; the `keywords()` override
+    /// in `ReadDocumentAgent` is what closes the gap.
+    #[test]
+    fn pre_select_picks_read_document_for_file_or_doc_query() {
+        let reg = registry(vec![
+            read_document(),
+            x_timeline(),
+            caldav_list_events(),
+        ]);
+        let r = ToolsRouter::from_registry(&reg);
+        let hits = r.pre_select("read a document or file", 1);
+        assert_eq!(hits.len(), 1, "expected one match, got {hits:?}");
+        assert_eq!(
+            &*hits[0], "read_document",
+            "expected read_document to win the BM25 walk; got {:?}",
+            hits
+        );
+    }
+
+    /// Same as above, but for the French synonym a user might
+    /// type ("fiche de paie", "bulletin"). Confirms the
+    /// keywords actually land in the BM25 index — the v1 router
+    /// has no stemming so the literal token has to appear.
+    #[test]
+    fn pre_select_picks_read_document_for_french_synonyms() {
+        let reg = registry(vec![
+            read_document(),
+            x_timeline(),
+            caldav_list_events(),
+        ]);
+        let r = ToolsRouter::from_registry(&reg);
+        for query in [
+            "lis ma fiche de paie",
+            "ouvre mon bulletin",
+            "lecture du pdf",
+        ] {
+            let hits = r.pre_select(query, 1);
+            assert_eq!(
+                hits.first().map(|s| &**s),
+                Some("read_document"),
+                "query {query:?} should land on read_document, got {hits:?}",
+            );
+        }
     }
 }

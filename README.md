@@ -1055,12 +1055,15 @@ make smoke-llm
 ## Documents (Discussion-mode uploads + `read_document` tool)
 
 The Discussion-mode sidebar ships a **Documents** panel. Users
-upload `.txt` or `.pdf` files via the `+` button, drag-and-drop
-on the panel, or `Ctrl+V` from the OS clipboard. The LLM picks
-which document to consult through the `read_document` tool —
-the prompt includes the list of available documents by name +
-size, and the model calls the tool when it needs a specific
-file's text.
+upload `.txt`, `.pdf`, `.md`, or `.log` files via the `+` button,
+drag-and-drop on the panel, `Ctrl+V` from the OS clipboard, or
+the composer **paperclip** / drag-onto-`#chat-form` affordance
+(see `docs/ui_features.md` §4.11). Both surfaces share the same
+per-session document store, so a file uploaded from either one
+appears in the other. The LLM picks which document to consult
+through the `read_document` tool — the prompt includes the list
+of available documents by name + size, and the model calls the
+tool when it needs a specific file's text.
 
 ### Cargo feature
 

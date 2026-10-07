@@ -2074,6 +2074,148 @@ select, input[type="checkbox"] {
   margin-top: 0.75rem;
 }
 
+/* Document-attach surface. The paperclip button mirrors the
+ * location-share button's ghost treatment; the chip tray sits
+ * between `#chat-messages` and `#chat-form` so it stays visible
+ * while the user types. Per-bubble chips (when the user has
+ * already attached files for this turn) reuse the same visual
+ * primitives. Both surfaces are gated by the documents feature
+ * flag — `composer-attachments.js` toggles `hidden`. */
+.chat-attach-btn {
+  flex: 0 0 auto;
+  width: 2.6rem;
+  height: 2.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.chat-attach-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.chat-attach-btn[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* Sized to match the location button's pin emoji so the
+ * paperclip + mic + send + stop all read as the same family
+ * at 1.2rem. The colour-emoji font hint is the standard
+ * cross-platform order; the trailing sans-serif fallback
+ * keeps a (less colourful) glyph visible on systems without
+ * any colour-emoji font installed. */
+.chat-attach-btn .chat-attach-icon {
+  font-size: 1.2rem;
+  line-height: 1;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji",
+    "Noto Color Emoji", "Twemoji", sans-serif;
+}
+
+.chat-attach-chips {
+  list-style: none;
+  padding: 0.4rem 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.chat-attach-chips[hidden] { display: none; }
+.chat-attach-chips.is-locked {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Drop-zone highlight — same dashed-accent treatment the
+ * sidebar Documents panel uses for its `.is-dragover` state
+ * (`#chat-form` and the tray itself are both drop targets). */
+#chat-form.is-dragover,
+.chat-attach-chips.is-dragover {
+  outline: 2px dashed var(--accent);
+  outline-offset: 4px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+/* Per-file chip. Reused by the live composer tray and by the
+ * historical per-bubble chip row (`renderChips` in
+ * `composer-attachments.js`). The `--uploading` and `--error`
+ * variants tweak the border colour so the user can tell at a
+ * glance which slots still need attention. */
+.chat-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  font-size: 0.85rem;
+  color: var(--fg);
+}
+.chat-attach-chip--uploading {
+  border-color: var(--accent);
+  animation: chat-attach-chip-pulse 1.2s ease-in-out infinite;
+}
+.chat-attach-chip--error {
+  border-color: #b91c1c;
+  color: #b91c1c;
+}
+@keyframes chat-attach-chip-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+.chat-attach-chip-mime {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: #fff;
+}
+/* Per-mime badge colours. Match the existing
+ * `.documents-item-mime--*` palette (`style.css:3127-3134`) so
+ * a doc looks the same whether it lives in the sidebar row or
+ * the composer chip. */
+.chat-attach-chip-mime--pdf { background: #b91c1c; }
+.chat-attach-chip-mime--txt { background: #1d4ed8; }
+.chat-attach-chip-mime--md  { background: #047857; }
+.chat-attach-chip-mime--log { background: #6b7280; }
+
+.chat-attach-chip-name { color: var(--fg); }
+.chat-attach-chip-meta {
+  color: var(--fg-mute);
+  font-size: 0.75rem;
+}
+.chat-attach-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+}
+.chat-attach-chip-remove:hover { color: var(--accent); }
+
+/* Per-bubble chip row (rendered by `chat.js#appendBubble` for
+ * user bubbles that carry an `attachments` array). The row is
+ * always the last child of the bubble so the text node stays
+ * first; the parent `--has-attachments` class is what keeps
+ * the user bubble flex-aligned the same way. */
+.chat-message--has-attachments .chat-message-attachments {
+  list-style: none;
+  padding: 0.4rem 0 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
 #chat-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -3049,7 +3191,7 @@ kbd {
   gap: 0.4rem;
   font-size: 0.85rem;
   font-weight: 600;
-  color: var(--fg-dim, var(--fg));
+  color: var(--fg-mute, #8b949e);
   cursor: pointer;
   list-style: none;
   user-select: none;
@@ -3064,6 +3206,7 @@ kbd {
   transition: transform 0.15s ease;
   font-size: 0.7rem;
   width: 0.9rem;
+  color: var(--fg-mute, #8b949e);
 }
 .documents-panel[open] > .documents-panel-summary::before {
   transform: rotate(90deg);
@@ -3072,17 +3215,24 @@ kbd {
 .documents-upload-btn {
   margin-left: auto;
   background: transparent;
-  border: 1px solid var(--border, var(--bg-elev));
+  border: 1px solid var(--border, #30363d);
   border-radius: 4px;
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 1.6rem;
+  height: 1.6rem;
   line-height: 1;
-  font-size: 0.95rem;
+  font-size: 1rem;
   cursor: pointer;
-  color: var(--fg);
+  color: var(--fg-mute, #8b949e);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 120ms ease, background 120ms ease,
+    border-color 120ms ease;
 }
 .documents-upload-btn:hover {
   background: var(--bg-elev);
+  color: var(--accent, #58a6ff);
+  border-color: var(--accent, #58a6ff);
 }
 
 .documents-list {
@@ -3096,7 +3246,7 @@ kbd {
 
 .documents-item {
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 0.35rem;
   padding: 0.35rem 0.5rem;
@@ -3115,6 +3265,11 @@ kbd {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* The filename span is also rendered with an explicit
+   * middle-ellipsis variant from `truncateNameIfOverflowing`
+   * in `documents.js`; the browser fallback above only fires
+   * when the JS path doesn't run (e.g. early paint, no
+   * requestAnimationFrame available). */
 }
 
 .documents-item-mime {
@@ -3123,37 +3278,41 @@ kbd {
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
   letter-spacing: 0.05em;
-}
-.documents-item-mime--pdf {
-  background: #b73e3a;
   color: #fff;
+}
+/* Palette unified with the composer chip tray (see
+ * `.chat-attach-chip-mime--*` below) so the same file shows
+ * the same badge across the sidebar and the composer
+ * surface. */
+.documents-item-mime--pdf {
+  background: #b91c1c;
 }
 .documents-item-mime--plain,
 .documents-item-mime--txt,
 .documents-item-mime--md,
 .documents-item-mime--log {
-  background: #2d6a9f;
-  color: #fff;
+  background: #1d4ed8;
 }
 
 .documents-item-meta {
   font-size: 0.72rem;
-  color: var(--fg-dim, #888);
+  color: var(--fg-mute, #8b949e);
 }
 
 .documents-item-delete {
   background: transparent;
   border: 0;
   cursor: pointer;
-  color: var(--fg-dim, #888);
+  color: var(--fg-mute, #8b949e);
   font-size: 0.95rem;
   line-height: 1;
   padding: 0.1rem 0.3rem;
   border-radius: 3px;
+  transition: color 120ms ease, background 120ms ease;
 }
 .documents-item-delete:hover {
-  background: rgba(255, 0, 0, 0.12);
-  color: #c00;
+  background: rgba(248, 81, 73, 0.14);
+  color: var(--error, #f85149);
 }
 
 .documents-empty {

@@ -322,6 +322,14 @@ pub struct TomlAgentConfig {
     pub stock: Option<TomlStockConfig>,
     #[serde(default)]
     pub read_document: Option<TomlReadDocumentConfig>,
+    /// Deprecated, ignored. The `read_document` agent is now
+    /// auto-registered whenever `[agents].enabled = true` AND
+    /// `[documents].enabled = true` produced a document store at
+    /// boot — the previous per-agent toggle was redundant. Kept
+    /// as an `Option<bool>` so a config that still carries the
+    /// legacy key parses cleanly; `merge_toml_agents` drops the
+    /// value on the floor.
+    #[serde(default)]
     pub read_document_enabled: Option<bool>,
     #[serde(default)]
     pub caldav: Option<TomlCalDavConfig>,
@@ -931,7 +939,13 @@ fn merge_toml_agents(
                 e.read_document.as_ref(),
                 l.read_document.as_ref(),
             ),
-            read_document_enabled: l.read_document_enabled.or(e.read_document_enabled),
+            // `read_document_enabled` is intentionally dropped
+            // here. The legacy `Option<bool>` field above stays
+            // for backward-compat (so a TOML that still carries
+            // the key parses), but the runtime config no longer
+            // reads it. We set `None` rather than merging so
+            // the field carries no information across reloads.
+            read_document_enabled: None,
             caldav: merge_toml_caldav(e.caldav.as_ref(), l.caldav.as_ref()),
             x_timeline: merge_toml_x_timeline(e.x_timeline.as_ref(), l.x_timeline.as_ref()),
             memory: merge_toml_memory(e.memory.as_ref(), l.memory.as_ref()),

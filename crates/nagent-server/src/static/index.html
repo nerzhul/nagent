@@ -399,6 +399,21 @@
         </ul>
       </details>
     </details>
+    <!--
+      Per-turn staged-document tray. Populated by
+      `composer-attachments.js` after a paperclip pick or a
+      drop onto `#chat-form`; chips carry the upload status
+      (uploading / done / error) and an `×` to remove a
+      pending slot before send. Hidden by default; the
+      module toggles the `hidden` attribute on every
+      `__nagentSubscribeFeatures` emit, and unhides it
+      whenever `pending.length > 0`. Sits BETWEEN
+      `#chat-messages` and `#chat-form` so the chips remain
+      visible while the user types — placing them below
+      the form hid the feedback behind the send button on
+      long viewports.
+    -->
+    <ul id="chat-attach-chips" class="chat-attach-chips" hidden></ul>
     <form id="chat-form">
       <textarea id="chat-input" rows="1"
                 placeholder="Message… (Enter to send, Ctrl+Enter for newline, Ctrl+Shift+D to talk)"
@@ -418,6 +433,35 @@
         <span aria-hidden="true">📍</span>
         <span>Share location</span>
       </button>
+      <!--
+        Paperclip that opens the document picker. Hidden until
+        `[documents].enabled = true` is advertised via
+        `/api/features`; the `composer-attachments.js` module
+        owns the actual file flow and toggles this attribute on
+        each `__nagentSubscribeFeatures` emit. The file input
+        itself is `hidden` and triggered programmatically by the
+        button's click handler — same pattern the sidebar
+        Documents panel uses for `#documents-upload-btn` /
+        `#documents-upload-input`.
+      -->
+      <button id="chat-attach-btn" type="button" class="chat-attach-btn"
+              aria-label="Attach a document"
+              title="Attach a document (PDF, TXT, MD, or LOG)"
+              hidden>
+        <!--
+          Emoji paperclip (same pattern as the location button's
+          📍 pin). The earlier inline-SVG attempts (Material
+          attach-file, Feather paperclip) rendered as a tiny
+          diagonal mark on a dark theme — the small viewBox /
+          thin strokes at 18-20px collapsed to a faint dot. An
+          emoji glyph is guaranteed to render with the system
+          colour-emoji font, scales cleanly, and reads instantly
+          as a paperclip.
+        -->
+        <span class="chat-attach-icon" aria-hidden="true">📎</span>
+      </button>
+      <input id="chat-attach-input" type="file"
+             accept=".pdf,.txt,.md,.log" multiple hidden>
       <button id="chat-record-btn" type="button" data-state="idle"
               aria-label="Start voice recording (Ctrl+Shift+D)"
               title="Start voice recording (Ctrl+Shift+D)">
@@ -747,5 +791,6 @@
     shows no rows).
   -->
   <script type="module" src="/static/documents.js"></script>
+  <script type="module" src="/static/composer-attachments.js"></script>
 </body>
 </html>

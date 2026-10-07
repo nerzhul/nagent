@@ -25,9 +25,10 @@ the Discussion chat composer offers:
    completes.
 5. On send, attachments ride along: a hidden `[Attached: …]` hint block
    goes into the LLM request (mirroring the existing
-   `maybeBuildLocationBlock()` pattern at `chat.js:2869`), the chips
-   render as `.chat-message-attachments` rows inside the user bubble,
-   and the chip list is cleared.
+   `maybeBuildLocationBlock()` / `maybeBuildTimezoneBlock()` pattern at
+   `chat.js:2436` / `chat.js:2548`, used inside `streamReply` at
+   `chat.js:3012-3021`), the chips render as `.chat-message-attachments`
+   rows inside the user bubble, and the chip list is cleared.
 6. The Documents panel and the new composer attachment UI share the same
    per-session document store, so docs uploaded from either surface
    appear in both.
@@ -63,13 +64,14 @@ the Discussion chat composer offers:
                 │  - renderChip(summary) → DOM <li>            │
                 │  - removePending(idx)                        │
                 │                                              │
-                │  exposes:                                    │
-                │    window.__nagentAttachments                 │
-                │      .stage(fileList)                         │
-                │      .consumeOnSend() → hint + summaries      │
-                │      .renderChips(containerEl)               │
-                │      .subscribe(cb)                          │
-                └──────────────────────────────────────────────┘
+│  exposes:                                    │
+                 │    window.__nagentAttachments                 │
+                 │      .isEnabled()                            │
+                 │      .stage(fileList)                         │
+                 │      .consumeOnSend() → hint + summaries      │
+                 │      .renderChips(containerEl, summaries)    │
+                 │      .reset()                                 │
+                 └──────────────────────────────────────────────┘
                               │ ▲                                       │
                               │ │                                     │
        ┌──────────────────────┘ └─────────────────────────┐           │
@@ -92,28 +94,34 @@ expect from text inputs.
 
 ## 2. Feature gating (the "toggle switch" rule)
 
-`applyFeatureGates()` in `chat.js:3481-3494` is extended to:
+`applyFeatureGates()` in `chat.js:3624-3637` is extended to:
 
 ```js
-const showAttach = feature("documents");
-toggleHidden(chat-attach-btn, !showAttach);        // paperclip button
-toggleHidden(chat-attach-chips, !showAttach);      // tray wrapper
-chat-form.classList.toggle("is-disabled", !showAttach && !hasPendingUploads);
+const attachBtn  = document.getElementById("chat-attach-btn");
+const attachTray = document.getElementById("chat-attach-chips");
+if (attachBtn)  attachBtn.toggleAttribute("hidden", !feature("documents"));
+if (attachTray) attachTray.toggleAttribute("hidden", !feature("documents"));
 ```
+
+(The tray is also `hidden` from inside the composer module whenever
+`pending.length === 0` — see `applyGate()` in §4. Keeping the tray-empty
+visibility in the module avoids extra plumbing through `chat.js`.)
 
 Behaviour:
 - **Toggle off (`documents.enabled = false`)** — the paperclip button is
   `hidden`, the chip tray is `hidden`, the drop-zone handlers bail at
   the top (`if (!isEnabled()) return;`). No regression for users on
   builds without the documents subsystem.
-- **Toggle on after page load** — `subscribeFeatures(cb)` listener
-  re-applies `applyFeatureGates()`; the button appears, drop zone
-  becomes active, no reload needed.
+- **Toggle on after page load** — the composer module subscribes to
+  `window.__nagentSubscribeFeatures(cb)` (the same hook
+  `documents.js:204-212` already uses) and re-runs its own
+  `applyGate()`; the button appears, drop zone becomes active, no
+  reload needed.
 - **Default-deny on `/api/features` failure** — `feature("documents")`
   returns `false` (per existing `DEFAULT_FEATURES` freeze at
-  `chat.js:3367-3372`). Same fail-closed posture as the Documents panel.
+  `chat.js:3519-3533`). Same fail-closed posture as the Documents panel.
 - **Operator config sanity** — the server-side route is only mounted
-  when `state.documents.is_some()` (`http/mod.rs:128-132`), so a request
+  when `state.documents.is_some()` (`http/mod.rs:128-130`), so a request
   against a server with the toggle off 404s and the client surfaces a
   toast exactly like the sidebar's `uploadFile` does today
   (`documents.js:295-340`).
@@ -122,13 +130,13 @@ Behaviour:
 
 | File | Change |
 |---|---|
-| `index.html:402-443` | Add chip tray `<ul id="chat-attach-chips" hidden>`, paperclip button `<button id="chat-attach-btn" type="button" hidden>`, hidden file input `<input id="chat-attach-input" type="file" accept=".pdf,.txt,.md,.log" multiple hidden>`. All three are siblings of `#chat-form`, inside `#app-shell-template` so they re-clone with the rest. |
-| `static/composer-attachments.js` (new, ~200 lines) | Module described in §4. Loaded via `<script type="module" src="/static/composer-attachments.js" defer>` after `chat.js` in `index.html:629-725`. |
-| `static/chat.js` | (a) `applyFeatureGates()` (line 3481) toggles the new button + tray. (b) `submitUserTurn()` (line 3237) accepts an optional `hint` and attachments, passes to `appendBubble` and `streamReply`. (c) `appendBubble("user", …)` (line 1017) renders `.chat-message-attachments` when given attachments. (d) `loadHistory` / `renderHistory` (line ~987) carries the `attachments` array through hydration. (e) New `chat.js` exports a tiny `onAttachmentsChanged(cb)` so the new module can re-render the tray when stage state changes. |
-| `static/documents.js` | Export `uploadFileInBackground(file, onSuccess)` (refactor `uploadFile` so the existing sidebar upload still calls the new shared core). Add the same constant export surface (`MAX_FILE_BYTES`, `ACCEPTED_EXTENSIONS`) so `composer-attachments.js` imports them instead of re-declaring. |
-| `static/style.css` | New section near `.chat-location-share` (line 2082): `.chat-attach-btn`, `.chat-attach-chips`, `.chat-attach-chip`, `.chat-attach-chip-mime--{pdf,txt,md,log}`, `.chat-form.is-dragover`, `.chat-message-attachments`. Reuse existing CSS variables (`--border`, `--bg-elev`, `--fg-mute`, `--accent`). Reuse `.documents-item-mime--*` colour tokens (declared `style.css:3045-3055`) for the badge colours. |
+| `crates/nagent-server/src/static/index.html:402-443` | Add chip tray `<ul id="chat-attach-chips" hidden>`, paperclip button `<button id="chat-attach-btn" type="button" hidden>`, hidden file input `<input id="chat-attach-input" type="file" accept=".pdf,.txt,.md,.log" multiple hidden>`. All three are siblings of `#chat-form`, inside `#app-shell-template` so they re-clone with the rest. |
+| `crates/nagent-server/src/static/composer-attachments.js` (new, ~200 lines) | Module described in §4. Loaded via `<script type="module" src="/static/composer-attachments.js" defer>` after `chat.js` in `index.html` (around line 658, next to `documents.js` at line 749). |
+| `crates/nagent-server/src/static/chat.js` | (a) `applyFeatureGates()` (`chat.js:3624-3637`) toggles the new button + tray. (b) `submitUserTurn()` (`chat.js:3380-3385`) accepts attachments, passes them to `appendBubble` and a new `streamReply` option. (c) `appendBubble("user", …)` (`chat.js:1025-1111`) renders `.chat-message-attachments` when given attachments. (d) `renderHistory` (`chat.js:900`) carries the `attachments` array through hydration. (e) `streamReply` (`chat.js:2923-…`) merges an ephemeral `[Attachments …]` system block into the LLM request the same way `maybeBuildLocationBlock()` (`chat.js:2436`, invoked at `chat.js:3012`) merges the location block. (f) `setStreamingUi` callers at `chat.js:2969` and `chat.js:3374` dispatch a new `chat-stream-state` `CustomEvent` so the composer module can grey the button mid-turn. |
+| `crates/nagent-server/src/static/documents.js` | Refactor `uploadFile` (`documents.js:295-340`) into an exported `uploadFileInBackground(file, { sessionId })` helper that the sidebar AND composer share. Convert `MAX_FILE_BYTES` and `ACCEPTED_EXTENSIONS` (`documents.js:35-36`) from `const` to `export const` so the composer module imports them. Also export the helper `prependRow`/`refresh` so the composer can mirror new uploads into the sidebar list. |
+| `crates/nagent-server/src/static/style.css` | New section near `.chat-location-share` (`style.css:2164`): `.chat-attach-btn`, `.chat-attach-chips`, `.chat-attach-chip`, `.chat-attach-chip-mime--{pdf,txt,md,log}`, `.chat-form.is-dragover`, `.chat-message-attachments`. Reuse existing CSS variables (`--border`, `--bg-elev`, `--fg-mute`, `--accent`). Reuse `.documents-item-mime--*` colour tokens (declared `style.css:3127-3134`) for the badge colours. |
 | `docs/ui_features.md` | Add §3.x sub-section "Discussion chat: file attachments" — mirrors the existing Documents sidebar description. (AGENTS.md §5 sync rule.) |
-| `README.md:1047-1148` | Update the "Documents" paragraph to mention the new composer attach affordance ("drag onto the composer, the 📎 button, or via the sidebar"). (AGENTS.md §5 sync rule.) |
+| `README.md:1055-…` | Update the "Documents" paragraph to mention the new composer attach affordance ("drag onto the composer, the 📎 button, or via the sidebar"). (AGENTS.md §5 sync rule.) |
 
 No Rust crate changes. No `Cargo.toml` changes.
 
@@ -141,22 +149,43 @@ window.__nagentAttachments = {
   isEnabled(): bool,                         // feature("documents") && isMounted
   stage(fileList | File[]): Promise<void>,   // upload each, render chips
   consumeOnSend(): { hint: string, summaries: Array<DocSummary> },
-  renderChips(containerEl): void,            // re-render after consume
-  subscribe(cb: () => void): () => void,     // tray re-render listener
+  renderChips(containerEl, summaries): void, // append chips to bubble container
   reset(): void,                             // called on session switch
 };
 ```
 
+`chat.js` is the only caller of `renderChips` (live user bubble +
+history hydration). No external subscriber needed; YAGNI.
+
 ### Internal state
 
 ```js
+import {
+  uploadFileInBackground,
+  MAX_FILE_BYTES,
+  ACCEPTED_EXTENSIONS,
+} from "/static/documents.js";
+import * as Documents from "/static/documents.js";
+import { getServerSessionId } from "/static/chat.js";
+
+const feature = () => Boolean(window.__nagentFeatures?.documents);
+
 const pending = [];  // Array<{ id?, file, status: "uploading"|"done"|"error", name, size, mime, error? }>
 let mounted = false;
 let trayEl = null;
-const listeners = new Set();
 ```
 
-### Wiring (mirrors `wireFormOnce` pattern at `chat.js:3311-3356`)
+(Reads `window.__nagentFeatures` — the same object `documents.js:177-180`
+reads. `feature()` here is a tiny local helper rather than importing
+the one from `chat.js`, which would force this module to be loaded as a
+classic script and break the `defer` module-loading pattern used by
+`index.html:658`. `chat.js:3590-3592` exposes both `__nagentFeatures`
+and `__nagentFeature` for exactly this kind of consumer.)
+
+(`const listeners` from the original draft is dropped — nothing external
+subscribes, see the public-surface callout.)
+
+### Wiring (mirrors `wireFormOnce` pattern at `chat.js:3455-3493`)
 
 ```js
 let _wired = false;
@@ -211,17 +240,25 @@ window.addEventListener("app-shell-mounted", () => {
   wireOnce();
   applyGate();
 });
-window.addEventListener("nagent-features-changed", applyGate);
+if (window.__nagentSubscribeFeatures) {
+  window.__nagentSubscribeFeatures(applyGate);
+}
+// Also run once eagerly in case the features arrived before this
+// module loaded.
+applyGate();
 
 function applyGate() {
   const btn = document.getElementById("chat-attach-btn");
   const tray = document.getElementById("chat-attach-chips");
   if (!btn || !tray) return;
-  const on = feature("documents");
+  const on = feature();
   btn.toggleAttribute("hidden", !on);
   tray.toggleAttribute("hidden", !on || pending.length === 0);
 }
 ```
+
+(`isEnabled()` is `() => feature() && mounted`; same pattern as
+`documents.js`'s `isDocumentsEnabled` at `documents.js:175-187`.)
 
 ### `stageFile(file)` (core of the upload)
 
@@ -242,8 +279,11 @@ async function stageFile(file) {
     if (!sid) throw new Error("No chat session bound");
     const doc = await uploadFileInBackground(file, { sessionId: sid });
     slot.id = doc.id; slot.status = "done"; slot.serverName = doc.name;
-    // Update Documents panel cache so the sidebar reflects the new file.
-    window.dispatchEvent(new CustomEvent("documents-changed"));
+    // Refresh the sidebar Documents panel so the new row appears
+    // there too (the composer shares the same per-session store).
+    // `Documents.refresh` is exported by `documents.js` and
+    // already short-circuits when the feature flag is off.
+    Documents.refresh?.();
   } catch (e) {
     slot.status = "error"; slot.error = e.message || "Upload failed";
     toast(slot.error, "error");
@@ -316,7 +356,7 @@ function renderChips(containerEl, summaries) {
 
 ## 5. chat.js changes — minimal touch points
 
-**`applyFeatureGates()` (line 3481-3494)** — append three lines:
+**`applyFeatureGates()` (`chat.js:3624-3637`)** — append three lines:
 
 ```js
 const attachBtn  = document.getElementById("chat-attach-btn");
@@ -325,7 +365,7 @@ if (attachBtn)  attachBtn.toggleAttribute("hidden", !feature("documents"));
 if (attachTray) attachTray.toggleAttribute("hidden", !feature("documents"));
 ```
 
-**`submitUserTurn()` (line 3237-3242)** — change to:
+**`submitUserTurn()` (`chat.js:3380-3385`)** — change to:
 
 ```js
 async function submitUserTurn(sessionId, text) {
@@ -337,60 +377,81 @@ async function submitUserTurn(sessionId, text) {
 }
 ```
 
-`streamReply` extends the LLM request the same way `maybeBuildLocationBlock()`
-already injects location — a hidden system-side block prepended to the
-user message, **not** persisted to `loadHistory` (the hint is ephemeral;
-the attachments array in history is what drives bubble re-render on
-hydration). The helper that builds the prompt array gains a second
-optional argument and concatenates the hint block identically to the
-location one (`chat.js:2869`).
-
-**`appendBubble("user", …)` (line 1017-1103)** — when `opts.attachments`
-is non-empty:
+**`streamReply()` (`chat.js:2923-…`)** — `streamReply` gains a second
+optional argument `opts.attachmentsHint`. Inside `streamReply`, just
+after the existing `maybeBuildLocationBlock()` + `maybeBuildTimezoneBlock()`
+insertions (`chat.js:3012-3021`), append a third ephemeral block if
+`opts.attachmentsHint` is non-empty:
 
 ```js
-if (opts.attachments?.length) {
-  div.classList.add("chat-message--has-attachments");
-  const tray = document.createElement("ul");
-  tray.className = "chat-message-attachments";
-  div.appendChild(tray);
-  window.__nagentAttachments.renderChips(tray, opts.attachments);
+if (opts?.attachmentsHint) {
+  messages.unshift({ role: "system", content: opts.attachmentsHint });
 }
 ```
 
-(`div.textContent = text` at line ~1048 still sets the user's text first;
-chips are appended after, so the text remains pure plaintext per the
-"trust user input" invariant at `chat.js:1046-1050`.)
+The block is **ephemeral** (same rule as the location + timezone blocks
+at `chat.js:3006-3011`): it travels only in the request payload for
+this turn and is never written back to `saveHistory`. The persisted
+`attachments` array on the user message record is what drives bubble
+re-render on history hydration (see `appendBubble` below).
 
-**History hydration (`renderHistory` line ~987)** — when loading a
-historical message that carries `attachments`, recreate the chip tray
-the same way:
+**`appendBubble("user", …)` (`chat.js:1025-1111`)** — extend the
+options destructure to accept `attachments`, and append a chip tray
+when the option is non-empty:
 
 ```js
-if (msg.attachments?.length) {
-  div.classList.add("chat-message--has-attachments");
-  const tray = document.createElement("ul");
-  tray.className = "chat-message-attachments";
-  div.appendChild(tray);
-  window.__nagentAttachments.renderChips(tray, msg.attachments);
+function appendBubble(role, text, {
+  persist = true, model = null, markdown = false, sessionId = null,
+  attachments = null,
+} = {}) {
+  // …existing body unchanged…
+  if (attachments?.length) {
+    div.classList.add("chat-message--has-attachments");
+    const tray = document.createElement("ul");
+    tray.className = "chat-message-attachments";
+    div.appendChild(tray);
+    window.__nagentAttachments.renderChips(tray, attachments);
+  }
+  // …
+  if (persist) {
+    const history = loadHistory(sid);
+    history.push({
+      role,
+      content: text,
+      ts: Date.now(),
+      model,
+      attachments: attachments?.length ? attachments : undefined,
+    });
+    // …
+  }
 }
 ```
 
-**History write (`loadHistory` / `saveHistory` line ~990)** — extend the
-pushed record:
+(`div.textContent = text` at `chat.js:1058` still sets the user's text
+first; chips are appended after, so the text remains pure plaintext per
+the "trust user input" invariant at `chat.js:1054-1059`.)
+
+**History hydration (`renderHistory` `chat.js:900-…`)** — the loop at
+`chat.js:921-1003` already calls `appendBubble(msg.role, …)` for every
+persisted message. Because `appendBubble` now accepts `attachments`,
+the call at `chat.js:995-1000` is extended to pass `msg.attachments`:
 
 ```js
-history.push({
-  role: "user",
-  content: text,
-  ts: Date.now(),
-  model,
-  attachments: opts.attachments?.length ? opts.attachments : undefined,
+const bubble = appendBubble(msg.role, msg.content || "", {
+  persist: false,
+  model: msg.model,
+  markdown: false,
+  sessionId,
+  attachments: msg.attachments || null,
 });
 ```
 
+Chips on historical bubbles are display-only (the per-chip `×` button
+is rendered only by the live composer tray, not by `renderChips`).
+
 **`chat-stream-state` event** — wherever `setStreamingUi(true|false)`
-fires today (around `chat.js:3231`), emit:
+fires today (`chat.js:2969` and `chat.js:3374`), emit a sibling
+`CustomEvent`:
 
 ```js
 window.dispatchEvent(new CustomEvent("chat-stream-state", {
@@ -400,20 +461,25 @@ window.dispatchEvent(new CustomEvent("chat-stream-state", {
 
 so the new module can grey the attach button during generation (prevents
 a race where the user drops a file mid-stream and `consumeOnSend` is
-called against a stale turn).
+called against a stale turn). The new event is **fired** by chat.js and
+**received** by the composer module — no other listener exists.
 
 ## 6. documents.js changes — extract the shared upload
 
 Refactor `uploadFile(file)` at `documents.js:295-340` so the inner
-`fetch(POST /v1/documents)` block becomes a reusable helper:
+`fetch(POST /v1/documents)` block becomes a reusable helper. Note: the
+helper **adds CSRF headers** — the existing `uploadFile` does NOT, which
+is a latent bug under cookie auth (see the note below).
 
 ```js
-export async function uploadFileInBackground(file, { sessionId, csrfHeaders }) {
+export async function uploadFileInBackground(file, { sessionId } = {}) {
+  const sid = sessionId ?? (await getServerSessionId());
+  if (!sid) throw new Error("No chat session bound");
   const form = new FormData();
   form.append("file", file, file.name);
   const headers = {
-    [CHAT_SESSION_HEADER]: sessionId,
-    ...(csrfHeaders ?? window.nagentAuth?.csrfHeaders() ?? {}),
+    [CHAT_SESSION_HEADER]: sid,
+    ...(window.nagentAuth?.csrfHeaders?.() ?? {}),
   };
   const doFetch = () => fetch(DOCUMENTS_PATH, { method: "POST", headers, body: form });
   let resp = await doFetch();
@@ -429,12 +495,21 @@ export async function uploadFileInBackground(file, { sessionId, csrfHeaders }) {
 }
 ```
 
-The existing `uploadFile` (sidebar path) is rewritten as a 6-line
-wrapper that calls this helper, catches errors, and toasts — same
-behaviour as today. `composer-attachments.js` imports
-`uploadFileInBackground` and the `MAX_FILE_BYTES` / `ACCEPTED_EXTENSIONS`
-constants (currently declared at `documents.js:35-36`); both move to
-named `export`s.
+**Why CSRF is now added (existing-bug fix)**: `check_csrf` in
+`auth/middleware.rs:107-125` requires an `x-csrf-token` header for
+cookie-authenticated POSTs (bearer-authenticated POSTs skip the check).
+`POST /v1/documents` is gated by `check_csrf`
+(`documents/routes.rs:274-275`). The existing `uploadFile` at
+`documents.js:295-340` does **not** send `x-csrf-token`, so the sidebar
+upload is currently broken under cookie auth (it only works under
+`auth.enabled = false` or with an API-key bearer). Including
+`window.nagentAuth?.csrfHeaders?.() ?? {}` in the new helper makes
+both surfaces (sidebar + composer) work correctly under cookie auth
+and stays inert under bearer / no-auth. The old `uploadFile` is rewritten
+as a 5-line wrapper around this helper that catches errors and toasts
+the same way today. `MAX_FILE_BYTES` and `ACCEPTED_EXTENSIONS`
+(`documents.js:35-36`) are converted from `const` to `export const` so
+`composer-attachments.js` imports them.
 
 ## 7. CSS spec — `static/style.css` (additions only)
 
@@ -496,7 +571,7 @@ named `export`s.
 ```
 
 Reuses `.documents-item-mime--pdf|txt` colour tokens that already exist
-at `style.css:3045-3055`. No new colour variables.
+at `style.css:3127-3134`. No new colour variables.
 
 ## 8. Edge cases & failure modes
 
@@ -521,10 +596,11 @@ Single change, behind the existing `[documents]` server-side toggle.
 No migration, no data backfill. Users on `[documents].enabled = false`
 see no UI change.
 
-`verify-chat-new-session.ts` smoke test (`scripts/`) references the
-Documents panel + `/api/features` flow at lines 69-134 — page-load
+`verify-chat-new-session.ts` smoke test (`scripts/`) probes `app-shell-
+mounted` + `/api/features` + `rehydrateAfterMount` registration — page-load
 sequence stays valid because the new module is purely additive (hidden
-until enabled).
+until enabled) and uses the same `app-shell-mounted` + `__nagentSubscribeFeatures`
+hooks the existing modules use.
 
 ## 10. Validation (acceptance)
 
@@ -563,10 +639,12 @@ these without re-deriving them:
    then send a message that mentions "the pdf". `read_document` agent
    finds it. Then upload `b.pdf` via the new composer paperclip, send,
    same outcome. Documents panel reflects both rows.
-10. **Lints** — `cargo fmt`, `cargo build --all-targets`, `cargo clippy`,
-    `cargo audit` (no Rust changes, but the rule applies). No new JS
-    lint pipeline today; reviewer should eyeball the new module against
-    the existing `documents.js` patterns.
+10. **Lints** — no Rust crate touched, so `cargo fmt / build / clippy /
+    audit` are not required (AGENTS.md §2 only applies when Rust
+    changes). No JS lint pipeline today; reviewer should eyeball the new
+    module against the existing `documents.js` patterns and check the
+    `cargo fmt -l` / `cargo clippy --all-features` baseline stays green
+    if any incidental change lands in a Rust file.
 11. **Docs sync** — `docs/ui_features.md` and `README.md` Documents
     section updated per AGENTS.md §5.
 

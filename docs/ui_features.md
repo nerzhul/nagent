@@ -645,6 +645,74 @@ context as the user / assistant turns.
   is part of the transcript) rather than a toolbar overlay. It also
   keeps the visible scope close to the user's gaze point — typically
   the chat input — when the chat view has scrolled down.
+
+### 4.11 Composer file attachments (Discussion)
+
+The Discussion composer offers a paperclip / drag-and-drop affordance
+that uploads PDF / TXT / MD / LOG files to the existing
+`POST /v1/documents` endpoint and surfaces them as inline chips on
+the user bubble. Both the sidebar Documents panel (§4.4) and the
+composer share the same per-session document store, so a doc uploaded
+from either surface appears in both.
+
+Implementation: `crates/nagent-server/src/static/composer-attachments.js`
++ `chat.js#submitUserTurn` / `#appendBubble` / `#streamReply`.
+
+- **Trigger surfaces**:
+  - `#chat-attach-btn` (paperclip) opens the OS file picker
+    (multi-select, `accept=".pdf,.txt,.md,.log"`).
+  - `#chat-form` and `#chat-attach-chips` are both drag-and-drop
+    targets; the dashed `--accent` outline highlights the active
+    region (`#chat-form.is-dragover`,
+    `.chat-attach-chips.is-dragover`).
+- **Staging flow**: each picked/dropped file lands in the
+  `pending` array as a slot. The chip tray (`#chat-attach-chips`)
+  renders immediately, so the user can keep typing while the
+  upload happens in the background. Each slot transitions
+  `uploading → done` (server-returned id stamped on the chip) or
+  `uploading → error` (red border, server message in the meta
+  span, `×` to remove).
+- **Send flow**:
+  1. `submitUserTurn` calls `__nagentAttachments.consumeOnSend()`,
+     which returns `(hint, summaries)`. Only `done` slots ride
+     along; in-flight and errored slots stay in the tray for the
+     user to retry or remove.
+  2. `appendBubble("user", …, { attachments: summaries })` renders
+     the chip row inside the user bubble. The chips are persisted
+     on the message record so history hydration re-renders them
+     on reload (`renderHistory` passes `msg.attachments` through).
+  3. `streamReply` prepends an ephemeral system block to the LLM
+     request — same ephemerality rule as the location / timezone
+     blocks — telling the model "the user just uploaded X, Y, Z;
+     call `read_document` to read them". The block is not written
+     back to `loadHistory`; the persisted `attachments` array is
+     what survives a reload.
+- **Feature gate**: `applyFeatureGates()` in `chat.js:3624-3637`
+  toggles `#chat-attach-btn` and `#chat-attach-chips` on every
+  `__nagentSubscribeFeatures` emit. The composer module also
+  re-applies the gate (the `documents` feature flag is read from
+  `window.__nagentFeatures`); handlers bail at
+  `if (!isEnabled()) return;` when the feature is off. Default-
+  deny on `/api/features` failure.
+- **Streaming guard**: `setStreamingUi(true|false)` dispatches a
+  sibling `chat-stream-state` `CustomEvent`; the composer greys
+  the paperclip + tray (`is-locked`) so a mid-stream drop can't
+  queue a chip against a stale turn.
+- **Cross-surface parity**: every successful composer upload calls
+  `Documents.refresh?.()` so the sidebar list reflects the new
+  row. The chip tray and the sidebar share the per-session
+  document store on the server side.
+- **CSRF fix bundled in**: the shared `uploadFileInBackground`
+  helper (extracted from the sidebar's `uploadFile`) sends
+  `x-csrf-token` for cookie-authenticated callers, fixing a
+  latent bug in the sidebar upload that previously only worked
+  under `auth.enabled = false` or bearer auth. Bearer / no-auth
+  callers are unaffected (the spread silently drops the absent
+  key).
+- **Out of scope**: composer paste-to-upload (the sidebar already
+  supports it; defer until a unified clipboard surface ships),
+  image previews, chip click → preview pane, auto-injection of
+  past-turn attachments. `read_document` covers re-reads.
 - **Cross-mode exclusivity is preserved**: clicking Record in either
   mode tears down the other mode's `AudioCapture` first (§2), so the
   inline voice widget in Discussion and the top-mounted widget in

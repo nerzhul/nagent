@@ -32,8 +32,13 @@ import { getServerSessionId, refreshServerSessionId } from "/static/chat.js";
 
 const DOCUMENTS_PATH = "/v1/documents";
 const CHAT_SESSION_HEADER = "x-chat-session-id";
-const MAX_FILE_BYTES = 20 * 1024 * 1024; // mirror [documents].max_file_size_bytes default
-const ACCEPTED_EXTENSIONS = ["txt", "pdf", "md", "log"];
+// Named exports so `composer-attachments.js` can reuse the same caps
+// without re-declaring. The values intentionally mirror
+// `[documents].max_file_size_bytes` and the `extract.rs` allow-list
+// on the Rust side; keep in sync if either is ever made operator-
+// configurable beyond a build-time default.
+export const MAX_FILE_BYTES = 20 * 1024 * 1024;
+export const ACCEPTED_EXTENSIONS = ["txt", "pdf", "md", "log"];
 
 // Documents module — every call site queries the DOM
 // directly via `document.getElementById(id)`. A module-level
@@ -174,6 +179,15 @@ function wireDocumentsPanelEvents() {
 /// toast.
 function isDocumentsEnabled() {
   if (typeof window === "undefined") return false;
+  // Prefer the function-form reader (`__nagentFeature`): it's a
+  // closure over the live `nagentFeatures` binding in `chat.js`,
+  // so it always returns the current flag value. The object form
+  // (`__nagentFeatures`) is also live (chat.js installs it as a
+  // getter) but the function form is the canonical reader and
+  // also avoids one DOM-equivalent lookup per call.
+  if (typeof window.__nagentFeature === "function") {
+    return Boolean(window.__nagentFeature("documents"));
+  }
   const live = window.__nagentFeatures;
   if (live && typeof live === "object") {
     return Boolean(live.documents);
@@ -292,10 +306,15 @@ export async function refresh() {
 // Send one file to the server. Accepts txt/pdf/md/log. Anything
 // else is rejected client-side so a wrong type never wastes a
 // round trip.
+//
+// Implementation note: the actual `POST /v1/documents` fetch lives
+// in the exported `uploadFileInBackground` helper below, so the
+// composer's drag-and-drop path shares the same code path. CSRF
+// is sent via `window.nagentAuth?.csrfHeaders()` (bearer-auth
+// callers don't have it, the spread silently drops the absent
+// key) — without it the route's `check_csrf` gate returns 403
+// under cookie auth.
 async function uploadFile(file) {
-  // Mirror the gate on `refresh()`: when the server has the
-  // documents feature disabled, reject the upload silently
-  // rather than POSTing to a 404'd endpoint.
   if (!isDocumentsEnabled()) {
     showToast("Documents feature is disabled on this server.", "error");
     return;
@@ -309,34 +328,50 @@ async function uploadFile(file) {
     showToast(`File too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB).`, "error");
     return;
   }
-  const sid = await getServerSessionId();
-  if (!sid) {
-    showToast("No chat session bound — try refreshing the page.", "error");
-    return;
-  }
-  const form = new FormData();
-  form.append("file", file, file.name);
   try {
-    const resp = await fetch(DOCUMENTS_PATH, {
-      method: "POST",
-      headers: { [CHAT_SESSION_HEADER]: sid },
-      body: form,
-    });
-    if (resp.status === 403 || resp.status === 503) {
-      await refreshServerSessionId();
-      return uploadFile(file);
-    }
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      showToast(`Upload failed: ${resp.status} ${text || resp.statusText}`, "error");
-      return;
-    }
-    const created = await resp.json();
+    const created = await uploadFileInBackground(file);
     prependRow(created);
     showToast(`Uploaded ${file.name}.`, "info");
   } catch (e) {
     showToast(`Upload failed: ${e.message}`, "error");
   }
+}
+
+/// POST one file to `/v1/documents` and return the parsed
+/// response body. Throws on any non-2xx response or network
+/// failure. Used by both the sidebar `uploadFile` path and the
+/// composer drag-and-drop module.
+///
+/// `sessionId` is optional; when omitted, the helper resolves
+/// the server-bound chat session id lazily via
+/// `getServerSessionId()`. The two call-sites both go through
+/// the same `/v1/chat/session` mint, so the binding check on
+/// the server side is identical.
+export async function uploadFileInBackground(file, { sessionId } = {}) {
+  const sid = sessionId ?? (await getServerSessionId());
+  if (!sid) throw new Error("No chat session bound");
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const headers = {
+    [CHAT_SESSION_HEADER]: sid,
+    ...(window.nagentAuth?.csrfHeaders?.() ?? {}),
+  };
+  const doFetch = () => fetch(DOCUMENTS_PATH, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  let resp = await doFetch();
+  if (resp.status === 403 || resp.status === 503) {
+    // SEV 2 fix: binding lost — re-mint and retry once.
+    await refreshServerSessionId();
+    resp = await doFetch();
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`upload failed: ${resp.status} ${text.slice(0, 200)}`);
+  }
+  return await resp.json();
 }
 
 async function deleteDoc(id) {
@@ -350,7 +385,18 @@ async function deleteDoc(id) {
   try {
     const resp = await fetch(`${DOCUMENTS_PATH}/${encodeURIComponent(id)}`, {
       method: "DELETE",
-      headers: { [CHAT_SESSION_HEADER]: sid },
+      headers: {
+        [CHAT_SESSION_HEADER]: sid,
+        // The DELETE route is a state-changing request and is
+        // gated by `check_csrf` in `auth/middleware.rs:107-125`.
+        // The browser SPA must carry the per-session token;
+        // bearer-auth callers are unaffected (the spread below
+        // is a no-op when `csrfHeaders()` returns `undefined`).
+        // Without this header, every DELETE 403s on a session
+        // authenticated via cookie and the UI's retry loop
+        // spams the route.
+        ...(window.nagentAuth?.csrfHeaders?.() ?? {}),
+      },
     });
     if (resp.status === 403 || resp.status === 503) {
       await refreshServerSessionId();
@@ -399,6 +445,11 @@ function buildRow(doc) {
   li.className = "documents-item";
   li.dataset.docId = doc.id;
 
+  // Filename with a middle-ellipsis so the extension is
+  // always visible on long names. The full name stays in the
+  // `title` attribute for hover, and the underlying text node
+  // is also the original `doc.name` so screen-readers and
+  // copy-paste see the real filename.
   const name = document.createElement("span");
   name.className = "documents-item-name";
   name.textContent = doc.name;
@@ -432,7 +483,47 @@ function buildRow(doc) {
   li.appendChild(badge);
   li.appendChild(meta);
   li.appendChild(del);
+  // After the row is in the DOM, swap the visible label for a
+  // middle-ellipsised variant if the layout container is too
+  // narrow to fit the full name + extension. The visible
+  // string becomes "head…tail" with the tail still ending in
+  // the original extension; the underlying textContent +
+  // `title` attribute stay as the real `doc.name` so a
+  // full-string copy (right-click → "Copy" in DevTools) still
+  // resolves to the original.
+  requestAnimationFrame(() => truncateNameIfOverflowing(name));
   return li;
+}
+
+/// Replace the visible text of `.documents-item-name` with a
+/// middle-ellipsised variant when its scrollWidth exceeds the
+/// available clientWidth. The extension (everything after the
+/// last `.` in the basename) is preserved at the tail. No-op
+/// when the name fits; the underlying `textContent` keeps the
+/// original filename so DevTools copy / screen-reader / title
+/// hover are unaffected.
+function truncateNameIfOverflowing(nameEl) {
+  if (!nameEl || !nameEl.isConnected) return;
+  const full = nameEl.textContent;
+  if (!full) return;
+  if (nameEl.scrollWidth <= nameEl.clientWidth + 1) return;
+  const dot = full.lastIndexOf(".");
+  // Files without a `.` (e.g. `Makefile`) just get a plain
+  // tail-ellipsis from the browser; we don't synthesise a fake
+  // extension.
+  const ext = dot > 0 ? full.slice(dot) : "";
+  const base = dot > 0 ? full.slice(0, dot) : full;
+  // Iteratively shrink the head until the rendered string
+  // fits. A binary search would be cheaper; 4 iterations are
+  // plenty for any realistic filename and keep the code
+  // obviously correct.
+  let headLen = Math.max(1, Math.floor(base.length / 2));
+  for (let i = 0; i < 8; i++) {
+    const candidate = `${base.slice(0, headLen)}…${ext}`;
+    nameEl.textContent = candidate;
+    if (nameEl.scrollWidth <= nameEl.clientWidth + 1) return;
+    headLen = Math.max(1, Math.floor(headLen * 0.7));
+  }
 }
 
 function renderEmpty(message) {

@@ -43,11 +43,11 @@ impl Agent for ReadDocumentAgent {
     }
 
     fn description(&self) -> &str {
-        "Read the text content of a document previously uploaded by the user to this chat session. \
-         Use the `name` field returned by GET /v1/documents (a UUID). For PDFs, optionally restrict \
-         to a `page_range` (e.g. \"3-7\") to limit context size. The tool returns at most \
-         max_extracted_chars characters; if the document is truncated, ask the user for the \
-         specific section you need."
+        "Read the text content of a file or document (PDF, TXT, MD, LOG) previously uploaded \
+         by the user to this chat session. Use the `name` field returned by GET /v1/documents \
+         (a UUID). For PDFs, optionally restrict to a `page_range` (e.g. \"3-7\") to limit \
+         context size. The tool returns at most max_extracted_chars characters; if the document \
+         is truncated, ask the user for the specific section you need."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -72,6 +72,23 @@ impl Agent for ReadDocumentAgent {
     /// The LLM does not need the indirect-prompt-injection fence.
     fn untrusted_output(&self) -> bool {
         false
+    }
+
+    /// BM25 synonyms for the router's pre-selection step. The
+    /// description alone scores the LLM query "read a document or
+    /// file" weakly because it mentions "read" + "document" but
+    /// not "file" / "PDF" / "txt" / etc. — the LLM usually
+    /// reaches for `read_document` directly (via the system
+    /// prompt's mention in `llm/prompt.rs`), but when the proxy
+    /// pre-selects from this agent first the keywords give the
+    /// BM25 walk the synonyms it needs to land on top of the
+    /// unrelated `x_timeline` / `caldav_*` candidates.
+    fn keywords(&self) -> &'static [&'static str] {
+        &[
+            "file", "files", "pdf", "txt", "md", "log", "markdown",
+            "fiche", "bulletin", "paie", "payslip", "statement",
+            "invoice", "facture", "notice",
+        ]
     }
 
     async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError> {

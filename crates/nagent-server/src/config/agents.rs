@@ -41,13 +41,15 @@ pub struct AgentConfig {
     /// Yahoo Finance fallback).
     pub stock: StockConfig,
     /// Knobs for the `read_document` agent (server-bound doc
-    /// access via the `DocumentSource` trait).
+    /// access via the `DocumentSource` trait). The agent itself
+    /// is auto-registered when the master `[agents].enabled`
+    /// switch is on AND `[documents].enabled = true` produced a
+    /// `DocumentStore` at boot — no separate
+    /// `read_document_enabled` flag. The TOML field is kept
+    /// around for the per-agent knobs (timeout, max chars) but
+    /// the historical `read_document_enabled = true` line is
+    /// silently ignored.
     pub read_document: ReadDocumentConfig,
-    /// Whether the `read_document` agent is wired in. Mirrors the
-    /// historical `from_config_with_documents` guard so enabling
-    /// docs alone (without a registered document store) does not
-    /// silently drop the agent.
-    pub read_document_enabled: bool,
     /// Knobs for the CalDAV plugin (plan 1790963194218). v1
     /// exposes three LLM tools (`caldav_list_events`,
     /// `caldav_get_event`, `caldav_create_event`) and a
@@ -76,7 +78,6 @@ impl Default for AgentConfig {
             dictionary: DictionaryConfig::default(),
             stock: StockConfig::default(),
             read_document: ReadDocumentConfig::default(),
-            read_document_enabled: false,
             caldav: CalDavConfig::default(),
             x_timeline: XTimelineConfig::default(),
             memory: MemoryConfig::default(),
@@ -102,12 +103,6 @@ impl AgentConfig {
             dictionary: DictionaryConfig::from_env_with_toml(toml.dictionary.as_ref())?,
             stock: StockConfig::from_env_with_toml(toml.stock.as_ref())?,
             read_document: ReadDocumentConfig::from_env_with_toml(toml.read_document.as_ref())?,
-            read_document_enabled: resolve_primitive(
-                env_opt("READ_DOCUMENT_AGENT_ENABLED").as_deref(),
-                toml.read_document_enabled,
-                defaults.read_document_enabled,
-                "READ_DOCUMENT_AGENT_ENABLED",
-            )?,
             caldav: CalDavConfig::from_env_with_toml(toml.caldav.as_ref())?,
             x_timeline: XTimelineConfig::from_env_with_toml(toml.x_timeline.as_ref())?,
             memory: MemoryConfig::from_env_with_toml(toml.memory.as_ref())?,
