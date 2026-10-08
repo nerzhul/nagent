@@ -56,9 +56,13 @@ pub use llm_guards::{build_rate_limiters, llm_auth_middleware, llm_rate_limit_mi
 /// - `DefaultBodyLimit::max([server.limits].body_limit_bytes)`
 ///   rejects oversized request bodies with `413 Payload Too
 ///   Large` before they reach a handler. The default (2 MiB)
-///   matches axum's built-in limit, but is operator-overridable
-///   so `/v1/documents` and `/v1/chat/completions` can diverge
-///   from the default.
+///   matches axum's built-in limit, but is operator-overridable.
+///   `/v1/documents` further overrides this cap to
+///   `[documents].max_file_size_bytes` so PDF uploads up to that
+///   size reach the handler (see `mount_documents` — the inner
+///   `DefaultBodyLimit` layer wins over the outer one because
+///   `RequestBodyLimit` is `insert`-overwritten during request
+///   processing).
 /// - `TimeoutLayer::new([server.limits].request_timeout_ms)`
 ///   cancels non-streaming requests that exceed the configured
 ///   timeout. The layer is wired through the per-route
@@ -144,9 +148,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // - `DefaultBodyLimit::max(body_limit_bytes)` rejects oversized
     //   request bodies with `413 Payload Too Large` before they reach
     //   a handler. Applied to the whole subtree so every `/v1/*` and
-    //   `/api/*` POST inherits it; the cap on `/v1/documents` POST is
-    //   tightened by the documents routes themselves to match
-    //   `[documents].max_file_size_bytes`.
+    //   `/api/*` POST inherits it; `mount_documents` then installs an
+    //   INNER `DefaultBodyLimit::max(documents.max_file_size_bytes)`
+    //   on the documents subtree so PDF uploads up to the
+    //   documents cap reach the handler instead of being chopped at
+    //   the transport layer with an opaque axum Multipart parse
+    //   error. The handler enforces the documents cap precisely
+    //   and surfaces a `FileTooLarge { got, max }` 413 with a
+    //   user-friendly message.
     // - `TimeoutLayer::new(request_timeout_ms)` cancels non-streaming
     //   requests that exceed the configured timeout. SSE
     //   (`/v1/chat/completions`) and the WebSocket upgrade stay
@@ -326,9 +335,38 @@ fn mount_llm_proxy(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// feature is on AND the runtime flag is on AND the auth DB is
 /// reachable (so the table exists). `state.documents` is `Some` iff
 /// all three are true.
+///
+/// ## Plan S-1b: body-limit override on the documents subtree
+///
+/// The protected subtree installs `DefaultBodyLimit::max(
+/// [server.limits].body_limit_bytes)` (2 MiB default) on every
+/// `/v1/*` and `/api/*` POST to keep oversized payloads from
+/// reaching a handler. That cap is the right knob for the LLM
+/// proxy and the agents endpoints — but `/v1/documents` needs to
+/// accept uploads up to `[documents].max_file_size_bytes` (20 MiB
+/// default), and rejecting a 3 MiB PDF at the transport layer
+/// surfaces an opaque `400 Bad Request — "Error parsing
+/// multipart/form-data request"` (axum's `MultipartError` body)
+/// that hides the actionable size limit.
+///
+/// We override the limit INSIDE `mount_documents` so the
+/// inner-most `DefaultBodyLimit::max(documents_max_file_size_bytes)`
+/// runs AFTER the outer `DefaultBodyLimit::max(body_limit_bytes)`
+/// during request processing. Layers mutate the
+/// `RequestBodyLimit` extension via `insert` (last-writer-wins);
+/// the inner layer therefore wins for documents routes while the
+/// outer layer still caps the rest of the protected subtree. The
+/// handler in `documents::routes::upload_handler` then enforces
+/// `max_file_size_bytes` precisely with a structured
+/// `FileTooLarge { got, max }` response that the frontend can
+/// surface verbatim.
 fn mount_documents(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let documents_app = crate::documents::routes::build_documents_router(state.clone());
-    v1_envelope(&state, documents_app)
+    let documents_body_cap = state.config.documents.max_file_size_bytes;
+    v1_envelope(
+        &state,
+        documents_app.layer(DefaultBodyLimit::max(documents_body_cap)),
+    )
 }
 
 /// `POST /v1/chat/session` — server-bound chat-session id mint. Mounted

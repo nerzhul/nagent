@@ -369,9 +369,37 @@ export async function uploadFileInBackground(file, { sessionId } = {}) {
   }
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
-    throw new Error(`upload failed: ${resp.status} ${text.slice(0, 200)}`);
+    throw new Error(friendlyUploadError(resp, text));
   }
   return await resp.json();
+}
+
+/// Translate an upload failure into a message the user can act
+/// on. The default fallback (`upload failed: <status> <body>`)
+/// is honest but rarely useful — for the two common size-rejection
+/// paths we recognise the verbatim server body and surface the actual
+/// upload cap instead. Detected patterns:
+///
+/// - 400 + axum's `MultipartError` body — fires when
+///   `DefaultBodyLimit` chops the multipart stream. The handler
+///   never saw the bytes; the actionable advice is the upload
+///   cap, not the parser message.
+/// - 413 + `file too large` — fires when the handler enforces
+///   `[documents].max_file_size_bytes` and the user-facing
+///   `FileTooLarge { got, max }` text is echoed verbatim.
+export function friendlyUploadError(resp, rawText) {
+  const text = rawText || "";
+  const limitMb = Math.round(MAX_FILE_BYTES / 1024 / 1024);
+  if (
+    resp.status === 400 &&
+    /Error parsing `multipart\/form-data` request/.test(text)
+  ) {
+    return `file exceeds the server upload limit (max ${limitMb} MB).`;
+  }
+  if (resp.status === 413 && /file too large/i.test(text)) {
+    return `file too large (max ${limitMb} MB).`;
+  }
+  return `upload failed: ${resp.status} ${text.slice(0, 200)}`;
 }
 
 async function deleteDoc(id) {

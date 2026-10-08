@@ -16,7 +16,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::{header, StatusCode};
+use axum::body::Body;
+use axum::http::{header, Request as HttpRequest, StatusCode};
 use futures_util::{SinkExt, StreamExt};
 use nagent_server::config::{LimitsConfig, LlmConfig, RateLimitConfig};
 use nagent_server::http::build_router;
@@ -27,6 +28,8 @@ use stt_proto::{decode_frame, encode, error_code, AudioFrame, Config, Payload, S
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
+use tower::util::ServiceExt;
+use uuid::Uuid;
 
 const SAMPLE_RATE: u32 = 16_000;
 
@@ -709,5 +712,258 @@ async fn ws_upgrade_with_cross_origin_origin_is_rejected() {
             .map(|v| v.to_str().unwrap_or("")),
         Some("Origin"),
         "cross-origin rejection must carry `Vary: Origin`"
+    );
+}
+
+// ====================================================================
+// Plan S-1b: documents subtree overrides the transport body cap
+// ====================================================================
+//
+// The protected subtree installs
+// `DefaultBodyLimit::max([server.limits].body_limit_bytes)` (the
+// generic 2 MiB cap that protects the LLM proxy, agents, and the
+// rest of `/v1/*`). `/v1/documents` mounts its OWN inner
+// `DefaultBodyLimit::max([documents].max_file_size_bytes)` so PDF
+// uploads up to the documents cap reach the handler instead of
+// being chopped at the transport layer with an opaque axum
+// `MultipartError` ("Error parsing `multipart/form-data` request").
+//
+// These two tests pin that override:
+//  1. `documents_route_overrides_transport_body_limit` (this file)
+//     — a body larger than `body_limit_bytes` but smaller than
+//     `documents.max_file_size_bytes` must reach the handler and
+//     succeed (or fail with a structured handler-side error), NOT
+//     the opaque axum 400.
+//  2. `http_body_limit_rejects_oversized_upload` (further up in
+//     this file) — `/v1/chat/completions` (on the protected
+//     subtree but NOT inside the documents override) must still
+//     trip the transport cap with the existing 413 contract.
+//
+// Without the override, test 1 would see
+// `400 Bad Request — "Error parsing multipart/form-data request"`
+// (axum's MultipartError body) instead of a structured handler
+// response.
+
+/// Build a minimal `AppState` for the documents body-limit override
+/// tests. Auth + documents + chat_sessions are wired; LLM is left
+/// off because the test does not need it and `v1_envelope` falls
+/// back to a permissive limiter when `state.llm` is `None`.
+async fn build_state_for_documents_body_limit_test(
+    body_limit_bytes: usize,
+    documents_max_file_size_bytes: usize,
+) -> (
+    Arc<nagent_server::AppState>,
+    nagent_db::Db,
+    nagent_server::config::AuthConfig,
+) {
+    let auth_cfg = nagent_server::config::AuthConfig {
+        enabled: true,
+        backends: vec![nagent_server::config::AuthBackendKind::Local],
+        public_url: "https://example.com".into(),
+        session_ttl_days: 7,
+        csrf_header: "x-csrf-token".into(),
+        db: nagent_server::config::AuthDbConfig {
+            backend: "sqlite".into(),
+            url: format!(
+                "sqlite://file:doc_body_limit_{}?mode=memory&cache=shared",
+                Uuid::new_v4()
+            ),
+            max_connections: 1,
+            auto_migrate: true,
+        },
+        ..nagent_server::config::AuthConfig::default()
+    };
+    let auth_store = nagent_db::Db::connect(&(&auth_cfg).into())
+        .await
+        .expect("sqlite in-memory store must connect");
+    auth_store.migrate().await.expect("migrations must run");
+
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).auth = auth_cfg.clone();
+    Arc::make_mut(&mut builder.config).limits = LimitsConfig {
+        body_limit_bytes,
+        ..LimitsConfig::default()
+    };
+    Arc::make_mut(&mut builder.config).documents = nagent_server::config::DocumentsConfig {
+        enabled: true,
+        cache_dir: std::env::temp_dir().join(format!(
+            "nagent-doc-body-limit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )),
+        max_file_size_bytes: documents_max_file_size_bytes,
+        ..nagent_server::config::DocumentsConfig::default()
+    };
+    let cache_dir = builder.config.documents.cache_dir.clone();
+    std::fs::create_dir_all(&cache_dir).expect("doc cache_dir must be creatable");
+
+    let doc_store = nagent_server::documents::DocumentStore::new(
+        auth_store.clone(),
+        100_000,
+        20,
+        20_000,
+        cache_dir,
+        0,
+        30,
+    );
+    builder = builder.with_auth(auth_store.clone());
+    builder = builder.with_documents(doc_store);
+    builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
+        auth_store.admin().chat_sessions.clone(),
+    ));
+    (builder.build(), auth_store, auth_cfg)
+}
+
+/// Mint a chat session via the HTTP route and return its UUID.
+async fn mint_chat_session(app: &axum::Router, bearer: &str) -> Uuid {
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/v1/chat/session")
+                .header(header::HOST, "127.0.0.1:0")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("POST /v1/chat/session");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "POST /v1/chat/session must return 200"
+    );
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    Uuid::parse_str(
+        body["id"]
+            .as_str()
+            .expect("/v1/chat/session response must carry `id`"),
+    )
+    .expect("chat session id must be a valid UUID")
+}
+
+/// Build a small multipart/form-data body in memory and return the
+/// bytes + the boundary so the caller can set the
+/// `Content-Type: multipart/form-data; boundary=…` header. The
+/// payload is a `text/plain` part named `file` containing `bytes`
+/// under `filename = "upload.txt"`.
+fn build_multipart_text_upload(bytes: &[u8], boundary: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 256);
+    out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    out.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\r\n",
+    );
+    out.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    out
+}
+
+/// `POST /v1/documents` with a body that exceeds
+/// `[server.limits].body_limit_bytes` (8 KiB) but fits inside
+/// `[documents].max_file_size_bytes` (1 MiB) must reach the
+/// handler. Before the S-1b fix the transport cap chopped the
+/// multipart stream at 8 KiB and the browser saw axum's opaque
+/// `400 Bad Request — "Error parsing multipart/form-data request"`.
+/// With the fix, the inner `DefaultBodyLimit::max(documents_max)`
+/// layer wins for documents routes and the handler runs to
+/// completion; for a plain-text upload that fits inside the
+/// documents cap the response is `201 Created`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn documents_route_overrides_transport_body_limit() {
+    let body_limit_bytes: usize = 8 * 1024;
+    let documents_max_file_size_bytes: usize = 1024 * 1024;
+    let (state, auth_store, _auth_cfg) =
+        build_state_for_documents_body_limit_test(body_limit_bytes, documents_max_file_size_bytes)
+            .await;
+    let app = build_router(state);
+
+    // Create a user + session directly in the DB so the test does
+    // not depend on the password-login flow.
+    let user_id = auth_store
+        .admin()
+        .users
+        .create("alice@body-limit.test", "Alice", "local", Some(b"hash"))
+        .await
+        .expect("create_user");
+    let session = auth_store
+        .admin()
+        .sessions
+        .create(user_id, std::time::Duration::from_secs(60), None, None)
+        .await
+        .expect("create_session");
+    let bearer = session
+        .plaintext_token
+        .clone()
+        .expect("create_session mints a plaintext token");
+
+    let chat_session_id = mint_chat_session(&app, &bearer).await;
+
+    // 100 KiB text payload — exceeds the 8 KiB transport cap but
+    // fits inside the 1 MiB documents cap.
+    let payload: Vec<u8> = (0..100 * 1024).map(|i| b'a' + (i % 26) as u8).collect();
+    assert!(
+        payload.len() > body_limit_bytes,
+        "payload must exceed the transport cap for the regression to fire"
+    );
+    assert!(
+        payload.len() <= documents_max_file_size_bytes,
+        "payload must fit inside the documents cap"
+    );
+
+    let boundary = "nagent-test-boundary";
+    let body = build_multipart_text_upload(&payload, boundary);
+    // The Origin / Host guard (plan S-2) treats a POST without
+    // `Origin` as a programmatic client and allows it ONLY when
+    // `Host` matches the allow-list; the test harness binds
+    // `127.0.0.1:0`, so we mirror that here.
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/v1/documents")
+                .header(header::HOST, "127.0.0.1:0")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header("x-chat-session-id", chat_session_id.to_string())
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("POST /v1/documents");
+    let status = resp.status();
+    let response_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
+    let response_text = String::from_utf8_lossy(&response_bytes).into_owned();
+    assert_ne!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "documents route must NOT return 400 for a body above the \
+         transport cap when the documents cap allows it \
+         (got 400 with body: {response_text:?})"
+    );
+    assert!(
+        !response_text.contains("Error parsing `multipart/form-data` request"),
+        "documents route must not surface the opaque axum MultipartError body \
+         (response: {response_text:?})"
+    );
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "documents route must reach the handler and return 201 for a \
+         plain-text upload that fits the documents cap \
+         (got {status} with body: {response_text:?})"
     );
 }
