@@ -1421,6 +1421,11 @@ async fn index_html_wraps_app_shell_in_template() {
         "<main id=\"view-discussion\"",
         "id=\"shortcuts-modal\"",
         "id=\"auth-pill\"",
+        // A1 (plan 1791464974103): the per-session export
+        // menu must live inside the template so it does not
+        // leak to anonymous visitors on `auth.enabled = true`
+        // builds (same rule as the rest of the chat UI).
+        "id=\"chat-export-menu\"",
     ] {
         let pos = html
             .find(must_be_inside)

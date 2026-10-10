@@ -23,6 +23,20 @@ export const HISTORY_CAP = 200;
 export const TITLE_MAX = 60;
 export const DEFAULT_TITLE = "New chat";
 
+// Plan 1791464974103 §1.4: per-session flag marking the
+// localStorage copy as already mirrored on the server. The first
+// authenticated load POSTs every entry of `nagent.chat.session.<id>`
+// to `/v1/chat/session/:sid/messages` and sets this flag on
+// success; subsequent loads skip the migration. Sessions that
+// never migrate (server missing the `chat_messages` table, network
+// failure) keep working from localStorage only — `chat.js` reads
+// the server first and falls back transparently.
+export const MIGRATED_PREFIX = "nagent.chat.migrated.";
+
+export function migratedKey(id) {
+  return MIGRATED_PREFIX + id;
+}
+
 // User-geolocation preference keys. Shared with `geolocation.js` and
 // `chat.js` so the names live in exactly one place. The TTL lives on
 // the cached position only — the enabled flag is a free switch and
@@ -65,6 +79,24 @@ export const TEMPERATURE_KEY = "nagent.chat.temperature";
 
 export function historyKey(id) {
   return HISTORY_PREFIX + id;
+}
+
+// True when the localStorage copy of `id` has been mirrored on
+// the server. Used by `chat.js` to skip the migration shim on
+// subsequent loads and to decide whether to fetch the server
+// copy (or stick to localStorage) on history render.
+export function isMigrated(id) {
+  try {
+    return globalThis.localStorage.getItem(migratedKey(id)) === "1";
+  } catch (_e) {
+    return false;
+  }
+}
+
+export function markMigrated(id) {
+  try {
+    globalThis.localStorage.setItem(migratedKey(id), "1");
+  } catch (_e) {}
 }
 
 export function isValidSession(s) {

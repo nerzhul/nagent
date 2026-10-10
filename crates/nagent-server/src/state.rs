@@ -221,6 +221,15 @@ pub struct ChatSessionsState {
     pub sessions: crate::chat::sessions::ChatSessions,
 }
 
+/// Per-session chat message store sub-state (plan
+/// 1791464974103). `Some` when `auth.enabled = true` — the
+/// table lives in the auth DB and the routes only mount when
+/// the binding is reachable.
+#[derive(Clone, Debug)]
+pub struct ChatMessagesState {
+    pub messages: crate::chat::messages::ChatMessages,
+}
+
 /// TTS sub-state. `Some` when `TTS_ENABLED=true` AND the
 /// `stt-server/tts` cargo feature is on.
 #[derive(Clone)]
@@ -252,6 +261,7 @@ pub struct AppState {
     pub auth: Option<AuthState>,
     pub documents: Option<DocumentsState>,
     pub chat_sessions: Option<ChatSessionsState>,
+    pub chat_messages: Option<ChatMessagesState>,
     pub tts: Option<TtsState>,
     /// Per-session pending approvals and session-wide tool overrides.
     /// Always present; consulted by the tool loop's confirmation
@@ -280,6 +290,10 @@ impl std::fmt::Debug for AppState {
             .field(
                 "chat_sessions",
                 &self.chat_sessions.as_ref().map(|_| "<ChatSessionsState>"),
+            )
+            .field(
+                "chat_messages",
+                &self.chat_messages.as_ref().map(|_| "<ChatMessagesState>"),
             )
             .field("tts", &self.tts.as_ref().map(|_| "<TtsState>"))
             .field("permission_store", &self.permission_store)
@@ -360,6 +374,15 @@ impl FromRef<Arc<AppState>> for ChatSessionsState {
             .chat_sessions
             .clone()
             .expect("chat-session handler reached without a ChatSessionsState on AppState")
+    }
+}
+
+impl FromRef<Arc<AppState>> for ChatMessagesState {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        state
+            .chat_messages
+            .clone()
+            .expect("chat-messages handler reached without a ChatMessagesState on AppState")
     }
 }
 

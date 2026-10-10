@@ -25,7 +25,8 @@ use crate::http::build_rate_limiters;
 use crate::llm::discovered_tools::DiscoveredTools;
 use crate::llm::LlmClient;
 use crate::state::{
-    AppState, AuthState, ChatSessionsState, DocumentsState, LlmState, SttState, TtsState,
+    AppState, AuthState, ChatMessagesState, ChatSessionsState, DocumentsState, LlmState, SttState,
+    TtsState,
 };
 use crate::stt::{result_router, session, watchdog};
 use crate::tts::TtsEngine;
@@ -100,6 +101,20 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     let chat_sessions_state = auth_store.clone().map(|s| ChatSessionsState {
         sessions: crate::chat::sessions::ChatSessions::new(s.admin().chat_sessions),
     });
+    // The chat-messages handle is paired with the chat-sessions
+    // handle so the per-row routes can re-verify the
+    // `(user, session)` binding on every request. Built only
+    // when both are available so a half-built state cannot
+    // surface a route that 500s on the binding check.
+    let chat_messages_state = match (auth_store.clone(), chat_sessions_state.clone()) {
+        (Some(store), Some(sessions)) => Some(ChatMessagesState {
+            messages: crate::chat::messages::ChatMessages::new(
+                store.admin().chat_messages,
+                sessions.sessions,
+            ),
+        }),
+        _ => None,
+    };
     let documents_state = if cfg.documents.enabled {
         let store = match auth_store.clone() {
             Some(s) => s,
@@ -453,6 +468,7 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         auth,
         documents: documents_state,
         chat_sessions: chat_sessions_state,
+        chat_messages: chat_messages_state,
         tts,
         permission_store: crate::llm::permission::PermissionStore::new(),
         discovered_tools: DiscoveredTools::new(),

@@ -50,20 +50,23 @@ impl From<DbDocumentError> for DocumentRouteError {
 }
 
 /// Build a tiny router that mounts only `POST /v1/chat/session`
-/// (the SEV 2 server-bound chat session id mint endpoint). This
-/// is split out from [`build_documents_router`] so it can be
-/// mounted independently of `[documents].enabled`: the browser
-/// mints a session id on every page load to harden the
-/// `X-Chat-Session-Id` header against forgery, even on a build
-/// where the operator has the documents feature off. Without
-/// this split, a `documents.enabled = false` build would 404
-/// the mint call and the chat-completions tool loop would lose
-/// its session-scoping (the agent then refuses to read documents
-/// anyway because the binding is missing — but the 404 still
-/// surfaces in the console).
+/// (the SEV 2 server-bound chat session id mint endpoint) plus
+/// the A3 `/v1/chat/session/:sid/messages*` family (edit,
+/// regenerate, list, append). This is split out from
+/// [`build_documents_router`] so it can be mounted independently
+/// of `[documents].enabled`: the browser mints a session id on
+/// every page load to harden the `X-Chat-Session-Id` header
+/// against forgery, even on a build where the operator has the
+/// documents feature off. Without this split, a
+/// `documents.enabled = false` build would 404 the mint call and
+/// the chat-completions tool loop would lose its session-scoping
+/// (the agent then refuses to read documents anyway because the
+/// binding is missing — but the 404 still surfaces in the
+/// console).
 ///
-/// The router carries `ChatSessionsState` directly so the mint
-/// handler can extract only what it needs. Caller wires the same
+/// The router carries `ChatSessionsState` for the mint handler
+/// and the messages routes carry `ChatMessagesState`; the two
+/// sub-routers are merged so the caller wires the same
 /// LLM-auth / rate-limit / CORS envelope used by the rest of
 /// `/v1/*`.
 pub fn build_chat_session_router(
@@ -73,12 +76,37 @@ pub fn build_chat_session_router(
         .chat_sessions
         .clone()
         .expect("chat_sessions handle is wired when this router is mounted");
-    axum::Router::new()
+    let mint_router = axum::Router::new()
         .route(
             "/v1/chat/session",
             axum::routing::post(crate::chat::sessions::mint_handler),
         )
-        .with_state(chat_sessions)
+        .with_state(chat_sessions);
+    // The A3 routes are mounted only when the `chat_messages`
+    // table is reachable (auth DB + auto-migrate). On a build
+    // where the operator left auth disabled they stay gone —
+    // the localStorage-only path is the v0 behaviour the
+    // browser keeps falling back to anyway.
+    let Some(chat_messages) = state.chat_messages.clone() else {
+        return mint_router;
+    };
+    let messages_router = axum::Router::new()
+        .route(
+            "/v1/chat/session/:sid/messages",
+            axum::routing::get(crate::chat::messages::list_handler)
+                .post(crate::chat::messages::append_handler),
+        )
+        .route(
+            "/v1/chat/session/:sid/messages/:mid",
+            axum::routing::patch(crate::chat::messages::edit_handler)
+                .delete(crate::chat::messages::delete_handler),
+        )
+        .route(
+            "/v1/chat/session/:sid/regenerate",
+            axum::routing::post(crate::chat::messages::regenerate_handler),
+        )
+        .with_state(chat_messages);
+    mint_router.merge(messages_router)
 }
 
 /// Build the documents router subtree. Caller wires the same

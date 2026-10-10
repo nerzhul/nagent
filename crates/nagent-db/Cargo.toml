@@ -51,3 +51,11 @@ uuid = { workspace = true }
 # client. See the `db-sqlite` / `db-postgres` features above for
 # the slim-build limitation.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"] }
+
+[dev-dependencies]
+# Enable `test-util` so the in-crate tests can call
+# `Db::raw_insert_one_str` to seed the `users` table without
+# having to round-trip through the typed `Users::create` helper
+# (which mints its own UUID and we want to control the value in
+# tests).
+nagent-db = { path = ".", features = ["test-util"] }

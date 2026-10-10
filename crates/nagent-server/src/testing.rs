@@ -325,7 +325,7 @@ impl AppStateBuilder {
             tools_router: None,
         });
 
-        let auth = self.auth_store.map(|store| {
+        let auth = self.auth_store.clone().map(|store| {
             let hash_concurrency = self.config.auth.password.hash_concurrency.max(1);
             AuthState {
                 store,
@@ -347,7 +347,23 @@ impl AppStateBuilder {
         let documents = self.documents.map(|store| DocumentsState { store });
         let chat_sessions = self
             .chat_sessions
+            .clone()
             .map(|sessions| ChatSessionsState { sessions });
+        // Plan 1791464974103: the chat-messages handle is paired
+        // with the chat-sessions handle (so the per-row routes
+        // can re-verify the `(user, session)` binding). The test
+        // builder pairs the two when both are present; tests
+        // that only set `chat_sessions` end up with `None` and
+        // the messages routes are simply not mounted.
+        let chat_messages = match (self.chat_sessions.clone(), self.auth_store.clone()) {
+            (Some(sessions), Some(store)) => Some(crate::state::ChatMessagesState {
+                messages: crate::chat::messages::ChatMessages::new(
+                    store.admin().chat_messages,
+                    sessions,
+                ),
+            }),
+            _ => None,
+        };
         let tts = self.tts.map(|engine| TtsState { engine });
 
         let stt = SttState {
@@ -369,6 +385,7 @@ impl AppStateBuilder {
             auth,
             documents,
             chat_sessions,
+            chat_messages,
             tts,
             permission_store: crate::llm::permission::PermissionStore::new(),
             discovered_tools: crate::llm::discovered_tools::DiscoveredTools::new(),

@@ -115,6 +115,13 @@ pub struct Features {
     /// (the server ignores it because no route reads it).
     #[serde(rename = "chat_sessions")]
     pub chat_sessions_enabled: bool,
+    /// Server-side chat message store is wired
+    /// (`state.chat_messages.is_some()`, plan 1791464974103).
+    /// When false the A3 edit / regenerate + A1 export menu
+    /// hide — the browser keeps using the localStorage copy as
+    /// before.
+    #[serde(rename = "chat_messages")]
+    pub chat_messages_enabled: bool,
     /// Names of every LLM tool currently exposed (subset of
     /// `features.agent_names`). Used by the chat-completions
     /// payload builder on the JS side so it knows what tools to
@@ -139,6 +146,7 @@ impl Features {
         let llm_enabled = state.llm.is_some();
         let tts_enabled = state.tts.is_some();
         let chat_sessions_enabled = state.chat_sessions.is_some();
+        let chat_messages_enabled = state.chat_messages.is_some();
 
         // `llm_models` is populated only when the proxy is wired.
         // The fetch is bounded by `UPSTREAM_MODELS_TIMEOUT` so a
@@ -176,6 +184,7 @@ impl Features {
             agents_enabled,
             agent_names,
             chat_sessions_enabled,
+            chat_messages_enabled,
             tools,
         }
     }

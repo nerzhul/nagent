@@ -253,6 +253,25 @@
         <span id="chat-location-pill-text">…</span>
       </button>
       <button id="chat-clear" type="button" class="ghost">Clear</button>
+      <!--
+        A1 (plan 1791464974103): per-session export menu. A
+        `<details>` element acts as a lightweight popover:
+        clicking the summary opens the menu, picking an item
+        triggers the matching exporter (chat-export.js) and
+        collapses the menu. Hidden until the first message
+        lands (same `disabled` contract as the Transcript-mode
+        `#download-menu`). Lifted to `enabled` by `chat.js` on
+        every `appendBubble` / `renderHistory` so a session
+        switch re-evaluates the affordance.
+      -->
+      <details id="chat-export-menu" class="download-menu" disabled>
+        <summary class="download-menu-summary">Export ▾</summary>
+        <ul class="download-menu-list" role="menu">
+          <li role="menuitem"><a href="#" data-format="md">Markdown (.md)</a></li>
+          <li role="menuitem"><a href="#" data-format="json">JSON (.json)</a></li>
+          <li role="menuitem"><a href="#" data-format="html">HTML (.html)</a></li>
+        </ul>
+      </details>
       <span id="chat-status" class="status idle">idle</span>
     </header>
 
@@ -465,16 +484,16 @@
       <button id="chat-record-btn" type="button" data-state="idle"
               aria-label="Start voice recording (Ctrl+Shift+D)"
               title="Start voice recording (Ctrl+Shift+D)">
-        <svg class="chat-record-icon-mic" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <svg class="chat-record-icon-mic" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
           <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z" fill="currentColor"/>
           <path d="M17 11a5 5 0 0 1-10 0H5.5a6.5 6.5 0 0 0 5.75 6.46V20h-3a.75.75 0 0 0 0 1.5h7.5a.75.75 0 0 0 0-1.5h-3v-2.54A6.5 6.5 0 0 0 18.5 11H17z" fill="currentColor"/>
         </svg>
-        <svg class="chat-record-icon-stop" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+        <svg class="chat-record-icon-stop" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
           <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
         </svg>
       </button>
       <button id="chat-send" type="submit" aria-label="Send message">
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
           <path d="M3.4 20.4l17.5-7.5a.5.5 0 0 0 0-.92L3.4 4.6a.5.5 0 0 0-.7.6L4.8 11l10.2 1a.5.5 0 0 1 0 .99L4.8 14l-2.1 5.8a.5.5 0 0 0 .7.6z"
                 fill="currentColor"/>
         </svg>

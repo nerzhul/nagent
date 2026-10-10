@@ -48,6 +48,7 @@
 //! to crawl the call graph. We deliberately avoid `sqlx::Any`
 //! until a concrete need pushes us there.
 
+pub mod chat_messages;
 pub mod chat_sessions;
 pub mod credentials;
 pub mod documents;
@@ -164,6 +165,7 @@ impl Db {
             preferences: preferences::Preferences::new(&self.pool),
             documents: documents::Documents::new(&self.pool),
             chat_sessions: chat_sessions::ChatSessions::new(&self.pool),
+            chat_messages: chat_messages::ChatMessages::new(&self.pool),
             memories: memories::Memories::new(&self.pool),
         }
     }
@@ -391,6 +393,15 @@ impl UserDb {
         chat_sessions::ChatSessions::new(&self.inner.pool).for_user(self.user_id)
     }
 
+    /// Scoped chat messages: every per-row method filters by
+    /// `user_id` automatically (plan 1791464974103). The A3
+    /// edit / regenerate flow goes through this view so a
+    /// handler holding a scoped `chat_messages()` cannot
+    /// accidentally read or mutate another user's messages.
+    pub fn chat_messages(&self) -> chat_messages::ScopedChatMessages {
+        chat_messages::ChatMessages::new(&self.inner.pool).for_user(self.user_id)
+    }
+
     /// Scoped preferences: `get` / `upsert` filter by `user_id`
     /// automatically. Plan 4.A.
     pub fn preferences(&self) -> preferences::ScopedPreferences {
@@ -443,6 +454,7 @@ pub struct AdminDb {
     pub preferences: preferences::Preferences,
     pub documents: documents::Documents,
     pub chat_sessions: chat_sessions::ChatSessions,
+    pub chat_messages: chat_messages::ChatMessages,
     pub memories: memories::Memories,
 }
 
@@ -460,6 +472,7 @@ impl AdminDb {
             preferences: preferences::Preferences::new(pool),
             documents: documents::Documents::new(pool),
             chat_sessions: chat_sessions::ChatSessions::new(pool),
+            chat_messages: chat_messages::ChatMessages::new(pool),
             memories: memories::Memories::new(pool),
         }
     }

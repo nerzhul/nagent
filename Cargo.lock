@@ -2178,6 +2178,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "nagent-db",
  "nagent-support",
  "rand 0.8.8",
  "serde",

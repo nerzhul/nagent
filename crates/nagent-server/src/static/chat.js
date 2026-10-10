@@ -51,9 +51,11 @@ import {
   deriveTitle,
   getActiveId,
   historyKey,
+  isMigrated,
   loadHistory,
   loadSelectedModel,
   loadSessions,
+  markMigrated,
   migrateLegacy,
   persistNewSession,
   renameSession,
@@ -63,6 +65,13 @@ import {
   sortedSessions,
   touchSession,
 } from "/static/chat-sessions.js";
+import {
+  formatMarkdown as exportFormatMarkdown,
+  formatJson as exportFormatJson,
+  formatHtml as exportFormatHtml,
+  downloadBlob as exportDownloadBlob,
+  filenameFor as exportFilenameFor,
+} from "/static/chat-export.js";
 import {
   clearCachedLocation,
   formatLocationMessage,
@@ -548,6 +557,12 @@ function renderMath(root) {
 }
 
 function applyMarkdown(bubbleEl, text) {
+  // Keep the raw markdown source on the bubble so the A9 copy
+  // button always has the latest text — even after a streaming
+  // re-render that rewrote the rendered HTML. The cache survives
+  // the `innerHTML =` reset below because we set it on the
+  // element itself, not on a child node.
+  bubbleEl._rawText = text;
   bubbleEl.innerHTML = renderMarkdown(text);
   decorateSafeLinks(bubbleEl);
   renderMath(bubbleEl);
@@ -558,6 +573,19 @@ function applyMarkdown(bubbleEl, text) {
   if (bubbleEl._replayBtn || bubbleEl.classList.contains("chat-message--markdown")) {
     ensureReplayButton(bubbleEl);
     refreshReplayButtonVisibility();
+  }
+  // A9 + A3: the cached-rebuild pattern also re-attaches the
+  // copy button + edit pencil so they survive every streaming
+  // markdown re-render. `_copyBtn` is set on assistant bubbles
+  // only by `appendBubble`; `_editBtn` only on user bubbles.
+  if (bubbleEl._copyBtn && bubbleEl.classList.contains("chat-assistant")) {
+    ensureCopyButton(bubbleEl, "assistant");
+  }
+  if (bubbleEl._editBtn && bubbleEl.classList.contains("chat-user")) {
+    ensureEditPencil(bubbleEl, "user");
+  }
+  if (bubbleEl._regenBtn) {
+    ensureRegenerateButton(bubbleEl);
   }
   // The tools footer holds every tool entry as a child. Re-mount
   // it once (the footer itself tracks its own list of entries).
@@ -611,6 +639,582 @@ function ensureReplayButton(bubbleEl) {
   bubbleEl.appendChild(btn);
   bubbleEl._replayBtn = btn;
   return btn;
+}
+
+/**
+ * A9: per-bubble copy button. Mirrors `ensureReplayButton`'s
+ * cached-rebuild pattern — every `applyMarkdown` rewrites
+ * `bubbleEl.innerHTML`, so the button is re-attached on demand
+ * from the cached `bubbleEl._copyBtn` reference. The click
+ * handler writes the bubble's `_rawText` (or plain textContent
+ * for non-markdown bubbles) to the clipboard via the async
+ * `navigator.clipboard.writeText` API; a transient failure
+ * surfaces a console warning rather than throwing into the
+ * UI event loop.
+ */
+function ensureCopyButton(bubbleEl, role) {
+  let btn = bubbleEl._copyBtn;
+  if (btn && btn.isConnected) return btn;
+  btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-message-copy";
+  const isAssistant = role === "assistant";
+  btn.setAttribute(
+    "aria-label",
+    isAssistant ? "Copy as Markdown" : "Copy message text"
+  );
+  btn.title = isAssistant ? "Copy as Markdown" : "Copy message text";
+  // Clipboard glyph. The inline SVG below is the portable
+  // fallback so the button is meaningful on every system font.
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path d="M19 2h-4.18C14.4.84 13.3 0 12 0s-2.4.84-2.82 2H5C3.9 2 3 2.9 3 4v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm2 18H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V10h10v2z" fill="currentColor"/>
+    </svg>`;
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    copyBubbleToClipboard(bubbleEl, isAssistant);
+  });
+  bubbleEl.appendChild(btn);
+  bubbleEl._copyBtn = btn;
+  return btn;
+}
+
+async function copyBubbleToClipboard(bubbleEl, asMarkdown) {
+  // Prefer the cached raw text (set by `appendBubble` and updated
+  // on every `applyMarkdown` call). Fall back to textContent for
+  // legacy bubbles that never had `_rawText` set.
+  const raw = (bubbleEl._rawText ?? "").toString();
+  const payload = asMarkdown
+    ? raw
+    : (raw || (bubbleEl.textContent || ""));
+  if (!payload) return;
+  let ok = true;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(payload);
+    } else {
+      // Fallback for non-secure contexts: a hidden textarea +
+      // execCommand. The clipboard API is unavailable on
+      // http:// (non-localhost) so a server without TLS would
+      // otherwise silently drop the click.
+      const ta = document.createElement("textarea");
+      ta.value = payload;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "absolute";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+  } catch (e) {
+    console.warn("chat.js: clipboard write failed", e);
+    ok = false;
+  }
+  // Visual confirmation: swap the icon to a check mark + the
+  // label to "Copied!" (or "Copy failed") for ~1.4s so the
+  // user has unambiguous feedback that the click registered.
+  // The `_copyBtn` reference is stable across the streaming
+  // re-render (cached-rebuild pattern) so the swap is durable.
+  flashCopyFeedback(bubbleEl, ok);
+}
+
+function flashCopyFeedback(bubbleEl, ok) {
+  const btn = bubbleEl._copyBtn;
+  if (!btn) return;
+  if (btn._copyFlashTimer) {
+    clearTimeout(btn._copyFlashTimer);
+  }
+  // SVG path swap: clipboard → checkmark (or cross on
+  // failure). The class `chat-message-copy--flash` carries the
+  // colour cue (green / red) so a future visual tweak only
+  // touches CSS.
+  const checkPath = "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z";
+  const crossPath = "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z";
+  const origPath = "M19 2h-4.18C14.4.84 13.3 0 12 0s-2.4.84-2.82 2H5C3.9 2 3 2.9 3 4v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm2 18H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V10h10v2z";
+  const path = btn.querySelector("svg path");
+  if (path) path.setAttribute("d", ok ? checkPath : crossPath);
+  btn.classList.add(ok
+    ? "chat-message-copy--flash-ok"
+    : "chat-message-copy--flash-fail");
+  btn.setAttribute("aria-label", ok ? "Copied" : "Copy failed");
+  btn.setAttribute("title", ok ? "Copied" : "Copy failed");
+  btn._copyFlashTimer = setTimeout(() => {
+    if (path) path.setAttribute("d", origPath);
+    btn.classList.remove(
+      "chat-message-copy--flash-ok",
+      "chat-message-copy--flash-fail",
+    );
+    const isAssistant = bubbleEl.classList.contains("chat-assistant");
+    btn.setAttribute(
+      "aria-label",
+      isAssistant ? "Copy as Markdown" : "Copy message text",
+    );
+    btn.setAttribute(
+      "title",
+      isAssistant ? "Copy as Markdown" : "Copy message text",
+    );
+    btn._copyFlashTimer = null;
+  }, 1400);
+}
+
+/**
+ * A3: edit pencil on user bubbles. Click swaps the bubble's
+ * textContent for a `<textarea>` + Save / Cancel buttons, then
+ * PATCHes the server with the optimistic-concurrency `version`
+ * and truncates every later message so the next LLM turn sees a
+ * clean state. The pencil rides the same cached-rebuild pattern
+ * as `ensureReplayButton` so it survives every `applyMarkdown`.
+ */
+function ensureEditPencil(bubbleEl, role) {
+  if (role !== "user") return null;
+  let btn = bubbleEl._editBtn;
+  if (btn && btn.isConnected) return btn;
+  btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-message-edit-pencil";
+  btn.setAttribute("aria-label", "Edit this message");
+  btn.title = "Edit this message";
+  btn.textContent = "\u270E"; // ✎
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    startEditUserBubble(bubbleEl, btn);
+  });
+  bubbleEl.appendChild(btn);
+  bubbleEl._editBtn = btn;
+  return btn;
+}
+
+/**
+ * A3: regenerate button on the LAST assistant bubble. The
+ * visibility is a two-tier gate (CSS for streaming, JS for the
+ * widget-only case) — same as `ensureReplayButton` and the
+ * A9 copy button. The click handler POSTs to
+ * `/v1/chat/session/:sid/regenerate` (the server drops the last
+ * assistant row), then re-streams the reply through the
+ * existing `streamReply` path.
+ */
+function ensureRegenerateButton(bubbleEl) {
+  let btn = bubbleEl._regenBtn;
+  if (btn && btn.isConnected) return btn;
+  btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-message-regenerate";
+  btn.setAttribute("aria-label", "Regenerate the last reply");
+  btn.title = "Regenerate the last reply";
+  btn.textContent = "\u21BB"; // ↻
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    regenerateLastAssistant();
+  });
+  bubbleEl.appendChild(btn);
+  bubbleEl._regenBtn = btn;
+  return btn;
+}
+
+/**
+ * Walk the live `#chat-messages` and attach the regenerate
+ * button to the LAST assistant bubble only. Older assistant
+ * bubbles stay button-less — the plan explicitly defers
+ * "regenerate any past turn" to a follow-up.
+ */
+function refreshRegenerateButtonVisibility() {
+  const all = messagesEl.querySelectorAll(".chat-assistant");
+  const last = all[all.length - 1];
+  messagesEl.querySelectorAll(".chat-message-regenerate").forEach((btn) => {
+    const bubble = btn.closest(".chat-assistant");
+    if (bubble !== last) {
+      btn.remove();
+    }
+  });
+  if (last && !last.classList.contains("chat-message--streaming")
+      && !last.classList.contains("chat-message--widget-only")) {
+    ensureRegenerateButton(last);
+  }
+}
+
+function startEditUserBubble(bubbleEl, btn) {
+  if (!bubbleEl.dataset.messageId) return;
+  // Hide the pencil + copy button while the form is open so a
+  // second click on the pencil cannot double-insert a form.
+  btn.hidden = true;
+  if (bubbleEl._copyBtn) bubbleEl._copyBtn.hidden = true;
+  // Remove the existing text node + child buttons; we render a
+  // textarea in the same bubble so the chip row (attachments)
+  // and the bubble's own dataset stay in place.
+  const text = (bubbleEl._rawText != null)
+    ? bubbleEl._rawText
+    : (bubbleEl.textContent || "");
+  // Preserve any attachment chip tray (the `<ul
+  // class="chat-message-attachments">` element rendered by the
+  // composer) so the edited bubble still shows the chips under
+  // the textarea.
+  const chips = bubbleEl.querySelector(".chat-message-attachments");
+  // Strip everything except the chips.
+  Array.from(bubbleEl.childNodes).forEach((n) => {
+    if (n !== chips && n !== btn && n !== bubbleEl._copyBtn) {
+      n.remove();
+    }
+  });
+  // Build the form.
+  const form = document.createElement("form");
+  form.className = "chat-message-edit-form";
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.rows = Math.min(8, Math.max(1, text.split("\n").length));
+  ta.setAttribute("aria-label", "Edited message");
+  form.appendChild(ta);
+  const actions = document.createElement("div");
+  actions.className = "chat-message-edit-form-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "ghost";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => cancelEdit(bubbleEl));
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "primary";
+  save.textContent = "Save & resubmit";
+  actions.appendChild(cancel);
+  actions.appendChild(save);
+  form.appendChild(actions);
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    commitEdit(bubbleEl, ta.value, btn);
+  });
+  bubbleEl.insertBefore(form, chips || null);
+  bubbleEl._editForm = form;
+  ta.focus();
+  // Auto-resize on input so a longer edit does not require manual
+  // scrollbar.
+  ta.addEventListener("input", () => autosizeTextarea(ta));
+  autosizeTextarea(ta);
+}
+
+function autosizeTextarea(ta) {
+  ta.style.height = "auto";
+  ta.style.height = `${Math.min(ta.scrollHeight, 320)}px`;
+}
+
+function cancelEdit(bubbleEl) {
+  // Re-render the bubble from the persisted history record. We
+  // re-fetch the latest record so the cancel path shows whatever
+  // was on disk (an edit that was committed from a different tab
+  // shows up here).
+  const sessionId = bubbleEl.dataset.sessionId;
+  const messageId = bubbleEl.dataset.messageId;
+  if (!sessionId || !messageId) return;
+  const h = loadHistory(sessionId);
+  const rec = h.find((m) => m.id === messageId);
+  if (!rec) {
+    // Row gone — fall back to wiping the bubble.
+    bubbleEl.remove();
+    return;
+  }
+  // Easiest reset: re-call `appendBubble({ persist: false })` to
+  // repaint the same content + restore the buttons. We replace
+  // the bubble in-place to keep the user's scroll position.
+  const replacement = appendBubble(rec.role, rec.content, {
+    persist: false,
+    markdown: false,
+    sessionId,
+    messageId: rec.id,
+    attachments: rec.attachments || null,
+  });
+  if (replacement) {
+    bubbleEl.replaceWith(replacement);
+  }
+}
+
+async function commitEdit(bubbleEl, newText, btn) {
+  const sessionId = bubbleEl.dataset.sessionId;
+  const messageId = bubbleEl.dataset.messageId;
+  if (!sessionId || !messageId) return;
+  const trimmed = (newText || "").trim();
+  if (!trimmed) return;
+  // Optimistic-concurrency: read the version from the bubble
+  // (set by `appendBubble` from the server response on first
+  // write, or from the local history record on hydration).
+  const version = parseInt(bubbleEl.dataset.version || "1", 10);
+  const h = loadHistory(sessionId);
+  const idx = h.findIndex((m) => m.id === messageId);
+  if (idx === -1) return;
+  try {
+    // 1. PATCH the message content. On 409 (version mismatch)
+    // we surface an inline error inside the form so the user
+    // can decide to reload.
+    const updated = await editMessageOnServer(
+      sessionId, messageId, trimmed, version,
+    );
+    // 2. Truncate every later message server-side so the next
+    // LLM turn sees a clean state. We mirror the truncation
+    // locally too so the rendered DOM matches.
+    h[idx].content = updated.content;
+    h[idx].version = updated.version;
+    bubbleEl.dataset.version = String(updated.version);
+    bubbleEl._rawText = updated.content;
+    const truncated = h.slice(0, idx + 1);
+    saveHistory(sessionId, truncated);
+    renderHistory(sessionId);
+    // 3. Re-send the edited turn through the existing streamReply
+    // path so the user gets a fresh reply without re-pressing
+    // Enter. The model picker / temperature / location / TZ
+    // blocks are read from their current UI state inside
+    // `streamReply` itself.
+    enqueueTurn(() => streamReply(sessionId, trimmed));
+  } catch (e) {
+    if (e && e.status === 409) {
+      showEditConflict(bubbleEl);
+      return;
+    }
+    if (e && e.status === 403) {
+      showEditForbidden(bubbleEl);
+      return;
+    }
+    if (e && e.status === 404) {
+      showEditMissing(bubbleEl);
+      return;
+    }
+    console.warn("chat.js: edit message failed", e);
+    showEditGenericError(bubbleEl, e?.message || String(e));
+  }
+}
+
+function showEditConflict(bubbleEl) {
+  showEditInlineError(
+    bubbleEl,
+    "This message changed on the server — reload to see the latest.",
+  );
+}
+
+function showEditForbidden(bubbleEl) {
+  showEditInlineError(
+    bubbleEl,
+    "You do not have permission to edit this message.",
+  );
+}
+
+function showEditMissing(bubbleEl) {
+  showEditInlineError(
+    bubbleEl,
+    "This message no longer exists on the server.",
+  );
+}
+
+function showEditGenericError(bubbleEl, msg) {
+  showEditInlineError(bubbleEl, `Edit failed: ${msg}`);
+}
+
+function showEditInlineError(bubbleEl, msg) {
+  const form = bubbleEl._editForm;
+  if (!form) {
+    console.warn("chat.js: cannot show edit error — form is gone", msg);
+    return;
+  }
+  let err = form.querySelector(".chat-message-edit-error");
+  if (!err) {
+    err = document.createElement("p");
+    err.className = "chat-message-edit-error";
+    form.appendChild(err);
+  }
+  err.textContent = msg;
+}
+
+async function regenerateLastAssistant() {
+  const sid = activeSessionId();
+  if (!sid) return;
+  // Abort an in-flight stream so its `finally` block fires
+  // BEFORE we touch the local history. The `finally` block
+  // writes the partial assistant turn to history and POSTs it
+  // to the server — if we don't wait for it, our own local
+  // delete below races against the abort's append and we end
+  // up with a stale partial assistant row at the tail. One
+  // microtask tick is enough: the abort's `finally` is already
+  // scheduled by `AbortController.abort()`.
+  if (inflight) {
+    inflight.controller.abort();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  // Drop the last assistant from local history FIRST so:
+  //   1. the user sees the assistant bubble disappear
+  //      immediately (visual feedback that the click registered),
+  //   2. the upcoming `streamReply` — which bails when the last
+  //      history entry is not a user turn — sees a clean tail.
+  // The server delete runs in parallel; whichever lands first
+  // is fine because we only act on the local copy here.
+  const h = loadHistory(sid);
+  let removedAny = false;
+  for (let i = h.length - 1; i >= 0; i--) {
+    if (h[i].role === "assistant") {
+      h.splice(i, 1);
+      removedAny = true;
+      break;
+    }
+  }
+  if (removedAny) {
+    saveHistory(sid, h);
+    renderHistory(sid);
+    refreshExportMenuVisibility();
+  }
+  const serverSid = await getServerSessionId();
+  try {
+    const resp = await fetch(`/v1/chat/session/${serverSid}/regenerate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...window.nagentAuth?.csrfHeaders(),
+      },
+    });
+    if (!resp.ok && resp.status !== 204) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`regenerate failed: HTTP ${resp.status} ${body}`);
+    }
+  } catch (e) {
+    // The local delete above already cleared the bubble; a
+    // server-side failure is non-fatal — the next streamReply
+    // will POST a fresh assistant turn and the table stays
+    // consistent (the user will see the same conversation
+    // shape, just with one orphaned row on the server that the
+    // periodic sweep could clean up later).
+    console.warn("chat.js: regenerate HTTP failed; local delete already applied", e);
+  }
+  // Find the last user message — the regenerate replays the
+  // previous turn verbatim.
+  for (let i = h.length - 1; i >= 0; i--) {
+    if (h[i].role === "user") {
+      const userText = h[i].content;
+      enqueueTurn(() => streamReply(sid, userText));
+      return;
+    }
+  }
+}
+
+// ---- Server-side message store helpers -----------------------------------
+//
+// Plan 1791464974103 §1.4: the localStorage copy of every
+// session is a hydration cache, not the only source of truth.
+// On the first authenticated load, every not-yet-migrated
+// session is POSTed to `/v1/chat/session/:sid/messages` (one
+// message at a time so a transient failure retries the tail
+// only). Subsequent appends / edits go through the same route.
+//
+// Every helper below is a no-op when the server does not
+// advertise the `chat_messages` feature (a build without the
+// migration; the UI keeps using localStorage only).
+
+function chatMessagesEnabled() {
+  return Boolean(window.__nagentFeatures && window.__nagentFeatures.chat_messages);
+}
+
+async function appendMessageToServer(sessionId, msg) {
+  if (!chatMessagesEnabled()) return null;
+  const serverSid = await getServerSessionId();
+  const resp = await fetch(`/v1/chat/session/${serverSid}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...window.nagentAuth?.csrfHeaders(),
+    },
+    body: JSON.stringify({
+      role: msg.role,
+      content: msg.content,
+      model: msg.model || null,
+    }),
+  });
+  if (!resp.ok) {
+    throw await asHttpError(resp, "appendMessageToServer");
+  }
+  const body = await resp.json();
+  return body.id || null;
+}
+
+async function editMessageOnServer(sessionId, messageId, content, version) {
+  if (!chatMessagesEnabled()) {
+    // Local-only edit (the localStorage copy is the only source
+    // of truth on this build). The caller still rewrites the
+    // history + DOM.
+    return { id: messageId, content, version };
+  }
+  const serverSid = await getServerSessionId();
+  const resp = await fetch(
+    `/v1/chat/session/${serverSid}/messages/${messageId}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        ...window.nagentAuth?.csrfHeaders(),
+      },
+      body: JSON.stringify({ content, version }),
+    },
+  );
+  if (!resp.ok) {
+    throw await asHttpError(resp, "editMessageOnServer");
+  }
+  return await resp.json();
+}
+
+async function asHttpError(resp, ctx) {
+  const body = await resp.text().catch(() => "");
+  const e = new Error(`${ctx}: HTTP ${resp.status} ${body}`);
+  e.status = resp.status;
+  e.body = body;
+  return e;
+}
+
+async function migrateSessionToServer(sessionId) {
+  // One-shot: walk every entry in `nagent.chat.session.<id>` and
+  // POST it to the server, then stamp the migrated flag. Runs
+  // once per page load after `/api/features` reports
+  // `chat_messages: true` AND the user is signed in (so the
+  // `/v1/chat/session/:sid/messages` route accepts the write).
+  if (!chatMessagesEnabled()) return;
+  if (isMigrated(sessionId)) return;
+  const history = loadHistory(sessionId);
+  if (!history.length) {
+    markMigrated(sessionId);
+    return;
+  }
+  const serverSid = await getServerSessionId();
+  for (const msg of history) {
+    if (!msg.role || !["user", "assistant", "system"].includes(msg.role)) {
+      // Skip tool traces / malformed rows — the server
+      // CHECK constraint would refuse them.
+      continue;
+    }
+    try {
+      await fetch(`/v1/chat/session/${serverSid}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...window.nagentAuth?.csrfHeaders(),
+        },
+        body: JSON.stringify({
+          role: msg.role,
+          content: msg.content || "",
+          model: msg.model || null,
+        }),
+      });
+    } catch (e) {
+      // Don't mark migrated on failure — the next load retries
+      // the tail.
+      console.warn("chat.js: migrateSessionToServer POST failed", e);
+      return;
+    }
+  }
+  markMigrated(sessionId);
+}
+
+async function migrateAllSessionsToServer() {
+  // Walk every `nagent.chat.sessions` entry and migrate each one
+  // independently. The per-session flag makes this safe to
+  // re-run: a second pass is a no-op.
+  if (!chatMessagesEnabled()) return;
+  const sessions = loadSessions();
+  for (const s of sessions) {
+    if (!isMigrated(s.id)) {
+      await migrateSessionToServer(s.id);
+    }
+  }
 }
 
 // Schedule a markdown re-render of `bubbleEl` for the next animation
@@ -916,7 +1520,25 @@ function renderHistory(sessionId) {
   // re-append after the rehydrated bubbles are in place.
   const inlineVoiceGraph = messagesEl.querySelector(".voice-graph--inline");
   messagesEl.innerHTML = "";
-  const history = loadHistory(sessionId);
+  let history = loadHistory(sessionId);
+  // Plan 1791464974103 §2: legacy history records (created
+  // before the server-mirror landed) have no `id` / `version`.
+  // Mint an id on every record so edit / regenerate / copy
+  // buttons have a stable key. The minted id is persisted back
+  // so the next render is a no-op.
+  let mintedAny = false;
+  history = history.map((m) => {
+    if (m.id) return m;
+    mintedAny = true;
+    return {
+      ...m,
+      id: (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+      version: m.version ?? 1,
+    };
+  });
+  if (mintedAny) saveHistory(sessionId, history);
   // Track the assistant bubble the *current* tool-bubble cluster
   // should hang off. When the history contains the pattern
   // `assistant(tool_calls) → tool → … → assistant(final)`, the
@@ -967,6 +1589,8 @@ function renderHistory(sessionId) {
         model: msg.model,
         markdown: true,
         sessionId,
+        messageId: msg.id,
+        version: msg.version,
       });
       if (hasToolCalls) {
         // Anchor subsequent tool bubbles under this assistant; do
@@ -1005,6 +1629,8 @@ function renderHistory(sessionId) {
       model: msg.model,
       markdown: false,
       sessionId,
+      messageId: msg.id,
+      version: msg.version,
       // `attachments` is a per-user-bubble array carrying the
       // `{id, name, mime, size_bytes}` summary that
       // `submitUserTurn` persisted on the originating turn.
@@ -1035,11 +1661,20 @@ function renderHistory(sessionId) {
     messagesEl.appendChild(inlineVoiceGraph);
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  // A3: the regenerate button is a last-bubble-only affordance
+  // (older assistant bubbles stay button-less). Re-evaluate
+  // after every render so a session switch / refresh sticks
+  // the button to the right bubble.
+  refreshRegenerateButtonVisibility();
+  // A1: re-evaluate the export menu after every render — a
+  // session switch (active session has no messages) re-locks
+  // the menu.
+  refreshExportMenuVisibility();
 }
 
 function appendBubble(role, text, {
   persist = true, model = null, markdown = false, sessionId = null,
-  attachments = null,
+  attachments = null, messageId = null, version = null,
 } = {}) {
   // `sessionId` is required on every persist path: a missing id is a
   // programming error, and silently dropping into the active session
@@ -1051,6 +1686,19 @@ function appendBubble(role, text, {
     console.warn("appendBubble called without a sessionId; skipping persist");
     return null;
   }
+  // Plan 1791464974103 §2: every bubble gets a stable per-message
+  // id. The id is server-minted when `appendBubble` is reached via
+  // the persist path (a fresh `appendMessage` round-trip returns
+  // it); for the live-stream assistant bubble the id is minted on
+  // append and stamped on the bubble's `dataset.messageId` so the
+  // A3 regenerate / copy button can find it again. Render-only
+  // callers (`renderHistory`) carry the id through the history
+  // record — a legacy record without an id gets one minted on
+  // hydration.
+  const id = messageId
+    || (typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
   const div = document.createElement("div");
   const classes = [`chat-message`, `chat-${role}`];
   // The `--markdown` modifier unlocks `white-space: normal` and the
@@ -1065,7 +1713,15 @@ function appendBubble(role, text, {
   if (attachments?.length) classes.push("chat-message--has-attachments");
   div.className = classes.join(" ");
   if (sid) div.dataset.sessionId = sid;
+  div.dataset.messageId = id;
+  if (version != null) div.dataset.version = String(version);
   if (model && role === "assistant") div.dataset.model = model;
+  // Cache the raw markdown source on the bubble so the A9
+  // copy-as-markdown button always has the latest text even
+  // after the streaming `applyMarkdown` rewrites the rendered
+  // HTML. The cache is updated on every `applyMarkdown` call
+  // (see `applyMarkdown`).
+  div._rawText = text;
   if (markdown) {
     // Sanitized HTML render of the assistant reply. The text source is
     // persisted (below) — only the live bubble uses innerHTML so a
@@ -1103,6 +1759,22 @@ function appendBubble(role, text, {
   if (role === "assistant") {
     ensureReplayButton(div);
   }
+  // A9: per-bubble copy-as-markdown button. Only on assistant
+  // bubbles — the user already knows what they typed, so a
+  // copy affordance on their own messages would be noise. The
+  // Transcript-mode export menu (plan 1791464974103 §4.12)
+  // covers the "I want a copy of the whole session" case
+  // without per-bubble redundancy. The button rides the same
+  // cached-rebuild pattern as the replay button so it
+  // survives every `applyMarkdown` reset.
+  if (role === "assistant") {
+    ensureCopyButton(div, role);
+  }
+  // A3: edit pencil on user bubbles. The pencil rides the same
+  // cached-rebuild pattern as `ensureReplayButton` so it
+  // survives every `applyMarkdown`. `ensureEditPencil` is a no-op
+  // on roles that don't carry the affordance.
+  ensureEditPencil(div, role);
   messagesEl.appendChild(div);
   // Re-pin the inline voice-graph to the end so the
   // `position: sticky; bottom: 0` CSS keeps it at the bottom of the
@@ -1118,14 +1790,17 @@ function appendBubble(role, text, {
   // initial `hidden = true` state until the next master-toggle event.
   if (role === "assistant") {
     refreshReplayButtonVisibility();
+    refreshRegenerateButtonVisibility();
   }
   if (persist) {
     const history = loadHistory(sid);
     history.push({
+      id,
       role,
       content: text,
       ts: Date.now(),
       model,
+      version: version ?? 1,
       // Persist attachments so history hydration re-renders
       // the chip row on reload. Omit the key when empty to
       // keep the on-disk shape unchanged for turns without
@@ -1147,6 +1822,38 @@ function appendBubble(role, text, {
       touchSession(sid);
     }
     renderSessionList();
+    // A1: the export menu lifts its `[disabled]` flag as soon
+    // as the session has at least one message. Cheap to call
+    // on every append.
+    refreshExportMenuVisibility();
+    // A1 / A3 (foundation): mirror the just-appended bubble
+    // to the server. The server is the source of truth once
+    // `chat_messages` is wired (plan §0); the localStorage
+    // copy is a hydration cache. The fire-and-forget shape
+    // means the UI never waits on the network, and a
+    // transient failure falls back to the localStorage copy
+    // on next reload. `appendMessageToServer` is a no-op
+    // when the feature flag is off (a build without
+    // `chat_messages`).
+    appendMessageToServer(sid, {
+      id, role, content: text, model,
+    }).then((assignedId) => {
+      if (assignedId && assignedId !== id) {
+        // Server minted a different id (e.g. migration
+        // path upgraded the client-minted one). Update the
+        // bubble + history record so the next read uses
+        // the server id.
+        div.dataset.messageId = assignedId;
+        const h = loadHistory(sid);
+        const idx = h.findIndex((m) => m.id === id);
+        if (idx !== -1) {
+          h[idx].id = assignedId;
+          saveHistory(sid, h);
+        }
+      }
+    }).catch((e) => {
+      console.warn("chat.js: appendMessageToServer failed", e);
+    });
   }
   return div;
 }
@@ -3397,6 +4104,10 @@ async function streamReply(sessionId, userText, opts = {}) {
       // the reply settles.
       const footer = assistantEl.querySelector(".chat-message__tools-summary");
       if (footer) footer.open = false;
+      // A3: now that the reply is finalised, attach the
+      // regenerate button to this last assistant bubble (and
+      // remove the one we had on the previous last, if any).
+      refreshRegenerateButtonVisibility();
     }
     // If a `get_weather` tool result came back successfully during
     // this reply, run the assistant finalizer (collapse long prose
@@ -3423,10 +4134,54 @@ async function streamReply(sessionId, userText, opts = {}) {
     // correct session after a switch.
     const targetSessionId = inflight?.sessionId || sessionId;
     const h = loadHistory(targetSessionId);
-    h.push({ role: "assistant", content: finalSource, ts: Date.now(), model });
+    // Mint a client-side id for the assistant turn so the A3
+    // regenerate / copy button can find it again. The server
+    // also mints one — the post-promise reconciliation below
+    // updates the bubble to the canonical server id when the
+    // append round-trip succeeds.
+    const assistantMessageId = (typeof crypto !== "undefined"
+        && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    h.push({
+      id: assistantMessageId,
+      role: "assistant",
+      content: finalSource,
+      ts: Date.now(),
+      model,
+      version: 1,
+    });
     saveHistory(targetSessionId, h);
+    if (assistantEl) {
+      assistantEl.dataset.messageId = assistantMessageId;
+      assistantEl.dataset.version = "1";
+      assistantEl._rawText = finalSource;
+    }
     touchSession(targetSessionId);
     renderSessionList();
+    refreshExportMenuVisibility();
+    // Mirror the assistant turn to the server (fire and forget).
+    // The post-promise reconciliation updates the bubble + the
+    // history record to the canonical server id when the round
+    // trip succeeds.
+    appendMessageToServer(targetSessionId, {
+      id: assistantMessageId,
+      role: "assistant",
+      content: finalSource,
+      model,
+    }).then((assignedId) => {
+      if (assignedId && assignedId !== assistantMessageId) {
+        if (assistantEl) assistantEl.dataset.messageId = assignedId;
+        const h2 = loadHistory(targetSessionId);
+        const idx = h2.findIndex((m) => m.id === assistantMessageId);
+        if (idx !== -1) {
+          h2[idx].id = assignedId;
+          saveHistory(targetSessionId, h2);
+        }
+      }
+    }).catch((e) => {
+      console.warn("chat.js: appendMessageToServer (assistant) failed", e);
+    });
     inflight = null;
     // Clear the streaming status so the pill falls back to the audio
     // state (typically "idle") before we drop the input-disable.
@@ -3557,6 +4312,82 @@ function wireFormOnce() {
       }
     });
   }
+  // A1: wire the per-session export menu. The handler reads the
+  // current session's title + history, runs the matching
+  // formatter, and triggers a download via the same
+  // `URL.createObjectURL` + programmatic `<a download>` click
+  // pattern the Transcript-mode exporter uses. The `[disabled]`
+  // attribute is lifted by `refreshExportMenuVisibility` on
+  // every `appendBubble` / `renderHistory`.
+  const exportMenu = document.getElementById("chat-export-menu");
+  if (exportMenu) {
+    exportMenu.addEventListener("click", (e) => {
+      const target = e.target.closest("a[data-format]");
+      if (!target) return;
+      e.preventDefault();
+      runSessionExport(target.dataset.format);
+    });
+  }
+  refreshExportMenuVisibility();
+}
+
+/**
+ * Lift / drop the `[disabled]` flag on the export menu based
+ * on whether the active session has at least one message.
+ * Mirrors the same `disabled` contract the Transcript-mode
+ * `#download-menu` uses (so the dropdown greys out until a
+ * turn has actually landed).
+ */
+function refreshExportMenuVisibility() {
+  const menu = document.getElementById("chat-export-menu");
+  if (!menu) return;
+  const sid = activeSessionId();
+  if (!sid) {
+    menu.setAttribute("disabled", "");
+    return;
+  }
+  const history = loadHistory(sid);
+  if (history.length === 0) {
+    menu.setAttribute("disabled", "");
+  } else {
+    menu.removeAttribute("disabled");
+  }
+}
+
+function runSessionExport(format) {
+  const sid = activeSessionId();
+  if (!sid) return;
+  const sessions = loadSessions();
+  const session = sessions.find((s) => s.id === sid);
+  const history = loadHistory(sid);
+  const payload = {
+    id: sid,
+    title: session?.title || "",
+    messages: history,
+  };
+  let content, mime, ext;
+  try {
+    if (format === "md") {
+      content = exportFormatMarkdown(payload);
+      mime = "text/markdown";
+      ext = "md";
+    } else if (format === "json") {
+      content = exportFormatJson(payload);
+      mime = "application/json";
+      ext = "json";
+    } else if (format === "html") {
+      content = exportFormatHtml(payload);
+      mime = "text/html";
+      ext = "html";
+    } else {
+      console.warn("chat.js: unknown export format", format);
+      return;
+    }
+  } catch (e) {
+    console.warn("chat.js: export formatter threw", e);
+    return;
+  }
+  exportDownloadBlob(content, mime, exportFilenameFor(payload.title, ext));
 }
 window.addEventListener("app-shell-mounted", wireFormOnce);
 // In the unlikely event the shell is already mounted (a cached
@@ -3723,7 +4554,39 @@ function applyFeatureGates() {
   // Future: gate the TTS settings drawer on `feature("tts")`,
   // etc. Each addition is one branch — the loop over a small
   // map keeps the boot tidy.
+  // A1 / A3: the export menu + per-bubble edit pencil only
+  // make sense when the server-side `chat_messages` table is
+  // reachable. The CSS uses `:has()` + a class on the body
+  // for the hidden case so the buttons do not flash before
+  // the feature flag resolves; this branch is the source of
+  // truth. The migration shim also fires from here: when the
+  // flag flips on (one-shot), walk every not-yet-migrated
+  // session and mirror it server-side.
+  const exportMenu = document.getElementById("chat-export-menu");
+  if (exportMenu) {
+    exportMenu.toggleAttribute("hidden", !feature("chat_messages"));
+  }
+  // The edit pencil / regenerate button live per-bubble; a
+  // body-level class is the cheapest way to gate them in CSS
+  // without a per-bubble query. The class is added on every
+  // feature emit so a runtime toggle re-paints.
+  document.body.classList.toggle(
+    "chat-messages-disabled",
+    !feature("chat_messages"),
+  );
+  if (feature("chat_messages") && !migratedToServer) {
+    migratedToServer = true;
+    migrateAllSessionsToServer().catch((e) => {
+      console.warn("chat.js: migrateAllSessionsToServer failed", e);
+    });
+  }
 }
+
+// One-shot: tracks whether the localStorage→server migration
+// shim has fired for this page load. Reset on a hard reload
+// (the module is re-evaluated) so a transient failure on the
+// first attempt can retry on the second.
+let migratedToServer = false;
 
 // Subscribe ONCE at module load so every `emitFeatures` triggers
 // exactly one re-apply. Subscribing inside `applyFeatureGates`

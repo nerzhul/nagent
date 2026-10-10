@@ -88,6 +88,7 @@ pub type AgentsConfig = config::AgentConfig;
 
 pub use config::{CliArgs, Config};
 pub use state::{
-    AppState, AuthState, ChatSessionsState, DocumentsState, LlmState, SttState, TtsState,
+    AppState, AuthState, ChatMessagesState, ChatSessionsState, DocumentsState, LlmState, SttState,
+    TtsState,
 };
 pub use version::VersionInfo;

@@ -753,13 +753,13 @@ select, input[type="checkbox"] {
  * live without being distracting. */
 #chat-record-btn {
   flex: 0 0 auto;
-  width: 2.6rem;
-  height: 2.6rem;
+  width: 2.4rem;
+  height: 2.4rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-elev);
   color: var(--fg);
@@ -2069,9 +2069,40 @@ select, input[type="checkbox"] {
 
 #chat-form {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.4rem;
   align-items: flex-end;
   margin-top: 0.75rem;
+}
+/* Right-aligned action cluster (attach + record + send/stop).
+ * Kept as a sub-flex so the icon buttons always hug the
+ * textarea's right edge, with the primary send action visually
+ * distinct (filled accent background) and the secondary
+ * actions (paperclip, mic) sharing the same ghost treatment.
+ * The cluster grows naturally when the form row wraps; we
+ * pin it to the right with `margin-left: auto` on the first
+ * button so the textarea stays the dominant visual element.
+ */
+#chat-form > .chat-attach-btn,
+#chat-form > #chat-record-btn,
+#chat-form > #chat-send,
+#chat-form > #chat-stop {
+  margin-left: 0;
+}
+/* Spacing between successive action buttons only — the first
+ * one in the cluster gets the auto margin so the whole cluster
+ * pushes to the right.
+ */
+#chat-form > .chat-attach-btn:not(:first-of-type),
+#chat-form > #chat-record-btn:not(:first-of-type),
+#chat-form > #chat-send:not(:first-of-type),
+#chat-form > #chat-stop:not(:first-of-type) {
+  margin-left: 0.25rem;
+}
+#chat-form > .chat-attach-btn:first-of-type,
+#chat-form > #chat-record-btn:first-of-type,
+#chat-form > #chat-send:first-of-type,
+#chat-form > #chat-stop:first-of-type {
+  margin-left: auto;
 }
 
 /* Document-attach surface. The paperclip button mirrors the
@@ -2083,17 +2114,25 @@ select, input[type="checkbox"] {
  * flag — `composer-attachments.js` toggles `hidden`. */
 .chat-attach-btn {
   flex: 0 0 auto;
-  width: 2.6rem;
-  height: 2.6rem;
+  width: 2.4rem;
+  height: 2.4rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--border);
-  background: transparent;
+  background: var(--bg-elev);
   color: var(--fg-mute);
   cursor: pointer;
-  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease, transform 80ms ease;
+}
+.chat-attach-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--bg-elev);
+}
+.chat-attach-btn:active:not(:disabled) {
+  transform: scale(0.96);
 }
 .chat-attach-btn:hover {
   color: var(--fg);
@@ -2220,13 +2259,13 @@ select, input[type="checkbox"] {
   flex: 1 1 auto;
   min-width: 0;
   resize: none;
-  min-height: 2.6rem;
+  min-height: 2.4rem;
   max-height: 10rem;
   background: var(--bg-elev);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.65rem 0.85rem;
+  border-radius: 8px;
+  padding: 0.55rem 0.85rem;
   font-family: inherit;
   font-size: 0.95rem;
   line-height: 1.4;
@@ -2251,45 +2290,51 @@ select, input[type="checkbox"] {
 #chat-send,
 #chat-stop {
   flex: 0 0 auto;
-  width: 2.6rem;
-  height: 2.6rem;
+  width: 2.4rem;
+  height: 2.4rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid transparent;
   cursor: pointer;
-  transition: background 120ms ease, transform 80ms ease, opacity 120ms ease;
+  transition: background 120ms ease, transform 80ms ease, opacity 120ms ease, box-shadow 120ms ease;
 }
 
 #chat-send {
   background: var(--accent);
   color: #0b0d10;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 #chat-send:hover:not(:disabled) {
   background: var(--accent-2);
   transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 #chat-send:active:not(:disabled) {
   transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 #chat-send:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: not-allowed;
   transform: none;
+  box-shadow: none;
 }
 
 #chat-stop {
   background: var(--error);
   color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 #chat-stop:hover:not(:disabled) {
   background: #ff6b63;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 #chat-send svg,
@@ -2863,6 +2908,145 @@ select, input[type="checkbox"] {
 .chat-message.chat-assistant {
   position: relative;
   padding-right: 2.4rem;
+}
+
+/* ---- A1 / A3 / A9 per-bubble affordances -------------------------------
+ *
+ * Three new affordances live next to the existing 🔊 replay
+ * button on every chat bubble:
+ *
+ *   📋 copy (A9):  every role — assistant copies the latest
+ *                  raw markdown, user bubbles copy plain text.
+ *                  Uses the same cached-rebuild pattern as the
+ *                  replay button so it survives every
+ *                  `applyMarkdown` reset.
+ *   ✎  edit (A3):  only on user bubbles. Click swaps the
+ *                  bubble's textContent for a `<textarea>` +
+ *                  Save / Cancel buttons; Save PATCHes the
+ *                  server with the optimistic-concurrency
+ *                  `version` and truncates every later
+ *                  message so the next LLM turn sees a clean
+ *                  state.
+ *   ↻  regenerate (A3): only on the LAST assistant bubble.
+ *                  Click POSTs to `/v1/chat/session/:sid/regenerate`
+ *                  (the server drops the last assistant row)
+ *                  then re-streams the reply through the
+ *                  existing `streamReply` path.
+ *
+ * The two-tier visibility gate matches the replay button
+ * (CSS for streaming, JS for the widget-only case) so a
+ * bubble never shows affordances it cannot honour.
+ */
+.chat-message-copy,
+.chat-message-edit-pencil,
+.chat-message-regenerate {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  transition: color 120ms ease, border-color 120ms ease,
+    background 120ms ease;
+}
+.chat-message-copy:hover,
+.chat-message-edit-pencil:hover,
+.chat-message-regenerate:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+/* Copy-button flash feedback (A9): the click handler swaps
+ * the SVG path to a check mark + adds one of these classes
+ * for ~1.4s so the user has unambiguous confirmation the
+ * clipboard write landed. The icon reverts to the clipboard
+ * glyph on its own — no JS-driven undo is needed.
+ */
+.chat-message-copy--flash-ok {
+  color: var(--ok, #5fc88f);
+  border-color: var(--ok, #5fc88f);
+  background: var(--bg-elev);
+}
+.chat-message-copy--flash-fail {
+  color: var(--error, #d35a5a);
+  border-color: var(--error, #d35a5a);
+  background: var(--bg-elev);
+}
+.chat-message-copy:focus-visible,
+.chat-message-edit-pencil:focus-visible,
+.chat-message-regenerate:focus-visible {
+  outline: 2px solid var(--accent, #4a90e2);
+  outline-offset: 2px;
+}
+.chat-message-copy { top: 0.5rem; right: 2.4rem; }
+.chat-message-edit-pencil { top: 0.5rem; right: 4.2rem; }
+.chat-message-regenerate { top: 2.4rem; right: 0.5rem; }
+.chat-message-regenerate[hidden],
+.chat-message-copy[hidden],
+.chat-message-edit-pencil[hidden] { display: none; }
+.chat-message--streaming > .chat-message-copy,
+.chat-message--streaming > .chat-message-edit-pencil,
+.chat-message--streaming > .chat-message-regenerate { display: none; }
+.chat-message--widget-only > .chat-message-copy,
+.chat-message--widget-only > .chat-message-edit-pencil,
+.chat-message--widget-only > .chat-message-regenerate { display: none; }
+.chat-user { position: relative; padding-right: 6.4rem; }
+.chat-user:not(.chat-message--markdown) { padding-right: 6.4rem; }
+/* Hide the edit + copy + regenerate affordances when the
+ * server-side `chat_messages` table is not wired
+ * (`features.chat_messages = false`). The body class is
+ * flipped by `applyFeatureGates` in `chat.js`. */
+body.chat-messages-disabled .chat-message-copy,
+body.chat-messages-disabled .chat-message-edit-pencil,
+body.chat-messages-disabled .chat-message-regenerate { display: none; }
+
+/* Inline edit form: rendered inside the user bubble when the
+ * pencil is clicked. The textarea auto-sizes up to 12em; the
+ * Save / Cancel buttons align to the right.
+ */
+.chat-message-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+.chat-message-edit-form textarea {
+  min-height: 1.5em;
+  max-height: 12em;
+  resize: vertical;
+  font-family: inherit;
+  font-size: inherit;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+}
+.chat-message-edit-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+.chat-message-edit-error {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--error);
+}
+
+/* Inline error inside the export menu. Shown when the
+ * formatter throws (e.g. clipboard blocked, file write
+ * denied). The class is opt-in: a future A11y pass can
+ * surface the same label through `aria-live`.
+ */
+.download-menu-list .chat-export-error {
+  padding: 0.4rem 0.8rem;
+  color: var(--error);
+  font-size: 0.85rem;
 }
 
 /* ---- Transcript-mode export dropdown ---------------------------------------
