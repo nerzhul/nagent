@@ -630,10 +630,18 @@ function ensureReplayButton(bubbleEl) {
   // Always visible on assistant bubbles -- the click handler in
   // `replayMessage` is what gates actual playback. Showing the
   // button unconditionally doubles as a discoverability cue.
+  // Two SVGs are baked in: the speaker (idle) and the stop
+  // square (playing). CSS toggles which one is visible via
+  // the `.chat-message-replay--playing` class — see
+  // `style.css`. This avoids a JS-driven path swap that would
+  // race with the cached-rebuild pattern.
   btn.hidden = false;
   btn.innerHTML = `
-    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+    <svg class="chat-message-replay-icon-idle" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
       <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77 0-4.28-2.99-7.86-7-8.77z" fill="currentColor"/>
+    </svg>
+    <svg class="chat-message-replay-icon-playing" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/>
     </svg>`;
   btn.addEventListener("click", () => replayMessage(bubbleEl, btn));
   bubbleEl.appendChild(btn);
@@ -775,7 +783,17 @@ function ensureEditPencil(bubbleEl, role) {
   btn.className = "chat-message-edit-pencil";
   btn.setAttribute("aria-label", "Edit this message");
   btn.title = "Edit this message";
-  btn.textContent = "\u270E"; // ✎
+  // Inline SVG (Material edit / pencil) so the icon scales
+  // crisply and matches the visual weight of the replay /
+  // copy / regenerate glyphs. The earlier Unicode ✎
+  // (U+270E) glyph rendered as a tiny hairline — too small
+  // relative to the 2rem circular button and inconsistent
+  // across system fonts. The path below is the standard
+  // "edit" silhouette (pencil + ruler edge).
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/>
+    </svg>`;
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
     startEditUserBubble(bubbleEl, btn);
@@ -802,7 +820,14 @@ function ensureRegenerateButton(bubbleEl) {
   btn.className = "chat-message-regenerate";
   btn.setAttribute("aria-label", "Regenerate the last reply");
   btn.title = "Regenerate the last reply";
-  btn.textContent = "\u21BB"; // ↻
+  // Inline SVG (circular arrow) so the icon scales crisply
+  // and matches the visual weight of the replay / copy /
+  // edit glyphs. The earlier ↻ (U+21BB) glyph rendered as
+  // a tiny hairline — too small relative to the 2rem button.
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z" fill="currentColor"/>
+    </svg>`;
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
     regenerateLastAssistant();
@@ -4899,9 +4924,9 @@ async function replayMessage(div, btn) {
     return;
   }
 
-  // Clear any other playing button's state.
+  // Clear any other playing button's state (icon + aria + title).
   if (currentReplayButton && currentReplayButton !== btn) {
-    currentReplayButton.classList.remove("chat-message-replay--playing");
+    clearReplayPlayingState(currentReplayButton);
   }
   // Cancel whatever the autoplay or another replay was doing.
   _ttsPlayer?.stopAll();
@@ -4909,7 +4934,7 @@ async function replayMessage(div, btn) {
   // settles, then start the new playback.
   await new Promise((r) => setTimeout(r, 0));
   _ttsPlayer = getOrCreateTtsPlayer();
-  btn.classList.add("chat-message-replay--playing");
+  applyReplayPlayingState(btn);
   currentReplayButton = btn;
   // Use the single-shot `speak` path: one fetch, one decode, one
   // play. We do NOT chain into the autoplay feed/flush -- this is
@@ -4920,16 +4945,37 @@ async function replayMessage(div, btn) {
       speed: getTtsSettings().speed,
       onEnd: () => {
         if (currentReplayButton === btn) {
-          btn.classList.remove("chat-message-replay--playing");
+          clearReplayPlayingState(btn);
           currentReplayButton = null;
         }
       },
     });
   } catch (e) {
-    btn.classList.remove("chat-message-replay--playing");
+    clearReplayPlayingState(btn);
     if (currentReplayButton === btn) currentReplayButton = null;
     appendError(`TTS replay failed: ${e?.message || e}`);
   }
+}
+
+/**
+ * Toggle a replay button into the "playing" visual state:
+ * add the class (which swaps the icon + paints the
+ * accent background via CSS) and update the aria-label +
+ * title so a screen reader / tooltip reflects the
+ * "click to stop" affordance. The function is split out
+ * from `replayMessage` so the two `onEnd` / `catch` paths
+ * can both call the same undo.
+ */
+function applyReplayPlayingState(btn) {
+  btn.classList.add("chat-message-replay--playing");
+  btn.setAttribute("aria-label", "Stop replay");
+  btn.setAttribute("title", "Stop replay");
+}
+
+function clearReplayPlayingState(btn) {
+  btn.classList.remove("chat-message-replay--playing");
+  btn.setAttribute("aria-label", "Replay this message aloud");
+  btn.setAttribute("title", "Replay this message aloud");
 }
 
 // Wire DOM events on the TTS controls. Done once at boot; the values

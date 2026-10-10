@@ -906,6 +906,15 @@ select, input[type="checkbox"] {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.45;
+  /* `position: relative` anchors the absolute-positioned
+   * per-bubble affordances (replay, copy, edit, regenerate)
+   * to the bubble's top-right corner. Both user + assistant
+   * bubbles carry the affordance column, so the base class
+   * needs the anchor (the previous assistant-only override at
+   * the end of the file is redundant — kept for backwards
+   * compatibility but harmless). */
+  position: relative;
+  padding-right: 2.4rem;
 }
 
 /* Assistant bubbles rendered as markdown need `white-space: normal`
@@ -2891,17 +2900,23 @@ select, input[type="checkbox"] {
   outline: 2px solid var(--accent, #4a90e2);
   outline-offset: 2px;
 }
-/* Playing state: tinted background + filled icon. We swap the SVG
- * via a CSS-only trick using the `data-playing` attribute; chat.js
- * also adds `chat-message-replay--playing` so the icon is replaced
- * with a "stop" silhouette (the same path with an X overlay). */
+/* Icon swap: the speaker (idle) and stop-square (playing)
+ * SVGs are both baked into the button by `ensureReplayButton`.
+ * The playing class hides the idle path and shows the
+ * playing path so the user sees an unambiguous "click to
+ * stop" affordance while audio is playing. The earlier
+ * "tint the speaker and keep it" approach left the button
+ * looking empty on dark themes (the dark speaker on a blue
+ * background had too little contrast).
+ */
+.chat-message-replay .chat-message-replay-icon-idle { display: block; }
+.chat-message-replay .chat-message-replay-icon-playing { display: none; }
+.chat-message-replay--playing .chat-message-replay-icon-idle { display: none; }
+.chat-message-replay--playing .chat-message-replay-icon-playing { display: block; }
 .chat-message-replay--playing {
   color: var(--bg);
   background: var(--accent, #4a90e2);
   border-color: var(--accent, #4a90e2);
-}
-.chat-message-replay--playing svg path {
-  fill: var(--bg);
 }
 /* The assistant bubble needs `position: relative` so the absolute
  * replay button anchors to its top-right corner. */
@@ -2912,61 +2927,97 @@ select, input[type="checkbox"] {
 
 /* ---- A1 / A3 / A9 per-bubble affordances -------------------------------
  *
- * Three new affordances live next to the existing 🔊 replay
- * button on every chat bubble:
+ * Four affordances live in the top-right corner of every chat
+ * bubble:
  *
- *   📋 copy (A9):  every role — assistant copies the latest
- *                  raw markdown, user bubbles copy plain text.
- *                  Uses the same cached-rebuild pattern as the
- *                  replay button so it survives every
- *                  `applyMarkdown` reset.
- *   ✎  edit (A3):  only on user bubbles. Click swaps the
- *                  bubble's textContent for a `<textarea>` +
- *                  Save / Cancel buttons; Save PATCHes the
- *                  server with the optimistic-concurrency
- *                  `version` and truncates every later
- *                  message so the next LLM turn sees a clean
- *                  state.
- *   ↻  regenerate (A3): only on the LAST assistant bubble.
- *                  Click POSTs to `/v1/chat/session/:sid/regenerate`
- *                  (the server drops the last assistant row)
- *                  then re-streams the reply through the
- *                  existing `streamReply` path.
+ *   🔊 replay (pre-existing): every assistant bubble. Hidden
+ *                  on widget-only / streaming bubbles.
+ *   📋 copy (A9):  assistant bubbles only — copies the latest
+ *                  raw markdown.
+ *   ✎  edit (A3):  user bubbles only. Click swaps the bubble's
+ *                  textContent for a `<textarea>` + Save / Cancel
+ *                  buttons; Save PATCHes the server with the
+ *                  optimistic-concurrency `version` and truncates
+ *                  every later message so the next LLM turn sees
+ *                  a clean state.
+ *   ↻  regenerate (A3): only on the LAST assistant bubble. Click
+ *                  POSTs to `/v1/chat/session/:sid/regenerate` and
+ *                  re-streams the reply through `streamReply`.
  *
- * The two-tier visibility gate matches the replay button
- * (CSS for streaming, JS for the widget-only case) so a
- * bubble never shows affordances it cannot honour.
+ * Visibility model (plan 1791464974103 §6 + the §6 v2
+ * "hover-only" feedback the user requested): all four buttons
+ * are *hover-only* with a small fade-in (180ms ease). They
+ * stay in the DOM and the layout, but stay at `opacity: 0`
+ * until the bubble gains hover / focus-within. The two-tier
+ * gate (CSS for streaming, JS for the widget-only case) and
+ * the body-level feature gate still apply on top of the
+ * hover state.
  */
 .chat-message-copy,
 .chat-message-edit-pencil,
-.chat-message-regenerate {
+.chat-message-regenerate,
+.chat-message-replay {
   position: absolute;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.8rem;
-  height: 1.8rem;
+  width: 2rem;
+  height: 2rem;
   border: 1px solid var(--border);
   border-radius: 50%;
   background: var(--bg-elev);
   color: var(--muted);
   cursor: pointer;
   padding: 0;
-  transition: color 120ms ease, border-color 120ms ease,
+  /* Default: invisible. The bubble hover / focus-within rule
+   * below fades the button in (180ms ease — short enough to
+   * feel instant, long enough to read as a deliberate fade).
+   * `color` / `border-color` / `background` are kept on the
+   * shorter 120ms transition so the hover colour swap stays
+   * snappy relative to the opacity ramp. */
+  opacity: 0;
+  transition:
+    opacity 180ms ease,
+    color 120ms ease,
+    border-color 120ms ease,
     background 120ms ease;
+}
+/* Fade in on bubble hover / keyboard focus-within. The
+ * `:focus-within` arm is what surfaces a button after the
+ * user tabs into it (e.g. screen reader, keyboard-only
+ * navigation): the bubble stays "focused" while the button
+ * inside holds the focus, so the fade stays at opacity 1
+ * until focus leaves. */
+.chat-message:hover .chat-message-copy,
+.chat-message:focus-within .chat-message-copy,
+.chat-message:hover .chat-message-edit-pencil,
+.chat-message:focus-within .chat-message-edit-pencil,
+.chat-message:hover .chat-message-regenerate,
+.chat-message:focus-within .chat-message-regenerate,
+.chat-message:hover .chat-message-replay,
+.chat-message:focus-within .chat-message-replay {
+  opacity: 1;
 }
 .chat-message-copy:hover,
 .chat-message-edit-pencil:hover,
-.chat-message-regenerate:hover {
+.chat-message-regenerate:hover,
+.chat-message-replay:hover {
   color: var(--text);
   border-color: var(--text);
 }
 /* Copy-button flash feedback (A9): the click handler swaps
  * the SVG path to a check mark + adds one of these classes
- * for ~1.4s so the user has unambiguous confirmation the
- * clipboard write landed. The icon reverts to the clipboard
- * glyph on its own — no JS-driven undo is needed.
- */
+ * for ~1.4s. The flash must override the default opacity:0
+ * so the user sees the confirmation even if their cursor
+ * has moved off the bubble. The `:focus-within` arm covers
+ * the "user clicked but the click also focused the button"
+ * case. */
+.chat-message-copy--flash-ok,
+.chat-message-copy--flash-fail,
+.chat-message:focus-within .chat-message-copy--flash-ok,
+.chat-message:focus-within .chat-message-copy--flash-fail {
+  opacity: 1;
+}
 .chat-message-copy--flash-ok {
   color: var(--ok, #5fc88f);
   border-color: var(--ok, #5fc88f);
@@ -2979,24 +3030,35 @@ select, input[type="checkbox"] {
 }
 .chat-message-copy:focus-visible,
 .chat-message-edit-pencil:focus-visible,
-.chat-message-regenerate:focus-visible {
+.chat-message-regenerate:focus-visible,
+.chat-message-replay:focus-visible {
   outline: 2px solid var(--accent, #4a90e2);
   outline-offset: 2px;
+  opacity: 1;
 }
-.chat-message-copy { top: 0.5rem; right: 2.4rem; }
-.chat-message-edit-pencil { top: 0.5rem; right: 4.2rem; }
-.chat-message-regenerate { top: 2.4rem; right: 0.5rem; }
+/* Position the four affordances on the right edge of the
+ * bubble, stacked vertically so the row never collides with
+ * the prose. The assistant bubble carries replay + copy +
+ * (sometimes) regenerate; the user bubble carries the
+ * single edit pencil. Both bubbles have the same right-edge
+ * anchor — the topmost button (replay / edit) sits at the
+ * very corner, the next one (copy) drops 2.4rem down. */
+.chat-message-replay { top: 0.5rem; right: 0.5rem; }
+.chat-message-copy { top: 2.7rem; right: 0.5rem; }
+.chat-message-regenerate { top: 4.9rem; right: 0.5rem; }
+.chat-message-edit-pencil { top: 0.5rem; right: 0.5rem; }
 .chat-message-regenerate[hidden],
 .chat-message-copy[hidden],
-.chat-message-edit-pencil[hidden] { display: none; }
+.chat-message-edit-pencil[hidden],
+.chat-message-replay[hidden] { display: none; }
 .chat-message--streaming > .chat-message-copy,
 .chat-message--streaming > .chat-message-edit-pencil,
-.chat-message--streaming > .chat-message-regenerate { display: none; }
+.chat-message--streaming > .chat-message-regenerate,
+.chat-message--streaming > .chat-message-replay { display: none; }
 .chat-message--widget-only > .chat-message-copy,
 .chat-message--widget-only > .chat-message-edit-pencil,
-.chat-message--widget-only > .chat-message-regenerate { display: none; }
-.chat-user { position: relative; padding-right: 6.4rem; }
-.chat-user:not(.chat-message--markdown) { padding-right: 6.4rem; }
+.chat-message--widget-only > .chat-message-regenerate,
+.chat-message--widget-only > .chat-message-replay { display: none; }
 /* Hide the edit + copy + regenerate affordances when the
  * server-side `chat_messages` table is not wired
  * (`features.chat_messages = false`). The body class is
