@@ -166,7 +166,7 @@ nagent-server = { path = ".", features = ["test-util", "all-agents"] }
 nagent-db      = { path = "../nagent-db", features = ["test-util"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures = "0.3"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 # Plan 4.A follow-up: tests reach raw SQL through
 # `nagent_db::Db::raw_execute` / `raw_query_scalar_i64` /
 # `raw_query_text_vec` / `raw_query_one_pair` /
