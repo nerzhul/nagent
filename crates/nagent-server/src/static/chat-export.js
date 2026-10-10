@@ -47,9 +47,8 @@ export function formatMarkdown({ title, messages }) {
     const ts = formatTs(msg.ts);
     out.push(`### ${role} (${ts})`, "");
     if (role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-      // Render the prose first (often empty for a tool-only
-      // turn, sometimes a "Let me check…" prefix from the
-      // model), then the tool trace as a collapsible block.
+      // Prose first (often empty for a tool-only turn), then
+      // the tool trace as a collapsible block.
       if (msg.content) {
         out.push(msg.content, "");
       }
@@ -166,9 +165,8 @@ function escapeHtml(s) {
 
 function formatTs(ts) {
   if (ts == null) return "unknown";
-  // History records use `Date.now()` (millis since epoch).
-  // Future records may carry an ISO string (the
-  // server-mirror rows). Handle both.
+  // History records use `Date.now()` (epoch millis); server
+  // mirror rows use ISO strings. Handle both.
   if (typeof ts === "number") return new Date(ts).toISOString();
   if (typeof ts === "string") {
     if (ISO_TS_RE.test(ts)) return ts;
@@ -202,14 +200,14 @@ export function filenameFor(title, ext, now = new Date()) {
  * uses (`app.js::downloadTranscript`).
  */
 export function downloadBlob(content, mime, filename) {
-  if (typeof document === "undefined") return; // Node test path
+  if (typeof document === "undefined") return;
   const blob = new Blob([content], { type: `${mime};charset=utf-8` });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
   a.rel = "noopener";
-  // Append so Firefox honours the click in some quirks modes
+  // Append so Firefox honours the click in quirks modes
   // (the click is a no-op on detached elements otherwise).
   document.body.appendChild(a);
   a.click();

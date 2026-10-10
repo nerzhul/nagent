@@ -23,14 +23,13 @@ export const HISTORY_CAP = 200;
 export const TITLE_MAX = 60;
 export const DEFAULT_TITLE = "New chat";
 
-// Plan 1791464974103 §1.4: per-session flag marking the
-// localStorage copy as already mirrored on the server. The first
-// authenticated load POSTs every entry of `nagent.chat.session.<id>`
-// to `/v1/chat/session/:sid/messages` and sets this flag on
-// success; subsequent loads skip the migration. Sessions that
-// never migrate (server missing the `chat_messages` table, network
-// failure) keep working from localStorage only — `chat.js` reads
-// the server first and falls back transparently.
+// per-session flag marking the
+// localStorage copy as already mirrored on the server. The
+// first authenticated load POSTs every entry of
+// `nagent.chat.session.<id>` and sets this flag on success;
+// subsequent loads skip the migration. Sessions that never
+// migrate (server missing the table, network failure) keep
+// working from localStorage only.
 export const MIGRATED_PREFIX = "nagent.chat.migrated.";
 
 export function migratedKey(id) {

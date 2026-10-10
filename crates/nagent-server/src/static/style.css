@@ -3068,13 +3068,20 @@ body.chat-messages-disabled .chat-message-edit-pencil,
 body.chat-messages-disabled .chat-message-regenerate { display: none; }
 
 /* Inline edit form: rendered inside the user bubble when the
- * pencil is clicked. The textarea auto-sizes up to 12em; the
- * Save / Cancel buttons align to the right.
+ * pencil is clicked. The form is intentionally compact:
+ * a single-column textarea on top (the dominant element),
+ * a single footer row underneath with a keyboard hint on
+ * the left + two compact text-style buttons on the right.
+ * The earlier chunky `Cancel` + `Save & resubmit` primary
+ * buttons pushed the bubble wider than the message it was
+ * editing; the new pattern is closer to GitHub's
+ * issue-edit form (keyboard hint for discoverability, two
+ * small text buttons for the click affordance).
  */
 .chat-message-edit-form {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.4rem;
   margin-top: 0.25rem;
 }
 .chat-message-edit-form textarea {
@@ -3088,15 +3095,71 @@ body.chat-messages-disabled .chat-message-regenerate { display: none; }
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.45rem 0.6rem;
+  line-height: 1.4;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.chat-message-edit-form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.18);
 }
 .chat-message-edit-form-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.chat-message-edit-form-hint {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--fg-mute);
+  letter-spacing: 0.01em;
+  margin: 0;
+  /* Sits ABOVE the button row so the action cluster stays
+   * visually tight (one row, no inline glyphs splitting the
+   * buttons). `user-select: none` so the hint text never
+   * gets selected when the user is selecting the bubble's
+   * textContent. */
+  user-select: none;
+}
+.chat-message-edit-btn {
+  font-family: inherit;
+  font-size: 0.78rem;
+  line-height: 1;
+  padding: 0.35rem 0.6rem;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease,
+    border-color 120ms ease;
+}
+.chat-message-edit-btn:hover {
+  color: var(--fg);
+}
+.chat-message-edit-btn:focus-visible {
+  outline: 2px solid var(--accent, #4a90e2);
+  outline-offset: 1px;
+}
+.chat-message-edit-btn--primary {
+  background: var(--accent, #4a90e2);
+  color: #0b0d10;
+  border-color: var(--accent, #4a90e2);
+}
+.chat-message-edit-btn--primary:hover {
+  background: var(--accent-2, #5fb0ff);
+  border-color: var(--accent-2, #5fb0ff);
+  color: #0b0d10;
+}
+.chat-message-edit-btn--primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .chat-message-edit-error {
   margin: 0;
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   color: var(--error);
 }
 

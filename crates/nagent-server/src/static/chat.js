@@ -557,27 +557,23 @@ function renderMath(root) {
 }
 
 function applyMarkdown(bubbleEl, text) {
-  // Keep the raw markdown source on the bubble so the A9 copy
-  // button always has the latest text — even after a streaming
-  // re-render that rewrote the rendered HTML. The cache survives
-  // the `innerHTML =` reset below because we set it on the
-  // element itself, not on a child node.
+  // Cache the raw markdown source on the bubble so the A9 copy
+  // button always has the latest text after a streaming
+  // re-render that wiped innerHTML. Stored on the element
+  // itself (not a child) so the cache survives the reset.
   bubbleEl._rawText = text;
   bubbleEl.innerHTML = renderMarkdown(text);
   decorateSafeLinks(bubbleEl);
   renderMath(bubbleEl);
-  // `innerHTML = ...` above wiped every child including the per-bubble
-  // replay button (added by `appendBubble`) and any inlined tool
-  // traces (added by `appendToolBubble`). Re-attach both so they
-  // survive every streaming markdown re-render.
+  // `innerHTML = ...` above wiped every child including the
+  // per-bubble replay / copy / edit / regenerate buttons.
+  // Re-attach the ones that were already mounted (the
+  // `_xxxBtn` references survive because they live on the
+  // element itself, not a child).
   if (bubbleEl._replayBtn || bubbleEl.classList.contains("chat-message--markdown")) {
     ensureReplayButton(bubbleEl);
     refreshReplayButtonVisibility();
   }
-  // A9 + A3: the cached-rebuild pattern also re-attaches the
-  // copy button + edit pencil so they survive every streaming
-  // markdown re-render. `_copyBtn` is set on assistant bubbles
-  // only by `appendBubble`; `_editBtn` only on user bubbles.
   if (bubbleEl._copyBtn && bubbleEl.classList.contains("chat-assistant")) {
     ensureCopyButton(bubbleEl, "assistant");
   }
@@ -627,14 +623,9 @@ function ensureReplayButton(bubbleEl) {
   btn.className = "chat-message-replay";
   btn.setAttribute("aria-label", "Replay this message aloud");
   btn.title = "Replay this message aloud";
-  // Always visible on assistant bubbles -- the click handler in
-  // `replayMessage` is what gates actual playback. Showing the
-  // button unconditionally doubles as a discoverability cue.
-  // Two SVGs are baked in: the speaker (idle) and the stop
-  // square (playing). CSS toggles which one is visible via
-  // the `.chat-message-replay--playing` class — see
-  // `style.css`. This avoids a JS-driven path swap that would
-  // race with the cached-rebuild pattern.
+  // Both SVGs are baked in so CSS can swap which one is
+  // visible via the `--playing` class — a JS-driven path
+  // swap would race with the cached-rebuild pattern.
   btn.hidden = false;
   btn.innerHTML = `
     <svg class="chat-message-replay-icon-idle" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
@@ -672,8 +663,6 @@ function ensureCopyButton(bubbleEl, role) {
     isAssistant ? "Copy as Markdown" : "Copy message text"
   );
   btn.title = isAssistant ? "Copy as Markdown" : "Copy message text";
-  // Clipboard glyph. The inline SVG below is the portable
-  // fallback so the button is meaningful on every system font.
   btn.innerHTML = `
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
       <path d="M19 2h-4.18C14.4.84 13.3 0 12 0s-2.4.84-2.82 2H5C3.9 2 3 2.9 3 4v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm2 18H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V10h10v2z" fill="currentColor"/>
@@ -688,9 +677,10 @@ function ensureCopyButton(bubbleEl, role) {
 }
 
 async function copyBubbleToClipboard(bubbleEl, asMarkdown) {
-  // Prefer the cached raw text (set by `appendBubble` and updated
-  // on every `applyMarkdown` call). Fall back to textContent for
-  // legacy bubbles that never had `_rawText` set.
+  // Prefer the cached raw text (set by `appendBubble` and
+  // updated on every `applyMarkdown` call) over textContent so
+  // a streaming re-render that wiped innerHTML does not lose
+  // the original markdown source.
   const raw = (bubbleEl._rawText ?? "").toString();
   const payload = asMarkdown
     ? raw
@@ -701,10 +691,8 @@ async function copyBubbleToClipboard(bubbleEl, asMarkdown) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(payload);
     } else {
-      // Fallback for non-secure contexts: a hidden textarea +
-      // execCommand. The clipboard API is unavailable on
-      // http:// (non-localhost) so a server without TLS would
-      // otherwise silently drop the click.
+      // Non-secure-context fallback (the clipboard API is
+      // unavailable on http:// non-localhost).
       const ta = document.createElement("textarea");
       ta.value = payload;
       ta.setAttribute("readonly", "");
@@ -719,11 +707,6 @@ async function copyBubbleToClipboard(bubbleEl, asMarkdown) {
     console.warn("chat.js: clipboard write failed", e);
     ok = false;
   }
-  // Visual confirmation: swap the icon to a check mark + the
-  // label to "Copied!" (or "Copy failed") for ~1.4s so the
-  // user has unambiguous feedback that the click registered.
-  // The `_copyBtn` reference is stable across the streaming
-  // re-render (cached-rebuild pattern) so the swap is durable.
   flashCopyFeedback(bubbleEl, ok);
 }
 
@@ -733,10 +716,9 @@ function flashCopyFeedback(bubbleEl, ok) {
   if (btn._copyFlashTimer) {
     clearTimeout(btn._copyFlashTimer);
   }
-  // SVG path swap: clipboard → checkmark (or cross on
-  // failure). The class `chat-message-copy--flash` carries the
-  // colour cue (green / red) so a future visual tweak only
-  // touches CSS.
+  // Path swap carries the icon shape, the modifier class
+  // carries the colour — split so a future visual tweak
+  // only touches CSS.
   const checkPath = "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z";
   const crossPath = "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z";
   const origPath = "M19 2h-4.18C14.4.84 13.3 0 12 0s-2.4.84-2.82 2H5C3.9 2 3 2.9 3 4v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm2 18H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V10h10v2z";
@@ -783,13 +765,9 @@ function ensureEditPencil(bubbleEl, role) {
   btn.className = "chat-message-edit-pencil";
   btn.setAttribute("aria-label", "Edit this message");
   btn.title = "Edit this message";
-  // Inline SVG (Material edit / pencil) so the icon scales
-  // crisply and matches the visual weight of the replay /
-  // copy / regenerate glyphs. The earlier Unicode ✎
-  // (U+270E) glyph rendered as a tiny hairline — too small
-  // relative to the 2rem circular button and inconsistent
-  // across system fonts. The path below is the standard
-  // "edit" silhouette (pencil + ruler edge).
+  // Material edit / pencil silhouette. Inline SVG (not the
+  // earlier ✎ Unicode glyph) so the visual weight matches
+  // the replay / copy / regenerate icons in the same row.
   btn.innerHTML = `
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
       <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/>
@@ -820,10 +798,9 @@ function ensureRegenerateButton(bubbleEl) {
   btn.className = "chat-message-regenerate";
   btn.setAttribute("aria-label", "Regenerate the last reply");
   btn.title = "Regenerate the last reply";
-  // Inline SVG (circular arrow) so the icon scales crisply
-  // and matches the visual weight of the replay / copy /
-  // edit glyphs. The earlier ↻ (U+21BB) glyph rendered as
-  // a tiny hairline — too small relative to the 2rem button.
+  // Circular-arrow SVG (not the earlier ↻ Unicode glyph) so
+  // the visual weight matches the replay / copy / edit
+  // icons in the same row.
   btn.innerHTML = `
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
       <path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z" fill="currentColor"/>
@@ -864,24 +841,24 @@ function startEditUserBubble(bubbleEl, btn) {
   // second click on the pencil cannot double-insert a form.
   btn.hidden = true;
   if (bubbleEl._copyBtn) bubbleEl._copyBtn.hidden = true;
-  // Remove the existing text node + child buttons; we render a
-  // textarea in the same bubble so the chip row (attachments)
-  // and the bubble's own dataset stay in place.
   const text = (bubbleEl._rawText != null)
     ? bubbleEl._rawText
     : (bubbleEl.textContent || "");
-  // Preserve any attachment chip tray (the `<ul
+  // Preserve the attachment chip tray (the `<ul
   // class="chat-message-attachments">` element rendered by the
-  // composer) so the edited bubble still shows the chips under
-  // the textarea.
+  // composer) so the edited bubble still shows the chips
+  // under the textarea.
   const chips = bubbleEl.querySelector(".chat-message-attachments");
-  // Strip everything except the chips.
   Array.from(bubbleEl.childNodes).forEach((n) => {
     if (n !== chips && n !== btn && n !== bubbleEl._copyBtn) {
       n.remove();
     }
   });
-  // Build the form.
+  // Compact form: textarea on top, hint above the buttons,
+  // buttons in a single row at the bottom. The earlier
+  // chunky primary buttons pushed the bubble wider than the
+  // message it was editing; the new pattern is closer to
+  // GitHub's inline issue-edit form.
   const form = document.createElement("form");
   form.className = "chat-message-edit-form";
   const ta = document.createElement("textarea");
@@ -889,30 +866,68 @@ function startEditUserBubble(bubbleEl, btn) {
   ta.rows = Math.min(8, Math.max(1, text.split("\n").length));
   ta.setAttribute("aria-label", "Edited message");
   form.appendChild(ta);
+  // Hint sits ABOVE the button row so the action cluster
+  // stays visually tight (one row, no inline `·` glyphs
+  // cutting the buttons in two). The hint is `aria-hidden`
+  // so screen readers don't double-announce the shortcut
+  // (the buttons carry the accessible name).
+  const hint = document.createElement("span");
+  hint.className = "chat-message-edit-form-hint";
+  hint.setAttribute("aria-hidden", "true");
+  hint.textContent = "Enter to save · Shift+Enter for newline · Esc to cancel";
+  form.appendChild(hint);
   const actions = document.createElement("div");
   actions.className = "chat-message-edit-form-actions";
   const cancel = document.createElement("button");
   cancel.type = "button";
-  cancel.className = "ghost";
+  cancel.className = "chat-message-edit-btn";
   cancel.textContent = "Cancel";
   cancel.addEventListener("click", () => cancelEdit(bubbleEl));
   const save = document.createElement("button");
   save.type = "submit";
-  save.className = "primary";
+  save.className = "chat-message-edit-btn chat-message-edit-btn--primary";
   save.textContent = "Save & resubmit";
+  // Block the no-op save (whitespace-only edit) — clearer
+  // affordance than a network round-trip that silently
+  // returns. `commitEdit` already trims, but a disabled
+  // button is the right UX hint.
+  const refreshSaveState = () => {
+    save.disabled = ta.value.trim().length === 0;
+  };
+  save.disabled = ta.value.trim().length === 0;
   actions.appendChild(cancel);
   actions.appendChild(save);
   form.appendChild(actions);
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
+    if (save.disabled) return;
     commitEdit(bubbleEl, ta.value, btn);
+  });
+  // Keyboard shortcuts: Enter saves, Shift+Enter inserts a
+  // newline (the user expects Enter to send in any chat
+  // composer — the main `#chat-input` already follows this
+  // gesture). Esc cancels.
+  ta.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      cancelEdit(bubbleEl);
+      return;
+    }
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+      ev.preventDefault();
+      if (!save.disabled) {
+        commitEdit(bubbleEl, ta.value, btn);
+      }
+    }
+  });
+  ta.addEventListener("input", () => {
+    autosizeTextarea(ta);
+    refreshSaveState();
   });
   bubbleEl.insertBefore(form, chips || null);
   bubbleEl._editForm = form;
+  bubbleEl._editSaveBtn = save;
   ta.focus();
-  // Auto-resize on input so a longer edit does not require manual
-  // scrollbar.
-  ta.addEventListener("input", () => autosizeTextarea(ta));
   autosizeTextarea(ta);
 }
 
@@ -965,15 +980,13 @@ async function commitEdit(bubbleEl, newText, btn) {
   const idx = h.findIndex((m) => m.id === messageId);
   if (idx === -1) return;
   try {
-    // 1. PATCH the message content. On 409 (version mismatch)
-    // we surface an inline error inside the form so the user
-    // can decide to reload.
     const updated = await editMessageOnServer(
       sessionId, messageId, trimmed, version,
     );
-    // 2. Truncate every later message server-side so the next
-    // LLM turn sees a clean state. We mirror the truncation
-    // locally too so the rendered DOM matches.
+    // Truncate the local history past the edited message so
+    // the rendered DOM matches the server (the server keeps
+    // the slice up to `idx + 1` as well; the next LLM turn
+    // will see a clean state).
     h[idx].content = updated.content;
     h[idx].version = updated.version;
     bubbleEl.dataset.version = String(updated.version);
@@ -981,11 +994,6 @@ async function commitEdit(bubbleEl, newText, btn) {
     const truncated = h.slice(0, idx + 1);
     saveHistory(sessionId, truncated);
     renderHistory(sessionId);
-    // 3. Re-send the edited turn through the existing streamReply
-    // path so the user gets a fresh reply without re-pressing
-    // Enter. The model picker / temperature / location / TZ
-    // blocks are read from their current UI state inside
-    // `streamReply` itself.
     enqueueTurn(() => streamReply(sessionId, trimmed));
   } catch (e) {
     if (e && e.status === 409) {
@@ -1049,24 +1057,17 @@ async function regenerateLastAssistant() {
   const sid = activeSessionId();
   if (!sid) return;
   // Abort an in-flight stream so its `finally` block fires
-  // BEFORE we touch the local history. The `finally` block
-  // writes the partial assistant turn to history and POSTs it
-  // to the server — if we don't wait for it, our own local
-  // delete below races against the abort's append and we end
-  // up with a stale partial assistant row at the tail. One
-  // microtask tick is enough: the abort's `finally` is already
-  // scheduled by `AbortController.abort()`.
+  // BEFORE we touch the local history — the `finally` writes
+  // the partial assistant turn to history and POSTs it to the
+  // server, which would race with our local delete below.
   if (inflight) {
     inflight.controller.abort();
     await new Promise((r) => setTimeout(r, 0));
   }
-  // Drop the last assistant from local history FIRST so:
-  //   1. the user sees the assistant bubble disappear
-  //      immediately (visual feedback that the click registered),
-  //   2. the upcoming `streamReply` — which bails when the last
-  //      history entry is not a user turn — sees a clean tail.
-  // The server delete runs in parallel; whichever lands first
-  // is fine because we only act on the local copy here.
+  // Drop the last assistant from local history FIRST so the
+  // user sees immediate visual feedback AND the upcoming
+  // `streamReply` (which bails when the last history entry is
+  // not a user turn) sees a clean tail.
   const h = loadHistory(sid);
   let removedAny = false;
   for (let i = h.length - 1; i >= 0; i--) {
@@ -1095,16 +1096,11 @@ async function regenerateLastAssistant() {
       throw new Error(`regenerate failed: HTTP ${resp.status} ${body}`);
     }
   } catch (e) {
-    // The local delete above already cleared the bubble; a
-    // server-side failure is non-fatal — the next streamReply
-    // will POST a fresh assistant turn and the table stays
-    // consistent (the user will see the same conversation
-    // shape, just with one orphaned row on the server that the
-    // periodic sweep could clean up later).
+    // Non-fatal: the local delete above already cleared the
+    // bubble, and the next streamReply will POST a fresh
+    // assistant turn so the table stays consistent.
     console.warn("chat.js: regenerate HTTP failed; local delete already applied", e);
   }
-  // Find the last user message — the regenerate replays the
-  // previous turn verbatim.
   for (let i = h.length - 1; i >= 0; i--) {
     if (h[i].role === "user") {
       const userText = h[i].content;
@@ -1155,9 +1151,8 @@ async function appendMessageToServer(sessionId, msg) {
 
 async function editMessageOnServer(sessionId, messageId, content, version) {
   if (!chatMessagesEnabled()) {
-    // Local-only edit (the localStorage copy is the only source
-    // of truth on this build). The caller still rewrites the
-    // history + DOM.
+    // Local-only edit (localStorage is the only source of
+    // truth on builds without the table).
     return { id: messageId, content, version };
   }
   const serverSid = await getServerSessionId();
@@ -1187,11 +1182,6 @@ async function asHttpError(resp, ctx) {
 }
 
 async function migrateSessionToServer(sessionId) {
-  // One-shot: walk every entry in `nagent.chat.session.<id>` and
-  // POST it to the server, then stamp the migrated flag. Runs
-  // once per page load after `/api/features` reports
-  // `chat_messages: true` AND the user is signed in (so the
-  // `/v1/chat/session/:sid/messages` route accepts the write).
   if (!chatMessagesEnabled()) return;
   if (isMigrated(sessionId)) return;
   const history = loadHistory(sessionId);
@@ -1230,9 +1220,6 @@ async function migrateSessionToServer(sessionId) {
 }
 
 async function migrateAllSessionsToServer() {
-  // Walk every `nagent.chat.sessions` entry and migrate each one
-  // independently. The per-session flag makes this safe to
-  // re-run: a second pass is a no-op.
   if (!chatMessagesEnabled()) return;
   const sessions = loadSessions();
   for (const s of sessions) {
@@ -1547,10 +1534,10 @@ function renderHistory(sessionId) {
   messagesEl.innerHTML = "";
   let history = loadHistory(sessionId);
   // Plan 1791464974103 §2: legacy history records (created
-  // before the server-mirror landed) have no `id` / `version`.
-  // Mint an id on every record so edit / regenerate / copy
-  // buttons have a stable key. The minted id is persisted back
-  // so the next render is a no-op.
+  // before the server-mirror landed) have no `id` /
+  // `version`. Mint an id on every record so edit /
+  // regenerate / copy buttons have a stable key, and
+  // persist back so the next render is a no-op.
   let mintedAny = false;
   history = history.map((m) => {
     if (m.id) return m;
@@ -1712,14 +1699,12 @@ function appendBubble(role, text, {
     return null;
   }
   // Plan 1791464974103 §2: every bubble gets a stable per-message
-  // id. The id is server-minted when `appendBubble` is reached via
-  // the persist path (a fresh `appendMessage` round-trip returns
-  // it); for the live-stream assistant bubble the id is minted on
-  // append and stamped on the bubble's `dataset.messageId` so the
-  // A3 regenerate / copy button can find it again. Render-only
-  // callers (`renderHistory`) carry the id through the history
-  // record — a legacy record without an id gets one minted on
-  // hydration.
+  // id. The id is client-minted for the live-stream assistant
+  // bubble and stamped on `dataset.messageId` so the A3
+  // regenerate / copy button can find it again. The server
+  // mints its own id on the append round-trip; the post-promise
+  // reconciliation below updates the bubble to the canonical
+  // server id when the two differ.
   const id = messageId
     || (typeof crypto !== "undefined" && crypto.randomUUID
       ? crypto.randomUUID()
@@ -1784,14 +1769,11 @@ function appendBubble(role, text, {
   if (role === "assistant") {
     ensureReplayButton(div);
   }
-  // A9: per-bubble copy-as-markdown button. Only on assistant
-  // bubbles — the user already knows what they typed, so a
-  // copy affordance on their own messages would be noise. The
-  // Transcript-mode export menu (plan 1791464974103 §4.12)
-  // covers the "I want a copy of the whole session" case
-  // without per-bubble redundancy. The button rides the same
-  // cached-rebuild pattern as the replay button so it
-  // survives every `applyMarkdown` reset.
+  // A9: per-bubble copy-as-markdown button. Assistant only —
+  // the user already knows what they typed, so a copy
+  // affordance on their own messages would be noise. The
+  // per-session Export menu (§4.12) covers the round-trip
+  // case without per-bubble redundancy.
   if (role === "assistant") {
     ensureCopyButton(div, role);
   }
@@ -1847,19 +1829,11 @@ function appendBubble(role, text, {
       touchSession(sid);
     }
     renderSessionList();
-    // A1: the export menu lifts its `[disabled]` flag as soon
-    // as the session has at least one message. Cheap to call
-    // on every append.
     refreshExportMenuVisibility();
-    // A1 / A3 (foundation): mirror the just-appended bubble
-    // to the server. The server is the source of truth once
-    // `chat_messages` is wired (plan §0); the localStorage
-    // copy is a hydration cache. The fire-and-forget shape
-    // means the UI never waits on the network, and a
-    // transient failure falls back to the localStorage copy
-    // on next reload. `appendMessageToServer` is a no-op
-    // when the feature flag is off (a build without
-    // `chat_messages`).
+    // Fire-and-forget mirror to the server (the localStorage
+    // copy stays the source of truth until the round-trip
+    // returns; a transient failure is retried on the next
+    // page load via the migration shim).
     appendMessageToServer(sid, {
       id, role, content: text, model,
     }).then((assignedId) => {
@@ -4159,11 +4133,10 @@ async function streamReply(sessionId, userText, opts = {}) {
     // correct session after a switch.
     const targetSessionId = inflight?.sessionId || sessionId;
     const h = loadHistory(targetSessionId);
-    // Mint a client-side id for the assistant turn so the A3
-    // regenerate / copy button can find it again. The server
-    // also mints one — the post-promise reconciliation below
-    // updates the bubble to the canonical server id when the
-    // append round-trip succeeds.
+    // Client-mint the id so the A3 regenerate / copy button
+    // can find this row before the server round-trip resolves.
+    // The post-promise reconciliation updates the bubble to
+    // the canonical server id when the two differ.
     const assistantMessageId = (typeof crypto !== "undefined"
         && crypto.randomUUID)
       ? crypto.randomUUID()
@@ -4185,10 +4158,6 @@ async function streamReply(sessionId, userText, opts = {}) {
     touchSession(targetSessionId);
     renderSessionList();
     refreshExportMenuVisibility();
-    // Mirror the assistant turn to the server (fire and forget).
-    // The post-promise reconciliation updates the bubble + the
-    // history record to the canonical server id when the round
-    // trip succeeds.
     appendMessageToServer(targetSessionId, {
       id: assistantMessageId,
       role: "assistant",
@@ -4579,22 +4548,14 @@ function applyFeatureGates() {
   // Future: gate the TTS settings drawer on `feature("tts")`,
   // etc. Each addition is one branch — the loop over a small
   // map keeps the boot tidy.
-  // A1 / A3: the export menu + per-bubble edit pencil only
-  // make sense when the server-side `chat_messages` table is
-  // reachable. The CSS uses `:has()` + a class on the body
-  // for the hidden case so the buttons do not flash before
-  // the feature flag resolves; this branch is the source of
-  // truth. The migration shim also fires from here: when the
-  // flag flips on (one-shot), walk every not-yet-migrated
-  // session and mirror it server-side.
+  // Gate the export menu + per-bubble edit pencil on the
+  // `chat_messages` table (the body-level class is the CSS
+  // gate; the migration shim fires from here when the flag
+  // flips on).
   const exportMenu = document.getElementById("chat-export-menu");
   if (exportMenu) {
     exportMenu.toggleAttribute("hidden", !feature("chat_messages"));
   }
-  // The edit pencil / regenerate button live per-bubble; a
-  // body-level class is the cheapest way to gate them in CSS
-  // without a per-bubble query. The class is added on every
-  // feature emit so a runtime toggle re-paints.
   document.body.classList.toggle(
     "chat-messages-disabled",
     !feature("chat_messages"),
