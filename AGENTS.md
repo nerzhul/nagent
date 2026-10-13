@@ -108,7 +108,47 @@ Required actions when such a parameter changes:
 
 If a parameter change genuinely has **no documentation surface** to update (unusual but possible — e.g. an internal helper flag), state that explicitly in the commit body so reviewers know the rule was considered.
 
-## 6. Commit Authorization and Authorship
+## 6. Credential redaction — never ship a password through an error path
+
+Every agent, wire client, probe handler, and audit log row in this codebase
+handles per-user credentials (vault-stored passwords, OAuth tokens, API
+keys, SASL payloads, app-specific tokens, …). **No credential of any kind
+may be displayed to a user, written to a log, surfaced in a UI status line,
+or returned in a server error body** — even when the credential is the
+caller's own. This rule is absolute; "the user already typed it" is not
+a justification for re-displaying it (the same user's screen can be
+shoulder-surfed, the server's HTTP error body can be mirrored by a reverse
+proxy log, the agent's stdout can be captured by a system service).
+
+The rule applies to every code path:
+
+- **Wire-client error messages** (`AgentError::AgentFailed`, `ProbeOutcome`,
+  `auth_events.kind`, `auth_events.target_service`): never include a credential
+  argument in the formatted string. When a protocol verb carries the secret
+  on the command line (e.g. IMAP `LOGIN <user> <pass>`, IMAP
+  `AUTHENTICATE PLAIN <base64(\0user\0pass)>`, HTTP `Authorization: Basic
+  <base64>`), redact both arguments before the command string enters any
+  error path. The server's own reply text (e.g. "A1 NO unable to login:
+  username or password incorrect") is safe to surface verbatim — the
+  user needs that signal — but the request that produced it is not.
+- **UI status lines and toasts**: re-display a redacted marker
+  (`<redacted>`) rather than the saved value. The integrations UI is
+  the only surface where the user retypes a credential at edit time
+  (and even there the `FieldDef::echo_on_edit` flag must remain `false`
+  for `username` / `password` / `from_address` / `access_token` / etc.).
+- **Audit rows**: the `auth_events` table stores
+  `target_service` / `kind` / `outcome` / at most a 256-byte
+  `message_id` hash. No password column exists, by design.
+- **Test fixtures and snapshot files**: assert against the
+  `<redacted>` marker, not the original credential.
+
+The current wire clients ship a `redact_command(cmd)` helper
+(`crates/nagent-agents/src/agents/email/client_imap.rs`) for the IMAP
+side; new wire clients (or future extensions to the IMAP one) MUST
+follow the same pattern. A future `clippy` lint can codify the rule
+in CI; until then, code review is the enforcement surface.
+
+## 7. Commit Authorization and Authorship
 
 **The single most violated rule in this codebase. Read this section twice before running `git commit`.**
 

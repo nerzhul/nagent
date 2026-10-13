@@ -27,6 +27,12 @@ caldav-agent = ["nagent-agents/caldav-agent"]
 # Plan 1790695073418: X timeline agent — forwards the agent +
 # registry into the server.
 x-agent = ["nagent-agents/x-agent"]
+# Plan 1791566269874: IMAP/SMTP email agent family — server-side
+# forwarding only; the agents themselves are brought in via
+# `nagent-agents/email-agent`. The matching
+# `#[cfg(feature = "email-agent")]` gates on the server crate
+# (probe endpoints, ServiceRegistry swap, config surface).
+email-agent = ["nagent-agents/email-agent"]
 # Plan 1791317253718: `search_tools` meta-agent + BM25 router.
 # Always compiled in alongside `all-agents` (every target that
 # dispatches tools needs the discovery surface) — the agent
@@ -58,6 +64,7 @@ all-agents = [
     "read-document-agent",
     "caldav-agent",
     "x-agent",
+    "email-agent",
     "tool-search-agent",
 ]
 # Piper TTS; pulls piper-rs + ort + espeak-ng FFI through the

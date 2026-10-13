@@ -341,20 +341,74 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     // Build the static `ServiceRegistry` from the per-feature
     // service catalog. Each per-feature entry is gated on the
     // matching cargo feature so a build without the feature has
-    // no surface to render.
-    #[cfg(all(feature = "caldav-agent", not(feature = "x-agent")))]
+    // no surface to render. The `email_imap` / `email_smtp` pair
+    // is one tuple in the `all` branch — see the
+    // `select!`-style macro below for the 3-feature intersection.
+    #[cfg(all(
+        feature = "caldav-agent",
+        not(feature = "x-agent"),
+        not(feature = "email-agent")
+    ))]
     let services =
         ServiceRegistry::new(&[nagent_agents::caldav_service::CALDAV_SERVICE]).into_arc();
-    #[cfg(all(not(feature = "caldav-agent"), feature = "x-agent"))]
+    #[cfg(all(
+        not(feature = "caldav-agent"),
+        feature = "x-agent",
+        not(feature = "email-agent")
+    ))]
     let services =
         ServiceRegistry::new(&[nagent_agents::x_account_service::X_ACCOUNT_SERVICE]).into_arc();
-    #[cfg(all(feature = "caldav-agent", feature = "x-agent"))]
+    #[cfg(all(
+        not(feature = "caldav-agent"),
+        not(feature = "x-agent"),
+        feature = "email-agent"
+    ))]
+    let services = ServiceRegistry::new(&[
+        nagent_agents::email_imap_service::EMAIL_IMAP_SERVICE,
+        nagent_agents::email_smtp_service::EMAIL_SMTP_SERVICE,
+    ])
+    .into_arc();
+    #[cfg(all(
+        feature = "caldav-agent",
+        feature = "x-agent",
+        not(feature = "email-agent")
+    ))]
     let services = ServiceRegistry::new(&[
         nagent_agents::caldav_service::CALDAV_SERVICE,
         nagent_agents::x_account_service::X_ACCOUNT_SERVICE,
     ])
     .into_arc();
-    #[cfg(not(any(feature = "caldav-agent", feature = "x-agent")))]
+    #[cfg(all(
+        feature = "caldav-agent",
+        not(feature = "x-agent"),
+        feature = "email-agent"
+    ))]
+    let services = ServiceRegistry::new(&[
+        nagent_agents::caldav_service::CALDAV_SERVICE,
+        nagent_agents::email_imap_service::EMAIL_IMAP_SERVICE,
+        nagent_agents::email_smtp_service::EMAIL_SMTP_SERVICE,
+    ])
+    .into_arc();
+    #[cfg(all(
+        not(feature = "caldav-agent"),
+        feature = "x-agent",
+        feature = "email-agent"
+    ))]
+    let services = ServiceRegistry::new(&[
+        nagent_agents::x_account_service::X_ACCOUNT_SERVICE,
+        nagent_agents::email_imap_service::EMAIL_IMAP_SERVICE,
+        nagent_agents::email_smtp_service::EMAIL_SMTP_SERVICE,
+    ])
+    .into_arc();
+    #[cfg(all(feature = "caldav-agent", feature = "x-agent", feature = "email-agent"))]
+    let services = ServiceRegistry::new(&[
+        nagent_agents::caldav_service::CALDAV_SERVICE,
+        nagent_agents::x_account_service::X_ACCOUNT_SERVICE,
+        nagent_agents::email_imap_service::EMAIL_IMAP_SERVICE,
+        nagent_agents::email_smtp_service::EMAIL_SMTP_SERVICE,
+    ])
+    .into_arc();
+    #[cfg(not(any(feature = "caldav-agent", feature = "x-agent", feature = "email-agent")))]
     let services = ServiceRegistry::empty().into_arc();
 
     // Plan 1790695073418: build the X OAuth state when the cargo

@@ -61,6 +61,7 @@ pub const CALDAV_SERVICE: ServiceDef = ServiceDef {
             placeholder: Some(
                 "https://nextcloud.example.com/remote.php/dav/calendars/alice/personal/",
             ),
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
@@ -70,6 +71,7 @@ pub const CALDAV_SERVICE: ServiceDef = ServiceDef {
             required: true,
             help: Some("CalDAV principal or basic-auth username."),
             placeholder: None,
+            options: &[],
             // `username` is credential-adjacent — opted out of
             // edit-mode echo so it is not re-displayed every time
             // the form is opened (see module-level doc comment).
@@ -85,6 +87,7 @@ pub const CALDAV_SERVICE: ServiceDef = ServiceDef {
                  App passwords). Stored AES-256-GCM encrypted at rest.",
             ),
             placeholder: None,
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_PASSWORD,
         },
     ],

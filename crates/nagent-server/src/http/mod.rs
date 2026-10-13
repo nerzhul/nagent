@@ -220,10 +220,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::credentials::caldav_probe::build_caldav_probe_router(state.clone());
         #[cfg(not(feature = "caldav-agent"))]
         let caldav_probe_routes = axum::Router::new();
+        #[cfg(feature = "email-agent")]
+        let email_probe_routes =
+            crate::credentials::email_probe::build_email_probe_router(state.clone());
+        #[cfg(not(feature = "email-agent"))]
+        let email_probe_routes = axum::Router::new();
         let protected_with_auth = protected
             .merge(identity)
             .merge(credentials_routes)
             .merge(caldav_probe_routes)
+            .merge(email_probe_routes)
             .merge(mount_memories(state.clone()))
             .layer(auth_layer);
         // Layer order is applied bottom-up; the LAST `.layer()`

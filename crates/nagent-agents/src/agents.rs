@@ -1428,6 +1428,97 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
             )))
         },
     },
+    // Plan 1791566269874: IMAP/SMTP email agent family. v1 ships
+    // five LLM tools (read + flag-set + send); the wire client
+    // itself is a Phase 3-5 follow-up so the agents return a
+    // clear "wire layer not implemented" error today. The
+    // capability traits, ServiceDefs, configs, and probe
+    // endpoints are stable so the follow-up commit can fill the
+    // body in without touching the agent code.
+    //
+    // The agents are constructed with `imap: None` /
+    // `smtp: None` because the per-user secret resolver + the
+    // `EmailImap` / `EmailSmtp` capability wiring lives in
+    // `nagent-server`; the descriptor-level factory cannot
+    // reach it. The post-build wiring path
+    // (`AgentRegistry::wire_router`-style hook) is what will
+    // attach the server-side impls once the wire layer lands.
+    // Until then, the agents' `invoke` returns
+    // `AgentError::AgentFailed("email: ... capability not wired
+    // in this context")` so a caller that reaches them sees a
+    // clear, actionable error instead of a silent success.
+    #[cfg(feature = "email-agent")]
+    AgentDescriptor {
+        id: "email_list_inbox",
+        feature: "email-agent",
+        build: |cfgs, _pool| {
+            // IMAP-side agent: thread the IMAP allow-list so a
+            // permissive read posture cannot accidentally
+            // expose a write path. `imap: None` is the wire-
+            // layer placeholder (the descriptor-level factory
+            // cannot reach the per-user secret resolver; the
+            // server wires the real `EmailImapImpl` at boot).
+            Ok(Box::new(email::list_inbox::ListInboxAgent::new(
+                std::sync::Arc::new(cfgs.email.clone()),
+                None,
+                cfgs.email.imap_allowlist.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "email-agent")]
+    AgentDescriptor {
+        id: "email_get_message",
+        feature: "email-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(email::get_message::GetMessageAgent::new(
+                std::sync::Arc::new(cfgs.email.clone()),
+                None,
+                cfgs.email.imap_allowlist.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "email-agent")]
+    AgentDescriptor {
+        id: "email_search",
+        feature: "email-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(email::search::SearchAgent::new(
+                std::sync::Arc::new(cfgs.email.clone()),
+                None,
+                cfgs.email.imap_allowlist.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "email-agent")]
+    AgentDescriptor {
+        id: "email_send",
+        feature: "email-agent",
+        build: |cfgs, _pool| {
+            // SMTP-side agent: thread the SMTP allow-list.
+            // The split from the IMAP list keeps an operator
+            // who only allows read access from a personal
+            // mailbox (e.g. `imap_allowlist = ["*"]` for
+            // any server) from accidentally exposing the
+            // corporate write path.
+            Ok(Box::new(email::send::SendAgent::new(
+                std::sync::Arc::new(cfgs.email.clone()),
+                None,
+                cfgs.email.smtp_allowlist.clone(),
+            )))
+        },
+    },
+    #[cfg(feature = "email-agent")]
+    AgentDescriptor {
+        id: "email_mark_read",
+        feature: "email-agent",
+        build: |cfgs, _pool| {
+            Ok(Box::new(email::mark_read::MarkReadAgent::new(
+                std::sync::Arc::new(cfgs.email.clone()),
+                None,
+                cfgs.email.imap_allowlist.clone(),
+            )))
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -1538,6 +1629,9 @@ pub mod web_fetch;
 
 #[cfg(feature = "caldav-agent")]
 pub mod caldav;
+
+#[cfg(feature = "email-agent")]
+pub mod email;
 
 #[cfg(feature = "calculate-agent")]
 pub mod calculate_agent;

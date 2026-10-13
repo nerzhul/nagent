@@ -348,6 +348,13 @@ pub struct TomlAgentConfig {
     /// `recalled_top_k` cap (default `10`).
     #[serde(default)]
     pub memory: Option<TomlMemoryConfig>,
+    /// Knobs for the IMAP/SMTP email agent family (plan
+    /// 1791566269874). Mirrors [`crate::config::EmailConfig`].
+    /// Parsed unconditionally so a TOML typo surfaces at boot; the
+    /// agents are only registered when the `email-agent` cargo
+    /// feature is on.
+    #[serde(default)]
+    pub email: Option<TomlEmailConfig>,
 }
 
 /// Knobs for the `memory_*` agents (plan 1791267136806).
@@ -465,6 +472,32 @@ pub struct TomlXOAuthConfig {
     pub redirect_path: Option<String>,
     pub scopes: Option<Vec<String>>,
     pub timeout_ms: Option<u64>,
+}
+
+/// Knobs for the IMAP/SMTP email agent family (plan
+/// 1791566269874). Mirrors [`crate::config::EmailConfig`].
+/// Parsed unconditionally so a TOML typo surfaces at boot; the
+/// agents are only registered when the `email-agent` cargo
+/// feature is on.
+///
+/// The `imap_allowlist` and `smtp_allowlist` are split so
+/// operators can dial the read and write postures
+/// independently — see the module-level comment on
+/// [`crate::config::EmailConfig`] for the rationale.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlEmailConfig {
+    pub timeout_ms: Option<u64>,
+    pub imap_allowlist: Option<Vec<String>>,
+    pub smtp_allowlist: Option<Vec<String>>,
+    pub max_messages_per_call: Option<usize>,
+    pub max_body_bytes: Option<usize>,
+    pub max_attachment_bytes: Option<usize>,
+    pub recipient_allowlist: Option<Vec<String>>,
+    pub default_probe_helo: Option<String>,
+    pub allow_cleartext_imap: Option<bool>,
+    pub allow_cleartext_smtp: Option<bool>,
+    pub strict_tls: Option<bool>,
 }
 
 /// WebSocket frame-limit knobs and HTTP transport guardrails (S-1).
@@ -959,6 +992,7 @@ fn merge_toml_agents(
             caldav: merge_toml_caldav(e.caldav.as_ref(), l.caldav.as_ref()),
             x_timeline: merge_toml_x_timeline(e.x_timeline.as_ref(), l.x_timeline.as_ref()),
             memory: merge_toml_memory(e.memory.as_ref(), l.memory.as_ref()),
+            email: merge_toml_email(e.email.as_ref(), l.email.as_ref()),
         }),
     }
 }
@@ -973,6 +1007,42 @@ fn merge_toml_memory(
         (None, Some(l)) => Some(l.clone()),
         (Some(e), Some(l)) => Some(TomlMemoryConfig {
             recalled_top_k: l.recalled_top_k.or(e.recalled_top_k),
+        }),
+    }
+}
+
+fn merge_toml_email(
+    earlier: Option<&TomlEmailConfig>,
+    later: Option<&TomlEmailConfig>,
+) -> Option<TomlEmailConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlEmailConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            imap_allowlist: l
+                .imap_allowlist
+                .clone()
+                .or_else(|| e.imap_allowlist.clone()),
+            smtp_allowlist: l
+                .smtp_allowlist
+                .clone()
+                .or_else(|| e.smtp_allowlist.clone()),
+            max_messages_per_call: l.max_messages_per_call.or(e.max_messages_per_call),
+            max_body_bytes: l.max_body_bytes.or(e.max_body_bytes),
+            max_attachment_bytes: l.max_attachment_bytes.or(e.max_attachment_bytes),
+            recipient_allowlist: l
+                .recipient_allowlist
+                .clone()
+                .or_else(|| e.recipient_allowlist.clone()),
+            default_probe_helo: l
+                .default_probe_helo
+                .clone()
+                .or_else(|| e.default_probe_helo.clone()),
+            allow_cleartext_imap: l.allow_cleartext_imap.or(e.allow_cleartext_imap),
+            allow_cleartext_smtp: l.allow_cleartext_smtp.or(e.allow_cleartext_smtp),
+            strict_tls: l.strict_tls.or(e.strict_tls),
         }),
     }
 }

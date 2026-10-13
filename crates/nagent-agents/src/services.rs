@@ -28,6 +28,37 @@ pub enum FieldKind {
     /// URL input (`<input type="url">`). Browser validates the format
     /// before submitting.
     Url,
+    /// Dropdown list (`<select>`). The options are carried by
+    /// [`FieldDef::options`]; the wire format is the option's
+    /// `value` string. Used for closed enumerations (TLS modes,
+    /// provider presets) where a free-text field would invite
+    /// typos that the user does not see until the probe fails.
+    Select,
+    /// Numeric input (`<input type="number">`). The wire format
+    /// stays a string (the UI does not strip leading zeros, the
+    /// server-side parser rounds non-integers to `u16`); the
+    /// browser-side validation is a UX hint, the server is the
+    /// source of truth.
+    Number,
+}
+
+/// One option for a [`FieldKind::Select`] field. The `value` is
+/// what the server stores and round-trips; the `label` is what
+/// the user sees in the dropdown. The two are separated so a
+/// stable, machine-friendly token (`"starttls"`) can ship with a
+/// human-friendly description (`"STARTTLS (mandatory upgrade
+/// before AUTH)"`).
+#[derive(Debug, Clone, Serialize)]
+pub struct SelectOption {
+    /// Stable token written to the per-user vault and read by
+    /// the server. Use a kebab-case / lowercase canonical form
+    /// (the `tls_mode` parser in `agents::email` lowercases
+    /// anyway, so `"STARTTLS"` and `"starttls"` would both
+    /// match, but storing the canonical form keeps the audit
+    /// log grep-friendly).
+    pub value: &'static str,
+    /// Human-readable label rendered in the dropdown.
+    pub label: &'static str,
 }
 
 /// Static description of a single configurable field.
@@ -39,7 +70,8 @@ pub struct FieldDef {
     pub key: &'static str,
     /// Human-readable label rendered above the input.
     pub label: &'static str,
-    /// `Text` / `Password` / `Url` — drives the HTML input type.
+    /// `Text` / `Password` / `Url` / `Select` / `Number` — drives
+    /// the HTML input type.
     pub kind: FieldKind,
     /// Whether the field must be set for the service to count as
     /// "configured" in the UI. Server-side validation enforces this
@@ -49,6 +81,11 @@ pub struct FieldDef {
     pub help: Option<&'static str>,
     /// Optional placeholder shown when the input is empty.
     pub placeholder: Option<&'static str>,
+    /// Options for a [`FieldKind::Select`] field. `None` (or empty)
+    /// for every other kind; the integrations UI ignores the
+    /// field when `kind != Select` so a stray `options` array on a
+    /// `Text` field is harmless.
+    pub options: &'static [SelectOption],
     /// Whether the server should echo the saved plaintext back on
     /// `GET /api/integrations/:id` so the edit form can pre-fill
     /// the field. Defaults to `true` for non-`Password` kinds via
@@ -160,6 +197,12 @@ pub struct FieldSummary {
     pub required: bool,
     pub help: Option<&'static str>,
     pub placeholder: Option<&'static str>,
+    /// Options for a [`FieldKind::Select`] field. The
+    /// `Serialize` skip keeps the array absent from the payload
+    /// when the field is not a select (the UI does not need to
+    /// see an empty list for a `Text` / `Number` field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<&'static [SelectOption]>,
     /// True iff the user has saved a value for this field.
     pub filled: bool,
     /// Plaintext value for **non-Password** fields when the
@@ -219,6 +262,14 @@ impl ServiceDef {
                     required: f.required,
                     help: f.help,
                     placeholder: f.placeholder,
+                    // Surface the option list only for select
+                    // fields; the `Serialize` skip drops an
+                    // empty array for non-select kinds.
+                    options: if matches!(f.kind, FieldKind::Select) && !f.options.is_empty() {
+                        Some(f.options)
+                    } else {
+                        None
+                    },
                     filled,
                     value,
                 }
@@ -278,6 +329,7 @@ mod tests {
                 required: true,
                 help: None,
                 placeholder: Some("imap.example.com"),
+                options: &[],
                 echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             },
             FieldDef {
@@ -287,6 +339,7 @@ mod tests {
                 required: true,
                 help: None,
                 placeholder: None,
+                options: &[],
                 echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
@@ -307,6 +360,7 @@ mod tests {
                 required: true,
                 help: None,
                 placeholder: None,
+                options: &[],
                 echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             },
             FieldDef {
@@ -316,6 +370,7 @@ mod tests {
                 required: true,
                 help: None,
                 placeholder: None,
+                options: &[],
                 echo_on_edit: false,
             },
             FieldDef {
@@ -325,6 +380,7 @@ mod tests {
                 required: true,
                 help: None,
                 placeholder: None,
+                options: &[],
                 echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
@@ -420,6 +476,85 @@ mod tests {
             pwd.value.is_none(),
             "password fields must never carry a plaintext value, got {:?}",
             pwd.value
+        );
+    }
+
+    /// Service that exercises the new `Select` and `Number` field
+    /// kinds so the JSON projection (options array present for
+    /// selects, absent otherwise) is locked in. Used by the
+    /// integrations UI to render a `<select>` dropdown instead of
+    /// a free-text input.
+    const FAKE_SERVICE_SELECT_NUMBER: ServiceDef = ServiceDef {
+        id: "fake-select-number",
+        display_name: "Fake (select + number)",
+        icon: "?",
+        fields: &[
+            FieldDef {
+                key: "tls_mode",
+                label: "TLS mode",
+                kind: FieldKind::Select,
+                required: true,
+                help: None,
+                placeholder: None,
+                options: &[
+                    SelectOption {
+                        value: "implicit",
+                        label: "Implicit TLS",
+                    },
+                    SelectOption {
+                        value: "starttls",
+                        label: "STARTTLS",
+                    },
+                ],
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+            },
+            FieldDef {
+                key: "port",
+                label: "Port",
+                kind: FieldKind::Number,
+                required: true,
+                help: None,
+                placeholder: Some("993"),
+                options: &[],
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+            },
+        ],
+        docs_url: None,
+    };
+
+    /// A `Select` field's `options` array must surface in the
+    /// JSON response so the integrations UI can render a
+    /// dropdown. The label and value round-trip verbatim.
+    #[test]
+    fn select_field_options_surface_in_summary() {
+        let empty = std::collections::HashMap::new();
+        let s = FAKE_SERVICE_SELECT_NUMBER
+            .to_summary(&["tls_mode".to_string(), "port".to_string()], &empty);
+        let tls = s.fields.iter().find(|f| f.key == "tls_mode").unwrap();
+        let opts = tls
+            .options
+            .expect("select fields must surface their options array");
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].value, "implicit");
+        assert_eq!(opts[0].label, "Implicit TLS");
+        assert_eq!(opts[1].value, "starttls");
+        assert_eq!(opts[1].label, "STARTTLS");
+    }
+
+    /// A `Number` field must NOT carry an `options` array in the
+    /// JSON response — the `Serialize` skip keeps the field
+    /// absent so the integrations UI does not render an empty
+    /// dropdown next to a numeric input.
+    #[test]
+    fn number_field_has_no_options_array_in_summary() {
+        let empty = std::collections::HashMap::new();
+        let s = FAKE_SERVICE_SELECT_NUMBER
+            .to_summary(&["tls_mode".to_string(), "port".to_string()], &empty);
+        let port = s.fields.iter().find(|f| f.key == "port").unwrap();
+        assert!(
+            port.options.is_none(),
+            "number fields must not surface an options array; got {:?}",
+            port.options
         );
     }
 }

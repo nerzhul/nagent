@@ -239,3 +239,11 @@ but operators on a budget can lower `max_posts` to 5 or set
   is discarded. Mitigation: documented single-writer
   assumption; cluster deployments should run the OAuth route
   through a single writer.
+
+## See also
+
+- `docs/integrations/email.md` — sibling per-user integration
+  (IMAP / SMTP) with the same per-call connection + capability
+  trait pattern.
+- `docs/integrations/caldav.md` — sibling per-user integration
+  with the same probe + audit pattern.

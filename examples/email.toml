@@ -1,0 +1,140 @@
+# Example `[agents.email]` config for the IMAP/SMTP email agent
+# family (plan 1791566269874). Copy into your `--config` TOML file
+# and adjust `imap_allowlist` / `smtp_allowlist` to match the
+# IMAP / SMTP servers your users can reach. Both lists default
+# to empty (fail-closed): the chat agents AND both probe
+# endpoints refuse every call until the operator sets at least
+# one entry per list. The two lists are **independent** on
+# purpose — read and write have different blast radii (see
+# `docs/integrations/email.md` for the threat model).
+#
+# v1 ships five LLM tools + two setup-only HTTP probe endpoints:
+#   * `email_list_inbox`  — list recent messages in a folder
+#   * `email_get_message` — fetch the full body of one UID
+#   * `email_search`      — constrained IMAP SEARCH
+#   * `email_send`        — send a message (strictest tool, double-gated)
+#   * `email_mark_read`   — set or clear the \Seen flag
+#
+# The wire layer for the IMAP / SMTP round-trips is a follow-up
+# commit (Phases 3-5 of the plan); v1 surfaces the configuration
+# + audit + DB migration end-to-end. The `email_send` agent
+# always rejects every call today with a clear "wire layer not
+# implemented in v1" error.
+
+[agents]
+enabled = true
+
+[agents.email]
+# Per-request connect+read timeout in milliseconds. Shared by the
+# IMAP and SMTP wire clients; 15 s is generous for a single
+# STARTTLS / LOGIN / LIST round trip.
+timeout_ms = 15_000
+
+# Hostname allow-list for the **IMAP** wire path (read side).
+# When non-empty, only the listed hosts (or their subdomains,
+# for `*.foo` entries) may be reached. The IMAP probe endpoint
+# and the four IMAP-side agents (`email_list_inbox`,
+# `email_get_message`, `email_search`, `email_mark_read`) all
+# check this list. Empty = fail-closed.
+#
+# Common entries:
+#   imap.fastmail.com   (Fastmail)
+#   imap.mail.me.com    (iCloud)
+#   imap.gmail.com      (Gmail; basic-auth deprecated by Google —
+#                        see v2 OAuth plan)
+imap_allowlist = ["imap.fastmail.com", "imap.mail.me.com"]
+
+# Hostname allow-list for the **SMTP** wire path (write side).
+# When non-empty, only the listed hosts may be reached. The
+# SMTP probe endpoint and the `email_send` agent check this
+# list. Empty = fail-closed; setting `smtp_allowlist = []` is
+# the right posture for a read-only deployment.
+#
+# Common entries:
+#   smtp.fastmail.com   (Fastmail)
+#   smtp.mail.me.com    (iCloud)
+#   smtp.gmail.com      (Gmail; see Gmail OAuth note above)
+smtp_allowlist = ["smtp.fastmail.com", "smtp.mail.me.com"]
+
+# Hard cap on the number of summaries `email_list_inbox` and
+# `email_search` return per call. The chat agent truncates beyond
+# this; the LLM must call again for the next page.
+max_messages_per_call = 100
+
+# Cap on the size of one RFC 5322 body the LLM ever sees (bytes).
+# Caps memory per `email_get_message`; bump it if you regularly
+# receive 2 MiB+ messages.
+max_body_bytes = 2097152
+
+# Cap on the size of one attachment metadata envelope. The body
+# of the attachment is NEVER decoded in v1 — `0` means the
+# agent refuses any LLM-driven attachment fetch. Bump to a
+# positive value (e.g. `262144` for 256 KiB) only after the
+# wire-layer follow-up commit lands.
+max_attachment_bytes = 0
+
+# Operator-set outbound `to` / `cc` / `bcc` allow-list for
+# `email_send`. Empty = the user's own `from_address` only.
+# This is the second gate on outbound mail — `email_send` checks
+# the LLM-supplied recipient list against this allow-list BEFORE
+# the agent reaches the network. The inline approval card fires
+# on every send; the per-session "Always allow" override is
+# intentionally not wired for `email_send`.
+recipient_allowlist = []
+
+# `EHLO` identity used by the SMTP probe when the form is
+# submitted. Some SMTP servers reject `EHLO` identities that do
+# not resolve; a real FQDN is preferred.
+default_probe_helo = "nagent.local"
+
+# TLS posture knobs. Both default to `false` (clear-text refused)
+# because:
+#   * RFC 3501 §3.4 — IMAP MUST NOT use clear-text credentials.
+#   * RFC 6409 — SMTP submission over clear-text is a credential
+#     capture vector. Set `allow_cleartext_smtp = true` only when
+#     you operate a relay the chat agents can reach over a private
+#     network (e.g. an internal Postfix that fronts the public one).
+allow_cleartext_imap = false
+allow_cleartext_smtp = false
+
+# `true` refuses self-signed certificates regardless of the
+# user-supplied form. Set `false` to relax the check for tests
+# against a loopback fixture (mkcert / step-ca / etc.).
+strict_tls = true
+
+# ----------------------------------------------------------------------------
+# Per-user credentials (the chat agents read these at request time).
+# The user pastes them through the Integrations page; the server
+# encrypts them with `[auth.credentials].key` (AES-256-GCM) and
+# never logs the plaintext. Two `ServiceDef`s:
+#
+#   `email_imap` — fields `host`, `port`, `tls_mode`, `username`,
+#                  `password`. The form's "Test connection" button
+#                  calls `POST /api/integrations/email_imap/probe`
+#                  with the current values BEFORE the user commits.
+#                  Validated against `[email].imap_allowlist`.
+#
+#   `email_smtp` — same five fields plus `from_address`. The SMTP
+#                  probe additionally validates the `from_address`
+#                  with a `MAIL FROM:<addr>` round-trip and caches
+#                  the verdict in the `email_allowed_from` table
+#                  (migration `0013_email_allowed_from.sql`). The
+#                  `email_send` agent always reads `from_address`
+#                  from this row — the LLM never picks the sender.
+#                  Validated against `[email].smtp_allowlist`.
+#
+# Field shape (see `ServiceDef` in
+# `nagent-agents/src/email_imap_service.rs` /
+# `nagent-agents/src/email_smtp_service.rs`):
+#   * `host`         — IMAP / SMTP server hostname.
+#   * `port`         — 993 / 465 for implicit TLS, 143 / 587 for
+#                      STARTTLS, custom allowed.
+#   * `tls_mode`     — `<select>` dropdown: `implicit` (recommended),
+#                      `starttls` (mandatory upgrade before AUTH),
+#                      or `none` (refused unless the operator
+#                      opts in via `allow_cleartext_*`).
+#   * `username`     — IMAP / SMTP AUTH login name.
+#   * `password`     — App password / token.
+#   * `from_address` — (SMTP only) single allowed sender, validated
+#                      by the probe.
+# ----------------------------------------------------------------------------

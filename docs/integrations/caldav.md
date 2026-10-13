@@ -155,3 +155,10 @@ stable and audited.
   `DTSTART` / `DTEND` to UTC. Floating times (no `TZID`,
   no `Z`) are interpreted as UTC for v1; if you regularly
   rely on a different floating timezone, file an issue.
+
+## See also
+
+- `docs/integrations/email.md` — sibling per-user integration
+  (IMAP / SMTP) with the same probe + audit pattern.
+- `docs/integrations/x.md` — sibling per-user integration with
+  the same per-call connection + capability trait pattern.

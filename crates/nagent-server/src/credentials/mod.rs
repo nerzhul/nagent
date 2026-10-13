@@ -30,6 +30,9 @@ pub mod routes;
 #[cfg(feature = "caldav-agent")]
 pub mod caldav_probe;
 
+#[cfg(feature = "email-agent")]
+pub mod email_probe;
+
 pub use crypto::{decrypt, encrypt, EncryptedSecret};
 pub use key::{CredentialsKey, CredentialsKeyError};
 pub use resolver::{CredentialError, CredentialResolver};

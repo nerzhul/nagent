@@ -445,6 +445,57 @@ mod tests {
             keywords: &["calendar", "events", "agenda"],
         }
     }
+    /// Mirrors the production `email_list_inbox` agent's
+    /// description + keywords so the BM25 walk can be
+    /// regression-tested against the exact registry the
+    /// user typically has on (CalDAV + email + weather
+    /// + memory). The keywords carry the user-facing
+    /// vocabulary ("emails", "inbox", "messages") that
+    /// the description's prose ("IMAP mailbox") is
+    /// missing — without them the router returns
+    /// `get_weather` (which has "days" in its
+    /// forecast-API prose) as the top hit for "list
+    /// emails from the last 2 days".
+    fn email_list_inbox() -> StubAgent {
+        StubAgent {
+            name: "email_list_inbox",
+            description: "List the most recent messages in a folder of the user's IMAP \
+                          mailbox (default `INBOX`). Returns JSON with `messages[]` (uid, \
+                          folder, from, subject, date, snippet, seen) capped at the \
+                          server-side limit. Accepts an optional `folder` (default `INBOX`), \
+                          an optional RFC 3339 `since`, and an optional `limit` (default 25, \
+                          cap 100). Read operations on a third-party service with the user's \
+                          credentials are gated by the inline approval card.",
+            keywords: &[
+                "email", "emails", "mail", "inbox", "messages", "list", "recent", "show", "check",
+                "read", "imap",
+            ],
+        }
+    }
+    fn email_search() -> StubAgent {
+        StubAgent {
+            name: "email_search",
+            description: "Run a constrained IMAP `SEARCH` against the user's mailbox. `query` \
+                          is restricted to a small allow-list of IMAP criteria tokens: `ALL`, \
+                          `UNSEEN`, `SEEN`, `SUBJECT <text>`, `FROM <text>`, `TO <text>`, \
+                          `BODY <text>`, `SINCE <date>`, `BEFORE <date>`, `UID <set>`. Free-form \
+                          Gmail-style queries are deliberately v2. Returns the matching \
+                          message summaries, capped at `limit` (default 25, cap 100).",
+            keywords: &[
+                "email", "emails", "mail", "inbox", "messages", "search", "find", "look", "lookup",
+                "query", "filter", "from", "subject", "imap",
+            ],
+        }
+    }
+    fn memory_list() -> StubAgent {
+        StubAgent {
+            name: "memory_list",
+            description: "List the durable facts currently stored for the current user. \
+                          Returns metadata only (subject / predicate / tags / confidence / \
+                          source_kind / created_at / last_used_at) — NO value or notes.",
+            keywords: &["memory", "remember", "list", "facts"],
+        }
+    }
 
     #[test]
     fn from_registry_excludes_search_tools() {
@@ -610,6 +661,64 @@ mod tests {
                 hits.first().map(|s| &**s),
                 Some("read_document"),
                 "query {query:?} should land on read_document, got {hits:?}",
+            );
+        }
+    }
+
+    /// Regression for the user-reported routing bug: a
+    /// natural-language query for email (e.g. "list
+    /// emails from the last 2 days") must land on the
+    /// email tools, not on `get_weather` (which has
+    /// the word "days" in its forecast-API prose and
+    /// used to win the BM25 walk because the email
+    /// descriptions only said "messages" / "IMAP" /
+    /// "mailbox"). The `keywords()` overrides on the
+    /// email agents add the user-facing vocabulary
+    /// ("emails", "inbox", "list", …) that closes the
+    /// gap.
+    ///
+    /// We assert: (1) the top hit for "list emails …"
+    /// is an email tool, (2) the email tools all rank
+    /// above `get_weather` in the top-5 walk, (3) the
+    /// same property holds for the other natural email
+    /// queries ("search emails", "show me the latest
+    /// email", "send an email").
+    #[test]
+    fn pre_select_picks_email_tools_for_email_queries() {
+        let reg = registry(vec![
+            weather(),
+            email_list_inbox(),
+            email_search(),
+            memory_list(),
+            caldav_list_events(),
+        ]);
+        let r = ToolsRouter::from_registry(&reg);
+        // The exact query the user reported.
+        let hits = r.pre_select("list emails from the last 2 days", 5);
+        let email_names: std::collections::HashSet<&str> =
+            ["email_list_inbox", "email_search"].into_iter().collect();
+        let weather_idx = hits.iter().position(|h| &**h == "get_weather");
+        let email_idx_first = hits.iter().position(|h| email_names.contains(&**h));
+        assert!(
+            email_idx_first.is_some(),
+            "expected an email tool in top 5 for `list emails from the last 2 days`, got {hits:?}"
+        );
+        let email_idx = email_idx_first.unwrap();
+        assert!(
+            weather_idx.is_none() || email_idx < weather_idx.unwrap(),
+            "expected email tools above get_weather in top 5, got {hits:?}"
+        );
+        // The other natural email queries should also
+        // land on the email side.
+        for query in [
+            "show me the latest email",
+            "search emails from alice",
+            "send an email to bob",
+        ] {
+            let hits = r.pre_select(query, 3);
+            assert!(
+                hits.iter().any(|h| email_names.contains(&**h)),
+                "query {query:?} should land on an email tool, got {hits:?}"
             );
         }
     }

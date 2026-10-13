@@ -58,6 +58,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  `x_timeline` agent on 401. Stored AES-256-GCM encrypted at rest.",
             ),
             placeholder: None,
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_PASSWORD,
         },
         FieldDef {
@@ -70,6 +71,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  access token when the stored one is expired. Stored AES-256-GCM encrypted at rest.",
             ),
             placeholder: None,
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_PASSWORD,
         },
         FieldDef {
@@ -82,6 +84,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  does not branch on this).",
             ),
             placeholder: None,
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
@@ -94,6 +97,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  Required to build the timeline URL.",
             ),
             placeholder: None,
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
@@ -103,6 +107,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
             required: true,
             help: Some("@handle surfaced in the chat UI (\"Connecté en tant que @naval\")."),
             placeholder: None,
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
@@ -115,6 +120,7 @@ pub const X_ACCOUNT_SERVICE: ServiceDef = ServiceDef {
                  callback time. The agent refreshes when this is past or within 60 s.",
             ),
             placeholder: None,
+            options: &[],
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
     ],

@@ -65,6 +65,11 @@ pub struct AgentConfig {
     /// The field is always parsed; the actual agents are only
     /// registered when the `memory-agent` cargo feature is on.
     pub memory: MemoryConfig,
+    /// Knobs for the IMAP/SMTP email agent family (plan
+    /// 1791566269874). The field is always parsed; the actual
+    /// agents are only registered when the `email-agent` cargo
+    /// feature is on.
+    pub email: EmailConfig,
 }
 
 impl Default for AgentConfig {
@@ -81,6 +86,7 @@ impl Default for AgentConfig {
             caldav: CalDavConfig::default(),
             x_timeline: XTimelineConfig::default(),
             memory: MemoryConfig::default(),
+            email: EmailConfig::default(),
         }
     }
 }
@@ -106,6 +112,7 @@ impl AgentConfig {
             caldav: CalDavConfig::from_env_with_toml(toml.caldav.as_ref())?,
             x_timeline: XTimelineConfig::from_env_with_toml(toml.x_timeline.as_ref())?,
             memory: MemoryConfig::from_env_with_toml(toml.memory.as_ref())?,
+            email: EmailConfig::from_env_with_toml(toml.email.as_ref())?,
         })
     }
 }
@@ -650,6 +657,181 @@ impl XTimelineConfig {
                 toml.base_url.as_deref(),
             )
             .unwrap_or_else(|| defaults.base_url.clone()),
+        })
+    }
+}
+
+/// Knobs for the IMAP/SMTP email agent family (plan 1791566269874).
+///
+/// Two `ServiceDef`s — `email_imap` and `email_smtp` — collect the
+/// per-user credentials (host, port, tls_mode, username, password,
+/// and an SMTP-only `from_address`). This struct holds the
+/// **operator** knobs: the hostname allow-list, the protocol
+/// timeout, the body-size caps, the recipient allow-list, and the
+/// per-deployment TLS posture. The wire client is built per call
+/// from this config + the per-user vault at request time.
+///
+/// `allowlist` is mandatory for any deployment that talks to a
+/// public IMAP / SMTP server: when empty, the default-deny
+/// posture refuses every call. `recipient_allowlist` defaults to
+/// empty; the `email_send` agent then narrows the outbound
+/// recipient set to the user's own `from_address` only.
+#[derive(Debug, Clone)]
+pub struct EmailConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Hostname allow-list applied to **IMAP** servers
+    /// (suffix match, case-insensitive). When non-empty, only
+    /// the listed hosts (or their subdomains, for `*.foo`
+    /// entries) may be reached. When empty, every IMAP call
+    /// is refused.
+    ///
+    /// The IMAP allow-list governs *reads* — what the user is
+    /// allowed to fetch / search through the LLM. Operators
+    /// who want a permissive read posture (any public IMAP
+    /// server, e.g. for a personal-assistant use case) keep
+    /// this broad; operators running a single corporate
+    /// mailbox lock it to that host.
+    pub imap_allowlist: Vec<String>,
+    /// Hostname allow-list applied to **SMTP** servers
+    /// (suffix match, case-insensitive). When non-empty, only
+    /// the listed hosts (or their subdomains, for `*.foo`
+    /// entries) may be reached. When empty, every SMTP call
+    /// is refused.
+    ///
+    /// The SMTP allow-list is intentionally separate from the
+    /// IMAP one because write operations have a higher blast
+    /// radius than read operations. A common posture is:
+    ///   * `imap_allowlist = ["*"]` (or a broad set) so the
+    ///     user can read from any mailbox they connect to.
+    ///   * `smtp_allowlist = ["smtp.corporate.example"]` (a
+    ///     single trusted relay) so the user can only send
+    ///     through the corporate gateway, never through an
+    ///     arbitrary open relay.
+    /// The reverse posture (locked read, open write) is
+    /// nonsense and the server still respects the per-list
+    /// decision.
+    pub smtp_allowlist: Vec<String>,
+    /// Hard cap on the number of summaries
+    /// `email_list_inbox` / `email_search` return per call.
+    pub max_messages_per_call: usize,
+    /// Cap on the size of a single RFC 5322 body the LLM ever
+    /// sees (bytes).
+    pub max_body_bytes: usize,
+    /// Cap on the size of one attachment metadata envelope.
+    /// The body of the attachment is never decoded in v1
+    /// (`max_attachment_bytes = 0` in the default).
+    pub max_attachment_bytes: usize,
+    /// Operator-set outbound `to` / `cc` / `bcc` allow-list
+    /// for `email_send`. Empty = the user's own
+    /// `from_address` only.
+    pub recipient_allowlist: Vec<String>,
+    /// Default `EHLO` identity used by the SMTP probe.
+    pub default_probe_helo: String,
+    /// When `true`, the agent accepts `tls_mode = "none"` for
+    /// IMAP. Off by default (RFC 3501 §3.4 — clear-text IMAP
+    /// violates the MUST-NOT-USE-PLAINTEXT rule).
+    pub allow_cleartext_imap: bool,
+    /// When `true`, the agent accepts `tls_mode = "none"` for
+    /// SMTP. Off by default; only enabled for relay scenarios
+    /// the operator controls.
+    pub allow_cleartext_smtp: bool,
+    /// When `true`, refuses self-signed certificates regardless
+    /// of the user-supplied form. Defaults to `true` so a
+    /// misconfigured vault cannot be coerced into trusting a
+    /// MitM cert.
+    pub strict_tls: bool,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 15_000,
+            imap_allowlist: Vec::new(),
+            smtp_allowlist: Vec::new(),
+            max_messages_per_call: 100,
+            max_body_bytes: 2 * 1024 * 1024,
+            // v1 refuses all attachment decodes; the envelope
+            // surfaces metadata only.
+            max_attachment_bytes: 0,
+            recipient_allowlist: Vec::new(),
+            default_probe_helo: "nagent.local".to_string(),
+            allow_cleartext_imap: false,
+            allow_cleartext_smtp: false,
+            strict_tls: true,
+        }
+    }
+}
+
+impl EmailConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlEmailConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("EMAIL_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "EMAIL_TIMEOUT_MS",
+            )?,
+            imap_allowlist: resolve_csv(
+                env_opt("EMAIL_IMAP_ALLOWLIST").as_deref(),
+                toml.imap_allowlist,
+                defaults.imap_allowlist,
+            ),
+            smtp_allowlist: resolve_csv(
+                env_opt("EMAIL_SMTP_ALLOWLIST").as_deref(),
+                toml.smtp_allowlist,
+                defaults.smtp_allowlist,
+            ),
+            max_messages_per_call: resolve_primitive(
+                env_opt("EMAIL_MAX_MESSAGES").as_deref(),
+                toml.max_messages_per_call,
+                defaults.max_messages_per_call,
+                "EMAIL_MAX_MESSAGES",
+            )?,
+            max_body_bytes: resolve_primitive(
+                env_opt("EMAIL_MAX_BODY_BYTES").as_deref(),
+                toml.max_body_bytes,
+                defaults.max_body_bytes,
+                "EMAIL_MAX_BODY_BYTES",
+            )?,
+            max_attachment_bytes: resolve_primitive(
+                env_opt("EMAIL_MAX_ATTACHMENT_BYTES").as_deref(),
+                toml.max_attachment_bytes,
+                defaults.max_attachment_bytes,
+                "EMAIL_MAX_ATTACHMENT_BYTES",
+            )?,
+            recipient_allowlist: resolve_csv(
+                env_opt("EMAIL_RECIPIENT_ALLOWLIST").as_deref(),
+                toml.recipient_allowlist,
+                defaults.recipient_allowlist,
+            ),
+            default_probe_helo: resolve_opt_string(
+                env_opt("EMAIL_DEFAULT_PROBE_HELO").as_deref(),
+                toml.default_probe_helo.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.default_probe_helo.clone()),
+            allow_cleartext_imap: resolve_primitive(
+                env_opt("EMAIL_ALLOW_CLEARTEXT_IMAP").as_deref(),
+                toml.allow_cleartext_imap,
+                defaults.allow_cleartext_imap,
+                "EMAIL_ALLOW_CLEARTEXT_IMAP",
+            )?,
+            allow_cleartext_smtp: resolve_primitive(
+                env_opt("EMAIL_ALLOW_CLEARTEXT_SMTP").as_deref(),
+                toml.allow_cleartext_smtp,
+                defaults.allow_cleartext_smtp,
+                "EMAIL_ALLOW_CLEARTEXT_SMTP",
+            )?,
+            strict_tls: resolve_primitive(
+                env_opt("EMAIL_STRICT_TLS").as_deref(),
+                toml.strict_tls,
+                defaults.strict_tls,
+                "EMAIL_STRICT_TLS",
+            )?,
         })
     }
 }

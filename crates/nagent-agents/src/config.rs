@@ -6,9 +6,9 @@
 
 pub use crate::agents::config_doc::{
     CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig, DictionaryAgentConfig,
-    MemoryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig, ToolSearchAgentConfig,
-    UnitConvertAgentConfig, WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig,
-    XTimelineAgentConfig,
+    EmailAgentConfig, MemoryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig,
+    ToolSearchAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig, WebFetchAgentConfig,
+    WikipediaAgentConfig, XTimelineAgentConfig,
 };
 
 /// Bag of every per-agent config. Plain data only — the server
@@ -27,6 +27,10 @@ pub struct AgentConfigs {
     pub caldav: CalDavAgentConfig,
     pub x_timeline: XTimelineAgentConfig,
     pub memory: MemoryAgentConfig,
+    /// Plan 1791566269874 — IMAP/SMTP email agent family.
+    /// Field is always parsed; the agents are only registered
+    /// when the `email-agent` cargo feature is on.
+    pub email: EmailAgentConfig,
     /// `search_tools` meta-agent config. Today a single knob
     /// (`default_top_k`); kept on the bag so the descriptor's
     /// `build` closure receives it through the same

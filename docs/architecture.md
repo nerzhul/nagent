@@ -220,6 +220,11 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `caldav_get_event` | `caldav-agent` | Per-user CalDAV calendar: fetch a single `VEVENT` by `UID`. Confirm-on-read. |
 | `caldav_create_event` | `caldav-agent` | Per-user CalDAV calendar: append a new `VEVENT` (confirm-on-write). |
 | `x_timeline` | `x-agent` | Per-user X (Twitter) home timeline via the v2 API (mode "Abonnements" / "Pour Vous"). Read-only. Refreshes the OAuth access token itself on 401. |
+| `email_list_inbox` | `email-agent` | Per-user IMAP: list the most recent `limit` summaries in a folder (default `INBOX`). Confirm-on-read. Plan 1791566269874. |
+| `email_get_message` | `email-agent` | Per-user IMAP: fetch the full body of one message by `UID`. Confirm-on-read. |
+| `email_search` | `email-agent` | Per-user IMAP: run a constrained `SEARCH` against a folder. The query is restricted to a small allow-list of IMAP criteria tokens. Confirm-on-read. |
+| `email_send` | `email-agent` | Per-user SMTP: send a message. Strictest tool in the registry — the inline approval card fires on every invocation and the per-session "Always allow" override is **not** wired for it. The recipient list is gated by the operator-set `recipient_allowlist` before the agent reaches the network. |
+| `email_mark_read` | `email-agent` | Per-user IMAP: set or clear the `\Seen` flag on one message. Confirm-on-write (session-override applies — same posture as `caldav_create_event`). |
 | `memory_store` | `memory-agent` | Persist one durable fact for the calling user (AES-256-GCM encrypted at rest, dedup on `(subject, predicate)`). Idempotent — re-storing the same fact returns the same memory id. |
 | `memory_recall` | `memory-agent` | Decrypt + return up to `recalled_top_k` rows matching the supplied `subject` / `predicate` / `tags` LIKE filters. |
 | `memory_list` | `memory-agent` | List metadata-only rows for the calling user. Pairs with `memory_recall` to retrieve the value of a specific id (the list shape never includes plaintext). |
@@ -236,6 +241,23 @@ methods and no such agent is registered in `AGENT_DESCRIPTORS`).
 `caldav_list_calendars` is a setup-only HTTP endpoint
 (`POST /api/integrations/caldav/probe-calendars`), not an LLM tool.
 See `docs/integrations/caldav.md` for the operator-facing guide.
+
+The email plugin (plan 1791566269874) ships **five LLM tools +
+two setup-only probe endpoints** in v1: the four read tools
+(`email_list_inbox`, `email_get_message`, `email_search`,
+`email_mark_read`) plus `email_send` for outbound mail. v1's
+wire layer for IMAP / SMTP is a follow-up commit so the agents
+return a clear "wire layer not implemented in v1" error today;
+the architecture, capability traits, ServiceDefs, configs,
+audit rows, and DB migration ship end-to-end. The two
+`ServiceDef`s (`email_imap`, `email_smtp`) stay distinct (the
+IMAP and SMTP endpoints for the same mailbox often differ) and
+use **independent** operator-set hostname allow-lists
+(`[email].imap_allowlist` for the four IMAP-side agents + the
+IMAP probe; `[email].smtp_allowlist` for `email_send` + the
+SMTP probe). The split keeps a permissive read posture from
+accidentally exposing a write path.
+See `docs/integrations/email.md` for the operator-facing guide.
 
 ### 2.5 Direct HTTP routes
 
@@ -279,6 +301,25 @@ populates the row at connect time; the `x_timeline` agent
 refreshes the token-shaped fields in place on 401 through
 `UserContext::update_secret(...)`. See
 `docs/integrations/x.md` for the operator-facing guide.
+
+When the `email-agent` cargo feature is on, the registry
+contains two `ServiceDef`s: `email_imap` (five fields: `host`,
+`port`, `tls_mode`, `username`, `password`) and `email_smtp`
+(six fields: the IMAP set plus `from_address`). The two
+`ServiceDef`s stay distinct so the IMAP and SMTP endpoints
+for the same mailbox can differ (the common case) and the
+credentials are not always symmetric. Two setup-only HTTP
+endpoints — `POST /api/integrations/email_imap/probe` and
+`POST /api/integrations/email_smtp/probe` — validate the
+credentials against the per-protocol operator-set
+`[email].imap_allowlist` / `[email].smtp_allowlist`
+before the user saves them. The SMTP probe additionally
+validates the `from_address` with a `MAIL FROM:<addr>`
+round-trip; the verdict is cached in the `email_allowed_from`
+table (migration `0013_email_allowed_from.sql`) so the
+`email_send` agent can never hand a misconfigured vault row to
+an arbitrary envelope sender. See
+`docs/integrations/email.md` for the operator-facing guide.
 
 #### 2.7 Setup-only helpers
 

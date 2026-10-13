@@ -2579,10 +2579,14 @@ select, input[type="checkbox"] {
   color: var(--chat-label-fg, #c8ccd4);
   opacity: 0.85;
 }
-.chat-integration-field input {
+.chat-integration-field input,
+.chat-integration-field select {
   /* Generous vertical padding keeps the field easy to scan
    * and gives the user enough room to type / verify long
-   * URLs and tokens without crowding. */
+   * URLs and tokens without crowding. The same shape is
+   * shared by `<select>` so a dropdown reads as a sibling
+   * of the surrounding text inputs rather than a foreign
+   * OS-native control. */
   padding: 0.65rem 0.75rem;
   border-radius: 0.4rem;
   border: 1px solid var(--chat-input-border, #444);
@@ -2594,13 +2598,65 @@ select, input[type="checkbox"] {
 .chat-integration-field input::placeholder {
   opacity: 0.5;
 }
-.chat-integration-field input:hover {
+.chat-integration-field input:hover,
+.chat-integration-field select:hover {
   border-color: var(--chat-input-border-hover, #5a5e64);
 }
-.chat-integration-field input:focus {
+.chat-integration-field input:focus,
+.chat-integration-field select:focus {
   outline: none;
   border-color: var(--chat-accent-fg, #8ab4ff);
   box-shadow: 0 0 0 3px rgba(138, 180, 255, 0.18);
+}
+
+/* `<select>` dropdown chevron + native-chrome strip (plan
+ * 1791566269874 follow-up). The browser's default arrow +
+ * the OS's open-dropdown chrome look out of place against
+ * the rest of the form; we strip them with `appearance:
+ * none` and draw a chevron via a tiny inline SVG background
+ * image. The arrow sits on the right edge with enough
+ * padding that the selected text never overlaps it. The
+ * `option` element is browser-rendered so the dropdown
+ * itself keeps OS-native colours / fonts (theming the
+ * open dropdown is intentionally not done — every major
+ * browser ships its own picker, and forcing a custom
+ * dropdown panel is a much bigger UX surface than this
+ * single field warrants). */
+.chat-integration-field select {
+  /* `appearance: none` strips the OS-default chevron. The
+   * `text-overflow: clip` keeps long labels from bleeding
+   * into the chevron when the placeholder is showing. */
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  text-overflow: clip;
+  /* Extra right padding makes room for the chevron so the
+   * selected text never overlaps the icon. `2.25rem` is
+   * roughly the chevron's diameter plus a comfortable
+   * breathing margin. */
+  padding-right: 2.25rem;
+  /* Center the chevron on the right edge. The SVG is a 12px
+   * `▼` glyph in the same accent colour as the field's
+   * focus ring so the two share a visual language. The
+   * background is anchored `right center` (default) and
+   * sized `14px` (matches the inline glyph's natural
+   * height for sharp rendering on hi-DPI displays). */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%238ab4ff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='3 5 6 8 9 5'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.85rem center;
+  background-size: 12px 12px;
+  cursor: pointer;
+}
+/* The disabled placeholder option (the "— pick a value —"
+ * line on a brand-new form) is dimmer than the real
+ * options so the user can tell at a glance they have not
+ * yet chosen anything. The `:invalid` pseudo-class fires
+ * when the `<select>` has the empty value, which is the
+ * same condition the JS layer uses to skip the field on
+ * submit. */
+.chat-integration-field select:has(option[value=""]:checked) {
+  color: var(--chat-help-fg, #a8acb4);
+  opacity: 0.7;
 }
 .chat-integration-field small {
   /* Help text under each field. Slightly dimmer than the
@@ -2622,7 +2678,8 @@ select, input[type="checkbox"] {
   align-items: stretch;
   gap: 0.5rem;
 }
-.chat-integration-field .chat-integration-input-group > input {
+.chat-integration-field .chat-integration-input-group > input,
+.chat-integration-field .chat-integration-input-group > select {
   flex: 1;
   min-width: 0;
 }
@@ -2710,9 +2767,52 @@ select, input[type="checkbox"] {
 .chat-integration-discover-status[data-state="error"] {
   color: var(--chat-danger-fg, #d96767);
 }
+.chat-integration-discover-status[data-state="pending"] {
+  color: var(--chat-help-fg, #a8acb4);
+}
+.chat-integration-discover-status[data-state="idle"] {
+  /* Idle = no probe has run yet. Keep the line invisible
+   * (preserves the row's min-height) so the modal does not
+   * flash a "Testing…" placeholder before the user clicks
+   * the button. The colour matches the input border so
+   * the line reads as "neutral padding" rather than a
+   * stray empty status. */
+  color: var(--chat-input-border, #444);
+}
+
+/* Plan 1791566269874 — the email "Test connection"
+ * affordance is a full-width panel above the actions row
+ * (NOT next to the host field, which is what the first
+ * pass of this affordance did). The panel hosts the status
+ * line + the discovered-mailboxes list; the button itself
+ * lives in the actions row next to Cancel + Save, the
+ * standard "review before committing" UX every settings
+ * modal uses. */
+.chat-integration-probe-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  padding: 0.6rem 0.75rem 0.7rem;
+  border: 1px solid var(--chat-input-border, #3a3d42);
+  border-radius: 0.4rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+.chat-integration-probe-panel .chat-integration-discover-status {
+  margin-top: 0;
+  font-size: 0.85rem;
+  min-height: 0;
+}
+.chat-integration-probe-empty {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--chat-help-fg, #a8acb4);
+  opacity: 0.85;
+  font-style: italic;
+}
 .chat-integration-probe-results {
-  margin-top: 0.5rem;
-  max-height: 240px;
+  margin-top: 0;
+  max-height: 200px;
   overflow-y: auto;
   border: 1px solid var(--chat-input-border, #444);
   border-radius: 0.4rem;

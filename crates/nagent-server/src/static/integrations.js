@@ -318,31 +318,85 @@ function buildFormField(field) {
   const text = document.createElement("span");
   text.textContent = field.label;
   wrap.appendChild(text);
-  const input = document.createElement("input");
-  input.name = field.key;
-  input.dataset.key = field.key;
-  input.type =
-    field.kind === "password"
-      ? "password"
-      : field.kind === "url"
-      ? "url"
-      : "text";
-  if (field.placeholder) input.placeholder = field.placeholder;
-  // Pre-fill the field when the server echoed back a saved
-  // value. The server only populates `field.value` for
-  // non-`password` kinds (URL, username, host, …); secret
-  // fields always come back as `undefined` so we never
-  // auto-populate a password. Leaving the field empty on edit
-  // is also a valid "keep what is already saved" signal —
-  // the PUT handler skips empty inputs and the existing
-  // ciphertext row stays untouched.
-  if (typeof field.value === "string") input.value = field.value;
-  input.autocomplete = "off";
-  input.spellcheck = false;
+
+  // The form needs a single, unified way to read the user's
+  // current value (the submit handler below iterates over
+  // every form control and reads `dataset.key + value`).
+  // Three different DOM elements share that contract: a
+  // plain `<input>` (Text / Password / Url / Number), a
+  // `<select>` (Select). We branch on `field.kind` here.
+  let input;
+  if (field.kind === "select") {
+    input = document.createElement("select");
+    input.name = field.key;
+    input.dataset.key = field.key;
+    input.autocomplete = "off";
+    // An empty placeholder option so the user sees a
+    // "Pick a value" hint before they touch the dropdown.
+    // When the server echoed back a saved value, that
+    // option is removed below and the matching one is
+    // selected — same UX as a native `<select>` with a
+    // pre-filled choice.
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "— pick a value —";
+    input.appendChild(blank);
+    for (const opt of field.options || []) {
+      const o = document.createElement("option");
+      o.value = opt.value;
+      o.textContent = opt.label;
+      input.appendChild(o);
+    }
+    // Pre-select the saved value when the server echoed it
+    // back. The submit handler skips empty values, so a
+    // `<select>` left on the blank placeholder does not
+    // overwrite the saved row.
+    if (typeof field.value === "string" && field.value) {
+      input.value = field.value;
+      // Drop the blank placeholder once a saved value is
+      // pre-selected — keeps the form honest about which
+      // value the user is about to save.
+      if (input.value === field.value && blank.value === "") {
+        blank.remove();
+      }
+    }
+  } else {
+    input = document.createElement("input");
+    input.name = field.key;
+    input.dataset.key = field.key;
+    input.type =
+      field.kind === "password"
+        ? "password"
+        : field.kind === "url"
+        ? "url"
+        : field.kind === "number"
+        ? "number"
+        : "text";
+    if (field.placeholder) input.placeholder = field.placeholder;
+    // Pre-fill the field when the server echoed back a saved
+    // value. The server only populates `field.value` for
+    // non-`password` kinds (URL, username, host, …); secret
+    // fields always come back as `undefined` so we never
+    // auto-populate a password. Leaving the field empty on edit
+    // is also a valid "keep what is already saved" signal —
+    // the PUT handler skips empty inputs and the existing
+    // ciphertext row stays untouched.
+    if (typeof field.value === "string") input.value = field.value;
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    // Numeric fields store as strings on the wire; pin the
+    // browser's `step` so a stray decimal does not slip
+    // through client-side validation. The server is the
+    // source of truth and rejects non-integers with a
+    // 400-class error.
+    if (field.kind === "number") {
+      input.step = "1";
+    }
+  }
   // The input lives inside a flex group so a service that
-  // exposes a probe affordance (currently CalDAV) can place a
-  // button next to the URL input without changing the markup
-  // contract for the other services.
+  // exposes a probe affordance (currently CalDAV + email)
+  // can place a button next to it without changing the
+  // markup contract for the other services.
   const group = document.createElement("div");
   group.className = "chat-integration-input-group";
   group.appendChild(input);
@@ -367,6 +421,15 @@ function buildFormField(field) {
 const CALDAV_SERVICE_ID = "caldav";
 const PROBE_PATH = "/api/integrations/caldav/probe-calendars";
 
+// Plan 1791566269874 — IMAP / SMTP probe endpoints. The wire
+// layer is a follow-up commit (Phases 3 + 5) so v1 returns a
+// 503 with a clear "wire layer not implemented in v1" body;
+// the UI still surfaces a "Test connection" button so the
+// user gets the affordance today and the same affordance will
+// light up the real probe once the wire layer lands.
+const PROBE_PATH_EMAIL_IMAP = "/api/integrations/email_imap/probe";
+const PROBE_PATH_EMAIL_SMTP = "/api/integrations/email_smtp/probe";
+
 // One-line subtitle per service. Sets the user's mental
 // model before they read the field labels. Falls back to a
 // generic "encrypted at rest" line so future ServiceDefs
@@ -376,6 +439,10 @@ const MODAL_SUBTITLES = {
     "Connect your personal calendar (Nextcloud, Radicale, Fastmail, iCloud, …). Read + add events only — edit/delete are out of scope for v1.",
   x_account:
     "Sign in with X to let the assistant read your home timeline (Abonnements / Pour Vous). Read-only — the agent never posts, replies, or writes on your behalf.",
+  email_imap:
+    "Connect your IMAP mailbox so the assistant can list / read / search your messages and mark them as read. App-specific password recommended.",
+  email_smtp:
+    "Connect your SMTP submission server so the assistant can send mail on your behalf. The `from` address is validated against the server and never picked by the LLM.",
 };
 
 async function probeCalendars(principalUrl, username, password) {
@@ -524,6 +591,292 @@ function attachCalDavDiscover(form, modal) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// IMAP / SMTP probe (plan 1791566269874 §1.2 + §2.2).
+//
+// Mirrors `attachCalDavDiscover` so the email connectors get a
+// "Test connection" affordance next to the host field. The
+// probe is read-only — it does NOT save anything to the
+// vault. The user must still hit Save to persist the values;
+// the test only validates the credentials against the
+// operator's `[email].allowlist` + the upstream host / port /
+// TLS posture so a misconfigured row surfaces a clear error
+// BEFORE the user has committed to it.
+//
+// v1 status: the wire layer is a follow-up commit, so the
+// endpoint returns 503 with a clear "wire layer not
+// implemented in v1" body. The button still surfaces the
+// affordance so the UI is stable across the wire-layer
+// follow-up; the same code path lights up automatically
+// when the real probe lands.
+// ---------------------------------------------------------------------------
+async function probeEmail(path, payload) {
+  const resp = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "content-type": "application/json",
+      ...(csrfHeaders() || {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const body = await resp.json();
+      if (body && typeof body.error === "string") msg = body.error;
+    } catch {
+      try {
+        msg = `${msg}: ${await resp.text()}`;
+      } catch {
+        /* fall through */
+      }
+    }
+    throw new Error(msg);
+  }
+  return await resp.json();
+}
+
+// Plan 1791566269874 — IMAP / SMTP probe affordance. The
+// `Test connection` button sits in the actions row (next
+// to Cancel + Save), the status / result panel sits in a
+// card above the actions row. The `tls_mode` field is a
+// `<select>`; when the user changes the TLS mode, the
+// port field is auto-filled with the canonical default
+// for that mode + protocol (993 / 143 for IMAP, 465 / 587
+// for SMTP) so a user who is not familiar with the port
+// matrix does not have to look it up. The auto-fill only
+// kicks in when the port field is empty OR matches one of
+// the other modes' defaults — a custom port is preserved.
+
+/// Default ports per (protocol, tls_mode) tuple.
+const EMAIL_DEFAULT_PORTS = {
+  email_imap: { implicit: 993, starttls: 143, none: 143 },
+  email_smtp: { implicit: 465, starttls: 587, none: 587 },
+};
+
+/// Set of canonical port values per protocol. Used by
+/// the TLS→port auto-fill to decide whether a stale
+/// port value is a leftover from another mode (and
+/// therefore safe to overwrite) or a custom value the
+/// user typed (and therefore preserved).
+const EMAIL_KNOWN_PORTS = Object.fromEntries(
+  Object.entries(EMAIL_DEFAULT_PORTS).map(([proto, by_mode]) => [
+    proto,
+    new Set(Object.values(by_mode)),
+  ]),
+);
+
+/// Wire the TLS→port auto-fill. The `tls_mode` field
+/// is a `<select>` with `data-key="tls_mode"`; the
+/// `port` field is a number input with `data-key="port"`.
+/// On every `change` event we look at the current
+/// port: if it is empty or matches one of the *other*
+/// modes' defaults, we replace it with the new mode's
+/// canonical default; otherwise we leave the custom
+/// value alone.
+function attachEmailPortAutofill(form, serviceId) {
+  const tls = form.querySelector('[data-key="tls_mode"]');
+  const port = form.querySelector('[data-key="port"]');
+  if (!tls || !port) return;
+  const known = EMAIL_KNOWN_PORTS[serviceId];
+  const defaults = EMAIL_DEFAULT_PORTS[serviceId];
+  if (!known || !defaults) return;
+  tls.addEventListener("change", () => {
+    const current = parseInt(port.value, 10);
+    const mode = tls.value;
+    const def = defaults[mode];
+    if (def === undefined) return;
+    if (!Number.isFinite(current) || known.has(current)) {
+      port.value = String(def);
+    }
+  });
+}
+
+function attachEmailTestButton(form, modal, actions, serviceId) {
+  // The probe needs host / port / username / password /
+  // tls_mode (and `from_address` for SMTP). Pull them
+  // out of the form by `data-key` so a future
+  // ServiceDef that re-orders the fields does not have
+  // to re-thread this helper.
+  const field = (key) => form.querySelector(`[data-key="${key}"]`);
+  const host = field("host");
+  const port = field("port");
+  const username = field("username");
+  const password = field("password");
+  const tlsMode = field("tls_mode");
+  const fromAddress = field("from_address");
+  if (!host || !port || !username || !password || !tlsMode) return;
+
+  // The `actions` row is passed in directly so the
+  // function fails fast if the caller forgot to build
+  // it first (the previous version looked it up via
+  // `modal.querySelector` and silently bailed when the
+  // row was not yet in the DOM — that's how the v1
+  // button disappeared from the rendered modal).
+  if (!actions) {
+    console.warn("attachEmailTestButton: missing actions element");
+    return;
+  }
+
+  // Insert the "Test connection" button right BEFORE
+  // the Cancel button. The Cancel button is tagged
+  // with `data-action="cancel"` so the lookup is
+  // unambiguous — using `querySelector("button.ghost")`
+  // would also match the test button once it's in the
+  // DOM, creating a circular `insertBefore` no-op.
+  const cancelBtn = actions.querySelector('[data-action="cancel"]');
+  const testBtn = document.createElement("button");
+  testBtn.type = "button";
+  testBtn.className = "ghost";
+  testBtn.textContent = "Test connection";
+  if (cancelBtn) {
+    actions.insertBefore(testBtn, cancelBtn);
+  } else {
+    actions.appendChild(testBtn);
+  }
+
+  // Status + result container live ABOVE the actions row,
+  // not next to the host field. The full-width layout
+  // means a multi-line error message can wrap without
+  // breaking the form's visual rhythm, and the user reads
+  // the status AFTER scrolling past the form — the same
+  // "footer-style" affordance every other settings modal
+  // uses.
+  // Status + result container live ABOVE the actions row,
+  // not next to the host field. The full-width layout
+  // means a multi-line error message can wrap without
+  // breaking the form's visual rhythm, and the user reads
+  // the status AFTER scrolling past the form — the same
+  // "footer-style" affordance every other settings modal
+  // uses.
+  //
+  // The panel is created LAZILY on the first probe —
+  // creating it up-front would leave an empty bordered
+  // "results" container visible before the user clicks
+  // the button (the empty-bar bug the v1.1 screenshot
+  // caught).
+  let probePanel = null;
+  let status = null;
+  let results = null;
+  const ensureProbePanel = () => {
+    if (probePanel) return { status, results };
+    probePanel = document.createElement("div");
+    probePanel.className = "chat-integration-probe-panel";
+    probePanel.setAttribute("role", "group");
+    probePanel.setAttribute("aria-label", "Test connection status");
+    status = document.createElement("p");
+    status.className = "chat-integration-discover-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    results = document.createElement("div");
+    results.className = "chat-integration-probe-results";
+    probePanel.append(status, results);
+    actions.parentNode.insertBefore(probePanel, actions);
+    return { status, results };
+  };
+
+  const path =
+    serviceId === "email_smtp" ? PROBE_PATH_EMAIL_SMTP : PROBE_PATH_EMAIL_IMAP;
+  const label = serviceId === "email_smtp" ? "SMTP" : "IMAP";
+
+  testBtn.addEventListener("click", async () => {
+    // Disable the button while the probe is in flight so a
+    // double-click cannot fire two concurrent requests. The
+    // user can re-enable it by editing any field.
+    testBtn.disabled = true;
+    const panel = ensureProbePanel();
+    panel.status.textContent = `Testing ${label} connection…`;
+    panel.status.dataset.state = "pending";
+    panel.results.replaceChildren();
+    // Build the request body from the form's current
+    // values. The server-side validator checks the host /
+    // port / allowlist / TLS posture and replies with a
+    // structured error; the catch below surfaces the
+    // server's `error` field verbatim so a misconfigured
+    // `[email].allowlist` or a bad host surfaces a clear
+    // message rather than a generic "probe failed".
+    const portNum = parseInt(port.value, 10);
+    if (!host.value.trim() || !Number.isFinite(portNum) || portNum <= 0) {
+      testBtn.disabled = false;
+      panel.status.textContent = "Please fill in host and port first.";
+      panel.status.dataset.state = "error";
+      return;
+    }
+    const payload = {
+      host: host.value.trim(),
+      port: portNum,
+      username: username.value,
+      password: password.value,
+      tls_mode: tlsMode.value,
+    };
+    if (serviceId === "email_smtp") {
+      if (!fromAddress || !fromAddress.value.trim()) {
+        testBtn.disabled = false;
+        panel.status.textContent = "Please fill in the From address first.";
+        panel.status.dataset.state = "error";
+        return;
+      }
+      payload.from_address = fromAddress.value.trim();
+    }
+    try {
+      const body = await probeEmail(path, payload);
+      panel.status.dataset.state = "ok";
+      if (serviceId === "email_imap") {
+        const mailboxes = body?.data?.mailboxes || body?.mailboxes || [];
+        const count = Array.isArray(mailboxes) ? mailboxes.length : 0;
+        panel.status.textContent =
+          `IMAP probe succeeded — found ${count} mailbox${count === 1 ? "" : "es"} on the server.`;
+        renderProbeMailboxList(panel.results, mailboxes);
+      } else {
+        panel.status.textContent = "SMTP probe succeeded — the relay accepted the From address.";
+        panel.results.replaceChildren();
+      }
+    } catch (e) {
+      console.error(`${label} probe failed:`, e);
+      panel.status.textContent = `Probe failed: ${e.message}`;
+      panel.status.dataset.state = "error";
+      panel.results.replaceChildren();
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+}
+
+/// Render the list of mailboxes the IMAP probe discovered.
+/// Each row shows the mailbox name + an `EXISTS` count when
+/// the server returned one. Empty / failure states are
+/// handled by the caller (the status line already says
+/// "no mailboxes" / "probe failed").
+function renderProbeMailboxList(container, mailboxes) {
+  container.replaceChildren();
+  if (!Array.isArray(mailboxes) || mailboxes.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "chat-integration-probe-empty";
+    empty.textContent = "The server returned no mailboxes.";
+    container.appendChild(empty);
+    return;
+  }
+  const list = document.createElement("ul");
+  list.className = "chat-integration-probe-list";
+  for (const mb of mailboxes) {
+    const li = document.createElement("li");
+    li.className = "chat-integration-probe-item";
+    const name = document.createElement("span");
+    name.className = "chat-integration-probe-name";
+    name.textContent = mb.name || "(unnamed)";
+    li.appendChild(name);
+    if (typeof mb.total === "number" && mb.total >= 0) {
+      const count = document.createElement("code");
+      count.className = "chat-integration-probe-href";
+      count.textContent = `${mb.total} message${mb.total === 1 ? "" : "s"}`;
+      li.appendChild(count);
+    }
+    list.appendChild(li);
+  }
+  container.appendChild(list);
+}
+
 // Async wrapper around `openEditor`. Refetches the single
 // integration summary (which decrypts the `echo_on_edit` fields)
 // and only opens the modal once we have the populated data —
@@ -642,6 +995,7 @@ function openEditor(svc) {
   cancel.type = "button";
   cancel.className = "ghost";
   cancel.textContent = "Cancel";
+  cancel.dataset.action = "cancel";
   cancel.addEventListener("click", () => overlay.remove());
   actions.appendChild(cancel);
 
@@ -652,12 +1006,40 @@ function openEditor(svc) {
   actions.appendChild(save);
   form.appendChild(actions);
 
+  // Plan 1791566269874: the IMAP / SMTP `ServiceDef`s each
+  // ship a setup-only probe endpoint so the user can
+  // validate the credentials + the operator's
+  // `[email].allowlist` before committing them to the
+  // per-user vault. The probe is real (Phases 3 + 5 of
+  // the plan landed in the same commit): IMAP runs
+  // `LOGIN` + `LIST "" *"`, SMTP runs `EHLO` /
+  // `STARTTLS` / `AUTH PLAIN` / `MAIL FROM:<addr>`. The
+  // button is wired to the actions row rather than
+  // placed next to the host field — see the comment in
+  // `attachEmailTestButton` for the UX rationale. The
+  // call MUST happen after `form.appendChild(actions)` so
+  // the actions row is in the DOM and the function can
+  // find it.
+  if (svc.id === "email_imap" || svc.id === "email_smtp") {
+    // The TLS→port auto-fill listener must be wired
+    // before the user starts changing the dropdown so
+    // the very first `change` event surfaces a default.
+    attachEmailPortAutofill(form, svc.id);
+    attachEmailTestButton(form, modal, actions, svc.id);
+  }
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fields = {};
-    for (const input of form.querySelectorAll("input")) {
-      if (!input.value) continue;
-      fields[input.dataset.key] = input.value;
+    // Walk every form control (inputs AND selects) so a
+    // `Select`-kind field ships its chosen value too. Empty
+    // values are skipped — the PUT handler treats a missing
+    // key as "keep the existing ciphertext row untouched",
+    // which is the expected behaviour when the user reopens
+    // the form and just clicks Save without changing anything.
+    for (const ctrl of form.querySelectorAll("input, select")) {
+      if (!ctrl.value) continue;
+      fields[ctrl.dataset.key] = ctrl.value;
     }
     try {
       await putCredentials(svc.id, fields);

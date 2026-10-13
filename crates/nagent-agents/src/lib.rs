@@ -22,6 +22,10 @@ pub mod agents;
 pub mod caldav_service;
 pub mod config;
 pub mod egress;
+#[cfg(feature = "email-agent")]
+pub mod email_imap_service;
+#[cfg(feature = "email-agent")]
+pub mod email_smtp_service;
 pub mod services;
 pub mod tools_router;
 #[cfg(feature = "x-agent")]
@@ -34,9 +38,9 @@ pub use agents::{
 };
 pub use config::{
     AgentConfigs, CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig,
-    DictionaryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig, ToolSearchAgentConfig,
-    UnitConvertAgentConfig, WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig,
-    XTimelineAgentConfig,
+    DictionaryAgentConfig, EmailAgentConfig, ReadDocumentAgentConfig, StockAgentConfig,
+    ToolSearchAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig, WebFetchAgentConfig,
+    WikipediaAgentConfig, XTimelineAgentConfig,
 };
 pub use tools_router::{ToolsRouter, SEARCH_TOOLS_NAME};
 

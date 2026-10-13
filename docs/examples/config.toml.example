@@ -147,6 +147,53 @@
 # timeout_ms = 5_000
 # base_url = "https://api.dictionaryapi.dev/api/v2"
 
+# `x_timeline` agent — per-user X (Twitter) home timeline via the
+# v2 API. Read-only v1; refresh handled inside the agent itself
+# when X returns 401. The agent is registered only when the
+# `x-agent` cargo feature is on AND the `[x_oauth].enabled = true`
+# master switch is on. See `docs/integrations/x.md`.
+# [agents.x_timeline]
+# timeout_ms = 8_000
+# max_posts = 20
+# allowlist = ["api.x.com", "x.com"]
+# cache_ttl_secs = 60
+# base_url = "https://api.x.com"
+
+# `memory_*` agents — per-user long-term memory (memory_store /
+# memory_recall / memory_list / memory_forget). The agents are
+# only registered when the `memory-agent` cargo feature is on.
+# `recalled_top_k` caps the number of decrypted rows the LLM
+# ever sees per call; the repository hard-caps at 64.
+# [agents.memory]
+# recalled_top_k = 10
+
+# `email_*` agents — per-user IMAP + SMTP (plan 1791566269874).
+# v1 ships five LLM tools (read + flag-set + send) and two
+# setup-only HTTP probe endpoints. The wire layer for the IMAP
+# and SMTP round-trips is a follow-up commit (Phases 3-5 of
+# the plan); v1 surfaces the configuration + audit + DB
+# migration end-to-end. See `docs/integrations/email.md`.
+#
+# `imap_allowlist` and `smtp_allowlist` are independent on
+# purpose — read and write have different blast radii. Common
+# postures:
+#   * broad read / locked write: `imap_allowlist = ["*"]`
+#     paired with a single-entry `smtp_allowlist`.
+#   * locked read / locked write: both lists to a single host.
+#   * read-only: `smtp_allowlist = []` refuses every `email_send`.
+# [agents.email]
+# timeout_ms = 15_000
+# imap_allowlist = ["imap.fastmail.com", "imap.mail.me.com"]
+# smtp_allowlist = ["smtp.fastmail.com", "smtp.mail.me.com"]
+# max_messages_per_call = 100
+# max_body_bytes = 2_097_152
+# max_attachment_bytes = 0                 # v1 refuses all attachment decodes
+# recipient_allowlist = []                 # empty = user's own from_address only
+# default_probe_helo = "nagent.local"
+# allow_cleartext_imap = false             # clear-text IMAP violates RFC 3501 §3.4
+# allow_cleartext_smtp = false
+# strict_tls = true                         # refuse self-signed certs regardless of the user form
+
 # ---------------------------------------------------------------------------
 # Text-to-speech (Piper ONNX, local)
 # ---------------------------------------------------------------------------

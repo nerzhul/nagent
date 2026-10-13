@@ -324,3 +324,67 @@ impl Default for ToolSearchAgentConfig {
         Self { default_top_k: 5 }
     }
 }
+
+/// Knobs for the IMAP/SMTP email agent family (plan 1791566269874).
+///
+/// v1 ships five agents — `email_list_inbox`, `email_get_message`,
+/// `email_search`, `email_send`, `email_mark_read` — and two
+/// setup-only HTTP probe endpoints (`/api/integrations/email_imap/probe`
+/// and `/api/integrations/email_smtp/probe`). The agent config
+/// carries the protocol-level surface (timeout, size caps,
+/// recipient allow-list) AND the per-protocol hostname
+/// allow-lists (IMAP vs SMTP). The two lists are kept
+/// independent so a permissive read posture cannot accidentally
+/// expose a write path — see `EmailConfig::imap_allowlist` /
+/// `EmailConfig::smtp_allowlist` for the operator-facing rationale.
+#[derive(Debug, Clone)]
+pub struct EmailAgentConfig {
+    /// Per-request connect+read timeout in milliseconds. The
+    /// IMAP and SMTP wire clients share this cap.
+    pub timeout_ms: u64,
+    /// Cap on the number of summaries the `email_list_inbox`
+    /// and `email_search` agents return in one call. Mirrors
+    /// the CalDAV `max_events` knob.
+    pub max_messages_per_call: usize,
+    /// Cap on the size of a single RFC 5322 body the LLM ever
+    /// sees (bytes). Caps memory per `email_get_message`.
+    pub max_body_bytes: usize,
+    /// Cap on the size of one attachment metadata envelope.
+    /// The body of the attachment is **not** decoded in v1
+    /// (`max_attachment_bytes` is exposed for the v2 follow-up).
+    pub max_attachment_bytes: usize,
+    /// Operator-set outbound `to` / `cc` / `bcc` allow-list
+    /// for `email_send`. When empty, the user's own
+    /// `from_address` is the only legal recipient.
+    pub recipient_allowlist: Vec<String>,
+    /// Default `EHLO` identity the SMTP probe uses. Mirrors
+    /// `[email].default_probe_helo` on the server side.
+    pub default_probe_helo: String,
+    /// Hostname allow-list applied to the IMAP wire path.
+    /// Mirrors `[email].imap_allowlist` on the server side.
+    /// The four IMAP-side agents (`email_list_inbox`,
+    /// `email_get_message`, `email_search`,
+    /// `email_mark_read`) check this list on every call.
+    pub imap_allowlist: Vec<String>,
+    /// Hostname allow-list applied to the SMTP wire path.
+    /// Mirrors `[email].smtp_allowlist` on the server side.
+    /// The `email_send` agent checks this list on every call.
+    pub smtp_allowlist: Vec<String>,
+}
+
+impl Default for EmailAgentConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 15_000,
+            max_messages_per_call: 100,
+            max_body_bytes: 2 * 1024 * 1024,
+            // Attachments are a v2 follow-up; cap at 0 in v1 so
+            // the agent refuses any LLM-driven attachment ask.
+            max_attachment_bytes: 0,
+            recipient_allowlist: Vec::new(),
+            default_probe_helo: "nagent.local".to_string(),
+            imap_allowlist: Vec::new(),
+            smtp_allowlist: Vec::new(),
+        }
+    }
+}

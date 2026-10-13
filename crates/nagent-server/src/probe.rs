@@ -25,7 +25,7 @@ use std::sync::Arc;
 use axum::extract::FromRef;
 use nagent_db::NewAuthEvent;
 
-use crate::config::agents::CalDavConfig;
+use crate::config::agents::{CalDavConfig, EmailConfig};
 use crate::state::AppState;
 
 /// Trait implemented by every per-integration config that
@@ -83,6 +83,81 @@ impl ProbeConfig for CalDavConfig {
     }
 }
 
+/// Plan 1791566269874 — the IMAP probe uses the same
+/// `ProbeConfig` trait so the audit-row schema and the
+/// fail-closed allowlist posture are identical to the CalDAV
+/// probe. The `EmailConfig` carries **two** allow-lists
+/// (IMAP vs SMTP) so the read and write trust boundaries stay
+/// independent; this impl defaults to the IMAP allow-list
+/// because the IMAP probe endpoint is the one that uses
+/// `ProbeState<EmailConfig>` directly. The SMTP probe handler
+/// uses the dedicated [`ProbeState<EmailSmtpConfig>`] newtype
+/// (defined right below) so the SMTP allow-list is the one
+/// checked.
+impl ProbeConfig for EmailConfig {
+    fn service_id(&self) -> &'static str {
+        "email_imap"
+    }
+    fn audit_kind_prefix(&self) -> &'static str {
+        "email_imap_probe"
+    }
+    fn allowlist(&self) -> &[String] {
+        &self.imap_allowlist
+    }
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+    fn max_body_bytes(&self) -> usize {
+        // The IMAP / SMTP wire bodies are textual (IMAP
+        // responses, SMTP `EHLO` greeti0ngs); 256 KiB is a
+        // generous cap for a `LIST` / `CAPABILITY` response
+        // and far below the per-call body-size cap the runtime
+        // agents use.
+        256 * 1024
+    }
+}
+
+/// Newtype wrapper that exposes the SMTP allow-list of an
+/// `EmailConfig` through the `ProbeConfig` trait. The SMTP
+/// probe endpoint instantiates `ProbeState<EmailSmtpConfig>`
+/// (built by the `FromRef` impl below) so the same
+/// `validate_host` / `write_probe_audit` plumbing the IMAP
+/// probe uses applies verbatim — only the allow-list and the
+/// audit kind differ. The audit row's `target_service` column
+/// reads `email_smtp` so the two probes are distinguishable
+/// in the audit log even though they share the underlying
+/// runtime config.
+#[derive(Debug, Clone)]
+pub struct EmailSmtpConfig(pub EmailConfig);
+
+impl std::ops::Deref for EmailSmtpConfig {
+    type Target = EmailConfig;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ProbeConfig for EmailSmtpConfig {
+    fn service_id(&self) -> &'static str {
+        "email_smtp"
+    }
+    fn audit_kind_prefix(&self) -> &'static str {
+        "email_smtp_probe"
+    }
+    fn allowlist(&self) -> &[String] {
+        &self.0.smtp_allowlist
+    }
+    fn timeout_ms(&self) -> u64 {
+        self.0.timeout_ms
+    }
+    fn max_body_bytes(&self) -> usize {
+        // Mirror the IMAP cap — both protocols are textual
+        // and the 256 KiB ceiling is the same one the IMAP
+        // impl uses.
+        256 * 1024
+    }
+}
+
 /// Per-route state for any setup-only probe handler. The
 /// `cfg` field is the agent's per-integration config (so
 /// the SSRF allowlist is identical to the chat agents'
@@ -125,6 +200,48 @@ impl FromRef<Arc<AppState>> for ProbeState<CalDavConfig> {
     }
 }
 
+/// Plan 1791566269874 — IMAP + SMTP probe state. The
+/// `ProbeState<EmailConfig>` extractor is what the
+/// `email_imap/probe` handler reads; the SMTP probe uses the
+/// [`ProbeState<EmailSmtpConfig>`] newtype (defined just below)
+/// so it can surface the SMTP-specific allow-list. Both
+/// extractors share the same `auth.store` so the audit row
+/// writes go to the same `auth_events` table.
+impl FromRef<Arc<AppState>> for ProbeState<EmailConfig> {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        let store = state
+            .auth
+            .as_ref()
+            .expect("email probe requires auth to be enabled")
+            .store
+            .clone();
+        Self {
+            cfg: Arc::new(state.config.agents.email.clone()),
+            store,
+        }
+    }
+}
+
+/// SMTP probe state. Built from the same `EmailConfig` as
+/// the IMAP probe but the `ProbeConfig` impl points at the
+/// `smtp_allowlist` field so a read-misconfiguration cannot
+/// accidentally expose a write path. See
+/// `EmailConfig::smtp_allowlist` for the rationale.
+impl FromRef<Arc<AppState>> for ProbeState<EmailSmtpConfig> {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        let store = state
+            .auth
+            .as_ref()
+            .expect("email probe requires auth to be enabled")
+            .store
+            .clone();
+        Self {
+            cfg: Arc::new(EmailSmtpConfig(state.config.agents.email.clone())),
+            store,
+        }
+    }
+}
+
 /// Outcome kind suffixes for the `auth_events` row. The
 /// caller picks one to compose the full kind
 /// `{prefix}_{suffix}` (e.g. `caldav_probe_ok`,
@@ -155,6 +272,14 @@ pub enum ProbeOutcome {
     /// The supplied credentials were missing the `url` field
     /// in the request body.
     BadRequest,
+    /// Plan 1791566269874 — the IMAP / SMTP wire layer is
+    /// compiled in but not implemented in v1 (the probe
+    /// endpoint accepts the request shape, validates the
+    /// allowlist, and writes the audit row, but the actual
+    /// TCP+TLS round-trip is a follow-up commit). Operators
+    /// can distinguish "feature compiled in but pending" from
+    /// a real upstream error by grepping for this kind.
+    WireLayerNotImplemented,
 }
 
 impl ProbeOutcome {
@@ -171,6 +296,7 @@ impl ProbeOutcome {
             ProbeOutcome::AuthRejected => "auth_rejected",
             ProbeOutcome::UpstreamError => "upstream_error",
             ProbeOutcome::BadRequest => "bad_request",
+            ProbeOutcome::WireLayerNotImplemented => "wire_layer_not_implemented",
         }
     }
 }
@@ -240,6 +366,7 @@ mod tests {
             ProbeOutcome::AuthRejected,
             ProbeOutcome::UpstreamError,
             ProbeOutcome::BadRequest,
+            ProbeOutcome::WireLayerNotImplemented,
         ] {
             let s = s.as_str();
             assert!(!s.is_empty());

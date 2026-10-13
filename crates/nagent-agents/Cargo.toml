@@ -23,6 +23,7 @@ web-agent = []
 read-document-agent = []
 caldav-agent = ["dep:icalendar", "dep:chrono-tz"]
 x-agent = []
+email-agent = ["dep:imap", "dep:imap-proto", "dep:async-smtp", "dep:mailparse", "dep:base64", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 # Plan 1791267136806 — the four `memory_*` chat tools
 # (`memory_store`, `memory_recall`, `memory_list`,
 # `memory_forget`). The feature is empty because the agents only need
@@ -52,6 +53,7 @@ all-agents = [
     "read-document-agent",
     "caldav-agent",
     "x-agent",
+    "email-agent",
     "memory-agent",
     "tool-search-agent",
 ]
@@ -92,4 +94,42 @@ icalendar = { version = "0.7", optional = true }
 # Random hex suffix for VEVENT UIDs (CalDAV create_event).
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom", "std_rng"] }
 # Base64 for the HTTP Basic Authorization header.
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
+
+# Plan 1791566269874 — IMAP + SMTP wire clients.
+#
+# IMAP: the well-tested `imap` crate
+# (https://docs.rs/imap/latest/imap/) is the de-facto
+# standard Rust IMAP client. It is synchronous, so every
+# call goes through `tokio::task::spawn_blocking` — a 5-line
+# shim that keeps the rest of the wire layer (and the
+# `EmailImap` capability trait surface) async. `native-tls`
+# is the default TLS feature on `imap` 2.4.x; pulling it in
+# transitively is the cost of matching the rest of the
+# Rust IMAP ecosystem (Dovecot / Gmail / iCloud / Fastmail
+# all exercise the same code path).
+#
+# SMTP: `async-smtp` 0.10 is the standard async SMTP client
+# in the `async-email` working group. It exposes the
+# `MAIL FROM` / `RCPT TO` / `DATA` verbs the probe endpoint
+# and the `email_send` agent need; the encoded `AUTH PLAIN`
+# payload never reaches the error path so the redaction
+# surface for SMTP is just the optional envelope-from
+# string.
+#
+# `mailparse` decodes the RFC 5322 body returned by
+# `email_get_message` (and gives us a typed `MailHeaderMap`
+# for the `email_search` summary path so we do not have to
+# hand-roll an envelope parser).
+imap = { version = "2.4", optional = true, default-features = false }
+imap-proto = { version = "0.10", optional = true }
+async-smtp = { version = "0.10", optional = true, default-features = false, features = ["runtime-tokio"] }
+mailparse = { version = "0.18", optional = true }
+# The SMTP wire client wraps the rustls TLS stream
+# itself (the `async-smtp` crate does not do the TLS
+# upgrade for STARTTLS — we hand it a rustls-wrapped
+# stream after the upgrade completes). We pull
+# `rustls` + `tokio-rustls` + `webpki-roots` for that.
+rustls = { version = "0.23", optional = true, default-features = false, features = ["logging", "std", "tls12"] }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["logging", "tls12"] }
+webpki-roots = { version = "1", optional = true }

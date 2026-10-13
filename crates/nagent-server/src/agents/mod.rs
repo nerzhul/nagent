@@ -705,6 +705,7 @@ pub fn build_registry(
         caldav: cfg.caldav.clone().into(),
         x_timeline: cfg.x_timeline.clone().into(),
         memory: cfg.memory.clone().into(),
+        email: cfg.email.clone().into(),
         // Plan 1791317253718: the `search_tools` meta-agent has
         // its own per-feature knob (`default_top_k`); the v1
         // server-side config does not surface it — `default()` is
@@ -713,6 +714,25 @@ pub fn build_registry(
         // other per-agent configs are.
         tool_search: Default::default(),
     };
+    // Plan 1791566269874: install the per-process IMAP /
+    // SMTP capability impls so the agents built below can
+    // reach the wire client. The descriptor table passes
+    // `None` for `imap` / `smtp` to the agent constructor
+    // (the per-user secret resolver is not in scope at
+    // boot time); the agents fall back to the
+    // `email_imap_impl()` / `email_smtp_impl()` static
+    // getters on every invoke. The setters panic on
+    // double-installation so a future boot-loop wiring
+    // bug surfaces immediately rather than silently
+    // overwriting the first server's config.
+    let imap_impl: Arc<dyn nagent_agents::agents::email::EmailImap> = Arc::new(
+        nagent_agents::agents::email::EmailImapImpl::new(Arc::new(cfgs.email.clone())),
+    );
+    let smtp_impl: Arc<dyn nagent_agents::agents::email::EmailSmtp> = Arc::new(
+        nagent_agents::agents::email::EmailSmtpImpl::new(Arc::new(cfgs.email.clone())),
+    );
+    nagent_agents::agents::email::set_email_imap_impl(imap_impl);
+    nagent_agents::agents::email::set_email_smtp_impl(smtp_impl);
     // Plan 4.C (C): one shared `EgressPool` is built per process
     // and passed to every agent. Strict-class agents
     // (`web_fetch`) drain the strict client; public-class agents
@@ -871,6 +891,32 @@ impl From<crate::config::agents::MemoryConfig> for nagent_agents::config::Memory
         // TOML-free.
         Self {
             recalled_top_k: c.recalled_top_k,
+        }
+    }
+}
+
+impl From<crate::config::agents::EmailConfig> for nagent_agents::EmailAgentConfig {
+    fn from(c: crate::config::agents::EmailConfig) -> Self {
+        // Plan 1791566269874: the runtime `EmailConfig` carries
+        // the operator knobs (split IMAP / SMTP allowlists,
+        // recipient allow-list, TLS posture) while the
+        // agents-crate `EmailAgentConfig` carries the
+        // protocol-level knobs (timeout, body caps, recipient
+        // allow-list) AND the two per-protocol hostname
+        // allow-lists. The descriptor table threads the right
+        // one to each agent (IMAP list to the four read /
+        // flag-set agents, SMTP list to `email_send`). The
+        // split keeps a permissive read posture from
+        // accidentally exposing a write path.
+        Self {
+            timeout_ms: c.timeout_ms,
+            max_messages_per_call: c.max_messages_per_call,
+            max_body_bytes: c.max_body_bytes,
+            max_attachment_bytes: c.max_attachment_bytes,
+            recipient_allowlist: c.recipient_allowlist,
+            default_probe_helo: c.default_probe_helo,
+            imap_allowlist: c.imap_allowlist,
+            smtp_allowlist: c.smtp_allowlist,
         }
     }
 }
