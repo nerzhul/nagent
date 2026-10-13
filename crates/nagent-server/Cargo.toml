@@ -165,6 +165,17 @@ ipnet = "2"
 # `documents` subcommands and the global `--config PATH` flag.
 clap = { workspace = true }
 humantime = "2"
+# OAuth2 PKCE dance for X (plan S2b — catalogue candidate #2).
+# `oauth2 5` replaces the hand-rolled `/i/oauth2/authorize` URL
+# builder, `POST /2/oauth2/token` form-POST (code + refresh), and
+# the bearer-auth GET in `oauth::x`. The X-specific wire surface
+# (`/2/users/me`, vault encryption, audit row) stays in this
+# crate; `oauth2::Client` only handles the OAuth-spec bits.
+# `reqwest` is the HTTP backend (so the workspace's `reqwest`
+# connection pool can be shared via `request_async(&self.http)`);
+# `rustls-tls` selects the rustls TLS stack to match the rest
+# of the workspace.
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
 
 [dev-dependencies]
 # `test-util` enables the `crate::testing::app_state` builder that

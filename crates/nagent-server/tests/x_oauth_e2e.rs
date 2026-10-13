@@ -197,12 +197,16 @@ fn audit_event_kinds_for_x_oauth_are_stable() {
         target_service: Some("x_account".to_string()),
     };
     // XRefreshTokenClient is constructed at app boot and
-    // threaded through the X OAuth state. We assert the
-    // public surface here so a future refactor that drops
-    // the `http` / `cfg` fields breaks the test.
-    let _client = XRefreshTokenClient {
-        http: reqwest::Client::new(),
-        cfg: Arc::new(ServerXOAuthConfig {
+    // threaded through the X OAuth state. After the `oauth2`
+    // migration (plan S2b — catalogue candidate #2), the
+    // client builds an `oauth2::basic::BasicClient` from
+    // `(http, cfg, public_url)` and exposes the inner client
+    // through `oauth_client()` so the server-side
+    // `callback_handler` can run `exchange_code` against the
+    // same instance the refresh path uses.
+    let client = XRefreshTokenClient::new(
+        reqwest::Client::new(),
+        Arc::new(ServerXOAuthConfig {
             enabled: true,
             client_id: "x".into(),
             client_secret: None,
@@ -210,5 +214,11 @@ fn audit_event_kinds_for_x_oauth_are_stable() {
             scopes: vec!["tweet.read".into()],
             timeout_ms: 8000,
         }),
-    };
+        "https://example.com",
+    )
+    .expect("valid config + public_url must build the refresh client");
+    // The accessor returns the live OAuth2 client; a refactor
+    // that drops it would force `callback_handler` to build
+    // its own (and lose the shared `refresh` instance).
+    let _oauth = client.oauth_client();
 }

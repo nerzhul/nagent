@@ -36,32 +36,6 @@ itself is the wrong move:
 Format per item: **Where / What / Crate / Why / LOC saved / Risk /
 Migration sketch**.
 
-### 1. CLI argv parsing — `clap` derive ≈ 600 LOC ✅ DONE (commit `cc57400`, 2026-10-13)
-- **Where:** `crates/nagent-server/src/cli/auth.rs:73-91, 175-186, 255-285, 377-397, 426-447`,
-  `cli/migrate.rs:77-96, 114-148, 186-199, 251-284, 409-423`,
-  `cli/documents.rs` (`split_global_flags`, `parse_common`,
-  `parse_create_admin`, `parse_list_users`, `parse_delete_user`,
-  `parse_up`, `parse_down`, `parse_status`, `pid_file_path`,
-  `check_running_server`).
-- **What:** Hand-rolled `--flag value` / `--flag=value` walking;
-  `split_global_flags` duplicated across two namespaces; the full
-  `stt-server auth …` / `migrate …` / `documents …` argv grammar.
-  Existing in-source comment: *"Hand-rolled flag parsing … no `clap` dep"*.
-- **Crate:** `clap = "4"` (derive `Args` + `Parser` + `Subcommand`).
-- **Why:** Each subcommand repeats the same shape
-  (`--email`, `--password`, `--from-stdin`, `--force`, `--help`).
-  Clap derive reproduces each subcommand's surface in one struct plus
-  gives `--help`, `--version`, and shell completion for free.
-- **LOC saved:** ~500–650.
-- **Risk:** None on the wire. The PID-file guard + `kill -0 <pid>`
-  carve-out is independent of argv parsing and stays where it is.
-- **Migration sketch:** Replace `parse_*` functions with `#[derive(Parser)]`
-  structs. Keep the global `--config` / `-v` / `--force` parsing as
-  the top-level `Cli` struct's global args. The
-  `--from-stdin` toggle becomes a `value_parser` that reads from
-  stdin when the flag is present and `arg_required_else_help` is off.
-  Snapshot tests for `--help` should be added (per AGENTS §5).
-
 ### 2. OAuth2 X / Twitter wiring — `oauth2` (already in lockfile) ≈ 500 LOC
 - **Where:** `crates/nagent-server/src/oauth/x.rs:1-722`,
   `crates/nagent-agents/src/agents/x_timeline/mod.rs:1-861`,
@@ -281,6 +255,22 @@ router (~500), config layer (~400).
   The original implementation plan was kept in the commit history
   as `.kilo/plans/1792262220000-clap-derive-migration.md` for
   reference, then deleted once merged.
+
+- [x] **#2 `oauth2` 5** — DONE 2026-10-13 (uncommitted as of
+  this revision). Net ~85 LOC deleted in `oauth/x.rs`
+  (`507 → ~470` lines after the trim) plus a parallel ~30
+  deleted in `x_timeline/mod.rs::refresh_access_token` (the
+  same form-POST lived in both crates and now goes through
+  `oauth2::Client::exchange_refresh_token` in both). The
+  `XRefreshTokenClient` struct, the `RefreshTokenClient` trait,
+  and the `TokenSet`/`RefreshTokenError` types stay — the swap
+  was wired under the existing abstraction. The `PKCE` verifier
+  mint, the `state` round-trip, the `/2/users/me` lookup, the
+  vault encryption + UPSERT, and the audit row stay X-specific
+  (no crate replacement). 17/17 `oauth::` unit tests + 13/13
+  `x_timeline` unit tests pass; clippy introduces zero new
+  warnings. Actual saving: **~260 LOC** (catalogue estimate
+  ~500 was over-counted; the X-specific surface stays).
 
 ## Recommended implementation order (remaining)
 

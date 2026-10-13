@@ -13,6 +13,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use oauth2::basic::BasicClient;
+use oauth2::{AuthType, AuthUrl, ClientId, ClientSecret, RefreshToken, TokenResponse, TokenUrl};
 use secrecy::ExposeSecret;
 use serde_json::{json, Value};
 
@@ -103,73 +105,68 @@ impl XTimelineAgent {
     }
 
     /// Refresh the access token via `grant_type=refresh_token`.
-    /// Mirrors the OAuth callback wire shape (POST `/oauth2/token`
-    /// with `refresh_token`, `client_id`, optional `client_secret`)
-    /// but lives in the agent so the locked decision "refresh
-    /// handled by the agent itself" is honoured.
+    /// Lives in the agent so the locked decision "refresh
+    /// handled by the agent itself" is honoured
+    /// (plan 1790695073418). The wire call goes through
+    /// `oauth2::Client::exchange_refresh_token`; only the
+    /// status → `AgentError` mapping is bespoke.
     async fn refresh_access_token(
         &self,
         refresh_token: &str,
     ) -> Result<RefreshedToken, AgentError> {
         let url = format!("{}/2/oauth2/token", self.cfg.base_url.trim_end_matches('/'));
-        let mut form: Vec<(String, String)> = vec![
-            ("grant_type".to_string(), "refresh_token".to_string()),
-            ("refresh_token".to_string(), refresh_token.to_string()),
-        ];
-        if let Some(cs) = token_endpoint_client_creds() {
-            form.push(("client_id".to_string(), cs.client_id));
-            if let Some(secret) = cs.client_secret {
-                form.push(("client_secret".to_string(), secret));
-            }
+        let token_url = TokenUrl::new(url.clone()).map_err(|e| {
+            AgentError::AgentFailed(format!("X refresh: invalid token URL `{url}`: {e}"))
+        })?;
+        let auth_url = AuthUrl::new(X_AUTH_URL.to_string())
+            .map_err(|e| AgentError::AgentFailed(format!("X refresh: invalid auth URL: {e}")))?;
+        let creds = token_endpoint_client_creds();
+        let mut client = BasicClient::new(ClientId::new(
+            creds
+                .as_ref()
+                .map(|c| c.client_id.clone())
+                // Placeholder when the env vars are missing
+                // — X rejects the request anyway.
+                .unwrap_or_else(|| "x-agent-refresh".to_string()),
+        ))
+        .set_auth_uri(auth_url)
+        .set_token_uri(token_url)
+        .set_auth_type(AuthType::RequestBody);
+        if let Some(secret) = creds.and_then(|c| c.client_secret) {
+            client = client.set_client_secret(ClientSecret::new(secret));
         }
-        let resp = self
-            .http
-            .post(&url)
-            .form(&form)
-            .send()
+        let result = client
+            .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+            .request_async(&self.http)
             .await
-            .map_err(|e| AgentError::AgentFailed(format!("X refresh transport: {e}")))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AgentError::AgentFailed(format!("X refresh read: {e}")))?;
-        if status.as_u16() == 400 || status.as_u16() == 401 {
-            // The token was revoked or expired; tell the caller to
-            // ask the user to reconnect.
-            return Err(AgentError::AgentFailed(format!(
-                "X OAuth refresh failed: refresh token rejected ({status})"
-            )));
-        }
-        if !status.is_success() {
-            return Err(AgentError::Upstream {
-                status: status.as_u16(),
-                body: truncate(&body, 2048),
-            });
-        }
-        let parsed: Value = serde_json::from_str(&body)
-            .map_err(|e| AgentError::AgentFailed(format!("X refresh response parse: {e}")))?;
-        let access_token = parsed
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AgentError::AgentFailed("X refresh: access_token missing".into()))?
-            .to_string();
-        let new_refresh = parsed
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let expires_in = parsed
-            .get("expires_in")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(3600);
-        let expires_at = Utc::now() + Duration::seconds(expires_in);
+            .map_err(|e| match e {
+                oauth2::RequestTokenError::ServerResponse(resp) => AgentError::AgentFailed(
+                    format!("X OAuth refresh failed: refresh token rejected: {resp}"),
+                ),
+                oauth2::RequestTokenError::Request(req) => {
+                    AgentError::AgentFailed(format!("X refresh transport: {req}"))
+                }
+                oauth2::RequestTokenError::Parse(perr, body) => AgentError::AgentFailed(format!(
+                    "X refresh parse: {perr}; body={}",
+                    truncate(&String::from_utf8_lossy(&body), 256)
+                )),
+                oauth2::RequestTokenError::Other(msg) => {
+                    AgentError::AgentFailed(format!("X refresh: {msg}"))
+                }
+            })?;
+        let expires_in = result
+            .expires_in()
+            .unwrap_or(std::time::Duration::from_secs(3600));
+        let expires_at = Utc::now() + Duration::seconds(expires_in.as_secs() as i64);
         Ok(RefreshedToken {
-            access_token,
-            new_refresh,
+            access_token: result.access_token().secret().clone(),
+            new_refresh: result.refresh_token().map(|t| t.secret().clone()),
             expires_at,
         })
     }
 }
+
+const X_AUTH_URL: &str = "https://x.com/i/oauth2/authorize";
 
 /// One row of the token refresh wire response.
 struct RefreshedToken {

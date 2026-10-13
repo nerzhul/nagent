@@ -22,7 +22,7 @@ dictionary-agent = []
 web-agent = []
 read-document-agent = []
 caldav-agent = ["dep:icalendar", "dep:chrono-tz"]
-x-agent = []
+x-agent = ["dep:oauth2"]
 email-agent = ["dep:imap", "dep:imap-proto", "dep:async-smtp", "dep:mailparse", "dep:base64", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 # Plan 1791267136806 — the four `memory_*` chat tools
 # (`memory_store`, `memory_recall`, `memory_list`,
@@ -95,6 +95,15 @@ icalendar = { version = "0.7", optional = true }
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom", "std_rng"] }
 # Base64 for the HTTP Basic Authorization header.
 base64 = { version = "0.22", optional = true }
+# OAuth2 PKCE dance (plan S2b — catalogue candidate #2). The
+# `x_timeline` agent's refresh-on-401 path uses `oauth2::Client`
+# to exchange the stored refresh token for a fresh access token;
+# only the X-specific wire (`/2/users/me`, the bearer-auth
+# timeline GET) stays in this crate. `reqwest` is the HTTP
+# backend so the agent's shared `reqwest::Client` is reused via
+# `request_async(&self.http)`; `rustls-tls` selects the rustls
+# TLS stack to match the workspace.
+oauth2 = { version = "5", optional = true, default-features = false, features = ["reqwest", "rustls-tls"] }
 
 # Plan 1791566269874 — IMAP + SMTP wire clients.
 #
