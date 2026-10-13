@@ -153,6 +153,8 @@ pub(crate) async fn run_tool_loop(
     // tool call. The reasoning path does not consume this
     // budget — a long thinking chain followed by a final answer
     // is a single round from the loop's perspective.
+    // Counts only rounds that produced at least one tool call —
+    // reasoning chains followed by a final answer are one round.
     let mut tool_round: u32 = 0;
     let mut auto_continue_count: u32 = 0;
     let mut current_stream: Option<UpstreamByteStream> = Some(first_stream);
@@ -184,7 +186,6 @@ pub(crate) async fn run_tool_loop(
                 chat_session_id,
             );
 
-            // Subsequent rounds: open a fresh upstream connection.
             let upstream = match http
                 .post(&url)
                 .headers(headers.clone())
@@ -219,9 +220,6 @@ pub(crate) async fn run_tool_loop(
             Box::pin(upstream.bytes_stream())
         };
 
-        // Drain the upstream SSE stream. We parse each event so we can
-        // buffer `tool_calls` deltas while forwarding everything else
-        // verbatim.
         let outcome = drain_upstream_round(stream, idle_timeout, &tx).await;
 
         let outcome = match outcome {

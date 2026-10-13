@@ -186,29 +186,18 @@ impl ImapClient {
         let timeout = self.timeout;
 
         task::spawn_blocking(move || -> Result<R, AgentError> {
-            // 1. Open the TCP stream. We use the sync
-            //    `std` API because the rest of the IMAP
-            //    wire layer is sync. The connect runs
-            //    inside `spawn_blocking` so a slow DNS
-            //    lookup or a black-holed server does not
-            //    block the tokio runtime; the per-call
-            //    IMAP `timeout` is enforced by the
-            //    `read_timeout` we set on the stream
-            //    below. (`std::net::TcpStream::connect_timeout`
-            //    takes `&SocketAddr` only, which would
-            //    require us to do a separate DNS lookup;
-            //    we let `TcpStream::connect` do the
-            //    `ToSocketAddrs` resolution instead.)
+            // Sync std API because the rest of the IMAP wire layer is
+            // sync; `spawn_blocking` keeps a slow DNS lookup or a
+            // black-holed server off the tokio runtime. We use
+            // `TcpStream::connect` (not `connect_timeout`) so it does
+            // the `ToSocketAddrs` resolution for us.
             let addr: (&str, u16) = (host_owned.as_str(), port_owned);
             let tcp = std::net::TcpStream::connect(addr).map_err(|e| {
                 AgentError::AgentFailed(format!("IMAP connect to {host_owned}:{port_owned}: {e}"))
             })?;
-            // Enforce the per-call timeout on every
-            // subsequent `read` / `write`. The imap
-            // crate does its own buffering so the
-            // cost of a single byte-at-a-time read is
-            // amortized over the buffer fill, but the
-            // timeout still applies per read syscall.
+            // Per-call timeout on every subsequent read/write. The
+            // `imap` crate does its own buffering so the cost is
+            // amortised, but the timeout still applies per read syscall.
             tcp.set_read_timeout(Some(timeout)).map_err(|e| {
                 AgentError::AgentFailed(format!("IMAP set_read_timeout to {host_owned}: {e}"))
             })?;
@@ -216,7 +205,6 @@ impl ImapClient {
                 AgentError::AgentFailed(format!("IMAP set_write_timeout to {host_owned}: {e}"))
             })?;
 
-            // 2. Build the rustls TLS configuration.
             let tls_config = Arc::new(
                 ClientConfig::builder()
                     .with_root_certificates(rustls::RootCertStore::from_iter(
@@ -225,7 +213,6 @@ impl ImapClient {
                     .with_no_client_auth(),
             );
 
-            // 3. Build the `Client<ImapTlsStream>`.
             let mut client = match tls_mode {
                 ImapTlsMode::Implicit => {
                     let server_name = ServerName::try_from(host_owned.clone()).map_err(|e| {
@@ -234,10 +221,6 @@ impl ImapClient {
                     let conn = ClientConnection::new(tls_config, server_name)
                         .map_err(|e| AgentError::AgentFailed(format!("IMAP TLS init: {e}")))?;
                     let tls_stream: ImapTlsStream = StreamOwned::new(conn, tcp);
-                    // Synchronous TLS handshake (no
-                    // explicit handshake call needed —
-                    // `StreamOwned` performs it on the
-                    // first read/write).
                     let mut client = Client::new(tls_stream);
                     client.read_greeting().map_err(|e| {
                         AgentError::AgentFailed(format!("IMAP greeting after TLS: {e}"))
@@ -263,11 +246,9 @@ impl ImapClient {
                 }
             };
 
-            // 4. LOGIN. The `imap` crate's `login`
-            //    consumes the client and returns a
-            //    `Session<ImapTlsStream>`. The password
-            //    stays inside the call and never
-            //    surfaces in the error path.
+            // The `imap` crate's `login` consumes the client and returns
+            // a `Session<ImapTlsStream>`. The password stays inside the
+            // call and never surfaces in the error path.
             let mut session =
                 client
                     .login(username_owned, password_owned)
@@ -275,11 +256,8 @@ impl ImapClient {
                         AgentError::AgentFailed(format!("IMAP login to {host_owned}: {e}"))
                     })?;
             let result = f(&mut session);
-            // Best-effort LOGOUT so the server can
-            // release the slot. We do not treat a
-            // LOGOUT failure as a request failure —
-            // the user's operation already succeeded
-            // (or failed for a different reason).
+            // Best-effort LOGOUT — failures don't fail the request;
+            // the user's op already succeeded or failed for another reason.
             let _ = session.logout();
             result
         })

@@ -36,26 +36,6 @@ itself is the wrong move:
 Format per item: **Where / What / Crate / Why / LOC saved / Risk /
 Migration sketch**.
 
-### 2. OAuth2 X / Twitter wiring — `oauth2` (already in lockfile) ≈ 500 LOC
-- **Where:** `crates/nagent-server/src/oauth/x.rs:1-722`,
-  `crates/nagent-agents/src/agents/x_timeline/mod.rs:1-861`,
-  plus `crates/nagent-server/src/oauth/{pkce,refresh,state}.rs`.
-- **What:** Authorization URL building, PKCE verifier wiring,
-  token exchange, refresh round-trip — all hand-implemented over
-  `reqwest + serde_json`.
-- **Crate:** `oauth2 = "5.0"` (already in `Cargo.lock`, version
-  `5.0.0`).
-- **Why:** `oauth2::AuthorizationCode::new(code).set_pkce_challenge(pkce)`
-  + `oauth2::basic::BasicClient::exchange_code()` collapse the wire
-  layer.
-- **LOC saved:** ~400–550.
-- **Risk:** Keep `oauth2::RedirectUrl` / `ClientSecret` mapping into
-  the existing encrypted-secret types; nothing user-facing changes.
-- **Migration sketch:** Replace direct `reqwest::Client::post` calls
-  in `x.rs` with `oauth2::Client::exchange_code` /
-  `exchange_refresh_token`. Keep `TokenSet` /
-  `RefreshTokenClient` abstraction in `refresh.rs` as-is.
-
 ### 3. Rate limiting — `governor` / `tower-governor` ≈ 1 400 LOC
 - **Where:**
   `crates/nagent-support/src/ratelimit.rs:170-355`

@@ -35,9 +35,8 @@ axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.5", features = ["fs", "trace", "set-header", "cors", "timeout", "limit"] }
 rust-embed = "8"
 dotenvy = "0.15"
-# `toml` powers the optional TOML configuration file (`--config <path>`).
-# Pulled with default features; serde integration is enabled transitively
-# via the existing `serde` workspace dep.
+# Powers the optional `--config <path>` TOML file. Serde integration
+# is enabled transitively via the workspace `serde` dep.
 toml = "0.8"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 humantime = "2"

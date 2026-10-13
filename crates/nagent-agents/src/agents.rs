@@ -180,11 +180,10 @@ pub trait DocumentSource: Send + Sync {
         chat_session_id: Uuid,
         request: DocumentReadRequest,
     ) -> Result<DocumentPayload, AgentError> {
-        // Default: fetch the full payload via the legacy path
-        // and let the agent slice / cap it. Downstream
-        // implementers that do not have a per-page store can
-        // keep relying on this; only the server-side store
-        // overrides with the encrypted-blob path.
+        // Default packages the full text as a single-page range so
+        // the wire shape still carries the "showing X-Y of N" hint.
+        // The server-side per-page store overrides this with the
+        // encrypted-blob path.
         let _ = request; // not used in the legacy path
         self.read(user_id, chat_session_id, &request.name).await
     }

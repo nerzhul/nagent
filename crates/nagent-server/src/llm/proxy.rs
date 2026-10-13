@@ -180,23 +180,19 @@ pub async fn chat_completions(
     // the LLM can recover.
     let chat_session_id = parse_chat_session_header(&headers);
 
-    // Rebuild the body so we can override `model` with our fallback
-    // without disturbing the rest of the user's payload (messages,
-    // temperature, etc.).
+    // Override `model` with the configured fallback without disturbing
+    // the rest of the user's payload (messages, temperature, etc.).
     let mut forward_body = serde_json::from_slice::<Value>(&body)
         .map_err(|e| LlmError::BadRequest(format!("invalid json body: {e}")))?;
     if let Some(obj) = forward_body.as_object_mut() {
         obj.insert("model".into(), json!(model));
         obj.insert("stream".into(), json!(true));
-        // Build the round's `tools=[]` via the dynamic helper.
-        // Round 0 is special: there is no router pre-selection
-        // source yet (the discovery store is empty for a fresh
-        // session) and the LLM hasn't invoked anything. Pass
-        // `None` for both so the helper still ships
-        // `search_tools` + the rest of the registry's static
-        // `tools_schema()` projection. Subsequent rounds (in
-        // `run_tool_loop`) re-run this helper with the live
-        // router + discovered set folded in.
+        // Round 0: no router pre-selection source yet (discovery
+        // store is empty for a fresh session) and the LLM hasn't
+        // invoked anything. Pass `None` for both so the helper
+        // still ships `search_tools` + the static `tools_schema()`
+        // projection. Subsequent rounds re-run this helper in
+        // `run_tool_loop` with the live router + discovered set.
         let router_ref = llm_state.tools_router.as_deref();
         let initial_tools = build_tools_for_round(
             agents.0.as_ref().map(|arc| arc.as_ref()),

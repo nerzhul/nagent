@@ -12,8 +12,8 @@ default = []
 # Real whisper-rs backend; off → in-process mock (tests, CI).
 real-backend = ["stt-core/whisper-rs-backend"]
 # Per-agent gates; off → module not compiled, agent not registered.
-# Plan 4.C: forwarded 1:1 to `nagent-agents` so the operator
-# toggles the agent on the server crate only.
+# Forwarded 1:1 to `nagent-agents` so the operator toggles the
+# agent on the server crate only.
 web-agent = ["nagent-agents/web-agent"]
 datetime-agent = ["nagent-agents/datetime-agent", "dep:chrono-tz"]
 weather-agent = ["nagent-agents/weather-agent"]
@@ -24,33 +24,19 @@ wikipedia-agent = ["nagent-agents/wikipedia-agent"]
 dictionary-agent = ["nagent-agents/dictionary-agent"]
 read-document-agent = ["nagent-agents/read-document-agent"]
 caldav-agent = ["nagent-agents/caldav-agent"]
-# Plan 1790695073418: X timeline agent — forwards the agent +
-# registry into the server.
 x-agent = ["nagent-agents/x-agent"]
-# Plan 1791566269874: IMAP/SMTP email agent family — server-side
-# forwarding only; the agents themselves are brought in via
-# `nagent-agents/email-agent`. The matching
-# `#[cfg(feature = "email-agent")]` gates on the server crate
-# (probe endpoints, ServiceRegistry swap, config surface).
 email-agent = ["nagent-agents/email-agent"]
-# Plan 1791317253718: `search_tools` meta-agent + BM25 router.
-# Always compiled in alongside `all-agents` (every target that
-# dispatches tools needs the discovery surface) — the agent
-# itself is a one-shot helper, the router is a few hundred
-# lines of pure Rust.
+# `search_tools` meta-agent + BM25 router. Always compiled in
+# alongside `all-agents` so every target that dispatches tools
+# has the discovery surface.
 tool-search-agent = ["nagent-agents/tool-search-agent"]
-# Convenience meta-feature: every agent compiled in.
-#
-# Cargo's feature forwarding has a sharp edge here: `nagent-agents/all-agents`
-# only enables the agents in the agents crate (so the `AgentDescriptor`
-# table is populated). The matching `#[cfg(feature = "…-agent")]`
-# gates on the SERVER crate (e.g. `app.rs` conditionally swaps the
-# `ServiceRegistry` for CalDAV, `credentials/caldav_probe.rs` mounts
-# the probe endpoint, `agents/mod.rs` forwards the per-agent config)
-# are NOT auto-enabled. We must list every local per-agent feature
-# here too — without this, `make run-hipblas` builds with the agents
-# compiled but the server-side wiring silently degrades to the
-# no-feature default (empty registry, no probe endpoint).
+# Convenience meta-feature: every agent compiled in. Cargo's
+# feature forwarding only enables the agents in the agents crate
+# (`AgentDescriptor` table); the matching server-side gates
+# (`app.rs` ServiceRegistry swap, `credentials/caldav_probe.rs`,
+# per-agent config forwarding) must be listed here too —
+# otherwise `make run-hipblas` builds with agents compiled but
+# server-side wiring silently degrading to the no-feature default.
 all-agents = [
     "nagent-agents/all-agents",
     "datetime-agent",
@@ -67,15 +53,14 @@ all-agents = [
     "email-agent",
     "tool-search-agent",
 ]
-# Piper TTS; pulls piper-rs + ort + espeak-ng FFI through the
-# `nagent-tts` crate so the engine can be split into its own
-# inference tier later (plan 4.F / plan H).
+# Piper TTS; pulls piper-rs + ort + espeak-ng FFI through
+# `nagent-tts` so the engine can be split into its own
+# inference tier later.
 tts = ["nagent-tts/tts"]
 # Integration-test AppState builder (crate::testing).
 test-util = []
 
 [build-dependencies]
-# Fingerprints the static frontend assets at build time.
 sha2 = "0.10"
 
 [dependencies]
@@ -103,26 +88,20 @@ async-trait        = { workspace = true }
 toml               = { workspace = true }
 bytes              = "1"
 futures-util       = "0.3"
-# stream = SSE pipe-through; json = /v1/models decoder; rustls-tls = no OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 url = "2"
-# `clock`/`std` only; wasmbind/serde/now stay off to keep the surface minimal.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # IANA tz database (datetime agent); drops bundled tzfiles.
 chrono-tz = { version = "0.10", default-features = false, features = ["std"], optional = true }
-# ONNX-based Piper TTS moved to `nagent-tts` (plan 4.F); the
-# server only consumes the engine through that crate.
-# Sandboxed expression evaluator for the calculate tool.
+# ONNX-based Piper TTS moved to `nagent-tts`; the server only
+# consumes the engine through that crate.
 meval = { version = "0.2", optional = true }
 argon2 = "0.5"
-# Reuses the workspace's reqwest + rustls TLS stack.
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
-# 0.6.x replaces openssl-sys with crypto-glue (pure-Rust build).
-# Plan S2a: pinned to `=0.6.1-dev` so a future dev-build of the
-# crate cannot slip in via semver-compatible ranges. The
-# cargo-deny `deny = [{ name = "webauthn-rs", version = "<0.6.1-dev" }]`
-# rule mirrors this constraint.
-# danger-allow-state-serialisation lets the ceremony state cross the HTTP round-trip.
+# Pinned to `=0.6.1-dev` so a future dev-build cannot slip in
+# via semver-compatible ranges; `cargo-deny` mirrors the
+# constraint. `danger-allow-state-serialisation` lets the
+# ceremony state cross the HTTP round-trip.
 webauthn-rs = { version = "=0.6.1-dev", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"] }
 # OS-RNG for session ids, CSRF tokens, OIDC nonces.
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom"] }
@@ -131,7 +110,8 @@ cookie = { version = "0.18", features = ["percent-encode"] }
 hex = "0.4"
 base64 = "0.22"
 sha2 = "0.10"
-# WAV encoder for /v1/audio/speech. Always on so MockSynthesizer works without the `tts` feature.
+# WAV encoder for /v1/audio/speech. Always on so MockSynthesizer
+# works without the `tts` feature.
 hound = "3.5"
 tower = { version = "0.5", features = ["util"] }
 # AES-256-GCM vault; zeroize + secrecy keep plaintext out of Debug/logs.
@@ -139,60 +119,34 @@ aes-gcm = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 # PDF parsing for read_document; runtime-gated by `[documents].enabled`.
-# `pdf-extract` re-exports `lopdf` transitively; we depend on `lopdf`
-# directly so we can load the PDF once at upload time, iterate per
-# page, and write one encrypted blob per page into the per-doc
-# `<uuid>/pages/` directory instead of running the whole-document
-# extractor on every tool call. Version pinned to the transitive
-# version pdf-extract pulls in to keep the dep tree deduplicated.
-#
 # Per-page text extraction goes through `pdf_extract::output_doc_page`
 # (NOT `lopdf::Document::extract_text`): the latter uses lopdf 0.34's
 # bundled CMap parser, which raises `ToUnicodeCMap(Parse(Error))` on
-# a non-trivial slice of real-world PDFs (Microsoft Office + scanners
-# + a few publishing tools). `pdf-extract` routes ToUnicode through
-# `adobe-cmap-parser` instead and recovers the correct mapping on
-# the same files. The `five_steps_perform_2009.pdf` fixture under
-# `tests/fixtures/` is the regression pin — see
-# `extract_page_text_recovers_real_malformed_t_office_pdf`.
+# real-world PDFs (MS Office + scanners). `pdf-extract` routes
+# ToUnicode through `adobe-cmap-parser` and recovers correctly —
+# `five_steps_perform_2009.pdf` is the regression pin.
 pdf-extract = "0.7"
 lopdf = { version = "0.34", default-features = false, features = ["pom_parser"] }
 mime_guess = "2"
-# Trusted-proxy CIDR parser for security plan #5.
+# Trusted-proxy CIDR parser (security plan #5).
 ipnet = "2"
-# Operator CLI (plan `1792262220000-clap-derive-migration`):
-# clap derive + humantime power the `auth` / `migrate` /
+# Operator CLI: clap derive + humantime power the `auth` / `migrate` /
 # `documents` subcommands and the global `--config PATH` flag.
 clap = { workspace = true }
 humantime = "2"
-# OAuth2 PKCE dance for X (plan S2b — catalogue candidate #2).
-# `oauth2 5` replaces the hand-rolled `/i/oauth2/authorize` URL
-# builder, `POST /2/oauth2/token` form-POST (code + refresh), and
-# the bearer-auth GET in `oauth::x`. The X-specific wire surface
-# (`/2/users/me`, vault encryption, audit row) stays in this
-# crate; `oauth2::Client` only handles the OAuth-spec bits.
-# `reqwest` is the HTTP backend (so the workspace's `reqwest`
-# connection pool can be shared via `request_async(&self.http)`);
-# `rustls-tls` selects the rustls TLS stack to match the rest
-# of the workspace.
+# OAuth2 PKCE dance (catalogue candidate #2). `reqwest` backend
+# so the workspace's `reqwest` connection pool is shared via
+# `request_async(&self.http)`; `rustls-tls` matches the rest of
+# the workspace.
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
 
 [dev-dependencies]
-# `test-util` enables the `crate::testing::app_state` builder that
-# the integration tests import. Listed here so `cargo test` builds
-# the module without requiring `--features test-util` on the
-# command line. It also enables `nagent-db/test-util`, which
-# compiles the `Db::raw_execute` / `raw_query_*` /
-# `raw_insert_one_str` helpers the integration tests use to
-# assert on schema shape and audit rows (plan S10).
 nagent-server = { path = ".", features = ["test-util", "all-agents"] }
 nagent-db      = { path = "../nagent-db", features = ["test-util"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures = "0.3"
 tokio-tungstenite = "0.24"
-# Plan 4.A follow-up: tests reach raw SQL through
-# `nagent_db::Db::raw_execute` / `raw_query_scalar_i64` /
-# `raw_query_text_vec` / `raw_query_one_pair` /
-# `raw_insert_one_str` (gated on `nagent-db/test-util` since S10),
-# so the dev-dep on `sqlx` is no longer required and the
-# integration tests are fully nagent_db-driven.
+# Tests reach raw SQL through `nagent_db::Db::raw_execute` /
+# `raw_query_*` / `raw_insert_one_str` (gated on
+# `nagent-db/test-util`), so the dev-dep on `sqlx` is gone and
+# the integration tests are fully nagent_db-driven.

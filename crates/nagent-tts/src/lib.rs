@@ -45,9 +45,7 @@ use std::path::Path;
 #[cfg(feature = "tts")]
 use std::sync::Mutex;
 
-// ---------------------------------------------------------------------------
-// Public error type
-// ---------------------------------------------------------------------------
+// ---- Public error type ----
 
 /// Errors produced by [`TtsEngine::synth_wav`] and friends.
 #[derive(Debug, thiserror::Error)]
@@ -89,9 +87,7 @@ impl From<hound::Error> for TtsError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plain per-engine settings
-// ---------------------------------------------------------------------------
+// ---- Plain per-engine settings ----
 
 /// Plain per-engine settings the crate consumes. Built from the
 /// server's `[tts]` config section; lives here so the crate stays
@@ -133,9 +129,7 @@ pub struct TtsSettings {
     pub synth_queue_timeout_ms: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Voice metadata
-// ---------------------------------------------------------------------------
+// ---- Voice metadata ----
 
 /// Public voice metadata exposed to the browser via `GET /v1/audio/voices`
 /// so the UI's voice selectors can only show voices actually present in
@@ -157,9 +151,7 @@ pub struct VoiceMeta {
     pub sample_rate: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Synthesizer trait
-// ---------------------------------------------------------------------------
+// ---- Synthesizer trait ----
 
 /// Raw PCM output of a synthesizer, ready to be wrapped in a WAV
 /// container. Samples are mono, normalized to `[-1.0, 1.0]`.
@@ -193,9 +185,7 @@ pub trait Synthesizer: Send + Sync {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mock synthesizer (tests + CI without espeak-ng)
-// ---------------------------------------------------------------------------
+// ---- Mock synthesizer (tests + CI without espeak-ng) ----
 
 /// Test double that produces a short sine-wave clip proportional to the
 /// input length, plus the requested voice metadata. Used by the unit
@@ -256,9 +246,7 @@ impl Synthesizer for MockSynthesizer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Piper synthesizer (production)
-// ---------------------------------------------------------------------------
+// ---- Piper synthesizer (production) ----
 
 /// Wrapper around `piper-rs`. Loads one Piper voice per `<id>.onnx.json`
 /// file in `model_dir` on first use (the underlying ONNX session
@@ -546,9 +534,7 @@ impl Synthesizer for PiperSynthesizer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// TtsEngine (public facade used by the HTTP handler + tests)
-// ---------------------------------------------------------------------------
+// ---- TtsEngine (public facade used by the HTTP handler + tests) ----
 
 /// User-facing TTS engine. Owned by `nagent-server`'s `TtsState` (one per
 /// server), cloneable via `Arc<TtsEngine>` when passed to handlers.
@@ -896,9 +882,7 @@ fn encode_wav(out: &SynthOutput) -> Result<Vec<u8>, TtsError> {
     Ok(buf.into_inner())
 }
 
-// ---------------------------------------------------------------------------
-// Unit tests (mock-only — never touch piper-rs or espeak-ng)
-// ---------------------------------------------------------------------------
+// ---- Unit tests (mock-only — never touch piper-rs or espeak-ng) ----
 
 #[cfg(test)]
 mod tests {

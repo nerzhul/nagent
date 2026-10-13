@@ -7,10 +7,9 @@ publish = false
 description = "Server-invoked chat agents (trait, registry, service catalogue)."
 
 [features]
-# Default empty: no agent compiled in. The server / Makefile picks
-# the subset it wants. One cargo feature per agent so a slim
-# build drops the heavy machinery (`meval`, `chrono-tz`, the egress
-# client) the build does not need.
+# Default empty: no agent compiled in. One feature per agent so
+# a slim build drops the heavy machinery. `all-agents` is the
+# Makefile-target convenience.
 default = []
 datetime-agent = ["dep:chrono-tz"]
 weather-agent = []
@@ -24,23 +23,13 @@ read-document-agent = []
 caldav-agent = ["dep:icalendar", "dep:chrono-tz"]
 x-agent = ["dep:oauth2"]
 email-agent = ["dep:imap", "dep:imap-proto", "dep:async-smtp", "dep:mailparse", "dep:base64", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
-# Plan 1791267136806 — the four `memory_*` chat tools
-# (`memory_store`, `memory_recall`, `memory_list`,
-# `memory_forget`). The feature is empty because the agents only need
-# the existing `secrecy` + `chrono` deps; the encryption itself
-# happens server-side and the agents reach the per-user store
-# through the `MemorySource` capability trait.
+# `memory_*` chat tools. The agents only need the existing
+# `secrecy` + `chrono` deps; encryption is server-side and
+# the agents reach the per-user store via `MemorySource`.
 memory-agent = []
-# Plan 1791317253718 — the `search_tools` meta-agent + the
-# in-process BM25 router (the `tools_router` module). The agent
-# is a thin wrapper over the router; the router is a few hundred
-# lines of pure Rust. No new dependencies, matching the crate's
-# "no external services" posture. The agent is always paired
-# with the router in the boot path; one feature gates both.
+# `search_tools` meta-agent + in-process BM25 router (same
+# feature gates both since they boot as a pair).
 tool-search-agent = []
-# Convenience meta-feature that turns on every agent. The Makefile
-# targets list it once so an operator does not need to enumerate
-# the whole set in CI.
 all-agents = [
     "datetime-agent",
     "weather-agent",
@@ -68,12 +57,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 secrecy = "0.10"
-# The agents that don't need reqwest still compile against it
-# through the egress crate, which is unconditional. So the
-# per-agent features only gate the heavy / specialised ones
-# (`meval`, `chrono-tz`). `reqwest` itself stays unconditional so
-# the `egress` module + the agent files that mention `reqwest` in
-# doc-tests keep compiling.
+# Unconditional so the `egress` module + agent files that
+# mention `reqwest` in doc-tests keep compiling under any
+# per-agent feature subset.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 url = "2"
 bytes = "1"
@@ -81,64 +67,28 @@ futures-util = "0.3"
 ipnet = "2"
 tracing = { workspace = true }
 
-# Per-agent conditional dependencies. Each `dep:` is feature-gated so
-# the heavy / specialised crates (`meval`, `chrono-tz`) are not
-# linked into a slim build.
 chrono = { version = "0.4", features = ["clock", "serde"] }
 chrono-tz = { version = "0.10", optional = true, features = ["serde"] }
 meval = { version = "0.2", optional = true }
-# iCalendar (RFC 5545) parser for VEVENT bodies. Gated on the
-# `caldav-agent` cargo feature so a slim build that drops CalDAV
-# does not pay the dep cost.
+# iCalendar (RFC 5545) for VEVENT bodies.
 icalendar = { version = "0.7", optional = true }
-# Random hex suffix for VEVENT UIDs (CalDAV create_event).
+# Random hex suffix for VEVENT UIDs.
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom", "std_rng"] }
 # Base64 for the HTTP Basic Authorization header.
 base64 = { version = "0.22", optional = true }
-# OAuth2 PKCE dance (plan S2b — catalogue candidate #2). The
-# `x_timeline` agent's refresh-on-401 path uses `oauth2::Client`
-# to exchange the stored refresh token for a fresh access token;
-# only the X-specific wire (`/2/users/me`, the bearer-auth
-# timeline GET) stays in this crate. `reqwest` is the HTTP
-# backend so the agent's shared `reqwest::Client` is reused via
-# `request_async(&self.http)`; `rustls-tls` selects the rustls
-# TLS stack to match the workspace.
+# OAuth2 PKCE dance (catalogue candidate #2). `reqwest` backend
+# so the agent's shared `reqwest::Client` is reused via
+# `request_async(&self.http)`.
 oauth2 = { version = "5", optional = true, default-features = false, features = ["reqwest", "rustls-tls"] }
 
-# Plan 1791566269874 — IMAP + SMTP wire clients.
-#
-# IMAP: the well-tested `imap` crate
-# (https://docs.rs/imap/latest/imap/) is the de-facto
-# standard Rust IMAP client. It is synchronous, so every
-# call goes through `tokio::task::spawn_blocking` — a 5-line
-# shim that keeps the rest of the wire layer (and the
-# `EmailImap` capability trait surface) async. `native-tls`
-# is the default TLS feature on `imap` 2.4.x; pulling it in
-# transitively is the cost of matching the rest of the
-# Rust IMAP ecosystem (Dovecot / Gmail / iCloud / Fastmail
-# all exercise the same code path).
-#
-# SMTP: `async-smtp` 0.10 is the standard async SMTP client
-# in the `async-email` working group. It exposes the
-# `MAIL FROM` / `RCPT TO` / `DATA` verbs the probe endpoint
-# and the `email_send` agent need; the encoded `AUTH PLAIN`
-# payload never reaches the error path so the redaction
-# surface for SMTP is just the optional envelope-from
-# string.
-#
-# `mailparse` decodes the RFC 5322 body returned by
-# `email_get_message` (and gives us a typed `MailHeaderMap`
-# for the `email_search` summary path so we do not have to
-# hand-roll an envelope parser).
+# IMAP + SMTP wire clients. `imap` is synchronous so every call
+# goes through `tokio::task::spawn_blocking`. The SMTP wire client
+# wraps the rustls TLS stream itself (`async-smtp` does not do
+# STARTTLS), so we pull `rustls` + `tokio-rustls` + `webpki-roots`.
 imap = { version = "2.4", optional = true, default-features = false }
 imap-proto = { version = "0.10", optional = true }
 async-smtp = { version = "0.10", optional = true, default-features = false, features = ["runtime-tokio"] }
 mailparse = { version = "0.18", optional = true }
-# The SMTP wire client wraps the rustls TLS stream
-# itself (the `async-smtp` crate does not do the TLS
-# upgrade for STARTTLS — we hand it a rustls-wrapped
-# stream after the upgrade completes). We pull
-# `rustls` + `tokio-rustls` + `webpki-roots` for that.
 rustls = { version = "0.23", optional = true, default-features = false, features = ["logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["logging", "tls12"] }
 webpki-roots = { version = "1", optional = true }

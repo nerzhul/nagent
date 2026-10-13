@@ -53,10 +53,6 @@
 //! If a build runs without first calling the setters, the agents
 //! return a clear "email capability not wired" error and the
 //! operator gets the same diagnostic they had in v1.
-//! adapters (built per-call from the per-user vault) implement the
-//! [`EmailImap`] / [`EmailSmtp`] capability traits declared here.
-//! Tests can swap in a mock impl without standing up a real IMAP
-//! server.
 
 use std::sync::Arc;
 use std::sync::OnceLock;

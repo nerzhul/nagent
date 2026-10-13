@@ -285,8 +285,6 @@ async fn verify_session_binding(
     Ok(())
 }
 
-// ---- POST /v1/documents (upload) ----------------------------------------
-
 pub async fn upload_handler(
     State(state): State<DocumentHandlerState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -615,8 +613,6 @@ struct UploadedFile {
     bytes: bytes::Bytes,
 }
 
-// ---- GET /v1/documents (list) -------------------------------------------
-
 pub async fn list_handler(
     State(state): State<DocumentHandlerState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -654,8 +650,6 @@ pub async fn list_handler(
     // DB ordering and we keep the wire shape minimal).
     Ok(Json(json!({ "data": out })).into_response())
 }
-
-// ---- GET /v1/documents/{id} (download) ---------------------------------
 
 pub async fn download_handler(
     State(state): State<DocumentHandlerState>,
@@ -703,8 +697,6 @@ pub async fn download_handler(
     Ok(resp.body(Body::from(bytes)).expect("static builder"))
 }
 
-// ---- DELETE /v1/documents/{id} -----------------------------------------
-
 pub async fn delete_handler(
     State(state): State<DocumentHandlerState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -746,8 +738,6 @@ pub async fn delete_handler(
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
-
-// ---- Helpers -------------------------------------------------------------
 
 fn extension_from_filename(name: &str) -> String {
     std::path::Path::new(name)

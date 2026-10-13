@@ -233,8 +233,6 @@ pub struct EditRequest {
     pub version: i32,
 }
 
-// ---- GET /v1/chat/session/:sid/messages ----------------------------------
-
 /// List every message in the session, oldest first.
 pub async fn list_handler(
     State(state): State<crate::ChatMessagesState>,
@@ -250,8 +248,6 @@ pub async fn list_handler(
     let out: Vec<MessageResponse> = messages.into_iter().map(MessageResponse::from).collect();
     Ok(Json(serde_json::json!({ "data": out })).into_response())
 }
-
-// ---- POST /v1/chat/session/:sid/messages ---------------------------------
 
 /// Append a new message. The server mints the id and the
 /// `ordinal`; the client just provides `role`, `content`, and
@@ -292,8 +288,6 @@ pub async fn append_handler(
     Ok((StatusCode::CREATED, Json(MessageResponse::from(record))).into_response())
 }
 
-// ---- PATCH /v1/chat/session/:sid/messages/:mid ----------------------------
-
 /// Edit a single message in place. The `version` in the body is
 /// the optimistic-concurrency token: a stale edit returns 409
 /// and the row is left untouched.
@@ -318,8 +312,6 @@ pub async fn edit_handler(
     Ok(Json(MessageResponse::from(record)).into_response())
 }
 
-// ---- DELETE /v1/chat/session/:sid/messages/:mid --------------------------
-
 /// Delete a single message. Returns 204 on success, 404 if the
 /// row is missing, 403 if it is owned by a different user.
 pub async fn delete_handler(
@@ -341,8 +333,6 @@ pub async fn delete_handler(
         .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
-
-// ---- POST /v1/chat/session/:sid/regenerate -------------------------------
 
 /// Delete the last assistant message (if any). The browser then
 /// re-streams the reply through the existing

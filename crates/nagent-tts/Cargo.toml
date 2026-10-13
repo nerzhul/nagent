@@ -7,10 +7,10 @@ publish = false
 description = "Local Piper ONNX text-to-speech engine, isolated behind a small trait so the inference split (plan H) can move it to a separate tier later."
 
 [features]
-# Piper ONNX backend; off → MockSynthesizer is the only available
-# backend. Mirrors the `[tts]` feature gate on `nagent-server` so
-# the GPU build targets (`make run-cuda`, `make run-hipblas`) opt
-# out and avoid pulling espeak-ng / libclang / libssl-dev.
+# Piper ONNX backend; off → MockSynthesizer only. Mirrors the
+# `[tts]` gate on `nagent-server` so `make run-cuda` /
+# `make run-hipblas` opt out and skip espeak-ng / libclang /
+# libssl-dev.
 tts = ["dep:piper-rs"]
 
 [dependencies]
@@ -24,5 +24,3 @@ tracing = { workspace = true }
 piper-rs = { version = "0.2", optional = true }
 
 [dev-dependencies]
-# Unit tests exercise `MockSynthesizer` only; no need for the
-# piper-rs build deps.
