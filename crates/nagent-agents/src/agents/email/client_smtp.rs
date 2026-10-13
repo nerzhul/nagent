@@ -45,7 +45,6 @@ use std::time::Duration;
 use async_smtp::authentication::Mechanism;
 use async_smtp::commands::MailCommand;
 use async_smtp::extension::ClientId;
-use async_smtp::response::Response;
 use async_smtp::EmailAddress;
 use async_smtp::{Envelope as SmtpEnvelope, SmtpClient as AsyncSmtpClient, SmtpTransport};
 use rustls::pki_types::ServerName;

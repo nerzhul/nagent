@@ -36,7 +36,7 @@ itself is the wrong move:
 Format per item: **Where / What / Crate / Why / LOC saved / Risk /
 Migration sketch**.
 
-### 1. CLI argv parsing — `clap` derive ≈ 600 LOC
+### 1. CLI argv parsing — `clap` derive ≈ 600 LOC ✅ DONE (commit `cc57400`, 2026-10-13)
 - **Where:** `crates/nagent-server/src/cli/auth.rs:73-91, 175-186, 255-285, 377-397, 426-447`,
   `cli/migrate.rs:77-96, 114-148, 186-199, 251-284, 409-423`,
   `cli/documents.rs` (`split_global_flags`, `parse_common`,
@@ -265,33 +265,43 @@ Migration sketch**.
 
 ## Total swing
 
-≈ **4 700 LOC** of hand-rolled code deletable on top of crates that
-already exist (and several are already in the dep tree). Largest
-deltas: rate limiting (~1 400), CLI parsing (~600), BM25 router
-(~500), OAuth2 X (~500).
+≈ **4 100 LOC** of hand-rolled code still deletable on top of crates
+that already exist (and several are already in the dep tree). The
+original estimate was ~4 700 LOC; candidate #1 (`clap`) shipped as
+~800 LOC net deletion (over-delivered vs the 600 estimate). Largest
+remaining deltas: rate limiting (~1 400), OAuth2 X (~500), BM25
+router (~500), config layer (~400).
 
-## Recommended implementation order
+## Progress
+
+- [x] **#1 `clap` derive** — DONE 2026-10-13 (commit `cc57400`).
+  Removed ~800 LOC net (1438 deletions / 634 insertions). `CliArgs`
+  retired; `Config::load` takes `Option<&Path>` directly. 12
+  snapshot tests in `cli/snapshots.rs` guard the wire contract.
+  The original implementation plan was kept in the commit history
+  as `.kilo/plans/1792262220000-clap-derive-migration.md` for
+  reference, then deleted once merged.
+
+## Recommended implementation order (remaining)
 
 Based on LOC savings × migration risk:
 
-1. **`clap` derive** — biggest safe win, no behaviour change.
-   Plan to follow.
-2. **`moka`** — drops the `sweep_clock` dependency from `ttl_map`;
+1. **`moka`** — drops the `sweep_clock` dependency from `ttl_map`;
    low risk; existing tests use mostly `insert` / `get`.
-3. **`ipnet` allowlist** — already a dep; pure simplification.
-4. **`oauth2` X dance** — `oauth2` is already in `Cargo.lock`; the
+2. **`ipnet` allowlist** — already a dep; pure simplification.
+3. **`oauth2` X dance** — `oauth2` is already in `Cargo.lock`; the
    swap is mechanical.
-5. **`governor`** — biggest win but requires keeping the loopback
+4. **`governor`** — biggest win but requires keeping the loopback
    carve-out and BucketKind diagnostics; plan must include an
    adapter shim.
-6. **`quick-xml` + maybe `icalendar`** — both CalDAV-shaped; bundle
+5. **`quick-xml` + maybe `icalendar`** — both CalDAV-shaped; bundle
    into one plan to avoid two migrations of the same module.
-7. **`figment` config layer** — touches every `with_env_and_toml`
+6. **`figment` config layer** — touches every `with_env_and_toml`
    constructor; needs a single PR with N agent config files
    updated together.
-8. **`sse-stream`** — only if another SSE surface appears; defer.
-9. **`bm25`** — defer until tool registry grows.
-10. **`cookie`** — defer; existing rejection comment is up-to-date.
+7. **`sse-stream`** — only if another SSE surface appears; defer.
+8. **`bm25`** — defer until tool registry grows.
+9. **`cookie`** — defer; existing rejection comment is up-to-date.
 
 ## Open questions
 

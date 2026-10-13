@@ -65,7 +65,7 @@ use tokio::task;
 
 use crate::agents::AgentError;
 
-use super::{EmailMessage, EmailSummary, MailboxSummary};
+use super::EmailSummary;
 
 /// Stream type the `imap` crate's `Client::new` consumes:
 /// the sync `rustls::StreamOwned` over a `std::net::TcpStream`.
