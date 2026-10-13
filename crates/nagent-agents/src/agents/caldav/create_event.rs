@@ -132,24 +132,22 @@ impl Agent for CreateEventAgent {
         })
     }
 
-    fn requires_confirmation(&self, ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
-        // The confirm-then-execute pattern: the first call
-        // in a chat-completions turn asks the LLM to surface
-        // the write to the user, the second call in the same
-        // turn (after the user has confirmed) gets the
-        // `Allow` verdict and runs the PUT.
-        if ctx.was_invoked(self.name()) {
-            ConfirmationDecision::Allow
-        } else {
-            ConfirmationDecision::NeedsConfirmation {
-                reason: format!(
-                    "`{name}` is a write tool that appends a new VEVENT to the user's CalDAV \
-                     calendar. The user must explicitly confirm the create in chat before this \
-                     call runs. Re-invoke `{name}` with the same arguments on the next turn to \
-                     proceed; the second invocation runs the write.",
-                    name = self.name(),
-                ),
-            }
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        // Strict per-call gate (plan 1791834996882). The previous
+        // confirm-then-execute short-circuit let the LLM bypass
+        // the card by re-invoking the same tool in the same
+        // turn — the user wants that vector closed. The
+        // session-override button on the approval card remains
+        // the only click-skip path; that bypass lives in the
+        // tool loop's `force_allow` check, not here.
+        ConfirmationDecision::NeedsConfirmation {
+            reason: format!(
+                "`{name}` is a write tool that appends a new VEVENT to the user's CalDAV \
+                 calendar. The user must explicitly confirm the create in chat before this \
+                 call runs. Wait for the user to click \"Autoriser\" in the chat UI; the \
+                 tool will execute on their next message and you will see its result then.",
+                name = self.name(),
+            ),
         }
     }
 
@@ -288,25 +286,29 @@ mod tests {
     }
 
     #[test]
-    fn requires_confirmation_first_call_then_allow() {
-        // The first invocation in a turn refuses without
-        // confirmation; the second in the same turn returns
-        // `Allow`. Replicates the pattern documented in
-        // `web_fetch.rs::requires_confirmation`.
+    fn requires_confirmation_is_strict_even_in_same_turn() {
+        // Plan 1791834996882: the LLM-mediated same-turn re-call
+        // shortcut is gone. Both calls in a turn must require
+        // confirmation — a session-wide "Toujours pour cette
+        // session" override is the only path that bypasses the
+        // gate, and that bypass lives in the tool loop, not in
+        // `requires_confirmation`. Locks in the
+        // bypass-removed invariant at the trait level.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let agent = CreateEventAgent::new(CalDavAgentConfig::default());
         let mut ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
             Arc::new(crate::ServiceRegistry::empty()),
         );
-        // First call: NeedsConfirmation.
         let d1 = agent.requires_confirmation(&ctx, &Value::Null);
         assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
-        // The tool loop records the invocation between calls.
         ctx.record_invocation(agent.name());
-        // Second call: Allow.
         let d2 = agent.requires_confirmation(&ctx, &Value::Null);
-        assert!(matches!(d2, ConfirmationDecision::Allow));
+        assert!(
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require \
+             confirmation (plan 1791834996882); got {d2:?}"
+        );
         // Suppress the unused-runtime lint.
         let _ = rt;
     }

@@ -154,30 +154,26 @@ impl Agent for ListEventsAgent {
         })
     }
 
-    fn requires_confirmation(&self, ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
         // Calendar contents are sensitive: even read access
         // hits a third-party service with the user's
         // credentials and exposes event titles, locations,
-        // attendees. The first invocation in a chat turn
-        // refuses with a reason the LLM is expected to relay
-        // to the user; the second invocation (after the user
-        // has confirmed) returns `Allow` and runs the read.
-        // The tool loop's `ctx.record_invocation(self.name())`
-        // bridge makes this stateful without keeping the
-        // history inside the agent.
-        if ctx.was_invoked(self.name()) {
-            ConfirmationDecision::Allow
-        } else {
-            ConfirmationDecision::NeedsConfirmation {
-                reason: format!(
-                    "`{name}` reads the user's CalDAV calendar. Calendar contents are \
-                     sensitive (event titles, locations, descriptions). The user must \
-                     explicitly confirm the read in chat before this call runs. Re-invoke \
-                     `{name}` with the same arguments on the next turn to proceed; the \
-                     second invocation runs the read.",
-                    name = self.name(),
-                ),
-            }
+        // attendees. Every call in the session requires a
+        // fresh user click on the inline approval card —
+        // there is no same-turn re-call shortcut any more
+        // (plan 1791834996882). The user can still opt into
+        // a session-wide "Toujours pour cette session" for
+        // this tool, which the tool loop's `force_allow`
+        // bypass consults before calling this method.
+        ConfirmationDecision::NeedsConfirmation {
+            reason: format!(
+                "`{name}` reads the user's CalDAV calendar. Calendar contents are \
+                 sensitive (event titles, locations, descriptions). The user must \
+                 explicitly confirm the read in chat before this call runs. Wait for \
+                 the user to click \"Autoriser\" in the chat UI; the tool will execute \
+                 on their next message and you will see its result then.",
+                name = self.name(),
+            ),
         }
     }
 
@@ -293,14 +289,16 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn requires_confirmation_first_call_then_allow() {
-        // Same pattern as `caldav_create_event`: first invocation
-        // in a turn refuses with a reason the LLM relays to the
-        // user; the second invocation (after the user has confirmed)
-        // runs the read. Calendar contents are sensitive enough
-        // that even reads hit the per-call gate (regression guard
-        // for the bug where the LLM invented a permission flow in
-        // text and went ahead without confirmation).
+    fn requires_confirmation_is_strict_even_in_same_turn() {
+        // Plan 1791834996882: the LLM-mediated same-turn re-call
+        // shortcut is gone. Both calls in a turn must require
+        // confirmation — a session-wide "Toujours pour cette
+        // session" override is the only path that bypasses the
+        // gate, and that bypass lives in the tool loop, not in
+        // `requires_confirmation`. This locks in the
+        // bypass-removed invariant at the trait level (see also
+        // `email_list_inbox`, `memory_forget`, and the unit test
+        // in `nagent-agents::agents`).
         let agent = ListEventsAgent::new(CalDavAgentConfig::default());
         let mut ctx = UserContext::for_tests(
             uuid::Uuid::new_v4(),
@@ -314,8 +312,9 @@ mod tests {
         ctx.record_invocation(agent.name());
         let d2 = agent.requires_confirmation(&ctx, &Value::Null);
         assert!(
-            matches!(d2, ConfirmationDecision::Allow),
-            "second call in the same turn must be `Allow`; got {d2:?}"
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require \
+             confirmation (plan 1791834996882); got {d2:?}"
         );
     }
 

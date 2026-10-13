@@ -113,27 +113,23 @@ impl Agent for ListInboxAgent {
         ]
     }
 
-    fn requires_confirmation(&self, ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
-        // Inbox contents are sensitive: even read access hits
-        // a third-party service with the user's credentials.
-        // The first invocation in a turn refuses with a
-        // reason the LLM relays to the user; the second
-        // invocation (after the user has confirmed) returns
-        // `Allow` and runs the read. The CalDAV agents use
-        // the same two-step pattern.
-        if ctx.was_invoked(self.name()) {
-            ConfirmationDecision::Allow
-        } else {
-            ConfirmationDecision::NeedsConfirmation {
-                reason: format!(
-                    "`{name}` reads the user's IMAP mailbox. Inbox contents are sensitive \
-                     (sender, subject, snippet). The user must explicitly confirm the read \
-                     in chat before this call runs. Re-invoke `{name}` with the same \
-                     arguments on the next turn to proceed; the second invocation runs \
-                     the read.",
-                    name = self.name(),
-                ),
-            }
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        // Inbox contents are sensitive: even read access hits a
+        // third-party service with the user's credentials. Plan
+        // 1791834996882 closes the same-turn re-call shortcut —
+        // every call must require a fresh user click. The
+        // session-override button on the approval card remains the
+        // only click-skip path; that bypass lives in the tool
+        // loop's `force_allow` check, not here.
+        ConfirmationDecision::NeedsConfirmation {
+            reason: format!(
+                "`{name}` reads the user's IMAP mailbox. Inbox contents are sensitive \
+                 (sender, subject, snippet). The user must explicitly confirm the read \
+                 in chat before this call runs. Wait for the user to click \"Autoriser\" \
+                 in the chat UI; the tool will execute on their next message and you \
+                 will see its result then.",
+                name = self.name(),
+            ),
         }
     }
 
@@ -283,14 +279,20 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn requires_confirmation_first_call_then_allow() {
+    fn requires_confirmation_is_strict_even_in_same_turn() {
+        // Plan 1791834996882: same-turn re-call shortcut is
+        // closed — both calls must require confirmation.
         let agent = ListInboxAgent::new(Arc::new(EmailAgentConfig::default()), None, Vec::new());
         let mut ctx = UserContext::for_tests(Uuid::new_v4(), Arc::new(ServiceRegistry::empty()));
         let d1 = agent.requires_confirmation(&ctx, &Value::Null);
         assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
         ctx.record_invocation(agent.name());
         let d2 = agent.requires_confirmation(&ctx, &Value::Null);
-        assert!(matches!(d2, ConfirmationDecision::Allow));
+        assert!(
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require \
+             confirmation (plan 1791834996882); got {d2:?}"
+        );
     }
 
     #[test]

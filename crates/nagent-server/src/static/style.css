@@ -1780,6 +1780,41 @@ select, input[type="checkbox"] {
   pointer-events: none;
   opacity: 0.5;
 }
+
+/* Round paused (plan 1791834996882). The tool loop halted on
+ * the first gated call and is waiting for the user to click a
+ * decision button on the inline approval card. We mark the most
+ * recent user bubble with `--paused` and render a small pill,
+ * AND we set `data-paused="true"` on the chat root so the
+ * textarea + send button go mute (no pointer events). The
+ * streaming UI is not active in this state — the user is not
+ * driving a round; the LLM is.
+ *
+ * The pill rides a dashed left border that reuses the same
+ * `--accent` as the approval card so the eye links the two. */
+.chat-message--paused {
+  border-left: 3px dashed var(--accent);
+  padding-left: 0.6rem;
+  margin-left: 0.4rem;
+}
+.chat-message-paused-pill {
+  display: inline-block;
+  margin-top: 0.35rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg-mute);
+  font-size: 0.78rem;
+  font-family: var(--font-sans);
+  cursor: help;
+}
+[data-paused="true"] #chat-input,
+[data-paused="true"] #chat-send {
+  pointer-events: none;
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .chat-tool-caption {
   flex: 1 1 auto;
   min-width: 0;

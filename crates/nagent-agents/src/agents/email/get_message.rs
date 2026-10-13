@@ -86,22 +86,24 @@ impl Agent for GetMessageAgent {
         ]
     }
 
-    fn requires_confirmation(&self, ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
-        // Same two-step pattern as `email_list_inbox`: first
-        // call refuses, second runs. The CalDAV
-        // `caldav_get_event` agent uses the same posture.
-        if ctx.was_invoked(self.name()) {
-            ConfirmationDecision::Allow
-        } else {
-            ConfirmationDecision::NeedsConfirmation {
-                reason: format!(
-                    "`{name}` reads one message from the user's IMAP mailbox. The body is \
-                     sensitive (full message text). The user must explicitly confirm the read \
-                     in chat before this call runs. Re-invoke `{name}` with the same arguments \
-                     on the next turn to proceed; the second invocation runs the read.",
-                    name = self.name(),
-                ),
-            }
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        // Strict per-call gate (plan 1791834996882). The
+        // previous two-step pattern (first call refuses,
+        // second runs) was the LLM-mediated bypass the user
+        // wants closed — every call must require a fresh
+        // user click. The session-override button on the
+        // approval card remains the only click-skip path;
+        // that bypass lives in the tool loop's `force_allow`
+        // check, not here.
+        ConfirmationDecision::NeedsConfirmation {
+            reason: format!(
+                "`{name}` reads one message from the user's IMAP mailbox. The body is \
+                 sensitive (full message text). The user must explicitly confirm the read \
+                 in chat before this call runs. Wait for the user to click \"Autoriser\" \
+                 in the chat UI; the tool will execute on their next message and you \
+                 will see its result then.",
+                name = self.name(),
+            ),
         }
     }
 
@@ -176,14 +178,20 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn requires_confirmation_first_call_then_allow() {
+    fn requires_confirmation_is_strict_even_in_same_turn() {
+        // Plan 1791834996882: same-turn re-call shortcut is
+        // closed — both calls must require confirmation.
         let agent = GetMessageAgent::new(Arc::new(EmailAgentConfig::default()), None, Vec::new());
         let mut ctx = UserContext::for_tests(Uuid::new_v4(), Arc::new(ServiceRegistry::empty()));
         let d1 = agent.requires_confirmation(&ctx, &Value::Null);
         assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
         ctx.record_invocation(agent.name());
         let d2 = agent.requires_confirmation(&ctx, &Value::Null);
-        assert!(matches!(d2, ConfirmationDecision::Allow));
+        assert!(
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require \
+             confirmation (plan 1791834996882); got {d2:?}"
+        );
     }
 
     #[test]

@@ -1663,6 +1663,14 @@ function renderHistory(sessionId) {
     const footer = bubble.querySelector(".chat-message__tools-summary");
     if (footer) footer.open = false;
   }
+  // Plan 1791834996882: if the most recent history row is a
+  // tool entry with `needs_approval: true`, the round was paused
+  // mid-flow — a refresh left the user staring at an unresolved
+  // card. Re-apply the paused state on the latest user bubble
+  // so the input stays disabled until the user clicks a decision
+  // button. The matching approval card was already re-rendered
+  // above (see `resolveToolBubble`).
+  rehydratePausedState(history);
   // Re-append the inline voice-graph at the very end so it stays
   // the last child of `#chat-messages` per §4.10 ("appended to
   // `#chat-messages`"). The wipe above removed it; the AudioCapture
@@ -2621,6 +2629,90 @@ function sendPermissionDecision(toolCallId, toolName, kind) {
   // session id, history persistence, abort handling, TTS pause) is
   // identical to a normal user turn.
   sendTypedMessage(sentinel);
+}
+
+/**
+ * Apply the user-facing "round paused" state when the server
+ * emits a `round_paused` SSE frame (plan 1791834996882). The
+ * server halted the tool loop on the first gated call and is
+ * waiting for the user to decide — there will be no more frames
+ * for this turn. We:
+ * 1. Add `.chat-message--paused` to the most recent user
+ *    bubble, plus a "⏸ Waiting for approval" pill so the user
+ *    can see at a glance why the assistant stopped responding.
+ * 2. Set `data-paused="true"` on the chat root so the CSS can
+ *    mute the textarea + send button (no pointer events, dim
+ *    colour). The streaming UI is NOT active here — we manage
+ *    the disable ourselves so a subsequent user send re-enables
+ *    the input naturally via the normal `setStreamingUi(false)`
+ *    end-of-round path.
+ */
+function applyRoundPaused(evt) {
+  const root = document.getElementById("chat-root") || document.body;
+  root.dataset.paused = "true";
+  const userBubbles = messagesEl.querySelectorAll(
+    ".chat-message.chat-user:not(.chat-message--error)",
+  );
+  const latest = userBubbles[userBubbles.length - 1];
+  if (latest) {
+    latest.classList.add("chat-message--paused");
+    // Drop any prior pill — only one pause per user turn.
+    latest.querySelectorAll(".chat-message-paused-pill").forEach((p) => p.remove());
+    const pill = document.createElement("span");
+    pill.className = "chat-message-paused-pill";
+    pill.textContent = "⏸ Waiting for approval";
+    pill.title = (evt && evt.reason) || "Waiting for user approval";
+    latest.appendChild(pill);
+  }
+}
+
+/**
+ * Clear the paused UI state when a new user turn starts. Called
+ * at the top of `streamReply` (before the streaming UI takes
+ * over) so the old pill is gone the moment the user types
+ * anything — a permission decision or a brand-new question.
+ */
+function clearRoundPaused() {
+  const root = document.getElementById("chat-root") || document.body;
+  delete root.dataset.paused;
+  messagesEl.querySelectorAll(".chat-message--paused").forEach((el) => {
+    el.classList.remove("chat-message--paused");
+  });
+  messagesEl.querySelectorAll(".chat-message-paused-pill").forEach((p) => p.remove());
+}
+
+/**
+ * On reload, decide whether the session is paused mid-round. The
+ * round is paused iff the most recent persisted tool entry has
+ * `needs_approval: true` AND no later assistant/user row exists
+ * that resolves it (plan 1791834996882). The approval card is
+ * already re-rendered by `resolveToolBubble` above; this helper
+ * only re-applies the chat-root disabled state and the user-
+ * bubble pill.
+ */
+function rehydratePausedState(history) {
+  if (!Array.isArray(history) || history.length === 0) return;
+  // Walk from the tail — the first row that is either a tool
+  // with `needs_approval: true`, an assistant final-answer, or a
+  // user message decides the round state. Everything before is
+  // historical.
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const msg = history[i];
+    if (!msg) continue;
+    if (msg.role === "tool" && msg.needs_approval === true) {
+      applyRoundPaused({
+        id: msg.tool_call_id || "",
+        name: msg.name || "",
+        reason: msg.content || "",
+      });
+      return;
+    }
+    if (msg.role === "user" || msg.role === "assistant") {
+      // The session ended cleanly on the last assistant or user
+      // turn; nothing to re-pause.
+      return;
+    }
+  }
 }
 
 /**
@@ -3922,6 +4014,24 @@ async function streamReply(sessionId, userText, opts = {}) {
           }
           continue;
         }
+        if (currentEventName === "round_paused") {
+          // Plan 1791834996882: a gated call was refused. The
+          // round is over — dim the latest user message, render a
+          // "⏸ Waiting for approval" pill on it, and disable the
+          // chat input until the user sends a decision message.
+          // The matching `needs_approval` `tool_result` event was
+          // already dispatched above; this event is purely a UI
+          // signal that no more SSE frames are coming.
+          if (dataPayload) {
+            try {
+              const evt = JSON.parse(dataPayload.trim());
+              applyRoundPaused(evt);
+            } catch (e) {
+              console.warn("round_paused parse failed:", e, dataPayload);
+            }
+          }
+          continue;
+        }
         if (!dataPayload) continue;
         const payload = dataPayload.trim();
         if (payload === "[DONE]") { reader.cancel(); break; }
@@ -4189,6 +4299,12 @@ async function streamReply(sessionId, userText, opts = {}) {
 async function submitUserTurn(sessionId, text) {
   const trimmed = (text || "").trim();
   if (!trimmed) return;
+  // Plan 1791834996882: the user just made a decision (or
+  // asked a new question) — drop the paused UI so the input
+  // becomes interactive again. `setStreamingUi(true)` below
+  // disables the input while the new round streams, and
+  // `setStreamingUi(false)` (run on round end) re-enables it.
+  clearRoundPaused();
   // Pull any staged documents the user queued via the
   // composer's paperclip / drag-drop. The composer is the only
   // owner of the pending slots, so a missing module (e.g. the

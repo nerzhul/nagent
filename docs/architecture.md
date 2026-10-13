@@ -517,8 +517,49 @@ three buttons.
   lack of state. A future plan can persist the override set to
   `nagent_db` if needed.
 
+#### 3.4.2 Per-call strict, user-only authority (plan 1791834996882)
+
+The user is the sole authority for executing a gated tool. The
+LLM must never be able to run a gated tool without an explicit
+user click (or a "Toujours pour cette session" opt-in already
+recorded for that tool).
+
+- **Strict per-call.** Every gated call requires one user click.
+  The previous "first-call refuses, same-turn re-call allows"
+  shortcut (`ctx.was_invoked(self.name())`) is closed: every
+  `requires_confirmation` override now returns
+  `NeedsConfirmation` unconditionally on the first call, and the
+  LLM does NOT get a continuation round until the user decides.
+  The trait method `UserContext::was_invoked` /
+  `record_invocation` is kept for one release (the cross-tool
+  `web_fetch` after `read_document` check still uses it) and is
+  scheduled for removal in a follow-up cleanup.
+- **Round halts on first gated call.** When a gated call is
+  refused, the tool loop pushes the `PendingApproval` entry,
+  emits `tool_result { needs_approval: true }` plus a
+  `round_paused` SSE frame, and returns from `run_tool_loop`
+  without scheduling another Ollama round. Other tool calls the
+  LLM issued in the same round are dropped silently.
+- **Session-override button** ("✓ Toujours pour cette session")
+  is the only click-skip path. The tool loop's `force_allow`
+  check honours `Agent::allow_session_override()` (default
+  `true`) before consulting the session override set, so a tool
+  can opt out of the bypass. `email_send` overrides to `false`
+  and stays pinned to always-ask — even after a previous
+  `[APPROVE_ALWAYS:email_send]` click, every subsequent send
+  surfaces the inline approval card.
+- **Explicit refusal message.** The synthetic `role: "tool"`
+  message the LLM sees on the refused round tells it to wait,
+  not to re-call the tool, and not to call any other tool. The
+  LLM resumes only when the user clicks Approve.
+- **Reload during a paused round.** The persisted `tool`
+  history row carries `needs_approval: true` + the `prompt`
+  body; on reload, `chat.js::rehydratePausedState` re-applies
+  the paused state to the most recent user bubble and disables
+  the chat input until the user clicks a decision button.
+
 The detailed wire-level diff lives in plan
-`.kilo/plans/1791229183545-tool-bubble-footer-pill.md` §2.6.
+`.kilo/plans/1791834996882-user-driven-tool-permission.md`.
 
 ### 3.5 Hardening
 

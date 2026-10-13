@@ -606,12 +606,28 @@ pub trait Agent: Send + Sync {
     /// is `Allow` for every agent; `web_fetch` overrides this to
     /// enforce the indirect prompt-injection rule (plan #10).
     ///
-    /// `history` is the set of agent names invoked earlier in the
-    /// same chat-completions turn — agents that depend on
-    /// order-of-invocation (e.g. `web_fetch` after `read_document`)
-    /// inspect it via [`UserContext::invoked_this_turn`].
+    /// Plan 1791834996882: this is now strictly per-call — every
+    /// gated call requires a fresh user click. The previous
+    /// two-step pattern (first call refuses, same-turn re-call
+    /// allows) is closed at every override. The only click-skip
+    /// path is the session-wide "Toujours pour cette session"
+    /// override, and that bypass lives in the tool loop's
+    /// `force_allow` check (which consults
+    /// [`Agent::allow_session_override`] first so a tool can opt
+    /// out of the bypass — e.g. `email_send`).
     fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
         ConfirmationDecision::Allow
+    }
+
+    /// Whether the session-wide override set ("Toujours pour
+    /// cette session" on the approval card) is allowed to skip
+    /// the inline approval card for this tool. Default = `true`.
+    /// `SendAgent` overrides to `false` so `email_send` keeps the
+    /// always-ask pin even after the user has clicked "Toujours
+    /// pour cette session" — the server's `force_allow` short-
+    /// circuit honours this flag (plan 1791834996882, §1).
+    fn allow_session_override(&self) -> bool {
+        true
     }
 
     /// Whether this agent's output is untrusted (default `true`).
@@ -817,10 +833,20 @@ impl UserContext {
         }
     }
 
-    /// Record that `name` was invoked in the current round. Called
-    /// by the LLM tool loop right before each `Agent::invoke` so
-    /// the agent's `requires_confirmation` impl can inspect the
-    /// history.
+    /// Record that `name` was invoked in the current round. Once
+    /// consulted by every `requires_confirmation` override that
+    /// used the two-step "first call refuses, second allows"
+    /// pattern. Plan 1791834996882 closes that bypass: the
+    /// override no longer reads this field for the same-tool
+    /// case, and the tool loop no longer calls this method.
+    /// Kept public for one release so any downstream crate
+    /// that still builds against the old shape compiles
+    /// unchanged — the implementation still pushes onto
+    /// `invoked_this_turn` so [`UserContext::was_invoked`]
+    /// keeps returning a meaningful value (the cross-tool
+    /// "did `read_document` run before this?" check used by
+    /// `web_fetch`'s indirect-prompt-injection rule still
+    /// depends on this). Removal is a follow-up cleanup.
     pub fn record_invocation(&mut self, name: &str) {
         if !self.invoked_this_turn.iter().any(|n| n == name) {
             self.invoked_this_turn.push(name.to_string());
@@ -828,7 +854,14 @@ impl UserContext {
     }
 
     /// True when `name` was invoked earlier in the same
-    /// chat-completions turn.
+    /// chat-completions turn. See
+    /// [`UserContext::record_invocation`] for the deprecation
+    /// note — the same-tool `was_invoked(self.name())` shortcut
+    /// used by the CalDAV / email read agents was the LLM-
+    /// mediated bypass the user wanted closed (plan
+    /// 1791834996882) and is now gone. The cross-tool check
+    /// (`web_fetch` looking for `read_document`) is unaffected
+    /// and still relies on this method.
     pub fn was_invoked(&self, name: &str) -> bool {
         self.invoked_this_turn.iter().any(|n| n == name)
     }
@@ -1612,6 +1645,88 @@ mod descriptor_table_tests {
             !AGENT_DESCRIPTORS.is_empty(),
             "AGENT_DESCRIPTORS must list at least one agent when all-agents is on"
         );
+    }
+}
+
+/// Trait-level invariant test for plan 1791834996882: a stub
+/// agent that used the historical "first call refuses, second
+/// allows" pattern (`was_invoked(self.name())`) must NOT
+/// short-circuit on the second call once the bypass is removed.
+/// Each gated tool's own test file also asserts this — this module
+/// is the single place that locks the invariant at the
+/// [`Agent::requires_confirmation`] trait level so a future
+/// agent added to the registry is forced to think about it.
+#[cfg(test)]
+mod confirmation_invariant_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    /// A stub agent that declares itself gated on every call. The
+    /// invariant test below calls it twice in the same
+    /// `UserContext` and asserts both calls need confirmation.
+    struct AlwaysGatedStub;
+
+    #[async_trait]
+    impl Agent for AlwaysGatedStub {
+        fn name(&self) -> &str {
+            "stub_always_gated"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}, "additionalProperties": false})
+        }
+        async fn invoke(&self, _ctx: &UserContext, _args: Value) -> Result<String, AgentError> {
+            Ok("{}".into())
+        }
+        fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+            ConfirmationDecision::NeedsConfirmation {
+                reason: "stub: always gated".into(),
+            }
+        }
+    }
+
+    #[test]
+    fn two_calls_in_same_context_both_need_confirmation() {
+        // Plan 1791834996882: the LLM-mediated same-turn re-call
+        // shortcut is gone. The previous code path was:
+        //
+        //   if ctx.was_invoked(self.name()) {
+        //       ConfirmationDecision::Allow
+        //   } else {
+        //       ConfirmationDecision::NeedsConfirmation { ... }
+        //   }
+        //
+        // After the change, every override unconditionally
+        // returns `NeedsConfirmation` so the LLM cannot run a
+        // gated tool without an explicit user click. The
+        // session-override bypass is the only click-skip path,
+        // and it lives in the tool loop, not in the trait.
+        //
+        // Locking the invariant at the trait level here means
+        // a future agent that re-introduces the same-tool
+        // `was_invoked(self.name())` short-circuit trips this
+        // test — the per-agent tests in `caldav::*`, `email::*`,
+        // and `memory` are the second line of defence, this is
+        // the first.
+        let agent = AlwaysGatedStub;
+        let mut ctx = UserContext::for_tests(Uuid::new_v4(), ServiceRegistry::empty().into_arc());
+        let d1 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
+        ctx.record_invocation(agent.name());
+        let d2 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require \
+             confirmation (plan 1791834996882); got {d2:?}"
+        );
+        // `allow_session_override` defaults to `true` so the
+        // tool loop's session-bypass still works for any agent
+        // that does not opt out. `email_send` is the documented
+        // exception (see `SendAgent::allow_session_override`).
+        assert!(agent.allow_session_override());
     }
 }
 

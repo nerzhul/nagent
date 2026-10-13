@@ -30,11 +30,32 @@ use crate::llm::discovered_tools::DiscoveredTools;
 use crate::llm::permission::{approval_prompt, approval_prompt_json, PermissionStore};
 use crate::llm::proxy::build_tools_for_round;
 use crate::llm::sse::{
-    drain_upstream_round, sse_error_event, sse_tool_call_event, sse_tool_result_event,
-    sse_tool_result_needs_approval, UpstreamByteStream,
+    drain_upstream_round, sse_error_event, sse_round_paused, sse_tool_call_event,
+    sse_tool_result_event, sse_tool_result_needs_approval, UpstreamByteStream,
 };
 use nagent_agents::agents::MemorySource;
 use nagent_agents::ToolsRouter;
+
+/// Build the synthetic `role: "tool"` content the LLM sees on a
+/// gated refusal. The LLM's default behaviour on a refusal is
+/// to re-issue the call — exactly the vector plan 1791834996882
+/// wants closed — so the wording has to be unambiguous about
+/// NOT retrying AND NOT continuing the turn. The agent's
+/// `reason` (the same text surfaced to the user on the approval
+/// card) is appended so the LLM can quote it back if needed.
+///
+/// We deliberately do NOT mention "click Approve" or any other
+/// UI detail here: the LLM does not need to know about the
+/// approval card, only that the tool did not run and that the
+/// user will decide on their next message.
+fn refusal_message_for_llm(name: &str, reason: &str) -> String {
+    format!(
+        "Tool \"{name}\" did not run: the user has not approved it yet. The current \
+         turn is paused. Do NOT re-call this tool and do NOT call any other tool — \
+         wait for the user's next message; the tool will run only if the user \
+         approves it then. Reason: {reason}"
+    )
+}
 
 /// Run the tool loop until the LLM stops or we hit `max_rounds`.
 ///
@@ -487,11 +508,13 @@ pub(crate) async fn run_tool_loop(
                 }
                 (None, _) => UserContext::for_tests(user_id, services),
             };
-            // Plan 4.C: record the invocation so the next tool
-            // call in this turn can ask the agent's
-            // `requires_confirmation` impl whether to gate (e.g.
-            // `web_fetch` after `read_document`).
-            ctx.record_invocation(&name);
+            // `record_invocation` is moved to the Allow path
+            // below — it must only fire when the tool is actually
+            // dispatched, so cross-tool gates (`web_fetch` after
+            // `read_document`) see the right history and refused
+            // calls don't pollute it. The previous same-tool
+            // `was_invoked(self.name())` shortcut used by the
+            // two-step pattern is gone (plan 1791834996882).
 
             // Session-wide override short-circuit: if the user
             // clicked "Toujours pour cette session" earlier in the
@@ -500,10 +523,20 @@ pub(crate) async fn run_tool_loop(
             // untouched — the bypass happens at this call site only,
             // which keeps the trait contract clean and the
             // direct-invoke route (`/v1/agents/:name/invoke`) honest.
+            //
+            // The agent can opt out of the bypass via
+            // [`Agent::allow_session_override`] (default `true`).
+            // `email_send` overrides to `false` so the always-ask
+            // pin survives a session-wide "Toujours pour cette
+            // session" click (plan 1791834996882, §1).
             let session_override = chat_session_id
                 .map(|sid| permission_store.has_override(sid, &name))
                 .unwrap_or(false);
-            let force_allow = session_override;
+            let force_allow = session_override
+                && agents
+                    .get(&name)
+                    .map(|a| a.allow_session_override())
+                    .unwrap_or(true);
 
             if let Some(agent) = agents.get(&name) {
                 if !force_allow {
@@ -521,7 +554,15 @@ pub(crate) async fn run_tool_loop(
                         // [APPROVE:…] / [DENY:…] sentinel on the
                         // next user turn can resolve it; emit the
                         // enriched SSE frame so the chat UI
-                        // renders the inline approval card.
+                        // renders the inline approval card; emit
+                        // the `round_paused` marker so the UI
+                        // knows the round is over and the input
+                        // must be disabled until the user
+                        // decides; then leave the tool_call loop
+                        // and the outer tool_loop — the LLM does
+                        // NOT get a continuation round. Other
+                        // tool_calls in the same round are
+                        // dropped silently (plan 1791834996882).
                         let prompt = approval_prompt(&name, &args_value);
                         if let Some(sid) = chat_session_id {
                             permission_store.set_pending(
@@ -531,26 +572,42 @@ pub(crate) async fn run_tool_loop(
                                 args_value.clone(),
                             );
                         }
+                        let wait_message = refusal_message_for_llm(&name, &reason);
                         let _ = tx
                             .send(Ok(Bytes::from(sse_tool_result_needs_approval(
                                 &tc.id,
                                 &name,
-                                &reason,
+                                &wait_message,
                                 approval_prompt_json(&prompt),
                             ))))
+                            .await;
+                        let _ = tx
+                            .send(Ok(Bytes::from(sse_round_paused(&tc.id, &name, &reason))))
                             .await;
                         messages.push(json!({
                             "role": "tool",
                             "tool_call_id": tc.id,
-                            "content": reason,
+                            "content": wait_message,
                         }));
-                        continue;
+                        // Break the tool_call loop AND the
+                        // outer tool_loop — no Ollama re-call,
+                        // no further tool_calls dispatched. The
+                        // SSE sink closes when this function
+                        // returns.
+                        let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
+                        return;
                     }
                 }
                 let result = match agent.invoke(&ctx, args_value).await {
                     Ok(s) => Ok(s),
                     Err(e) => Err(e.to_string()),
                 };
+                // Plan 4.C: record the invocation only when we
+                // actually dispatch — cross-tool gates (e.g.
+                // `web_fetch` after `read_document`) inspect
+                // `ctx.was_invoked(...)`. Refused calls do not
+                // pollute the history (plan 1791834996882).
+                ctx.record_invocation(&name);
                 let (ok, payload) = match &result {
                     Ok(s) => (true, s.clone()),
                     Err(e) => {

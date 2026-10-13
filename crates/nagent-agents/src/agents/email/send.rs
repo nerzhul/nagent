@@ -123,13 +123,14 @@ impl Agent for SendAgent {
     fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
         // Strictest tool in the registry. The inline approval
         // card fires on every invocation. The per-session
-        // "Always allow" override is intentionally **not**
-        // wired for this tool — see the LLM tool loop's
-        // `should_skip_inline_card` for the enforcement
-        // surface (the tool loop reads
-        // `agent.requires_confirmation` AND checks the agent
-        // name against the override set; `email_send` is added
-        // to a small "no override" set on the server side).
+        // "Toujours pour cette session" override is intentionally
+        // **not** honoured for this tool — see
+        // [`SendAgent::allow_session_override`] for the
+        // enforcement surface (plan 1791834996882). The tool
+        // loop checks this flag before consulting the session
+        // override set so `email_send` keeps the always-ask pin
+        // even after the user clicked "Toujours pour cette
+        // session" on a previous card.
         ConfirmationDecision::NeedsConfirmation {
             reason: format!(
                 "`{name}` sends a real email through the user's mailbox. The user must \
@@ -138,6 +139,16 @@ impl Agent for SendAgent {
                 name = self.name(),
             ),
         }
+    }
+
+    fn allow_session_override(&self) -> bool {
+        // `email_send` is pinned to always-ask; clicking
+        // "Toujours pour cette session" on the approval card
+        // must not bypass the gate for subsequent sends. The
+        // tool loop's `force_allow` check honours this flag
+        // before consulting the per-session override set
+        // (plan 1791834996882).
+        false
     }
 
     fn untrusted_output(&self) -> bool {
@@ -385,11 +396,18 @@ mod tests {
         // approval card fires on every invocation and the
         // per-session "Always allow" override is **not**
         // wired for it. The agent declares
-        // `NeedsConfirmation` unconditionally.
+        // `NeedsConfirmation` unconditionally AND pins
+        // `allow_session_override() = false` so the tool loop's
+        // `force_allow` short-circuit never fires for this
+        // tool (plan 1791834996882).
         let agent = SendAgent::new(Arc::new(EmailAgentConfig::default()), None, Vec::new());
         let ctx = UserContext::for_tests(Uuid::new_v4(), Arc::new(ServiceRegistry::empty()));
         let d = agent.requires_confirmation(&ctx, &Value::Null);
         assert!(matches!(d, ConfirmationDecision::NeedsConfirmation { .. }));
+        assert!(
+            !agent.allow_session_override(),
+            "email_send must opt out of the session-override bypass"
+        );
     }
 
     #[test]

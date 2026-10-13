@@ -371,6 +371,27 @@ pub(crate) fn sse_error_event(reason: &str, detail: &str) -> String {
     format!("event: error\ndata: {payload}\n\n")
 }
 
+/// `round_paused` SSE frame (plan 1791834996882). Emitted exactly
+/// once at the end of a paused round, right after the
+/// `tool_result` frame carrying `needs_approval: true`. The
+/// client uses it to:
+/// - dim the most recent user bubble and render a small
+///   "⏸ Waiting for approval" pill,
+/// - disable the chat input until the user sends a decision
+///   message (re-enabled on the next user-message send).
+///
+/// Carries `id` (the gated `tool_call_id`), `name` (the tool
+/// that asked), and the agent's `reason` text so the UI can
+/// quote it on the pill without re-fetching.
+pub(crate) fn sse_round_paused(id: &str, name: &str, reason: &str) -> String {
+    let payload = json!({
+        "id": id,
+        "name": name,
+        "reason": reason,
+    });
+    format!("event: round_paused\ndata: {payload}\n\n")
+}
+
 /// Public alias so [`crate::llm::proxy`] and
 /// [`crate::llm::tool_loop`] can spell the upstream byte stream
 /// uniformly.
