@@ -37,7 +37,7 @@ rust-embed = "8"
 dotenvy = "0.15"
 # Powers the optional `--config <path>` TOML file. Serde integration
 # is enabled transitively via the workspace `serde` dep.
-toml = "0.8"
+toml = "1.1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 humantime = "2"
 
