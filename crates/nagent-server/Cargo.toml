@@ -125,7 +125,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 # real-world PDFs (MS Office + scanners). `pdf-extract` routes
 # ToUnicode through `adobe-cmap-parser` and recovers correctly —
 # `five_steps_perform_2009.pdf` is the regression pin.
-pdf-extract = "0.7"
+pdf-extract = "0.12"
 lopdf = { version = "0.34", default-features = false, features = ["pom_parser"] }
 mime_guess = "2"
 # Trusted-proxy CIDR parser (security plan #5).
