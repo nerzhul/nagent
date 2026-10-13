@@ -6,53 +6,26 @@
 
 use std::net::SocketAddr;
 
-use nagent_server::app::build_app;
-use nagent_server::cli::{auth as auth_cli, documents as documents_cli, migrate as migrate_cli};
+use clap::Parser;
+use nagent_server::cli::{self, Cli};
 use nagent_server::http::build_router;
-use nagent_server::{CliArgs, Config};
+use nagent_server::{app::build_app, Config};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
-    // `stt-server auth …` subcommand dispatch happens FIRST so the
-    // CLI subcommand arguments (`create-admin`, `--email`, etc.)
-    // do not get rejected by the strict `CliArgs::parse` loop below.
-    // The dispatch walks the full argv (skipping the binary name)
-    // so `--config FOO auth list-users` routes correctly even when
-    // the operator puts the global flag before the subcommand.
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(idx) = argv.iter().position(|a| a == "auth") {
-        // Concatenate leading global flags (`--config FOO`) with
-        // the trailing subcommand args (`list-users`). The auth CLI
-        // re-parses `--config` from the combined vector and routes
-        // the rest to the subcommand parser. This handles both
-        // `stt-server auth …` and `stt-server --config FOO auth …`.
-        let mut argv = argv;
-        let trailing = argv.split_off(idx + 1);
-        let mut combined = argv;
-        combined.extend(trailing);
-        return auth_cli::run_auth_cli(combined).await;
-    }
-    if let Some(idx) = argv.iter().position(|a| a == "migrate") {
-        // Same dispatcher trick as the `auth` branch above. Order
-        // matters: `auth` stays first so existing behaviour is
-        // unchanged, then `migrate`, then fallthrough to server
-        // boot.
-        let mut argv = argv;
-        let trailing = argv.split_off(idx + 1);
-        let mut combined = argv;
-        combined.extend(trailing);
-        return migrate_cli::run_migrate_cli(combined).await;
-    }
-    if let Some(idx) = argv.iter().position(|a| a == "documents") {
-        // Same dispatcher trick as the `auth` / `migrate` branches
-        // above. Sits after both so `--config FOO documents purge
-        // …` routes correctly.
-        let mut argv = argv;
-        let trailing = argv.split_off(idx + 1);
-        let mut combined = argv;
-        combined.extend(trailing);
-        return documents_cli::run_documents_cli(combined).await;
+    // `Cli::parse()` (clap derive) owns subcommand detection and the
+    // global `--config PATH` knob. When a subcommand is present the
+    // binary exits without booting the HTTP server; otherwise it
+    // falls through to the server boot path below.
+    let cli = Cli::parse();
+    match cli.command {
+        Some(cli::Command::Auth(c)) => return cli::auth::run(c, cli.config.as_deref()).await,
+        Some(cli::Command::Migrate(c)) => return cli::migrate::run(c, cli.config.as_deref()).await,
+        Some(cli::Command::Documents(c)) => {
+            return cli::documents::run(c, cli.config.as_deref()).await;
+        }
+        None => {}
     }
 
     init_tracing();
@@ -60,8 +33,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // CLI flags must be parsed before tracing emits its first
     // `info!` so a malformed `--config` exits cleanly without
     // producing a half-initialised log line.
-    let cli = CliArgs::parse();
-    let cfg = Config::load(&cli).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cfg = Config::load(cli.config.as_deref()).map_err(|e| anyhow::anyhow!("{e}"))?;
     tracing::info!(addr = %cfg.bind_addr, model = ?cfg.whisper_model_path, "starting nagent stt-server");
 
     let state = build_app(&cfg).await?;

@@ -1,11 +1,10 @@
 //! `stt-server migrate …` — operator CLI for the auth DB migration
 //! state.
 //!
-//! Mirrors [`crate::cli::auth`] style: hand-rolled flag parsing
-//! (no `clap` dep), `--config FOO` global flag, `--force` PID-file
-//! override, `--help` / `-h` per subcommand. Runs against the same
-//! `[auth.db]` configuration the server uses, without needing the
-//! HTTP server to be running.
+//! Argv parsing is driven by `clap` derive (plan
+//! `1792262220000-clap-derive-migration`). Subcommands are variants
+//! of [`MigrateAction`]; the `compute_target` math and the
+//! migration-status JSON rendering are unchanged.
 //!
 //! Subcommands:
 //!
@@ -13,199 +12,105 @@
 //! stt-server migrate up                    [--force]
 //! stt-server migrate down [--steps N | --to VERSION] [--yes] [--force]
 //! stt-server migrate status [--json]       [--force]
-//! stt-server migrate help
 //! ```
 //!
 //! `down` is destructive and requires `--yes` to skip the printed
 //! plan check. `up` is idempotent (sqlx is the source of truth) so
 //! it never asks for confirmation.
 //!
-//! Unlike `crate::cli::auth::open_store()`, this module does NOT call
-//! `migrate_up` after connect — every subcommand uses the migration
-//! primitives directly so an operator can inspect `status` against
-//! a freshly-created DB without immediately applying the schema.
+//! Unlike [`crate::cli::auth::open_store`], this module does NOT
+//! call `migrate_up` after connect — every subcommand uses the
+//! migration primitives directly so an operator can inspect
+//! `status` against a freshly-created DB without immediately
+//! applying the schema.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::ExitCode;
 
-use crate::config::{CliArgs, Config};
+use clap::{Parser, Subcommand};
 use nagent_db::{MigrationRow, MigrationStatus};
 
-/// Top-level dispatch: called from `main` when `argv[1] == "migrate"`.
-/// Returns `Ok(exit_code)` so the binary returns the right status to
-/// the shell on each subcommand.
-///
-/// `args` is the full argv after the binary name. The dispatch walks
-/// the full argv (skipping the binary name) so `--config FOO migrate
-/// status` routes correctly even when the operator puts the global
-/// flag before the subcommand — same trick the `auth` CLI uses.
-pub async fn run_migrate_cli(args: Vec<String>) -> Result<ExitCode, anyhow::Error> {
-    let (cli_args, rest) = split_global_flags(args);
-    let mut rest = rest;
-    if rest.first().map(|s| s.as_str()) == Some("migrate") {
-        rest.remove(0);
-    }
-    let mut iter = rest.into_iter();
-    let sub = iter.next().unwrap_or_default();
-    let result = match sub.as_str() {
-        // `help` comes BEFORE `down` in the dispatch order — the
-        // string `"help"` would otherwise parse cleanly as a VERSION
-        // argument if we let it reach `parse_down`.
-        "help" | "--help" | "-h" | "" => {
-            print_help();
-            return Ok(ExitCode::from(0));
-        }
-        "up" => up(iter.collect(), &cli_args).await,
-        "down" => down(iter.collect(), &cli_args).await,
-        "status" => status(iter.collect(), &cli_args).await,
-        other => {
-            eprintln!("error: unknown migrate subcommand: {other:?}");
-            eprintln!("(run `stt-server migrate help` for usage)");
-            return Ok(ExitCode::from(2));
-        }
-    };
-    result
+use crate::cli::shared::{check_running_server, ensure_sqlite_parent_dir};
+use crate::config::Config;
+
+/// Top-level `migrate` subcommand.
+#[derive(Debug, Parser)]
+#[command(
+    about = "Operator CLI for auth DB migrations",
+    long_about = "Operator CLI for auth DB migrations.\n\
+                  Runs against the same `[auth.db]` configuration the server uses, \
+                  without booting the HTTP server."
+)]
+pub struct MigrateCmd {
+    #[command(subcommand)]
+    pub action: MigrateAction,
 }
 
-/// Extract the `--config <path>` flag pair (if any) from the migrate
-/// CLI argv. Returns the parsed [`CliArgs`] plus the remainder
-/// without the global flags — the subcommand-specific parsers then
-/// operate on a clean slice. Same shape as
-/// [`crate::cli::auth::split_global_flags`]; duplicated rather than
-/// shared because the `auth` module's helper is private and there
-/// are only two namespaces today.
-fn split_global_flags(args: Vec<String>) -> (CliArgs, Vec<String>) {
-    let mut cli = CliArgs::default();
-    let mut rest = Vec::with_capacity(args.len());
-    let mut iter = args.into_iter();
-    while let Some(a) = iter.next() {
-        if a == "--config" {
-            if let Some(v) = iter.next() {
-                cli.config = Some(PathBuf::from(v));
-            } else {
-                eprintln!("error: --config requires a path argument");
-                std::process::exit(2);
-            }
-        } else if let Some(v) = a.strip_prefix("--config=") {
-            cli.config = Some(PathBuf::from(v));
-        } else {
-            rest.push(a);
-        }
-    }
-    (cli, rest)
+#[derive(Debug, Subcommand)]
+pub enum MigrateAction {
+    /// Apply any pending migrations. Idempotent; safe to re-run.
+    Up {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Reverse migrations. DESTRUCTIVE — requires `--yes`.
+    Down {
+        /// Number of most-recent migrations to revert. Mutually
+        /// exclusive with `--to`.
+        #[arg(long, conflicts_with = "to")]
+        steps: Option<usize>,
+        /// Revert down to (but keeping) this VERSION.
+        #[arg(long)]
+        to: Option<i64>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        force: bool,
+    },
+    /// List applied + pending migrations.
+    Status {
+        /// Emit a stable JSON shape instead of the human table.
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
-/// Connect to the auth DB WITHOUT running migrations. Each `migrate`
-/// subcommand then drives the migration primitives directly so the
-/// `status` view reflects what is on disk, not what would have been
-/// applied by `connect()`.
+/// Dispatch the parsed [`MigrateCmd`].
+pub async fn run(cmd: MigrateCmd, config: Option<&Path>) -> Result<ExitCode, anyhow::Error> {
+    match cmd.action {
+        MigrateAction::Up { force } => up(force, config).await,
+        MigrateAction::Down {
+            steps,
+            to,
+            yes,
+            force,
+        } => down(steps, to, yes, force, config).await,
+        MigrateAction::Status { json, force } => status(json, force, config).await,
+    }
+}
+
+/// Connect to the auth DB WITHOUT running migrations. Each
+/// `migrate` subcommand then drives the migration primitives
+/// directly so the `status` view reflects what is on disk, not
+/// what would have been applied by `connect()`.
 async fn connect_store(cfg: &Config) -> Result<nagent_db::Db, anyhow::Error> {
-    crate::cli::auth::ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
+    ensure_sqlite_parent_dir(&cfg.auth.db.url)?;
     let opts: nagent_db::DbOptions = (&cfg.auth).into();
     nagent_db::Db::connect(&opts)
         .await
         .map_err(|e| anyhow::anyhow!("auth DB connect failed: {e}"))
 }
 
-/// PID-file + `--force` guard shared by every subcommand. Mirrors the
-/// [`crate::cli::auth::check_running_server`] helper but is wired up
-/// here independently (the `auth` CLI's check is private and the two
-/// namespaces have no reason to share this code path).
-fn check_running_server(force: bool) -> Result<(), anyhow::Error> {
-    let pid_path = PathBuf::from("data").join("server.pid");
-    if !pid_path.exists() {
-        return Ok(());
-    }
-    let pid = match std::fs::read_to_string(&pid_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "could not read PID file at {}: {e}",
-                pid_path.display()
-            ))
-        }
-    };
-    let pid_num: u64 = match pid.parse() {
-        Ok(n) => n,
-        Err(_) => return Ok(()), // stale PID file → allow
-    };
-    if !force {
-        let status = std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid_num.to_string())
-            .status();
-        if let Ok(s) = status {
-            if s.success() {
-                return Err(anyhow::anyhow!(
-                    "a server is already running (PID {} from {}); pass --force to override",
-                    pid_num,
-                    pid_path.display()
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn print_help() {
-    println!("stt-server migrate — operator CLI for auth DB migrations");
-    println!();
-    println!("USAGE:");
-    println!("    stt-server migrate <subcommand> [options]");
-    println!();
-    println!("SUBCOMMANDS:");
-    println!("    up       Apply any pending migrations. Idempotent; safe to re-run.");
-    println!("             Prints either `applied N migrations (...)` or");
-    println!("             `no pending migrations` and exits 0.");
-    println!();
-    println!("    down     Reverse migrations. DESTRUCTIVE — requires --yes.");
-    println!("             Default (no flags): revert the latest applied migration.");
-    println!("             --steps N: revert the N most recent migrations.");
-    println!("             --to VERSION: revert down to (but keeping) VERSION.");
-    println!("             Without --yes, prints the plan and exits non-zero.");
-    println!();
-    println!("    status   List applied + pending migrations as:");
-    println!("             VERSION  DESCRIPTION         STATUS");
-    println!("             0001     init                applied");
-    println!("             0002     credentials        pending");
-    println!("             Plus a footer with `highest applied` + `pending count`.");
-    println!("             --json emits a stable JSON shape (see README).");
-    println!();
-    println!("GLOBAL OPTIONS:");
-    println!("    --config PATH    Load config from this TOML file (see auth CLI).");
-    println!("    --force          Run even when data/server.pid points at a live process.");
-}
-
-// ---- up ---------------------------------------------------------------------
-
-#[derive(Debug, Default)]
-struct UpOpts {
-    force: bool,
-}
-
-fn parse_up(args: Vec<String>) -> Result<UpOpts, anyhow::Error> {
-    let mut o = UpOpts::default();
-    for a in args {
-        match a.as_str() {
-            "--force" => o.force = true,
-            "--help" | "-h" => {
-                println!("stt-server migrate up [--force]");
-                std::process::exit(0);
-            }
-            other => return Err(anyhow::anyhow!("unknown migrate up flag: {other:?}")),
-        }
-    }
-    Ok(o)
-}
-
-async fn up(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error> {
-    let opts = parse_up(args)?;
-    check_running_server(opts.force)?;
-    let cfg = Config::load(cli)?;
+async fn up(force: bool, config: Option<&Path>) -> Result<ExitCode, anyhow::Error> {
+    check_running_server(force)?;
+    let cfg = load_config(config)?;
 
     if !cfg.auth.enabled {
         return Err(anyhow::anyhow!(
-            "auth is not enabled in the active configuration; set [auth].enabled = true (or NAGENT_AUTH_ENABLED=true)"
+            "auth is not enabled in the active configuration; \
+             set [auth].enabled = true (or NAGENT_AUTH_ENABLED=true)"
         ));
     }
 
@@ -213,7 +118,7 @@ async fn up(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error>
     // Diff before so we can report what we actually applied. Idempotent
     // — sqlx skips already-applied migrations on the second call.
     let before = store.migration_status().await?;
-    store.migrate().await.map_err(map_auth_err)?;
+    store.migrate().await.map_err(map_db_err)?;
     let after = store.migration_status().await?;
 
     let newly_applied: Vec<&MigrationRow> = after
@@ -236,51 +141,6 @@ async fn up(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error>
         println!("applied {} migration(s): {}", newly_applied.len(), names);
     }
     Ok(ExitCode::from(0))
-}
-
-// ---- down -------------------------------------------------------------------
-
-#[derive(Debug, Default)]
-struct DownOpts {
-    steps: Option<usize>,
-    to: Option<i64>,
-    yes: bool,
-    force: bool,
-}
-
-fn parse_down(args: Vec<String>) -> Result<DownOpts, anyhow::Error> {
-    let mut o = DownOpts::default();
-    let mut iter = args.into_iter();
-    while let Some(a) = iter.next() {
-        match a.as_str() {
-            "--steps" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--steps requires a value"))?;
-                let n: usize = v
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("invalid --steps value {v:?}: {e}"))?;
-                o.steps = Some(n);
-            }
-            "--to" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--to requires a value"))?;
-                let n: i64 = v
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("invalid --to value {v:?}: {e}"))?;
-                o.to = Some(n);
-            }
-            "--yes" => o.yes = true,
-            "--force" => o.force = true,
-            "--help" | "-h" => {
-                println!("stt-server migrate down [--steps N | --to VERSION] [--yes] [--force]");
-                std::process::exit(0);
-            }
-            other => return Err(anyhow::anyhow!("unknown migrate down flag: {other:?}")),
-        }
-    }
-    Ok(o)
 }
 
 /// Compute the `target_version` we want to keep applied after the
@@ -332,20 +192,57 @@ fn compute_target(opts: &DownOpts, status: &MigrationStatus) -> Result<Option<i6
     Ok(Some(sorted[sorted.len() - n - 1]))
 }
 
-async fn down(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error> {
-    let opts = parse_down(args)?;
+/// Parsed-shape of the `migrate down` subcommand. Mirrors the
+/// clap-derived [`MigrateAction::Down`] variant so
+/// [`compute_target`] stays free of clap types.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DownOpts {
+    pub steps: Option<usize>,
+    pub to: Option<i64>,
+    pub yes: bool,
+    pub force: bool,
+}
+
+impl From<&MigrateAction> for DownOpts {
+    fn from(action: &MigrateAction) -> Self {
+        match action {
+            MigrateAction::Down {
+                steps,
+                to,
+                yes,
+                force,
+            } => Self {
+                steps: *steps,
+                to: *to,
+                yes: *yes,
+                force: *force,
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn down(
+    steps: Option<usize>,
+    to: Option<i64>,
+    yes: bool,
+    force: bool,
+    config: Option<&Path>,
+) -> Result<ExitCode, anyhow::Error> {
+    let opts = DownOpts {
+        steps,
+        to,
+        yes,
+        force,
+    };
     check_running_server(opts.force)?;
-    let cfg = Config::load(cli)?;
+    let cfg = load_config(config)?;
 
     if !cfg.auth.enabled {
         return Err(anyhow::anyhow!(
             "auth is not enabled in the active configuration; \
              there is no auth DB to migrate."
-        ));
-    }
-    if opts.steps.is_some() && opts.to.is_some() {
-        return Err(anyhow::anyhow!(
-            "--steps and --to are mutually exclusive; pick one."
         ));
     }
 
@@ -388,7 +285,7 @@ async fn down(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Erro
         return Ok(ExitCode::from(2));
     }
 
-    store.revert_to(target).await.map_err(map_auth_err)?;
+    store.revert_to(target).await.map_err(map_db_err)?;
 
     println!(
         "reverted {} migration(s); target version = {}",
@@ -398,34 +295,9 @@ async fn down(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Erro
     Ok(ExitCode::from(0))
 }
 
-// ---- status -----------------------------------------------------------------
-
-#[derive(Debug, Default)]
-struct StatusOpts {
-    json: bool,
-    force: bool,
-}
-
-fn parse_status(args: Vec<String>) -> Result<StatusOpts, anyhow::Error> {
-    let mut o = StatusOpts::default();
-    for a in args {
-        match a.as_str() {
-            "--json" => o.json = true,
-            "--force" => o.force = true,
-            "--help" | "-h" => {
-                println!("stt-server migrate status [--json] [--force]");
-                std::process::exit(0);
-            }
-            other => return Err(anyhow::anyhow!("unknown migrate status flag: {other:?}")),
-        }
-    }
-    Ok(o)
-}
-
-async fn status(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Error> {
-    let opts = parse_status(args)?;
-    check_running_server(opts.force)?;
-    let cfg = Config::load(cli)?;
+async fn status(json: bool, force: bool, config: Option<&Path>) -> Result<ExitCode, anyhow::Error> {
+    check_running_server(force)?;
+    let cfg = load_config(config)?;
 
     if !cfg.auth.enabled {
         return Err(anyhow::anyhow!(
@@ -437,7 +309,7 @@ async fn status(args: Vec<String>, cli: &CliArgs) -> Result<ExitCode, anyhow::Er
     let store = connect_store(&cfg).await?;
     let status = store.migration_status().await?;
 
-    if opts.json {
+    if json {
         let json = serde_json::json!({
             "applied": status.applied.iter().map(row_to_json).collect::<Vec<_>>(),
             "pending": status.pending.iter().map(row_to_json).collect::<Vec<_>>(),
@@ -479,19 +351,22 @@ fn print_status_table(status: &MigrationStatus) {
     println!("pending: {}", status.pending.len());
 }
 
-/// Map the auth subsystem's error into `anyhow` so the CLI can use a
 /// Map a `nagent_db::Error` to the CLI's `anyhow` error type.
-fn map_auth_err(e: nagent_db::Error) -> anyhow::Error {
+fn map_db_err(e: nagent_db::Error) -> anyhow::Error {
     anyhow::anyhow!("{e}")
+}
+
+/// Load `Config` from an optional explicit `--config PATH`.
+fn load_config(path: Option<&Path>) -> Result<Config, anyhow::Error> {
+    Config::load(path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]
 mod tests {
-    //! CLI parsing tests. The data-layer tests (up / status / down
-    //! against a real sqlite store) live in `tests/migrate_cli.rs`
-    //! so they share the existing integration-test harness; this
-    //! module only covers the pure-Rust flag-parsing branches so
-    //! they run as fast unit tests inside the crate.
+    //! Pure-logic tests for [`compute_target`] and [`DownOpts`].
+    //! Parser-shape tests now drive clap directly via
+    //! `MigrateAction::try_parse_from`; see
+    //! [`crate::cli::snapshot_tests`].
     use super::*;
     use nagent_db::MigrationRow;
 
@@ -516,60 +391,6 @@ mod tests {
             pending,
             highest_applied,
         }
-    }
-
-    #[test]
-    fn parse_down_accepts_steps_to_yes_and_force() {
-        let opts = parse_down(vec![
-            "--steps".into(),
-            "2".into(),
-            "--yes".into(),
-            "--force".into(),
-        ])
-        .expect("parse_down");
-        assert_eq!(opts.steps, Some(2));
-        assert_eq!(opts.to, None);
-        assert!(opts.yes);
-        assert!(opts.force);
-    }
-
-    #[test]
-    fn parse_down_accepts_to_version() {
-        let opts = parse_down(vec!["--to".into(), "1".into(), "--yes".into()]).expect("parse_down");
-        assert_eq!(opts.steps, None);
-        assert_eq!(opts.to, Some(1));
-        assert!(opts.yes);
-    }
-
-    #[test]
-    fn parse_down_rejects_unknown_flag() {
-        let err = parse_down(vec!["--nope".into()]).unwrap_err();
-        assert!(err.to_string().contains("unknown migrate down flag"));
-    }
-
-    #[test]
-    fn parse_down_rejects_missing_steps_value() {
-        let err = parse_down(vec!["--steps".into()]).unwrap_err();
-        assert!(err.to_string().contains("--steps requires a value"));
-    }
-
-    #[test]
-    fn parse_down_rejects_non_numeric_steps() {
-        let err = parse_down(vec!["--steps".into(), "abc".into()]).unwrap_err();
-        assert!(err.to_string().contains("invalid --steps value"));
-    }
-
-    #[test]
-    fn parse_up_accepts_force() {
-        let opts = parse_up(vec!["--force".into()]).expect("parse_up");
-        assert!(opts.force);
-    }
-
-    #[test]
-    fn parse_status_accepts_json_and_force() {
-        let opts = parse_status(vec!["--json".into(), "--force".into()]).expect("parse_status");
-        assert!(opts.json);
-        assert!(opts.force);
     }
 
     #[test]

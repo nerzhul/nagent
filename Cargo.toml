@@ -39,6 +39,8 @@ dotenvy = "0.15"
 # Pulled with default features; serde integration is enabled transitively
 # via the existing `serde` workspace dep.
 toml = "0.8"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+humantime = "2"
 
 [profile.release]
 opt-level = 3

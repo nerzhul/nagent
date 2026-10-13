@@ -9,7 +9,7 @@
 //!
 //! ## Section layout
 //!
-//! - [`server`] — `Config`, `CliArgs`, `ConfigError`, the env/TOML
+//! - [`server`] — `Config`, `ConfigError`, the env/TOML
 //!  merge helpers (`env_opt`, `resolve_primitive`, …) and the
 //!  layered file discovery.
 //! - [`allowed_origins`] — `[server].allowed_origins` (plan S-2).
@@ -39,9 +39,12 @@ pub mod x_oauth;
 // without dragging `crate::config_file` into every signature.
 pub use crate::config_file as file;
 
-// Re-export the canonical top-level types so call sites continue to
-// use `crate::config::Config` / `crate::config::CliArgs`.
-pub use server::{CliArgs, Config, ConfigError};
+// Re-export the canonical top-level type so call sites continue to
+// use `crate::config::Config`. `CliArgs` was removed when the
+// operator CLI moved to `clap` derive (plan
+// `1792262220000-clap-derive-migration`); callers now pass
+// `Option<&Path>` directly.
+pub use server::{Config, ConfigError};
 
 // Section re-exports keep the existing `crate::config::FooConfig`
 // canonical paths resolving unchanged for downstream users (lib,
@@ -296,39 +299,28 @@ mod tests {
         assert_eq!(p, PathBuf::from("/from/toml.bin"));
     }
 
-    /// `CliArgs::parse` accepts both `--config PATH` and the
+    /// `Cli::parse` accepts both `--config PATH` and the
     /// `--config=PATH` form so operators don't have to remember which
-    /// one the binary supports.
+    /// one the binary supports. Driven via clap's test-friendly
+    /// `try_parse_from` (process-global `std::env::args` is not
+    /// stubbable from a unit test).
     #[test]
-    fn cli_args_parse_space_and_equals_forms() {
-        // Drive `parse()` against a synthetic argv by re-implementing
-        // the loop inline; `std::env::args` is process-global so we
-        // can't stub it from a unit test.
-        fn run(argv: &[&str]) -> Result<CliArgs, String> {
-            let mut iter = argv.iter().copied();
-            let mut out = CliArgs::default();
-            while let Some(arg) = iter.next() {
-                if arg == "--config" {
-                    let v = iter.next().ok_or("missing value".to_string())?;
-                    out.config = Some(PathBuf::from(v));
-                } else if let Some(v) = arg.strip_prefix("--config=") {
-                    out.config = Some(PathBuf::from(v));
-                } else {
-                    return Err(format!("unknown arg: {arg}"));
-                }
-            }
-            Ok(out)
-        }
+    fn cli_args_parse_space_and_equals() {
+        use clap::Parser;
+        use nagent_server::cli::Cli;
+        let space = Cli::try_parse_from(["stt-server", "--config", "/etc/nagent.toml"]).unwrap();
         assert_eq!(
-            run(&["--config", "/etc/nagent.toml"]).unwrap().config,
-            Some(PathBuf::from("/etc/nagent.toml"))
+            space.config.as_deref(),
+            Some(std::path::Path::new("/etc/nagent.toml"))
         );
+        let eq = Cli::try_parse_from(["stt-server", "--config=/etc/nagent.toml"]).unwrap();
         assert_eq!(
-            run(&["--config=/etc/nagent.toml"]).unwrap().config,
-            Some(PathBuf::from("/etc/nagent.toml"))
+            eq.config.as_deref(),
+            Some(std::path::Path::new("/etc/nagent.toml"))
         );
-        assert!(run(&[]).unwrap().config.is_none());
-        assert!(run(&["--bogus"]).is_err());
+        let none = Cli::try_parse_from(["stt-server"]).unwrap();
+        assert!(none.config.is_none());
+        assert!(Cli::try_parse_from(["stt-server", "--bogus"]).is_err());
     }
 
     #[test]

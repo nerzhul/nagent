@@ -86,7 +86,7 @@ pub mod version;
 /// Convenience alias for the per-agent section of `Config`.
 pub type AgentsConfig = config::AgentConfig;
 
-pub use config::{CliArgs, Config};
+pub use config::Config;
 pub use state::{
     AppState, AuthState, ChatMessagesState, ChatSessionsState, DocumentsState, LlmState, SttState,
     TtsState,

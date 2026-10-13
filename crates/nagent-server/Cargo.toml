@@ -160,6 +160,11 @@ lopdf = { version = "0.34", default-features = false, features = ["pom_parser"] 
 mime_guess = "2"
 # Trusted-proxy CIDR parser for security plan #5.
 ipnet = "2"
+# Operator CLI (plan `1792262220000-clap-derive-migration`):
+# clap derive + humantime power the `auth` / `migrate` /
+# `documents` subcommands and the global `--config PATH` flag.
+clap = { workspace = true }
+humantime = "2"
 
 [dev-dependencies]
 # `test-util` enables the `crate::testing::app_state` builder that

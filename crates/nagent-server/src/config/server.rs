@@ -1,4 +1,4 @@
-//! `server` — top-level `Config`, `CliArgs`, `ConfigError`, and the
+//! `server` — top-level `Config`, `ConfigError`, and the
 //! env/TOML merge helpers used by every section.
 
 use std::net::SocketAddr;
@@ -94,68 +94,6 @@ pub struct Config {
     /// `x_oauth.enabled = true` AND `x_oauth.client_id` is
     /// non-empty AND the `x-agent` cargo feature is on.
     pub x_oauth: XOAuthConfig,
-}
-
-/// CLI flags parsed before config loading.
-///
-/// Kept minimal on purpose: `--config <path>` is the only operator
-/// flag today. Parsed manually (no `clap` dep) — the cost is one
-/// `match` and the benefit is a single-binary dependency surface.
-#[derive(Debug, Default, Clone)]
-pub struct CliArgs {
-    /// Path to the optional TOML configuration file. When `Some`,
-    /// [`Config::load`] reads it and overlays it under the env-vars.
-    pub config: Option<PathBuf>,
-}
-
-impl CliArgs {
-    /// Parse `std::env::args()` for the supported flags.
-    ///
-    /// Unknown flags exit with status 2 and a one-line error; `--help`
-    /// / `-h` print the usage block and exit 0. The exit calls go
-    /// through `std::process` directly because this runs before
-    /// tracing is initialised and the binary has no business
-    /// continuing past a malformed command line.
-    pub fn parse() -> Self {
-        let mut out = Self::default();
-        let mut iter = std::env::args().skip(1);
-        while let Some(arg) = iter.next() {
-            if arg == "--config" {
-                match iter.next() {
-                    Some(value) => out.config = Some(PathBuf::from(value)),
-                    None => {
-                        eprintln!("error: --config requires a path argument");
-                        std::process::exit(2);
-                    }
-                }
-            } else if let Some(value) = arg.strip_prefix("--config=") {
-                out.config = Some(PathBuf::from(value));
-            } else if arg == "--help" || arg == "-h" {
-                print_help();
-                std::process::exit(0);
-            } else {
-                eprintln!("error: unknown argument: {arg}");
-                eprintln!("(run with --help for usage)");
-                std::process::exit(2);
-            }
-        }
-        out
-    }
-}
-
-fn print_help() {
-    println!("stt-server — STT pipeline with optional LLM proxy and chat agents");
-    println!();
-    println!("USAGE:");
-    println!("    stt-server [--config <PATH>]");
-    println!();
-    println!("OPTIONS:");
-    println!("    --config <PATH>    Load defaults from a TOML file before reading env vars.");
-    println!("                      Env vars always override the file (12-factor friendly).");
-    println!("    -h, --help         Print this help and exit.");
-    println!();
-    println!("ENVIRONMENT:");
-    println!("    All runtime knobs are documented in README.md under \"Configuration\".");
 }
 
 impl Config {
@@ -259,24 +197,26 @@ impl Config {
         })
     }
 
-    /// Top-level entry point used by `main`: parses CLI args, reads
-    /// the optional TOML file(s), and builds the [`Config`] from the
-    /// combined `env > toml > default` precedence chain.
+    /// Top-level entry point used by `main`: reads the optional
+    /// TOML file(s) and builds the [`Config`] from the combined
+    /// `env > toml > default` precedence chain.
     ///
-    /// File discovery depends on whether `--config` was supplied:
+    /// File discovery depends on whether an explicit `--config PATH`
+    /// was supplied via the CLI (parsed by `cli::Cli`):
     ///
-    /// - `--config <PATH>` — load only that file (operator-chosen,
-    /// bypasses the layered discovery). Useful for tests, container
-    /// setups, and debugging.
-    /// - no `--config` — layer the system file (`/etc/nagent/config.toml`)
-    /// under the XDG user file (`$XDG_CONFIG_HOME/nagent/config.toml`
-    /// or `~/.config/nagent/config.toml`). Missing files are silently
-    /// skipped; only parse / read errors are reported.
+    /// - `Some(path)` — load only that file (operator-chosen,
+    ///   bypasses the layered discovery). Useful for tests,
+    ///   container setups, and debugging.
+    /// - `None` — layer the system file (`/etc/nagent/config.toml`)
+    ///   under the XDG user file
+    ///   (`$XDG_CONFIG_HOME/nagent/config.toml` or
+    ///   `~/.config/nagent/config.toml`). Missing files are silently
+    ///   skipped; only parse / read errors are reported.
     ///
-    /// In both cases, environment variables (including `.env` values)
-    /// still win over whatever the file(s) provided.
-    pub fn load(cli: &CliArgs) -> Result<Self, ConfigError> {
-        let toml = match &cli.config {
+    /// In both cases, environment variables (including `.env`
+    /// values) still win over whatever the file(s) provided.
+    pub fn load(config_path: Option<&Path>) -> Result<Self, ConfigError> {
+        let toml = match config_path {
             Some(path) => Some(load_toml(path)?),
             None => load_layered_default_config()?,
         };
