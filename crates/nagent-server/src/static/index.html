@@ -241,10 +241,12 @@
     <div class="chat-main">
     <header class="chat-header">
       <h2>Assistant</h2>
-      <label class="chat-model">
-        <span>Model</span>
-        <select id="chat-model"></select>
-      </label>
+      <!--
+        The model selector has been moved into `#chat-form` (llama.cpp
+        style, Plan 1791919024804). The `#chat-model` element itself
+        still lives in the DOM for `chat.js` to populate — see the
+        compact label inside the prompt bar below.
+      -->
       <!--
         Geolocation opt-in. Hidden until the user has granted browser
         permission AND cached a position. Pre-grant, the entry point
@@ -487,6 +489,19 @@
       </button>
       <input id="chat-attach-input" type="file"
              accept=".pdf,.txt,.md,.log" multiple hidden>
+      <!--
+        Model selector inside the prompt bar (llama.cpp style).
+        The `<select>` keeps the same `#chat-model` id so the
+        request-build code in `chat.js` (which reads its value
+        and listens for `change` events) keeps working unchanged.
+        We strip the "Model" label visually and style the select
+        as a compact pill with a cube icon (added via CSS
+        `::before`) so it reads like llama.cpp's model trigger.
+      -->
+      <label class="chat-model" title="Select a model">
+        <span class="chat-model-label">Model</span>
+        <select id="chat-model"></select>
+      </label>
       <button id="chat-record-btn" type="button" data-state="idle"
               aria-label="Start voice recording (Ctrl+Shift+D)"
               title="Start voice recording (Ctrl+Shift+D)">

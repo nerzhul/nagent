@@ -4480,7 +4480,7 @@ header .subtitle {
  * being abruptly clipped. */
 #chat-form {
   position: sticky;
-  bottom: 0.5rem;
+  bottom: 1.25rem;
   display: flex;
   align-items: flex-end;
   gap: 0.5rem;
@@ -4592,10 +4592,10 @@ header .subtitle {
 
 /* Ensure the messages container has enough bottom padding so the
  * last message is never hidden behind the sticky form. The form
- * is roughly 3.5rem tall (padding + content) plus a 0.5rem
- * bottom offset, so we reserve ~4.5rem of breathing room. */
+ * is roughly 3.5rem tall (padding + content) plus a 1.25rem
+ * bottom offset, so we reserve ~5.5rem of breathing room. */
 .chat-messages {
-  padding-bottom: 5rem;
+  padding-bottom: 5.5rem;
 }
 
 /* On mobile, the form takes more horizontal space relative to the
@@ -4611,6 +4611,242 @@ header .subtitle {
     padding: 0.4rem 0.5rem;
   }
   .chat-messages {
-    padding-bottom: 5rem;
+    padding-bottom: 5.5rem;
   }
 }
+
+/* =====================================================================
+ * Prompt bar v2 — textarea on top, button row below
+ * (llama.cpp-style, Plan 1791919024804)
+ * =====================================================================
+ * The previous override made the prompt a single horizontal row.
+ * llama.cpp stacks the textarea above a compact button row so the
+ * typing surface dominates the container. The model selector also
+ * lives in that bottom row, next to the mic and send.
+ *
+ * Layout strategy: keep `flex-direction: row` on the form (so the
+ * buttons sit side-by-side) and force the textarea onto its own
+ * line by giving it `flex-basis: 100%`. With `flex-wrap: wrap` the
+ * textarea wraps to a full-width row, then the action buttons flow
+ * naturally on the second line as a horizontal sub-row. An earlier
+ * attempt used `flex-direction: column` which placed every child
+ * on its own line (3 stacked rows in the screenshot) — the wrap
+ * approach gives the two-row visual we want while keeping the
+ * buttons horizontal.
+ */
+#chat-form {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 0.7rem;
+}
+
+/* The textarea owns the top row. `flex-basis: 100%` forces a wrap
+ * so the textarea always sits on its own line, full container
+ * width. A subtle bottom divider separates the typing surface
+ * from the action row, matching llama.cpp's reference. */
+#chat-input {
+  order: 0;
+  flex: 0 0 100%;
+  width: 100%;
+  border-bottom: 1px solid var(--border-refined);
+  border-radius: 10px 10px 0 0;
+  padding: 0.5rem 0.7rem 0.6rem;
+  min-height: 1.5rem;
+  /* Negative side margin to bleed to the container edges; the
+   * divider is the only visual seam. */
+  margin: 0 -0.1rem 0.1rem;
+}
+
+/* The action buttons form a horizontal sub-row on the second
+ * line. They stay inline because the parent is now row-direction
+ * (not column), and the textarea's 100% basis pushed them to a
+ * new line via flex-wrap. */
+#chat-form > .chat-attach-btn,
+#chat-form > #chat-record-btn,
+#chat-form > #chat-send,
+#chat-form > #chat-stop,
+#chat-form > .chat-model,
+#chat-form > #chat-location-share {
+  order: 1;
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 0;
+}
+
+/* First action button (paperclip) sits at the left edge. */
+#chat-form > .chat-attach-btn:first-of-type,
+#chat-form > .chat-attach-btn {
+  margin-right: 0.15rem;
+}
+
+/* The model selector is the widest element. Override the 2rem
+ * width and let it grow to fit its content, matching llama.cpp's
+ * "ggml-org/gemma-4 12B it" pill. */
+#chat-form > .chat-model {
+  width: auto;
+  height: auto;
+  min-height: 2rem;
+  padding: 0.25rem 0.6rem 0.25rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-refined);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 0.8rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  /* The label text is hidden — the select shows the model name. */
+}
+#chat-form > .chat-model .chat-model-label {
+  display: none;
+}
+/* Native select chrome is ugly; strip it and let the selected
+ * option text show directly. The arrow is reconstructed below. */
+#chat-form > .chat-model select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font: inherit;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  outline: none;
+  /* Leave room for the custom caret added via ::after. */
+  padding-right: 0.9rem;
+}
+#chat-form > .chat-model::after {
+  /* Cube icon + caret combo. The cube is a unicode block; the
+   * caret is a small triangle. We use a single pseudo-element
+   * because the label is the only other child and we want a
+   * single visual cue. */
+  content: "▾";
+  position: relative;
+  margin-left: -0.9rem;
+  color: var(--fg-mute);
+  font-size: 0.7rem;
+  pointer-events: none;
+}
+/* Prefix the select with a cube glyph via the label's ::before,
+ * matching llama.cpp's "📦 model" pattern. */
+#chat-form > .chat-model::before {
+  content: "📦";
+  font-size: 0.95rem;
+  line-height: 1;
+  margin-right: 0.1rem;
+}
+/* When the user opens the dropdown, the focused select inherits
+ * the accent border on the parent pill. */
+#chat-form > .chat-model:focus-within {
+  border-color: var(--accent);
+  background: var(--bg-elev-2);
+}
+
+/* Send button keeps its accent fill, sized to match the other
+ * icons. */
+#chat-send {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+#chat-send:hover:not(:disabled) {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+/* Push the model pill (and everything after it) to the right
+ * end of the button row, so the layout reads as:
+ *   [+]  ............  [📦 model]  [🎤]  [➤]
+ * The attach button stays anchored to the left, and the
+ * model/mic/send cluster floats right. This matches the
+ * llama.cpp reference where the primary actions (mic, send)
+ * and the model selector group together on the right. */
+#chat-form > .chat-model {
+  margin-left: auto;
+}
+
+/* Location + attach: ghost style, no fill, subtle hover. */
+#chat-form > #chat-location-share,
+#chat-form > .chat-attach-btn {
+  color: var(--fg-mute);
+  background: transparent;
+  border: 1px solid transparent;
+}
+#chat-form > #chat-location-share:hover,
+#chat-form > .chat-attach-btn:hover {
+  color: var(--fg);
+  background: var(--bg);
+  border-color: var(--border-refined);
+}
+
+/* The `hidden` attribute must always win, regardless of the
+ * `display: inline-flex` we set on the buttons above. The user
+ * agent stylesheet's `[hidden] { display: none }` has very low
+ * specificity, so we re-state it at id level. The `chat.js`
+ * module toggles `hidden` on #chat-send / #chat-stop to swap
+ * the primary CTA between "send" and "stop" while the LLM is
+ * generating; without this guard the stop button stays visible
+ * even when not generating. */
+#chat-send[hidden],
+#chat-stop[hidden],
+#chat-attach-btn[hidden],
+#chat-location-share[hidden] {
+  display: none !important;
+}
+
+/* =====================================================================
+ * Seamless chat surface (Plan 1791919024804)
+ * =====================================================================
+ * llama.cpp and ChatGPT do not wrap the conversation in a visible
+ * card — the messages flow directly on the page background, with
+ * each bubble carrying its own subtle surface. The original
+ * `.chat-messages` rule used `--bg-elev` + a border + a radius
+ * which made the whole conversation read as one contained block.
+ *
+ * We strip the container's background, border, and radius, and
+ * promote the assistant bubble's surface so it remains visible
+ * against the now-unified global background. The user bubble
+ * already uses a translucent accent fill, so it keeps its
+ * identity without further changes.
+ *
+ * The effect: the page feels like one continuous canvas, the
+ * eye lands on the bubbles instead of a framed box, and the
+ * sticky prompt bar at the bottom becomes the only contained
+ * element on the screen — exactly the llama.cpp/ChatGPT look.
+ */
+.chat-messages {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 1rem 0.5rem 5rem;
+  min-height: 0;
+  max-height: none;
+  gap: 1.25rem;
+}
+
+/* Assistant bubble: was using `--bg` (the same as the global
+ * page background) which now blends invisibly because the
+ * container behind it is transparent. Promote it to `--bg-elev`
+ * so each bubble reads as its own subtle surface on the page. */
+.chat-assistant {
+  background: var(--bg-elev);
+}
+
+/* User bubble: the translucent accent fill is already distinct
+ * from both the page background and the assistant surface, so
+ * it keeps working unchanged. We just round the corners a touch
+ * more (already rounded) and ensure the border stays subtle. */
