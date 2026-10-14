@@ -1,9 +1,9 @@
 :root {
-  --bg: #0f1419;
+  --bg: #1a1d2e;
   --bg-elev: #1a2028;
-  --fg: #e6edf3;
+  --fg: #e8ecf4;
   --fg-mute: #8b949e;
-  --accent: #58a6ff;
+  --accent: #7a9eff;
   --accent-2: #79c0ff;
   --error: #f85149;
   --ok: #56d364;
@@ -28,6 +28,21 @@ html, body {
 header {
   padding: 1.25rem 1.5rem 0.5rem;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+header .logo {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+
+header .logo svg {
+  display: block;
 }
 
 h1 {
@@ -4097,4 +4112,505 @@ kbd {
  */
 #settings-llm-reset {
   margin-top: 1rem;
+}
+
+/* =====================================================================
+ * llama.cpp-inspired redesign (Plan 1791919024804, Phases 2-6)
+ * =====================================================================
+ * These rules override the original 4100-line stylesheet to bring the
+ * UI closer to llama.cpp's modern, clean aesthetic: larger body text,
+ * generous spacing, clear heading hierarchy in assistant bubbles, and
+ * a less noisy tool trace. They come last in the file so they win the
+ * cascade without removing any original rule.
+ */
+
+/* ---- Phase 2: Typography & Color Foundation ----
+ * Load Inter from Google Fonts. The original --font-sans already lists
+ * Inter as the first choice, but the system fallback chain (BlinkMac,
+ * Segoe UI, etc.) was being used because the font was never loaded.
+ * The @import makes the browser fetch the actual Inter files so the
+ * web font is used end-to-end.
+ *
+ * Vendoring locally would be safer for offline/CSP-strict deploys but
+ * requires a font-woff2 route in the static handler; deferring that
+ * until a real offline build surfaces as a requirement (open question
+ * in the plan). */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* Refined color tokens (Phase 2). Originals are preserved above so
+ * components that don't get an override here still resolve. */
+:root {
+  --bg-surface: #222639;
+  --bg-elev-2: #2a2f45;
+  --border-refined: #2d3348;
+  --line-height-body: 1.6;
+}
+
+/* Body baseline: 16px / 1.6 (was 15px / 1.5). */
+html, body {
+  font-size: 16px;
+  line-height: var(--line-height-body);
+}
+
+/* ---- Phase 3: Header & Layout ----
+ * Centered conversation column with a max-width that matches
+ * llama.cpp's reading column (≈800px). The original `.view` rule
+ * already caps the Discussion view at 1500px to fit the sidebar, so
+ * we narrow only the chat-messages container to keep the sidebar
+ * roomy on desktop while tightening the prose. */
+.chat-messages {
+  max-width: 820px;
+  margin: 0 auto;
+  width: 100%;
+  gap: 1.5rem;
+  padding: 2rem 1.5rem;
+}
+
+/* Header: a touch more vertical breathing room and a centered title
+ * block that mirrors llama.cpp's compact header bar. The original
+ * header kept the subtitle and version line on the same row, which
+ * felt busy; we let the subtitle flow under the title. */
+header {
+  padding: 1rem 1.5rem;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+header .subtitle {
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+}
+
+/* ---- Phase 4: Message Bubbles & Markdown Content ----
+ * The original assistant-bubble styles were tight (0.7rem padding,
+ * 0.95rem font). We open them up: more padding, slightly larger
+ * prose, larger headings with clear hierarchy. These selectors
+ * intentionally use the same class names as the original rules
+ * (`.chat-message`, `.chat-assistant`, etc.) so the JS layer keeps
+ * working without changes. */
+
+/* Assistant bubble: larger padding, slightly larger prose. */
+.chat-assistant {
+  padding: 1.25rem 1.5rem;
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+/* User bubble: matching scale. */
+.chat-user {
+  padding: 0.9rem 1.25rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+/* Assistant markdown headings: llama.cpp uses generously-sized h2
+ * with section emojis. The original had h2 at 1.15em (small). We
+ * promote h2 to 1.35rem and h3 to 1.15rem so the hierarchy reads
+ * at a glance. */
+.chat-assistant h1,
+.chat-assistant h2,
+.chat-assistant h3,
+.chat-assistant h4,
+.chat-assistant h5,
+.chat-assistant h6 {
+  margin: 1.1em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.chat-assistant h1 { font-size: 1.5rem; }
+.chat-assistant h2 { font-size: 1.35rem; }
+.chat-assistant h3 { font-size: 1.15rem; }
+.chat-assistant h4 { font-size: 1.05rem; }
+.chat-assistant h5,
+.chat-assistant h6 { font-size: 1rem; }
+
+.chat-assistant p {
+  margin: 0.7em 0;
+}
+
+/* Lists: more comfortable spacing, disc bullets that read well on
+ * dark backgrounds. */
+.chat-assistant ul,
+.chat-assistant ol {
+  margin: 0.6em 0;
+  padding-left: 1.6em;
+}
+.chat-assistant li {
+  margin: 0.35em 0;
+  line-height: 1.55;
+}
+.chat-assistant li::marker {
+  color: var(--accent);
+}
+
+/* Strong text picks up the accent so the reader's eye lands on key
+ * terms, matching llama.cpp's recipe-style "**250 g de farine**"
+ * pattern. */
+.chat-assistant strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* Code blocks: slightly more breathing room, softer border. */
+.chat-assistant pre {
+  margin: 0.8em 0;
+  padding: 0.9em 1.1em;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-refined);
+  border-radius: 8px;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+
+.chat-assistant code {
+  font-size: 0.9em;
+  padding: 0.1em 0.4em;
+  border-radius: 4px;
+}
+
+/* Inline `<em>` for section labels like *Ingrédients* gets a
+ * subtle italic + muted treatment so it reads as a label, not body. */
+.chat-assistant em {
+  color: var(--fg-mute);
+  font-style: italic;
+}
+
+/* ---- Phase 5: Tool Trace Consolidation ----
+ * The original `.chat-message__tool-usage` renders one `<details>`
+ * per tool call, which produces a wall of identical "1 outil
+ * utilisé ▾" rows in the current UI. The plan calls for a
+ * consolidated footer; the JS layer that creates these is in
+ * `chat.js` and is out of scope for a CSS-only pass. Until the
+ * consolidation lands, we make each individual trace smaller and
+ * quieter so the wall of rows reads as a single visual element:
+ * muted border, compact padding, small font. The user can still
+ * expand any row to inspect the payload. */
+.chat-message__tool-usage {
+  margin: 0.3rem 0 0;
+}
+.chat-message__tool-usage > summary {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+  background: transparent;
+  border: 1px solid var(--border-refined);
+  color: var(--fg-mute);
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+}
+.chat-message__tool-usage > summary:hover {
+  opacity: 1;
+  background: var(--bg-elev-2);
+}
+
+/* Per-tool bubble inside the trace: even more compact. */
+.chat-tool-bubble {
+  margin: 0.15rem 0 0.15rem 0.5rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.78rem;
+  border-radius: 6px;
+}
+
+/* ---- Phase 6: Input Bar polish ----
+ * The input bar already has good styles; we add a subtle focus
+ * ring and slightly more vertical padding so it feels like a
+ * modern text editor. */
+#chat-input {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+}
+#chat-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#chat-form {
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+}
+
+/* Send / stop buttons: icon-only, larger hit area, subtle hover. */
+#chat-send,
+#chat-stop {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 10px;
+}
+
+/* ---- Responsive: keep the conversation column readable on mobile.
+ * The original layout already collapses to a single column below
+ * 768px; we just tighten the message padding on small screens. */
+@media (max-width: 640px) {
+  .chat-messages {
+    padding: 1.25rem 0.75rem;
+    gap: 1rem;
+  }
+  .chat-assistant {
+    padding: 1rem 1.1rem;
+  }
+  .chat-user {
+    padding: 0.75rem 1rem;
+  }
+}
+
+/* ---- Action buttons (llama.cpp style) ----
+ * The original rules style copy/edit/regenerate/replay as 2rem round
+ * circles with a heavy `bg-elev` background. llama.cpp uses a
+ * quieter row of small rectangular buttons (📋 ✏️ 🔊 🗑) with a
+ * subtle border and no background fill. We override the visual
+ * treatment while preserving the existing hover-reveal (opacity 0 →
+ * 1) and flash / playing-state logic that chat.js relies on.
+ *
+ * The buttons are repositioned to sit in a tight row at the
+ * top-right of the bubble, with consistent spacing, so the
+ * affordance group reads as one element rather than four floating
+ * circles. We also add `top: 0.5rem` matching the original so
+ * nothing shifts vertically. */
+.chat-message-copy,
+.chat-message-edit-pencil,
+.chat-message-regenerate,
+.chat-message-replay {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-refined);
+  background: transparent;
+  color: var(--fg-mute);
+  /* Tighter spacing so the four buttons form a single visual group.
+   * The original used a wider gap (2.5rem between centers); the
+   * new gap lets the buttons sit shoulder-to-shoulder like
+   * llama.cpp's action row. */
+  margin-left: 0.25rem;
+}
+
+/* Hover state: subtle background tint + accent border, matching
+ * the refined accent token. We do NOT change `opacity` here because
+ * the original :hover/:focus-within rules above already fade the
+ * buttons in from opacity 0 — we only override the *visual* rest
+ * state. */
+.chat-message-copy:hover,
+.chat-message-edit-pencil:hover,
+.chat-message-regenerate:hover,
+.chat-message-replay:hover {
+  background: var(--bg-elev-2);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+/* ---- Per-message metadata bar (llama.cpp style) ----
+ * llama.cpp renders a small metadata row at the top of each
+ * assistant message: 👤 model · ⏱ 0.1s · 📊 713.68 tokens/s.
+ *
+ * chat.js does not currently inject this element per bubble, so
+ * the CSS is a no-op until a follow-up change adds
+ * `<div class="chat-message-meta">…</div>` inside each assistant
+ * bubble. The structure expected:
+ *
+ *   <div class="chat-message-meta">
+ *     <span class="chat-message-meta__item">👤 ggml-org/gemma-4-12b</span>
+ *     <span class="chat-message-meta__sep">·</span>
+ *     <span class="chat-message-meta__item">⏱ 0.1s</span>
+ *     <span class="chat-message-meta__sep">·</span>
+ *     <span class="chat-message-meta__item">📊 713.68 tokens/s</span>
+ *   </div>
+ *
+ * When the JS is wired up, the bar will render as a single quiet
+ * line above the assistant prose, matching llama.cpp's reference. */
+.chat-message-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  margin: 0 0 0.9rem;
+  padding: 0;
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+  font-family: var(--font-sans);
+  line-height: 1.3;
+}
+.chat-message-meta__item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+.chat-message-meta__item .meta-icon {
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+.chat-message-meta__item .meta-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  font-weight: 500;
+}
+.chat-message-meta__sep {
+  opacity: 0.5;
+  user-select: none;
+}
+
+/* =====================================================================
+ * llama.cpp-style sticky prompt (Plan 1791919024804)
+ * =====================================================================
+ * The reference screenshot shows a single rounded container that:
+ *   - sticks to the bottom of the viewport while messages scroll
+ *   - has a subtle border and a backdrop-blur so the prose fades
+ *     behind it instead of being clipped
+ *   - houses the textarea, the attach "+" button, and the action
+ *     icons (mic, send) in one tight row
+ *
+ * The original `#chat-form` is a plain flex row with no sticky
+ * positioning and a hard top border. The override here preserves
+ * the existing JS contract (textarea, attach button, record button,
+ * send/stop) but reskins the container and makes it stick to the
+ * bottom of the chat column so the prompt is always reachable.
+ *
+ * `position: sticky` (not `fixed`) is intentional: the form stays
+ * inside `.chat-main`'s flex column, so on tall viewports the
+ * natural document flow still applies and the form only sticks once
+ * the user scrolls past it. The chat column itself caps the
+ * sticky behaviour to the conversation area.
+ */
+
+/* The form becomes a rounded pill that pins to the bottom of
+ * `.chat-main`. We add a soft top shadow + a translucent background
+ * so messages scrolling underneath fade out gracefully instead of
+ * being abruptly clipped. */
+#chat-form {
+  position: sticky;
+  bottom: 0.5rem;
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-refined);
+  border-radius: 16px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+  z-index: 5;
+  /* Backdrop blur where supported; falls back to the solid
+   * `--bg-elev-2` fill above. Keeps the form readable when
+   * messages scroll underneath. */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* The textarea is the dominant element. Strip its own border (the
+ * container has one now) and give it a comfortable, modern editor
+ * feel: large placeholder, 1.5 line-height, vertical-only resize. */
+#chat-input {
+  flex: 1 1 auto;
+  min-height: 1.75rem;
+  max-height: 12rem;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  font-family: var(--font-sans);
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  resize: none;
+  outline: none;
+}
+#chat-input::placeholder {
+  color: var(--fg-mute);
+  opacity: 0.85;
+}
+#chat-input:focus-visible {
+  outline: none;
+}
+
+/* The action buttons inside the form sit in a tight cluster on the
+ * right. We override their sizing to a compact 2rem square with
+ * subtle rounding, matching the reference's icon-only style. The
+ * attach button uses the same treatment (it's the "+" on the left
+ * in llama.cpp's reference). */
+#chat-form > .chat-attach-btn,
+#chat-form > #chat-record-btn,
+#chat-form > #chat-send,
+#chat-form > #chat-stop {
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  margin-left: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Tighten the gap between successive action buttons so the cluster
+ * reads as one element. */
+#chat-form > .chat-attach-btn + #chat-record-btn,
+#chat-form > #chat-record-btn + #chat-send,
+#chat-form > #chat-record-btn + #chat-stop {
+  margin-left: 0.15rem;
+}
+/* The first action button (paperclip) gets a small left padding
+ * instead of an auto margin so it sits at the left edge of the
+ * container, matching llama.cpp's "+" placement. */
+#chat-form > .chat-attach-btn:first-of-type {
+  margin-left: 0;
+  margin-right: 0.15rem;
+}
+/* If the location-share button is visible, push the action cluster
+ * to the right so the textarea stays dominant. */
+#chat-form > #chat-location-share {
+  margin-left: auto;
+}
+
+/* Send button: keep the accent fill so it stays the primary CTA,
+ * but soften the radius to match the container. */
+#chat-send {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+#chat-send:hover:not(:disabled) {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+/* The location-share and attach buttons: ghost style, no fill,
+ * subtle border. They sit quietly until the user hovers. */
+#chat-form > #chat-location-share,
+#chat-form > .chat-attach-btn {
+  color: var(--fg-mute);
+  background: transparent;
+  border: 1px solid transparent;
+}
+#chat-form > #chat-location-share:hover,
+#chat-form > .chat-attach-btn:hover {
+  color: var(--fg);
+  background: var(--bg);
+  border-color: var(--border-refined);
+}
+
+/* Ensure the messages container has enough bottom padding so the
+ * last message is never hidden behind the sticky form. The form
+ * is roughly 3.5rem tall (padding + content) plus a 0.5rem
+ * bottom offset, so we reserve ~4.5rem of breathing room. */
+.chat-messages {
+  padding-bottom: 5rem;
+}
+
+/* On mobile, the form takes more horizontal space relative to the
+ * container, so we tighten the padding and let the textarea stay
+ * the dominant element. */
+@media (max-width: 640px) {
+  #chat-form {
+    border-radius: 12px;
+    padding: 0.4rem 0.5rem;
+  }
+  #chat-input {
+    font-size: 0.9rem;
+    padding: 0.4rem 0.5rem;
+  }
+  .chat-messages {
+    padding-bottom: 5rem;
+  }
 }
