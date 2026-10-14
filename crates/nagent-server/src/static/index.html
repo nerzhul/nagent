@@ -811,5 +811,27 @@
   -->
   <script type="module" src="/static/documents.js"></script>
   <script type="module" src="/static/composer-attachments.js"></script>
+  <dialog id="chat-approval-modal" class="chat-approval-modal" aria-labelledby="chat-approval-modal-title">
+    <form method="dialog" class="chat-approval-modal__form">
+      <header class="chat-approval-modal__header">
+        <span class="chat-approval-modal__danger" data-danger="low" aria-hidden="true"></span>
+        <h2 id="chat-approval-modal-title" class="chat-approval-modal__title">…</h2>
+        <button type="button" class="chat-approval-modal__close" aria-label="Refuser">✕</button>
+      </header>
+      <p class="chat-approval-modal__tool">
+        <code class="chat-approval-modal__tool-name">…</code>
+      </p>
+      <p class="chat-approval-modal__body">…</p>
+      <details class="chat-approval-modal__args">
+        <summary>Arguments</summary>
+        <pre class="chat-approval-modal__args-pre">…</pre>
+      </details>
+      <div class="chat-approval-modal__buttons">
+        <button type="button" class="chat-approval-modal__button chat-approval-modal__button--allow"     data-decision="approve">✓ Autoriser</button>
+        <button type="button" class="chat-approval-modal__button chat-approval-modal__button--always"    data-decision="approve-always">✓ Toujours pour cette session</button>
+        <button type="button" class="chat-approval-modal__button chat-approval-modal__button--deny"      data-decision="deny">✕ Refuser</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

@@ -150,14 +150,13 @@ impl Agent for WebFetchAgent {
     /// refuse without an extra round. The LLM tool loop surfaces
     /// the reason verbatim; the model reformulates ("please
     /// confirm") and the user sees the request.
-    fn requires_confirmation(&self, ctx: &UserContext, args: &Value) -> ConfirmationDecision {
-        if !ctx.was_invoked("read_document") {
-            return ConfirmationDecision::Allow;
-        }
+    fn requires_confirmation(&self, _ctx: &UserContext, args: &Value) -> ConfirmationDecision {
         let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
         let Ok(parsed) = url::Url::parse(url) else {
             // Defer to `invoke`; the URL is malformed regardless.
-            return ConfirmationDecision::Allow;
+            return ConfirmationDecision::NeedsConfirmation {
+                reason: "malformed URL".into(),
+            };
         };
         let host = parsed.host_str().unwrap_or("");
         if host_matches_allowlist(host, &self.cfg.allowlist) {
@@ -812,6 +811,29 @@ mod tests {
             .block_on(agent.invoke(&ctx, json!({"url": "http://evil.com/"})))
             .unwrap_err();
         matches!(err, AgentError::SandboxDenied(_));
+    }
+
+    #[test]
+    fn requires_confirmation_is_strict_even_in_same_turn_web_fetch() {
+        // The cross-tool rule has been removed: web_fetch is gated on the
+        // allowlist regardless of whether read_document was invoked earlier in
+        // the same turn. This test asserts that a non-allowlisted host is
+        // still gated and that the sentinel is returned.
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let cfg = WebFetchAgentConfig {
+            allowlist: vec!["allowed.example".into()],
+            ..WebFetchAgentConfig::default()
+        };
+        let agent = WebFetchAgent::new(cfg);
+        let ctx = UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::ServiceRegistry::empty()),
+        );
+        let result = agent.requires_confirmation(&ctx, &json!({"url": "http://evil.com/"}));
+        assert!(matches!(
+            result,
+            ConfirmationDecision::NeedsConfirmation { .. }
+        ));
     }
 
     #[test]

@@ -342,6 +342,37 @@ async fn round_halts_on_first_gated_call() {
     );
 }
 
+/// **search_tools** — verify the `search_tools` agent is registered
+/// and NOT gated. It is the LLM's primary tool-discovery interface
+/// and must not trigger an approval card on every call. The full
+/// round-halt flow is covered by `round_halts_on_first_gated_call`;
+/// this test pins the `search_tools` opt-out so a future refactor
+/// that re-gates it (or drops it from the registry) is caught here.
+#[test]
+fn search_tools_is_registered_and_not_gated() {
+    let registry = registry_with_stubs();
+    let agent = registry.get("search_tools");
+    assert!(
+        agent.is_some(),
+        "search_tools must be in the default registry"
+    );
+    // search_tools opts out of the default-deny posture: it is the
+    // meta-tool the LLM uses to discover other tools, so gating it
+    // would force a user click on every catalog query.
+    let cfgs = AgentConfigs::default();
+    let pool = EgressPool::new();
+    let full_registry = AgentRegistry::from_config(&cfgs, true, &pool);
+    let summary = full_registry
+        .list()
+        .into_iter()
+        .find(|s| s.name == "search_tools")
+        .expect("search_tools summary must be present");
+    assert!(
+        !summary.requires_confirmation,
+        "search_tools must NOT be gated (requires_confirmation=false) — it is the tool-discovery interface"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // session-override regression
 // ---------------------------------------------------------------------------

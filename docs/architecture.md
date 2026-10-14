@@ -208,27 +208,27 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | Agent | Cargo feature | Description |
 | --- | --- | --- |
 | `web_fetch` | `web-agent` | Server-side HTTP GET → clean text. Hardened egress client (SSRF policy, DNS-rebinding mitigation, allow-list). |
-| `read_document` | `read-document-agent` | Fetches a single uploaded document by name, scoped to the current chat session. |
-| `get_datetime` | `datetime-agent` | Pure local date math (`chrono`, `chrono-tz`). |
-| `calculate` | `calculate-agent` | Pure local expression evaluator (`meval`). |
-| `unit_convert` | `unit-convert-agent` | Pure local conversion tables. |
-| `get_weather` | `weather-agent` | WeatherAPI.com (free API key required). |
-| `wikipedia` | `wikipedia-agent` | `wikipedia.org` REST, no API key, `User-Agent` set. |
-| `dictionary` | `dictionary-agent` | Free Dictionary REST API, no API key. |
-| `get_stock_quote` | `stock-agent` | Stooq CSV, no API key. |
+| `read_document` | `read-document-agent` | Fetches a single uploaded document by name, scoped to the current chat session. Danger: Low. |
+| `get_datetime` | `datetime-agent` | Pure local date math (`chrono`, `chrono-tz`). Danger: Low. |
+| `calculate` | `calculate-agent` | Pure local expression evaluator (`meval`). Danger: Low. |
+| `unit_convert` | `unit-convert-agent` | Pure local conversion tables. Danger: Low. |
+| `get_weather` | `weather-agent` | WeatherAPI.com (free API key required). Danger: Low. |
+| `wikipedia` | `wikipedia-agent` | `wikipedia.org` REST, no API key, `User-Agent` set. Danger: Low. |
+| `dictionary` | `dictionary-agent` | Free Dictionary REST API, no API key. Danger: Low. |
+| `get_stock_quote` | `stock-agent` | Stooq CSV, no API key. Danger: Low. |
 | `caldav_list_events` | `caldav-agent` | Per-user CalDAV calendar: list `VEVENT`s in a time range. Confirm-on-read — calendar contents are sensitive. |
 | `caldav_get_event` | `caldav-agent` | Per-user CalDAV calendar: fetch a single `VEVENT` by `UID`. Confirm-on-read. |
 | `caldav_create_event` | `caldav-agent` | Per-user CalDAV calendar: append a new `VEVENT` (confirm-on-write). |
-| `x_timeline` | `x-agent` | Per-user X (Twitter) home timeline via the v2 API (mode "Abonnements" / "Pour Vous"). Read-only. Refreshes the OAuth access token itself on 401. |
-| `email_list_inbox` | `email-agent` | Per-user IMAP: list the most recent `limit` summaries in a folder (default `INBOX`). Confirm-on-read. Plan 1791566269874. |
-| `email_get_message` | `email-agent` | Per-user IMAP: fetch the full body of one message by `UID`. Confirm-on-read. |
-| `email_search` | `email-agent` | Per-user IMAP: run a constrained `SEARCH` against a folder. The query is restricted to a small allow-list of IMAP criteria tokens. Confirm-on-read. |
-| `email_send` | `email-agent` | Per-user SMTP: send a message. Strictest tool in the registry — the inline approval card fires on every invocation and the per-session "Always allow" override is **not** wired for it. The recipient list is gated by the operator-set `recipient_allowlist` before the agent reaches the network. |
-| `email_mark_read` | `email-agent` | Per-user IMAP: set or clear the `\Seen` flag on one message. Confirm-on-write (session-override applies — same posture as `caldav_create_event`). |
-| `memory_store` | `memory-agent` | Persist one durable fact for the calling user (AES-256-GCM encrypted at rest, dedup on `(subject, predicate)`). Idempotent — re-storing the same fact returns the same memory id. |
-| `memory_recall` | `memory-agent` | Decrypt + return up to `recalled_top_k` rows matching the supplied `subject` / `predicate` / `tags` LIKE filters. |
-| `memory_list` | `memory-agent` | List metadata-only rows for the calling user. Pairs with `memory_recall` to retrieve the value of a specific id (the list shape never includes plaintext). |
-| `memory_forget` | `memory-agent` | Forget one memory by id. `NeedsConfirmation` (even though reversible through `memory_store`) so the chat UI surfaces a "forget this memory?" bubble. |
+| `x_timeline` | `x-agent` | Per-user X (Twitter) home timeline via the v2 API (mode "Abonnements" / "Pour Vous"). Read-only. Refreshes the OAuth access token itself on 401. Danger: Medium — the user must confirm before the tool runs. |
+| `email_list_inbox` | `email-agent` | Per-user IMAP: list the most recent `limit` summaries in a folder (default `INBOX`). Danger: High. Confirm-on-read. Plan 1791566269874. |
+| `email_get_message` | `email-agent` | Per-user IMAP: fetch the full body of one message by `UID`. Danger: High. Confirm-on-read. |
+| `email_search` | `email-agent` | Per-user IMAP: run a constrained `SEARCH` against a folder. The query is restricted to a small allow-list of IMAP criteria tokens. Danger: High. Confirm-on-read. |
+| `email_send` | `email-agent` | Per-user SMTP: send a message. Strictest tool in the registry — the inline approval card fires on every invocation and the per-session "Always allow" override is **not** wired for it. The recipient list is gated by the operator-set `recipient_allowlist` before the agent reaches the network. Danger: High. |
+| `email_mark_read` | `email-agent` | Per-user IMAP: set or clear the `\Seen` flag on one message. Confirm-on-write (session-override applies — same posture as `caldav_create_event`). Danger: Low. |
+| `memory_store` | `memory-agent` | Persist one durable fact for the calling user (AES-256-GCM encrypted at rest, dedup on `(subject, predicate)`). Danger: Medium — the user must confirm before the fact is stored. Idempotent — re-storing the same fact returns the same memory id. |
+| `memory_recall` | `memory-agent` | Decrypt + return up to `recalled_top_k` rows matching the supplied `subject` / `predicate` / `tags` LIKE filters. Danger: Medium. |
+| `memory_list` | `memory-agent` | List metadata-only rows for the calling user. Danger: Medium — the list shape never includes plaintext. Pairs with `memory_recall` to retrieve the value of a specific id (the list shape never includes plaintext). |
+| `memory_forget` | `memory-agent` | Forget one memory by id. `NeedsConfirmation` (even though reversible through `memory_store`) so the chat UI surfaces a "forget this memory?" bubble. Danger: Medium. |
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:
@@ -524,16 +524,19 @@ LLM must never be able to run a gated tool without an explicit
 user click (or a "Toujours pour cette session" opt-in already
 recorded for that tool).
 
+- **Default-deny posture.** Every gated call requires one user click.
+  The cross-tool rule that used `web_fetch` as a fallback after
+  `read_document` is removed — the allowlist is now the only host-
+  level bypass, and an unallowed host still refuses the tool.
+- **New approval modal.** The chat UI now shows a modal (the `<dialog>` in
+  `crates/nagent-server/src/static/index.html`) for every gated call. The user
+  clicks "Autoriser" or "Toujours pour cette session" to approve; the button row is set
+  to pending before the tool runs, and the LLM waits for the user's response.
 - **Strict per-call.** Every gated call requires one user click.
   The previous "first-call refuses, same-turn re-call allows"
   shortcut (`ctx.was_invoked(self.name())`) is closed: every
-  `requires_confirmation` override now returns
-  `NeedsConfirmation` unconditionally on the first call, and the
-  LLM does NOT get a continuation round until the user decides.
-  The trait method `UserContext::was_invoked` /
-  `record_invocation` is kept for one release (the cross-tool
-  `web_fetch` after `read_document` check still uses it) and is
-  scheduled for removal in a follow-up cleanup.
+  `requires_confirmation` override now returns `NeedsConfirmation` unconditionally on the first call, and the LLM does not get a continuation round until the user decides.
+  The trait method `UserContext::was_invoked` / `record_invocation` is kept for one release (the cross-tool `web_fetch` after `read_document` check still uses it) and is scheduled for removal in a follow-up cleanup.
 - **Round halts on first gated call.** When a gated call is
   refused, the tool loop pushes the `PendingApproval` entry,
   emits `tool_result { needs_approval: true }` plus a

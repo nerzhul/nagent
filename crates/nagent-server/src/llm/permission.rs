@@ -204,6 +204,166 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
                 danger: Danger::Low,
             }
         }
+        "email_list_inbox" => {
+            let body = format!(
+                "The assistant wants to read your uploaded document. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Lire votre document ?".to_string(),
+                body,
+                danger: Danger::High,
+            }
+        }
+        "email_get_message" => {
+            let body = format!(
+                "The assistant wants to read your uploaded document. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Lire votre document ?".to_string(),
+                body,
+                danger: Danger::High,
+            }
+        }
+        "email_search" => {
+            let body = format!(
+                "The assistant wants to search your uploaded documents. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Rechercher vos documents ?".to_string(),
+                body,
+                danger: Danger::High,
+            }
+        }
+        "email_send" => {
+            let body = format!(
+                "The assistant wants to send a message on your behalf. Please confirm before it is sent."
+            );
+            ApprovalPrompt {
+                title: "Envoyer un message ?".to_string(),
+                body,
+                danger: Danger::High,
+            }
+        }
+        "x_timeline" => {
+            let body = format!(
+                "The assistant wants to read your X (Twitter) account. Please confirm before it is accessed."
+            );
+            ApprovalPrompt {
+                title: "Lire votre compte X ?".to_string(),
+                body,
+                danger: Danger::Medium,
+            }
+        }
+        "read_document" => {
+            let body = format!(
+                "The assistant wants to read your uploaded document. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Lire le document ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "get_weather" => {
+            let body = format!(
+                "The assistant wants to fetch the weather for your location. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Afficher la météo ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "calculate" => {
+            let body = format!(
+                "The assistant wants to calculate a value for you. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Calculer ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "wikipedia" => {
+            let body = format!(
+                "The assistant wants to read your Wikipedia page. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Afficher la page Wikipedia ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "unit_convert" => {
+            let body = format!(
+                "The assistant wants to convert a value for you. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Convertir ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "datetime" => {
+            let body = format!(
+                "The assistant wants to convert a date for you. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Convertir la date ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "dictionary" => {
+            let body = format!(
+                "The assistant wants to read your dictionary entry. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Lire le dictionnaire ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "stock" => {
+            let body = format!(
+                "The assistant wants to fetch your stock price. Please confirm before it is displayed."
+            );
+            ApprovalPrompt {
+                title: "Afficher le cours du stock ?".to_string(),
+                body,
+                danger: Danger::Low,
+            }
+        }
+        "memory_store" => {
+            let body = format!(
+                "The assistant wants to store a durable fact. Please confirm before it is saved."
+            );
+            ApprovalPrompt {
+                title: "Stocker un souvenir ?".to_string(),
+                body,
+                danger: Danger::Medium,
+            }
+        }
+        "memory_recall" => {
+            let body = format!(
+                "The assistant wants to recall memories. Please confirm before they are displayed."
+            );
+            ApprovalPrompt {
+                title: "Rappeler des souvenirs ?".to_string(),
+                body,
+                danger: Danger::Medium,
+            }
+        }
+        "memory_list" => {
+            let body = format!(
+                "The assistant wants to list stored facts. Please confirm before they are displayed."
+            );
+            ApprovalPrompt {
+                title: "Lister les souvenirs ?".to_string(),
+                body,
+                danger: Danger::Medium,
+            }
+        }
         _ => ApprovalPrompt {
             title: "Autoriser cet outil ?".to_string(),
             body: format!("L'assistant veut appeler l'outil « {tool_name} »."),
@@ -585,9 +745,9 @@ mod tests {
 
     #[test]
     fn approval_prompt_fallback() {
-        let p = approval_prompt("get_weather", &json!({}));
+        let p = approval_prompt("unknown_tool_xyz", &json!({}));
         assert_eq!(p.danger, Danger::Low);
-        assert!(p.body.contains("get_weather"));
+        assert!(p.body.contains("unknown_tool_xyz"));
     }
 
     #[test]
@@ -617,6 +777,102 @@ mod tests {
         assert!(p.title.contains("événement"));
         assert!(p.body.contains("evt-123@host"));
         assert_eq!(p.danger, Danger::Medium);
+    }
+
+    #[test]
+    fn approval_prompt_email_send() {
+        let p = approval_prompt("email_send", &json!({}));
+        assert_eq!(p.danger, Danger::High);
+        assert!(p.title.contains("message"));
+    }
+
+    #[test]
+    fn approval_prompt_email_get_message() {
+        let p = approval_prompt("email_get_message", &json!({}));
+        assert_eq!(p.danger, Danger::High);
+    }
+
+    #[test]
+    fn approval_prompt_email_list_inbox() {
+        let p = approval_prompt("email_list_inbox", &json!({}));
+        assert_eq!(p.danger, Danger::High);
+    }
+
+    #[test]
+    fn approval_prompt_memory_store() {
+        let p = approval_prompt("memory_store", &json!({}));
+        assert_eq!(p.danger, Danger::Medium);
+        assert!(p.body.contains("durable fact"));
+    }
+
+    #[test]
+    fn approval_prompt_memory_recall() {
+        let p = approval_prompt("memory_recall", &json!({}));
+        assert_eq!(p.danger, Danger::Medium);
+        assert!(p.body.contains("recall"));
+    }
+
+    #[test]
+    fn approval_prompt_memory_list() {
+        let p = approval_prompt("memory_list", &json!({}));
+        assert_eq!(p.danger, Danger::Medium);
+        assert!(p.body.contains("list"));
+    }
+
+    #[test]
+    fn approval_prompt_x_timeline() {
+        let p = approval_prompt("x_timeline", &json!({}));
+        assert_eq!(p.danger, Danger::Medium);
+        assert!(p.body.contains("X (Twitter) account"));
+    }
+
+    #[test]
+    fn approval_prompt_read_document() {
+        let p = approval_prompt("read_document", &json!({}));
+        assert_eq!(p.danger, Danger::Low);
+        assert!(p.body.contains("uploaded document"));
+    }
+
+    #[test]
+    fn approval_prompt_calculate() {
+        let p = approval_prompt("calculate", &json!({}));
+        assert_eq!(p.danger, Danger::Low);
+        assert!(p.body.contains("calculate"));
+    }
+
+    #[test]
+    fn approval_prompt_wikipedia() {
+        let p = approval_prompt("wikipedia", &json!({}));
+        assert_eq!(p.danger, Danger::Low);
+        assert!(p.body.contains("Wikipedia page"));
+    }
+
+    #[test]
+    fn approval_prompt_unit_convert() {
+        let p = approval_prompt("unit_convert", &json!({}));
+        assert_eq!(p.danger, Danger::Low);
+        assert!(p.body.contains("convert a value"));
+    }
+
+    #[test]
+    fn approval_prompt_datetime() {
+        let p = approval_prompt("datetime", &json!({}));
+        assert_eq!(p.danger, Danger::Low);
+        assert!(p.body.contains("convert a date"));
+    }
+
+    #[test]
+    fn approval_prompt_dictionary() {
+        let p = approval_prompt("dictionary", &json!({}));
+        assert_eq!(p.danger, Danger::Low);
+        assert!(p.body.contains("dictionary entry"));
+    }
+
+    #[test]
+    fn approval_prompt_stock() {
+        let p = approval_prompt("stock", &json!({}));
+        assert_eq!(p.danger, Danger::Low);
+        assert!(p.body.contains("stock price"));
     }
 
     #[test]

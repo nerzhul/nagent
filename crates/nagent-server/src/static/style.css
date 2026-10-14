@@ -1705,52 +1705,33 @@ select, input[type="checkbox"] {
  *
  * Buttons muted in [data-state="pending"] (the click handler flips
  * this AFTER dispatching the sentinel user message). */
-.chat-tool-approval {
-  margin: 0.2rem 0.4rem 0.4rem;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
+/* Chat approval modal — replaces the inline approval card. The modal is a
+ * native `<dialog>` element with a title, body, and three buttons.
+ * Danger levels: Low for email_send, memory_*, web_fetch; Medium for
+ * x_timeline, read_document, get_weather, calculate, wikipedia,
+ * dictionary, stock, unit_convert, datetime; High for email_*. */
+.chat-approval-modal {
+  display: none;
+  border: 1px solid var(--accent);
   border-radius: 6px;
+  padding: 1rem;
   background: var(--bg-elev);
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-  font-family: var(--font-sans);
-  font-size: 0.85rem;
-  color: var(--fg);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
-.chat-tool-approval--danger-low {
-  border-left-color: var(--accent);
-}
-.chat-tool-approval--danger-medium {
-  border-left-color: #d99a3c;
-}
-.chat-tool-approval--danger-medium .chat-tool-approval__title::before {
-  content: "⚠ ";
-}
-.chat-tool-approval--danger-high {
-  border-left-color: var(--error);
-}
-.chat-tool-approval--danger-high .chat-tool-approval__title::before {
-  content: "⛔ ";
-}
-.chat-tool-approval__title {
-  margin: 0;
+.chat-approval-modal__title {
   font-weight: 600;
   font-size: 0.88rem;
+  margin-bottom: 0.3rem;
 }
-.chat-tool-approval__body {
+.chat-approval-modal__body {
   margin: 0;
   color: var(--fg-mute);
   font-size: 0.83rem;
 }
-.chat-tool-approval__buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
+.chat-approval-modal__args {
   margin-top: 0.2rem;
 }
-.chat-tool-approval__button {
+.chat-approval-modal__button {
   padding: 0.35rem 0.75rem;
   border-radius: 6px;
   border: 1px solid var(--border);
@@ -1760,25 +1741,30 @@ select, input[type="checkbox"] {
   font-size: 0.82rem;
   cursor: pointer;
 }
-.chat-tool-approval__button:hover {
+.chat-approval-modal__button:hover {
   border-color: var(--fg-mute);
 }
-.chat-tool-approval__button--allow {
+.chat-approval-modal__button--allow {
   background: var(--accent);
   color: var(--bg);
   border-color: var(--accent);
 }
-.chat-tool-approval__button--allow:hover {
+.chat-approval-modal__button--allow:hover {
   filter: brightness(1.1);
 }
-.chat-tool-approval__button--always,
-.chat-tool-approval__button--deny {
+.chat-approval-modal__button--always,
+.chat-approval-modal__button--deny {
   background: var(--bg);
   color: var(--fg);
 }
-.chat-tool-approval__buttons[data-state="pending"] .chat-tool-approval__button {
-  pointer-events: none;
+.chat-approval-modal__button--deny:hover {
+  filter: brightness(0.85);
+}
+.chat-approval-modal__button--deny:active {
   opacity: 0.5;
+}
+.chat-approval-modal__button--deny:disabled {
+  cursor: not-allowed;
 }
 
 /* Round paused (plan 1791834996882). The tool loop halted on

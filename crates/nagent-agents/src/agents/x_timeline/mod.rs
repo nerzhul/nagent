@@ -1,8 +1,6 @@
-//! `x_timeline` — read-only X (Twitter) timeline agent.
-//!
-//! v1 calls the X v2 `reverse_chronological` endpoint (the
-//! user's "Abonnements" timeline) by default and the `for_you`
-//! endpoint on demand. The agent refreshes the access token itself
+//! `x_timeline` — X (Twitter) timeline agent. Gated on every call:
+//! the user must click "Autoriser" or "Toujours pour cette session"
+//! before the tool runs. The agent refreshes the access token itself
 //! when X returns 401 (locked decision in plan 1790695073418) and
 //! caches the parsed response per `(user_id, mode)` for
 //! `cache_ttl_secs`.
@@ -18,7 +16,7 @@ use oauth2::{AuthType, AuthUrl, ClientId, ClientSecret, RefreshToken, TokenRespo
 use secrecy::ExposeSecret;
 use serde_json::{json, Value};
 
-use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
+use crate::agents::{Agent, AgentError, UserContext};
 use crate::egress::EgressClient;
 use crate::XTimelineAgentConfig;
 
@@ -248,11 +246,6 @@ impl Agent for XTimelineAgent {
             "required": [],
             "additionalProperties": false,
         })
-    }
-
-    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
-        // Read-only tool: no extra user confirmation.
-        ConfirmationDecision::Allow
     }
 
     fn untrusted_output(&self) -> bool {

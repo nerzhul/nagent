@@ -139,6 +139,16 @@ impl Agent for MemoryStoreAgent {
         false
     }
 
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        ConfirmationDecision::NeedsConfirmation {
+            reason: concat!(
+                "Store a durable fact the user explicitly stated — the agent persists it in encrypted form. ",
+                "The user should be warned before writing a new fact.",
+            )
+            .to_string(),
+        }
+    }
+
     async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_store_args(&args)?;
         let source = ctx.memories().ok_or_else(|| source_unavailable(ctx))?;
@@ -262,6 +272,17 @@ impl Agent for MemoryRecallAgent {
         false
     }
 
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        ConfirmationDecision::NeedsConfirmation {
+            reason: concat!(
+                "Recall specific memories for the current user — the LLM uses this when an ",
+                "auto-injected system block didn't include the fact it needs. The recall is read-only ",
+                "and does not modify state, so the gate is a courtesy rather than a safety requirement.",
+            )
+            .to_string(),
+        }
+    }
+
     async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError> {
         let req = parse_recall_args(&args)?;
         let source = ctx.memories().ok_or_else(|| source_unavailable(ctx))?;
@@ -371,6 +392,17 @@ impl Agent for MemoryListAgent {
         // Same posture as `memory_recall`: the LLM is seeing its own
         // user's taxonomy, not remote content.
         false
+    }
+
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        ConfirmationDecision::NeedsConfirmation {
+            reason: concat!(
+                "List the durable facts currently stored for the current user — metadata only ",
+                "no plaintext value or notes, so this cannot be used to dump secrets. The gate ensures the ",
+                "chat UI doesn't accidentally expose encrypted values via the list endpoint.",
+            )
+            .to_string(),
+        }
     }
 
     async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError> {
@@ -866,5 +898,49 @@ mod tests {
         assert!(dbg.contains("doctor"));
         assert!(!dbg.contains("Dr Martin"), "value leaked in Debug: {dbg}");
         assert!(!dbg.contains("secret note"), "notes leaked in Debug: {dbg}");
+    }
+
+    #[tokio::test]
+    async fn requires_confirmation_is_strict_even_in_same_turn() {
+        // The generic `agents.get(&name)` dispatch path returns the same
+        // agent instance, so a per-call override is the only gate.
+        let agent = MemoryStoreAgent::new();
+        let mut ctx = test_ctx();
+        let d1 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
+        ctx.record_invocation(agent.name());
+        let d2 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require confirmation (memory_store is gated)"
+        );
+    }
+
+    #[tokio::test]
+    async fn requires_confirmation_is_strict_even_in_same_turn_recall() {
+        let agent = MemoryRecallAgent::from_config(MemoryAgentConfig::default());
+        let mut ctx = test_ctx();
+        let d1 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
+        ctx.record_invocation(agent.name());
+        let d2 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require confirmation (memory_recall is gated)"
+        );
+    }
+
+    #[tokio::test]
+    async fn requires_confirmation_is_strict_even_in_same_turn_list() {
+        let agent = MemoryListAgent::new();
+        let mut ctx = test_ctx();
+        let d1 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
+        ctx.record_invocation(agent.name());
+        let d2 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(
+            matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }),
+            "second call in the same turn must STILL require confirmation (memory_list is gated)"
+        );
     }
 }

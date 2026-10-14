@@ -602,8 +602,8 @@ pub trait Agent: Send + Sync {
 
     /// Per-call policy: should the LLM tool loop refuse to dispatch
     /// this call without an extra user confirmation step? Default
-    /// is `Allow` for every agent; `web_fetch` overrides this to
-    /// enforce the indirect prompt-injection rule (plan #10).
+    /// is `NeedsConfirmation` for every agent — `web_fetch` overrides
+    /// this to enforce the indirect prompt-injection rule (plan #10).
     ///
     /// Plan 1791834996882: this is now strictly per-call — every
     /// gated call requires a fresh user click. The previous
@@ -615,7 +615,9 @@ pub trait Agent: Send + Sync {
     /// [`Agent::allow_session_override`] first so a tool can opt
     /// out of the bypass — e.g. `email_send`).
     fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
-        ConfirmationDecision::Allow
+        ConfirmationDecision::NeedsConfirmation {
+            reason: "default-deny: every tool call requires explicit user approval".into(),
+        }
     }
 
     /// Whether the session-wide override set ("Toujours pour
@@ -1144,7 +1146,7 @@ impl AgentRegistry {
                     name: a.name().to_string(),
                     description: a.description().to_string(),
                     untrusted_output: a.untrusted_output(),
-                    requires_confirmation_by_default: !a
+                    requires_confirmation: !a
                         .requires_confirmation(&dummy_ctx, &Value::Null)
                         .is_allowed(),
                 }
@@ -1202,7 +1204,7 @@ pub struct AgentSummary {
     pub name: String,
     pub description: String,
     pub untrusted_output: bool,
-    pub requires_confirmation_by_default: bool,
+    pub requires_confirmation: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1687,6 +1689,28 @@ mod confirmation_invariant_tests {
         }
     }
 
+    /// A stub agent that does not override `requires_confirmation`.
+    /// The default trait implementation must return `NeedsConfirmation`,
+    /// so the gate is enforced on every call unless the session-wide
+    /// override is used.
+    struct NoOverrideAgent;
+
+    #[async_trait]
+    impl Agent for NoOverrideAgent {
+        fn name(&self) -> &str {
+            "stub_no_override"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}, "additionalProperties": false})
+        }
+        async fn invoke(&self, _ctx: &UserContext, _args: Value) -> Result<String, AgentError> {
+            Ok("{}".into())
+        }
+    }
+
     #[test]
     fn two_calls_in_same_context_both_need_confirmation() {
         // Plan 1791834996882: the LLM-mediated same-turn re-call
@@ -1725,6 +1749,25 @@ mod confirmation_invariant_tests {
         // tool loop's session-bypass still works for any agent
         // that does not opt out. `email_send` is the documented
         // exception (see `SendAgent::allow_session_override`).
+        assert!(agent.allow_session_override());
+    }
+
+    /// A stub agent that does not override `requires_confirmation`.
+    /// The default trait implementation must return `NeedsConfirmation`,
+    /// so the gate is enforced on every call unless the session-wide
+    /// override is used.
+    #[test]
+    fn trait_default_returns_needs_confirmation() {
+        let agent = NoOverrideAgent;
+        let ctx = UserContext::for_tests(Uuid::new_v4(), ServiceRegistry::empty().into_arc());
+        let d1 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(matches!(d1, ConfirmationDecision::NeedsConfirmation { .. }));
+        // The trait default does not consult the context — every call
+        // returns `NeedsConfirmation` regardless of session state.
+        let d2 = agent.requires_confirmation(&ctx, &Value::Null);
+        assert!(matches!(d2, ConfirmationDecision::NeedsConfirmation { .. }));
+        // Session override is the only skip path; the stub permits it
+        // by default but the gate is still enforced.
         assert!(agent.allow_session_override());
     }
 }

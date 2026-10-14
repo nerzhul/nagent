@@ -26,8 +26,9 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
-use crate::agents::{Agent, AgentError, UserContext};
+use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
 use crate::config::ToolSearchAgentConfig;
 use crate::tools_router::{ToolsRouter, SEARCH_TOOLS_NAME};
 
@@ -145,6 +146,16 @@ impl Agent for ToolSearchAgent {
         // endpoint, nothing a remote document could poison. The
         // untrusted-input fence would be noise here.
         false
+    }
+
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        // `search_tools` is the LLM's primary tool-discovery
+        // interface — gating it would force the user to approve
+        // every catalog query, which defeats the purpose of the
+        // meta-tool. The result is server-generated (see
+        // `untrusted_output` above) so there is no remote
+        // content to redact.
+        ConfirmationDecision::Allow
     }
 
     fn wire_router(&self, router: Arc<ToolsRouter>) {
@@ -385,5 +396,21 @@ mod tests {
         let router = Arc::new(ToolsRouter::from_registry(&reg));
         agent.wire_router(router.clone());
         assert!(agent.router.read().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn requires_confirmation_allows_discovery() {
+        // `search_tools` is the LLM's primary tool-discovery
+        // interface; gating it would force a user click on every
+        // catalog query. The result is server-generated so there
+        // is no remote content to redact.
+        let agent = ToolSearchAgent::new();
+        let mut ctx = UserContext::for_tests(Uuid::new_v4(), ServiceRegistry::empty().into_arc());
+        assert!(agent.requires_confirmation(&ctx, &Value::Null).is_allowed());
+        ctx.record_invocation(agent.name());
+        assert!(
+            agent.requires_confirmation(&ctx, &Value::Null).is_allowed(),
+            "search_tools must remain Allow on every call (discovery is the primary interface)"
+        );
     }
 }

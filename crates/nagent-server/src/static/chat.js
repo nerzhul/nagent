@@ -2457,10 +2457,10 @@ function resolveToolBubble(
       : (ok ? "approved" : "errored");
 
     if (needs_approval && prompt) {
-      // Render the approval card inline. Idempotent: re-render
-      // replaces the existing card so a rehydrated history entry
-      // with persisted prompt data shows the buttons again.
-      renderApprovalCard(entry, prompt, id, name);
+      // Open the modal with the cached approval prompt and tool
+      // data. The modal is re-rendered on every page load so a
+      // persisted history row shows the buttons again.
+      openApprovalModal(prompt, id, name);
       entry.open = true; // keep entry open so the buttons are visible
     } else {
       // On tool error, no prose is going to stream after the tool
@@ -2556,63 +2556,8 @@ function guessArgs(entry) {
  * endpoint; the server-side parser drives the action and the LLM
  * summarises it on the next round.
  */
-function renderApprovalCard(entry, prompt, toolCallId, toolName) {
-  if (!entry) return;
-  let card = entry.querySelector(".chat-tool-approval");
-  if (card) card.remove();
-  card = document.createElement("div");
-  const danger = (prompt && prompt.danger) || "low";
-  card.className = `chat-tool-approval chat-tool-approval--danger-${danger}`;
-  const title = document.createElement("p");
-  title.className = "chat-tool-approval__title";
-  title.textContent = prompt?.title || "Autoriser cet outil ?";
-  card.appendChild(title);
-  if (prompt?.body) {
-    const body = document.createElement("p");
-    body.className = "chat-tool-approval__body";
-    body.textContent = prompt.body;
-    card.appendChild(body);
-  }
-  const buttons = document.createElement("div");
-  buttons.className = "chat-tool-approval__buttons";
-  const allowBtn = document.createElement("button");
-  allowBtn.type = "button";
-  allowBtn.className = "chat-tool-approval__button chat-tool-approval__button--allow";
-  allowBtn.textContent = "✓ Autoriser";
-  allowBtn.addEventListener("click", () => {
-    buttons.dataset.state = "pending";
-    sendPermissionDecision(toolCallId, toolName, "allow");
-  });
-  const alwaysBtn = document.createElement("button");
-  alwaysBtn.type = "button";
-  alwaysBtn.className = "chat-tool-approval__button chat-tool-approval__button--always";
-  alwaysBtn.textContent = "✓ Toujours pour cette session";
-  alwaysBtn.addEventListener("click", () => {
-    buttons.dataset.state = "pending";
-    sendPermissionDecision(toolCallId, toolName, "always");
-  });
-  const denyBtn = document.createElement("button");
-  denyBtn.type = "button";
-  denyBtn.className = "chat-tool-approval__button chat-tool-approval__button--deny";
-  denyBtn.textContent = "✕ Refuser";
-  denyBtn.addEventListener("click", () => {
-    buttons.dataset.state = "pending";
-    sendPermissionDecision(toolCallId, toolName, "deny");
-  });
-  buttons.appendChild(allowBtn);
-  buttons.appendChild(alwaysBtn);
-  buttons.appendChild(denyBtn);
-  card.appendChild(buttons);
-  // Append at the END of the entry so it lives after the args/result
-  // toggles — the user expands the entry, sees the JSON if they
-  // want, then sees the approval card.
-  entry.appendChild(card);
-  entry._approvalCard = card;
-  entry._approvalButtons = buttons;
-}
 
-/**
- * Synthesise the sentinel-prefixed user message and dispatch it
+Synthesise the sentinel-prefixed user message and dispatch it
  * through the chat-send path. The server-side parser recognises the
  * prefix and drives the matching action. The entry's approval card
  * is flipped to the "pending" state via `buttons.dataset.state =
@@ -2647,6 +2592,72 @@ function sendPermissionDecision(toolCallId, toolName, kind) {
  *    the input naturally via the normal `setStreamingUi(false)`
  *    end-of-round path.
  */
+
+/**
+ * Open the approval modal for a gated tool call. The modal is a
+ * native `<dialog>` with three buttons: "Autoriser", "Toujours pour
+ * cette session" (always approve for this session), and "Refuser".
+ * The entry is set to pending before dispatch so the buttons are
+ * visible, and the sentinel is dispatched through `sendPermissionDecision`.
+ */
+function openApprovalModal(prompt, toolCallId, toolName) {
+  const dialog = document.getElementById("chat-approval-modal");
+  if (!dialog) return;
+  // Populate the modal from the cached prompt payload.
+  const titleEl = dialog.querySelector(".chat-approval-modal__title");
+  const bodyEl = dialog.querySelector(".chat-approval-modal__body");
+  if (titleEl) titleEl.textContent = prompt.title;
+  if (bodyEl) bodyEl.textContent = prompt.body;
+  // Danger level is carried in the prompt payload.
+  const dangerEl = dialog.querySelector(".chat-approval-modal__danger");
+  if (dangerEl) {
+    dangerEl.textContent = prompt.danger;
+  }
+  dialog.classList.add("dialog");
+  dialog.classList.add("chat-approval-modal");
+  // Set the data attributes the render handlers read.
+  dialog.dataset.promptTitle = prompt.title;
+  dialog.dataset.promptBody = prompt.body;
+  dialog.dataset.danger = prompt.danger;
+  dialog.querySelector(".chat-approval-modal__tool-name").textContent =
+    toolName;
+  dialog.querySelector(".chat-approval-modal__button--allow").textContent =
+    "✓ Autoriser";
+  dialog.querySelector(".chat-approval-modal__button--always").textContent =
+    "✓ Toujours pour cette session";
+  dialog.querySelector(".chat-approval-modal__button--deny").textContent =
+    "✕ Refuser";
+  // Set the entry to pending before dispatching so the buttons are
+  // visible and the modal stays open.
+  const entry = document.querySelector(
+    `.details.chat-message__tool-entry[data-tool-id="${CSS.escape(toolCallId)}"]`
+  );
+  if (entry) {
+    entry.dataset.state = "pending";
+    dialog.classList.add("dialog");
+  }
+  // Wire the three buttons to sendPermissionDecision and close on
+  // ESC / backdrop click.
+  const closeBtn = dialog.querySelector(".chat-approval-modal__button--deny");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      dialog.dataset.state = "closed";
+      dialog.classList.remove("dialog");
+      sendPermissionDecision(toolCallId, toolName, "deny");
+    });
+  }
+  // The ESC key is handled by the browser's dialog default behavior
+  // (close when the user presses Escape). We also intercept the
+  // backdrop click so that the modal closes and a DENY decision
+  // is sent.
+  dialog.addEventListener("click", (e) => {
+    if (e.target === dialog || e.target.classList.contains(
+      "chat-approval-modal__button--deny"
+    )) {
+      sendPermissionDecision(toolCallId, toolName, "deny");
+    }
+  });
+}
 function applyRoundPaused(evt) {
   const root = document.getElementById("chat-root") || document.body;
   root.dataset.paused = "true";
@@ -4620,6 +4631,15 @@ function rehydrateAfterMount() {
   const sid = activeSessionId();
   renderSessionList();
   renderHistory(sid);
+  // Re-open any pending approval modal for entries that survived
+  // a page reload. The prompt payload is persisted on the history
+  // row, so we replay it through `openApprovalModal`.
+  const history = loadHistory(sid);
+  for (const entry of history) {
+    if (entry.needs_approval && entry.prompt) {
+      openApprovalModal(entry.prompt, entry.tool_id, entry.name);
+    }
+  }
   // Documents panel: `initDocumentsPanel` already wired the
   // listeners; refresh now that the shell is mounted.
   Documents.setSessionId(sid);
