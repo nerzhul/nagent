@@ -65,6 +65,8 @@ use nagent_server::config::{
     AgentConfig, DictionaryConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig,
     WikipediaConfig,
 };
+use nagent_agents::WikipediaAgentConfig;
+use nagent_agents::DictionaryAgentConfig;
 use nagent_server::http::build_router;
 use nagent_server::llm::LlmClient;
 use nagent_server::stt::session::SessionMap;
@@ -336,7 +338,7 @@ async fn web_fetch_invoke_succeeds_against_loopback() {
         allowlist: vec!["*".into()],
         ..WebFetchConfig::default()
     };
-    let agent = WebFetchAgent::new(cfg);
+    let agent = WebFetchAgent::new(cfg.into());
 
     let args = serde_json::json!({"url": page_url});
     let result = agent.invoke(&test_ctx(), args).await.expect("invoke");
@@ -363,7 +365,7 @@ async fn web_fetch_adaptive_retry_fetches_larger_pages() {
         allowlist: vec!["*".into()],
         ..WebFetchConfig::default()
     };
-    let agent = WebFetchAgent::new(cfg);
+    let agent = WebFetchAgent::new(cfg.into());
 
     // LLM asks for 10 KB. Page is 80 KB. Agent must retry until it
     // fits inside the server cap (default 2 MiB).
@@ -405,7 +407,7 @@ async fn web_fetch_adaptive_retry_caps_at_server_limit() {
         max_bytes: 50 * 1024,
         ..WebFetchConfig::default()
     };
-    let agent = WebFetchAgent::new(cfg);
+    let agent = WebFetchAgent::new(cfg.into());
     let args = serde_json::json!({"url": page_url, "max_bytes": 1024});
     let err = agent
         .invoke(&test_ctx(), args)
@@ -779,11 +781,7 @@ async fn weather_agent_parses_weatherapi_fixture() {
         }]}
     });
     let base_url = spawn_weatherapi_fixture(canned).await;
-    let agent = WeatherAgent::new(WeatherConfig {
-        api_key: "test-key".into(),
-        timeout_ms: 2_000,
-        base_url,
-    });
+    let agent = WeatherAgent::new(WeatherConfig::default().into());
     let result = agent
         .invoke(&test_ctx(), serde_json::json!({"location": "Paris"}))
         .await
@@ -808,11 +806,7 @@ async fn weather_agent_surfaces_upstream_error_message() {
         "error": {"code": 1006, "message": "No matching location found."}
     });
     let base_url = spawn_weatherapi_fixture(canned).await;
-    let agent = WeatherAgent::new(WeatherConfig {
-        api_key: "test-key".into(),
-        timeout_ms: 2_000,
-        base_url,
-    });
+    let agent = WeatherAgent::new(WeatherConfig::default().into());
     let err = agent
         .invoke(&test_ctx(), serde_json::json!({"location": "Atlantis"}))
         .await
@@ -835,10 +829,7 @@ async fn weather_agent_caps_days_to_fourteen() {
     // The schema guard exists so the LLM cannot request a
     // 30-day forecast and balloon the response. The cap moved
     // from 7 (Open-Meteo) to 14 (WeatherAPI free tier).
-    let agent = WeatherAgent::new(WeatherConfig {
-        api_key: "test-key".into(),
-        ..Default::default()
-    });
+    let agent = WeatherAgent::new(WeatherConfig::default().into());
     let schema = agent.parameters_schema();
     let days = &schema["properties"]["days"];
     assert_eq!(days["minimum"], 1);
@@ -850,7 +841,7 @@ async fn weather_agent_caps_days_to_fourteen() {
 async fn weather_agent_missing_api_key_is_a_clear_error() {
     // The most common deployment failure. The agent must point
     // at the signup URL rather than 401-ing confusingly.
-    let agent = WeatherAgent::new(WeatherConfig::default());
+    let agent = WeatherAgent::new(WeatherConfig::default().into());
     let err = agent
         .invoke(&test_ctx(), serde_json::json!({"location": "Paris"}))
         .await
@@ -984,7 +975,7 @@ async fn calculate_agent_invoke_endpoint_returns_400_for_invalid_chars() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unit_convert_agent_converts_miles_to_km() {
     // The canonical chat-user case. 12 mi × 1.609344 = 19.312128 km.
-    let agent = UnitConvertAgent::new(nagent_server::config::UnitConvertConfig::default());
+    let agent = UnitConvertAgent::new(nagent_server::config::UnitConvertConfig::default().into());
     let result = agent
         .invoke(
             &test_ctx(),
@@ -1068,7 +1059,7 @@ async fn wikipedia_agent_parses_summary_fixture() {
         }
     });
     let base_url = spawn_wikipedia_summary_fixture(canned).await;
-    let agent = WikipediaAgent::new(WikipediaConfig {
+    let agent = WikipediaAgent::new(WikipediaAgentConfig {
         base_url: format!("{base_url}/api/rest_v1"),
         timeout_ms: 2_000,
         user_agent: "nagent-test/0.1".into(),
@@ -1133,10 +1124,10 @@ async fn wikipedia_agent_sends_descriptive_user_agent() {
     });
     let base_url = format!("http://{addr}/api/rest_v1");
 
-    let agent = WikipediaAgent::new(WikipediaConfig {
-        base_url,
+    let agent = WikipediaAgent::new(WikipediaAgentConfig {
+        base_url: format!("{base_url}/api/rest_v1"),
         timeout_ms: 2_000,
-        user_agent: "nagent-test-wikipedia/42 (+https://example.test)".into(),
+        user_agent: "nagent-test/wikipedia/42 (+https://example.test)".into(),
     });
     let _ = agent
         .invoke(&test_ctx(), serde_json::json!({"title": "Lyon"}))
@@ -1226,7 +1217,7 @@ async fn dictionary_agent_parses_entries_fixture() {
         "license": {"name": "CC BY-SA 3.0"}
     }]);
     let base_url = spawn_dictionary_entries_fixture(canned).await;
-    let agent = DictionaryAgent::new(DictionaryConfig {
+    let agent = DictionaryAgent::new(DictionaryAgentConfig {
         base_url: format!("{base_url}/api/v2"),
         timeout_ms: 2_000,
     });

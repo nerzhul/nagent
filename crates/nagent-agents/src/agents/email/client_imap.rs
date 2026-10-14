@@ -213,7 +213,7 @@ impl ImapClient {
                     .with_no_client_auth(),
             );
 
-            let mut client = match tls_mode {
+            let client = match tls_mode {
                 ImapTlsMode::Implicit => {
                     let server_name = ServerName::try_from(host_owned.clone()).map_err(|e| {
                         AgentError::AgentFailed(format!("IMAP TLS server name: {e}"))

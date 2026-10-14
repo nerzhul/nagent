@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{json, Value};
 
-use crate::agents::{Agent, AgentError, UserContext};
+use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
 use crate::config::DateTimeAgentConfig;
 
 /// Build of the `get_datetime` agent. Stateless — the constructor
@@ -84,6 +84,18 @@ impl Agent for DateTimeAgent {
             },
             "additionalProperties": false,
         })
+    }
+
+    fn requires_confirmation(
+        &self,
+        _ctx: &UserContext,
+        _args: &Value,
+    ) -> ConfirmationDecision {
+        // Reading the clock is read-only and side-effect-free; the
+        // tool loop's default-deny gate would otherwise force a
+        // click on every "quelle heure est-il ?" round, which is
+        // pure friction.
+        ConfirmationDecision::Allow
     }
 
     async fn invoke(&self, _ctx: &UserContext, args: Value) -> Result<String, AgentError> {
@@ -168,6 +180,21 @@ mod tests {
         let schema = agent.parameters_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["timezone"].is_object());
+    }
+
+    #[test]
+    fn requires_confirmation_returns_allow() {
+        // Reading the clock is side-effect-free; the tool loop's
+        // default-deny gate would otherwise force a click on every
+        // "quelle heure est-il ?" round. This test pins the policy
+        // so a future refactor of the trait default can't silently
+        // re-enable the gate.
+        let agent = DateTimeAgent::new();
+        let ctx = UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::ServiceRegistry::empty()),
+        );
+        assert!(agent.requires_confirmation(&ctx, &Value::Null).is_allowed());
     }
 
     #[tokio::test]

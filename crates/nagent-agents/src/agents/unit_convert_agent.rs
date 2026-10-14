@@ -39,7 +39,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::agents::{Agent, AgentError, UserContext};
+use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
 use crate::config::UnitConvertAgentConfig;
 
 /// Physical category a unit belongs to. Temperature is its own
@@ -156,6 +156,17 @@ impl Agent for UnitConvertAgent {
             "required": ["value", "from", "to"],
             "additionalProperties": false,
         })
+    }
+
+    fn requires_confirmation(
+        &self,
+        _ctx: &UserContext,
+        _args: &Value,
+    ) -> ConfirmationDecision {
+        // Pure table-driven conversion: no I/O, no variable binding,
+        // no network. Gating every "12 miles en km" round behind
+        // an approval prompt would be pure friction.
+        ConfirmationDecision::Allow
     }
 
     async fn invoke(&self, _ctx: &UserContext, args: Value) -> Result<String, AgentError> {
@@ -935,6 +946,19 @@ mod tests {
         assert!(required.contains(&json!("value")));
         assert!(required.contains(&json!("from")));
         assert!(required.contains(&json!("to")));
+    }
+
+    #[test]
+    fn requires_confirmation_returns_allow() {
+        // Pure table-driven conversion: no I/O, no network, no
+        // variable binding. Gating every "12 miles en km" round
+        // behind an approval prompt would be pure friction.
+        let agent = UnitConvertAgent::default();
+        let ctx = UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::ServiceRegistry::empty()),
+        );
+        assert!(agent.requires_confirmation(&ctx, &Value::Null).is_allowed());
     }
 
     #[test]

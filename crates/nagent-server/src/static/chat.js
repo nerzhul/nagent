@@ -1692,6 +1692,146 @@ function renderHistory(sessionId) {
   refreshExportMenuVisibility();
 }
 
+/**
+ * Build the standalone inline approval card and append it to
+ * `assistantEl` (NOT inside the per-tool `<details>` trace, so it
+ * stays visible regardless of whether the user has expanded the
+ * tool entry). Idempotent: re-calling with the same `toolCallId`
+ * replaces the existing card.
+ *
+ * The three buttons route through `sendPermissionDecision`, which
+ * dispatches the matching sentinel and flips the card to the
+ * "decided" state via `setApprovalCardState`. The `args` payload is
+ * the tool call's arguments as a JSON-serialisable object; it is
+ * rendered behind a `<details>` so the default card stays compact.
+ */
+function appendApprovalCard(assistantEl, { toolCallId, toolName, prompt, args }) {
+  if (!assistantEl) return null;
+  // Replace any prior card for the same tool call (the `tool_result`
+  // event can re-fire on rehydration; we don't want stacked cards).
+  const existing = assistantEl.querySelector(
+    `.chat-approval-card[data-tool-id="${CSS.escape(toolCallId)}"]`,
+  );
+  if (existing) existing.remove();
+  const card = document.createElement("div");
+  card.className = "chat-approval-card";
+  card.dataset.toolId = toolCallId;
+  card.dataset.state = "pending";
+  // The prompt payload carries a danger level; default to "low" so a
+  // missing field still produces a visible (neutral) card.
+  const danger = (prompt && prompt.danger) || "low";
+  card.dataset.danger = danger;
+  // Header line: icon + title + tool-name chip.
+  const header = document.createElement("div");
+  header.className = "chat-approval-card__header";
+  const icon = document.createElement("span");
+  icon.className = "chat-approval-card__icon";
+  icon.textContent = danger === "high" ? "⛔" : (danger === "medium" ? "⚠️" : "🔐");
+  const title = document.createElement("span");
+  title.className = "chat-approval-card__title";
+  title.textContent = (prompt && prompt.title) || "Autorisation requise";
+  const toolChip = document.createElement("code");
+  toolChip.className = "chat-approval-card__tool";
+  toolChip.textContent = toolName;
+  header.appendChild(icon);
+  header.appendChild(title);
+  header.appendChild(toolChip);
+  card.appendChild(header);
+  // Body — the human-readable explanation from the agent.
+  if (prompt && prompt.body) {
+    const body = document.createElement("p");
+    body.className = "chat-approval-card__body";
+    body.textContent = prompt.body;
+    card.appendChild(body);
+  }
+  // Arguments (collapsed by default — the card stays compact and the
+  // curious user can still inspect the call).
+  if (args && Object.keys(args).length > 0) {
+    const argsDetails = document.createElement("details");
+    argsDetails.className = "chat-approval-card__args";
+    const argsSummary = document.createElement("summary");
+    argsSummary.textContent = "Arguments";
+    argsDetails.appendChild(argsSummary);
+    const argsPre = document.createElement("pre");
+    argsPre.className = "chat-approval-card__args-pre";
+    argsPre.textContent = JSON.stringify(args, null, 2);
+    argsDetails.appendChild(argsPre);
+    card.appendChild(argsDetails);
+  }
+  // Three action buttons — green / blue / red, matching the modal.
+  const buttons = document.createElement("div");
+  buttons.className = "chat-approval-card__buttons";
+  const allow = document.createElement("button");
+  allow.type = "button";
+  allow.className = "chat-approval-card__button chat-approval-card__button--allow";
+  allow.textContent = "✓ Autoriser";
+  allow.addEventListener("click", () => {
+    sendPermissionDecision(toolCallId, toolName, "allow");
+  });
+  const always = document.createElement("button");
+  always.type = "button";
+  always.className = "chat-approval-card__button chat-approval-card__button--always";
+  always.textContent = "✓ Toujours pour cette session";
+  always.addEventListener("click", () => {
+    sendPermissionDecision(toolCallId, toolName, "always");
+  });
+  const deny = document.createElement("button");
+  deny.type = "button";
+  deny.className = "chat-approval-card__button chat-approval-card__button--deny";
+  deny.textContent = "✕ Refuser";
+  deny.addEventListener("click", () => {
+    sendPermissionDecision(toolCallId, toolName, "deny");
+  });
+  buttons.appendChild(allow);
+  buttons.appendChild(always);
+  buttons.appendChild(deny);
+  card.appendChild(buttons);
+  // Post-decision summary line (hidden until the card flips to
+  // `[data-state="decided"]`).
+  const result = document.createElement("span");
+  result.className = "chat-approval-card__result";
+  card.appendChild(result);
+  // Insert just before the replay button so the visual flow reads
+  // [tool trace] → [approval card] → [weather card] → [🔊]. When the
+  // assistant bubble has no replay button yet (e.g. a paused round
+  // that the user is still staring at), append to the tail.
+  const replayBtn = assistantEl.querySelector(".chat-message-replay");
+  if (replayBtn) {
+    assistantEl.insertBefore(card, replayBtn);
+  } else {
+    assistantEl.appendChild(card);
+  }
+  return card;
+}
+
+/**
+ * Flip a previously-pending approval card to its decided state and
+ * render a one-line summary of the user's choice. Called from
+ * `sendPermissionDecision` after the sentinel has been dispatched, so
+ * the user sees an immediate visual confirmation that the click
+ * landed even before the LLM round completes.
+ */
+function setApprovalCardState(toolCallId, kind, toolName) {
+  const card = messagesEl.querySelector(
+    `.chat-approval-card[data-tool-id="${CSS.escape(toolCallId)}"]`,
+  );
+  if (!card) return;
+  card.dataset.state = "decided";
+  const result = card.querySelector(".chat-approval-card__result");
+  if (!result) return;
+  result.className = "chat-approval-card__result";
+  if (kind === "allow") {
+    result.classList.add("chat-approval-card__result--allow");
+    result.textContent = "✓ Action autorisée";
+  } else if (kind === "always") {
+    result.classList.add("chat-approval-card__result--always");
+    result.textContent = `✓ Toujours autoriser \`${toolName}\` pour cette session`;
+  } else if (kind === "deny") {
+    result.classList.add("chat-approval-card__result--deny");
+    result.textContent = "✕ Action refusée";
+  }
+}
+
 function appendBubble(role, text, {
   persist = true, model = null, markdown = false, sessionId = null,
   attachments = null, messageId = null, version = null,
@@ -2452,16 +2592,40 @@ function resolveToolBubble(
     if (captionEl) {
       captionEl.textContent = describeTool(name, guessArgs(entry), summary);
     }
-    entry.dataset.state = needs_approval
-      ? "needs-approval"
-      : (ok ? "approved" : "errored");
+    // If the user already decided on this tool (the entry carries a
+    // `data-decision` attribute stamped by `sendPermissionDecision`),
+    // honour that label instead of letting the synthetic
+    // `ok=false` deny result flip the entry to "errored". A denied
+    // tool is a user choice, not a tool error.
+    const priorDecision = entry.dataset.decision;
+    if (needs_approval) {
+      entry.dataset.state = "needs-approval";
+    } else if (priorDecision === "deny") {
+      entry.dataset.state = "denied";
+    } else if (priorDecision === "always") {
+      entry.dataset.state = "approved-always";
+    } else {
+      entry.dataset.state = ok ? "approved" : "errored";
+    }
 
     if (needs_approval && prompt) {
-      // Open the modal with the cached approval prompt and tool
-      // data. The modal is re-rendered on every page load so a
-      // persisted history row shows the buttons again.
-      openApprovalModal(prompt, id, name);
-      entry.open = true; // keep entry open so the buttons are visible
+      // Render the inline approval card as a direct child of the
+      // assistant bubble so the user does not have to expand a
+      // collapsed tool trace to see the pending decision. The
+      // three buttons route through `sendPermissionDecision`,
+      // which dispatches the matching sentinel and collapses
+      // the card. `guessArgs` reads back the JSON arguments from
+      // the parent assistant `tool_calls[]` history row so the
+      // card can show what the agent is about to do.
+      const assistantEl = findAssistantBubble(entry);
+      if (assistantEl) {
+        appendApprovalCard(assistantEl, {
+          toolCallId: id,
+          toolName: name,
+          prompt,
+          args: guessArgs(entry),
+        });
+      }
     } else {
       // On tool error, no prose is going to stream after the tool
       // result, so collapse the wrapper now rather than waiting for
@@ -2557,7 +2721,8 @@ function guessArgs(entry) {
  * summarises it on the next round.
  */
 
-Synthesise the sentinel-prefixed user message and dispatch it
+/**
+ * Synthesise the sentinel-prefixed user message and dispatch it
  * through the chat-send path. The server-side parser recognises the
  * prefix and drives the matching action. The entry's approval card
  * is flipped to the "pending" state via `buttons.dataset.state =
@@ -2570,10 +2735,46 @@ function sendPermissionDecision(toolCallId, toolName, kind) {
   else if (kind === "always") sentinel = `[APPROVE_ALWAYS:${toolName}]`;
   else if (kind === "deny") sentinel = `[DENY:${toolCallId}]`;
   else return;
-  // Reuse the existing chat send path so the sentry flow (active
-  // session id, history persistence, abort handling, TTS pause) is
-  // identical to a normal user turn.
-  sendTypedMessage(sentinel);
+  // Stamp the user's decision on the tool entry so the matching
+  // `tool_result` event can preserve the decision label instead of
+  // flipping the entry to "errored" when the synthetic deny result
+  // arrives with `ok=false`.
+  const entry = messagesEl.querySelector(
+    `.chat-message__tool-entry[data-tool-id="${CSS.escape(toolCallId)}"], ` +
+    `.chat-message__tool-usage[data-tool-id="${CSS.escape(toolCallId)}"]`,
+  );
+  if (entry) {
+    entry.dataset.decision = kind === "allow" ? "allow"
+      : kind === "always" ? "always" : "deny";
+    entry.dataset.state = kind === "deny" ? "denied"
+      : kind === "always" ? "approved-always" : "approved";
+  }
+  // Flip the inline approval card to its decided state so the
+  // user sees an immediate visual confirmation. The card's
+  // buttons are hidden by CSS once `[data-state="decided"]` is
+  // set, so a double-click cannot dispatch two decisions.
+  setApprovalCardState(toolCallId, kind, toolName);
+  // Clear the streaming UI in case the user clicked before the
+  // `round_paused` SSE frame landed (or on a build where the
+  // frame races the click). The loader and `--streaming` class
+  // are removed here too, so a stale "..." never lingers after a
+  // decision. `clearRoundPaused` is a no-op when no pause is
+  // active, so calling it unconditionally is safe.
+  clearRoundPaused();
+  // Bypass `sendTypedMessage` / `submitUserTurn` so the sentinel
+  // does NOT render a user bubble. The decision is already
+  // visible on the tool entry's collapsed summary (the
+  // `setApprovalCardState` flip above), so a second "✓ Action
+  // autorisée" bubble would be a pure duplicate. The server
+  // still receives the sentinel verbatim — `streamReply` posts
+  // the raw text to `/v1/chat/completions`, and the server-side
+  // parser (`llm::permission::parse_decision_prefix`) drives
+  // the matching action. The LLM's follow-up reply (a one-line
+  // "OK" or the tool's result) lands in a fresh assistant
+  // bubble, which is the only chat-level feedback the user sees.
+  const sid = activeSessionId();
+  if (!sid) return;
+  enqueueTurn(() => streamReply(sid, sentinel));
 }
 
 /**
@@ -2661,6 +2862,24 @@ function openApprovalModal(prompt, toolCallId, toolName) {
 function applyRoundPaused(evt) {
   const root = document.getElementById("chat-root") || document.body;
   root.dataset.paused = "true";
+  // The assistant bubble is mid-stream when the round halts: the
+  // tool loop returned before the LLM could write a single token,
+  // so the `.chat-loader` (the bouncing "…") sits inside the
+  // bubble forever. The model isn't thinking — the round is
+  // parked on the approval card. Strip the loader, drop the
+  // `--streaming` class (so the replay / regenerate buttons
+  // re-attach naturally when the next round lands), and clear
+  // the streaming pill so the status row falls back to idle.
+  const assistantEl = messagesEl.querySelector(
+    ".chat-message.chat-assistant.chat-message--streaming",
+  );
+  if (assistantEl) {
+    assistantEl.querySelectorAll(".chat-loader").forEach((l) => l.remove());
+    assistantEl.classList.remove("chat-message--streaming");
+    ensureReplayButton(assistantEl);
+    refreshRegenerateButtonVisibility();
+  }
+  setStreamState(null);
   const userBubbles = messagesEl.querySelectorAll(
     ".chat-message.chat-user:not(.chat-message--error)",
   );
@@ -2671,8 +2890,8 @@ function applyRoundPaused(evt) {
     latest.querySelectorAll(".chat-message-paused-pill").forEach((p) => p.remove());
     const pill = document.createElement("span");
     pill.className = "chat-message-paused-pill";
-    pill.textContent = "⏸ Waiting for approval";
-    pill.title = (evt && evt.reason) || "Waiting for user approval";
+    pill.textContent = "⏸ En attente d'autorisation";
+    pill.title = (evt && evt.reason) || "En attente d'autorisation";
     latest.appendChild(pill);
   }
 }
@@ -2682,6 +2901,11 @@ function applyRoundPaused(evt) {
  * at the top of `streamReply` (before the streaming UI takes
  * over) so the old pill is gone the moment the user types
  * anything — a permission decision or a brand-new question.
+ *
+ * Also called from `sendPermissionDecision` for the race where
+ * the user clicks before the `round_paused` SSE frame lands;
+ * the function is idempotent so a no-op when no pause is
+ * active.
  */
 function clearRoundPaused() {
   const root = document.getElementById("chat-root") || document.body;
@@ -2690,6 +2914,23 @@ function clearRoundPaused() {
     el.classList.remove("chat-message--paused");
   });
   messagesEl.querySelectorAll(".chat-message-paused-pill").forEach((p) => p.remove());
+  // Symmetric with `applyRoundPaused`: strip the per-bubble loader
+  // and the `--streaming` class so a stale "..." never lingers
+  // after the user resolves the pause (whether by clicking a
+  // decision button or by typing a new question). The next round
+  // either drops the bubble (if the decision denies and the LLM
+  // writes a short acknowledgment) or re-enters the streaming
+  // path (if the decision approves and the tool runs), and both
+  // paths expect a clean bubble.
+  const assistantEl = messagesEl.querySelector(
+    ".chat-message.chat-assistant.chat-message--streaming",
+  );
+  if (assistantEl) {
+    assistantEl.querySelectorAll(".chat-loader").forEach((l) => l.remove());
+    assistantEl.classList.remove("chat-message--streaming");
+    ensureReplayButton(assistantEl);
+    refreshRegenerateButtonVisibility();
+  }
 }
 
 /**
@@ -2724,19 +2965,6 @@ function rehydratePausedState(history) {
       return;
     }
   }
-}
-
-/**
- * Send `text` as a user turn on the currently active session. Used by
- * `sendPermissionDecision` (sentinel flow) and `sendTyped` (normal
- * text input). Both paths feed `submitUserTurn` so the persistence
- * + queue + audio-cancel behaviour is uniform.
- */
-function sendTypedMessage(text) {
-  // Use the existing `sendTyped` path with an explicit text
-  // override so the approval sentinel flow shares the persistence
-  // + queue + audio-cancel behaviour of a normal user turn.
-  sendTyped(text);
 }
 
 // Build the structured weather card and inject it as a sibling of
@@ -4631,15 +4859,15 @@ function rehydrateAfterMount() {
   const sid = activeSessionId();
   renderSessionList();
   renderHistory(sid);
-  // Re-open any pending approval modal for entries that survived
-  // a page reload. The prompt payload is persisted on the history
-  // row, so we replay it through `openApprovalModal`.
-  const history = loadHistory(sid);
-  for (const entry of history) {
-    if (entry.needs_approval && entry.prompt) {
-      openApprovalModal(entry.prompt, entry.tool_id, entry.name);
-    }
-  }
+  // The inline approval cards for any `needs_approval` tool entries
+  // that survived a page reload are already rendered by
+  // `renderHistory` → `resolveToolBubble` → `appendApprovalCard`.
+  // The old `<dialog>` modal fallback (`openApprovalModal`) is no
+  // longer the primary surface; the inline card lives in the main
+  // chat scroll and stays visible regardless of the tool trace's
+  // collapsed state. The matching paused-state (chat-root
+  // `data-paused` + user-bubble pill) is already re-applied by
+  // `renderHistory` → `rehydratePausedState`.
   // Documents panel: `initDocumentsPanel` already wired the
   // listeners; refresh now that the shell is mounted.
   Documents.setSessionId(sid);

@@ -1705,8 +1705,13 @@ select, input[type="checkbox"] {
  *
  * Buttons muted in [data-state="pending"] (the click handler flips
  * this AFTER dispatching the sentinel user message). */
-/* Chat approval modal — replaces the inline approval card. The modal is a
- * native `<dialog>` element with a title, body, and three buttons.
+/* Chat approval modal — the legacy `<dialog>` fallback. The primary
+ * surface is the inline `.chat-approval-card` (see below) that lives
+ * as a direct child of the assistant bubble so the user does not have
+ * to expand a collapsed tool trace to see the prompt. The dialog is
+ * kept as a no-JS / accessibility fallback and still receives the
+ * three coloured action buttons.
+ *
  * Danger levels: Low for email_send, memory_*, web_fetch; Medium for
  * x_timeline, read_document, get_weather, calculate, wikipedia,
  * dictionary, stock, unit_convert, datetime; High for email_*. */
@@ -1732,7 +1737,7 @@ select, input[type="checkbox"] {
   margin-top: 0.2rem;
 }
 .chat-approval-modal__button {
-  padding: 0.35rem 0.75rem;
+  padding: 0.4rem 0.85rem;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--bg);
@@ -1740,31 +1745,211 @@ select, input[type="checkbox"] {
   font-family: inherit;
   font-size: 0.82rem;
   cursor: pointer;
+  font-weight: 500;
 }
 .chat-approval-modal__button:hover {
-  border-color: var(--fg-mute);
+  filter: brightness(1.15);
 }
-.chat-approval-modal__button--allow {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
+.chat-approval-modal__button:active {
+  transform: translateY(1px);
 }
-.chat-approval-modal__button--allow:hover {
-  filter: brightness(1.1);
-}
-.chat-approval-modal__button--always,
-.chat-approval-modal__button--deny {
-  background: var(--bg);
-  color: var(--fg);
-}
-.chat-approval-modal__button--deny:hover {
-  filter: brightness(0.85);
-}
-.chat-approval-modal__button--deny:active {
+.chat-approval-modal__button:disabled {
+  cursor: not-allowed;
   opacity: 0.5;
 }
-.chat-approval-modal__button--deny:disabled {
+/* Outlined style: coloured border + matching text, transparent
+ * background. Quieter than a fully-filled button so the three
+ * variants sit comfortably next to each other on the dark theme. */
+.chat-approval-modal__button--allow {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.chat-approval-modal__button--allow:hover {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+}
+/* Blue — session-wide allow. Kept on a distinct hue so a quick glance
+ * tells the user this is a broader, persistent authorisation. */
+.chat-approval-modal__button--always {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.chat-approval-modal__button--always:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+/* Red — destructive / cancel. */
+.chat-approval-modal__button--deny {
+  border-color: var(--error);
+  color: var(--error);
+}
+.chat-approval-modal__button--deny:hover {
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+}
+
+/* ---- Inline approval card (primary surface) -----------------------------
+ * Renders as a direct child of the assistant bubble — NOT inside the
+ * per-tool `<details>` trace — so the user always sees the pending
+ * decision in the main chat scroll. Sits between the tool entry and
+ * the assistant's prose / replay button, with a coloured left border
+ * keyed on the prompt's danger level.
+ *
+ * The card is created lazily on the first `needs_approval` tool
+ * result (`appendApprovalCard` in chat.js) and torn down — or
+ * collapsed to a one-line summary — on the matching decision click
+ * (`sendPermissionDecision`). The `[data-state]` attribute drives the
+ * visual transition; the three buttons route through
+ * `sendPermissionDecision` which dispatches the sentinel.
+ */
+.chat-approval-card {
+  margin: 0.6rem 0;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.chat-approval-card[data-danger="medium"] {
+  border-left-color: #d29922;
+}
+.chat-approval-card[data-danger="high"] {
+  border-left-color: var(--error);
+}
+.chat-approval-card__header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+.chat-approval-card__icon {
+  font-size: 1rem;
+}
+.chat-approval-card__title {
+  font-weight: 600;
+  color: var(--fg);
+  flex: 1 1 auto;
+}
+.chat-approval-card__tool {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+}
+.chat-approval-card__body {
+  margin: 0;
+  color: var(--fg-mute);
+  font-size: 0.83rem;
+  line-height: 1.4;
+}
+.chat-approval-card__args {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+}
+.chat-approval-card__args summary {
+  cursor: pointer;
+  user-select: none;
+}
+.chat-approval-card__args-pre {
+  margin: 0.3rem 0 0;
+  padding: 0.4rem 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.76rem;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-approval-card__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.2rem;
+}
+.chat-approval-card__button {
+  padding: 0.4rem 0.85rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.1s ease;
+}
+/* Outlined variants: coloured border + matching text, transparent
+ * background. The :hover state tints the background with a low-alpha
+ * mix of the same hue so the button feels responsive without
+ * flashing a solid block of colour. */
+.chat-approval-card__button--allow {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.chat-approval-card__button--allow:hover {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+}
+.chat-approval-card__button--always {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.chat-approval-card__button--always:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.chat-approval-card__button--deny {
+  border-color: var(--error);
+  color: var(--error);
+}
+.chat-approval-card__button--deny:hover {
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+}
+.chat-approval-card__button:active {
+  transform: translateY(1px);
+}
+.chat-approval-card__button:disabled {
   cursor: not-allowed;
+  opacity: 0.5;
+}
+/* Post-decision collapse: a single line summarising the user's choice
+ * so the chat scroll keeps a visible trail of who authorised what
+ * without leaving the full three-button card open. */
+.chat-approval-card[data-state="decided"] {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.82rem;
+}
+.chat-approval-card[data-state="decided"] .chat-approval-card__body,
+.chat-approval-card[data-state="decided"] .chat-approval-card__args,
+.chat-approval-card[data-state="decided"] .chat-approval-card__buttons,
+.chat-approval-card[data-state="decided"] .chat-approval-card__header {
+  display: none;
+}
+.chat-approval-card__result {
+  display: none;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--fg);
+}
+.chat-approval-card[data-state="decided"] .chat-approval-card__result {
+  display: inline-flex;
+}
+.chat-approval-card__result--allow {
+  color: var(--ok);
+}
+.chat-approval-card__result--always {
+  color: var(--accent);
+}
+.chat-approval-card__result--deny {
+  color: var(--error);
 }
 
 /* Round paused (plan 1791834996882). The tool loop halted on
@@ -1861,7 +2046,7 @@ select, input[type="checkbox"] {
  * stays hidden. The footer stays visible so the user sees the tool
  * running; the approval card stays visible so the buttons stay
  * interactive while the LLM streams the post-tool preamble. */
-.chat-message--tool-pending > :not(.chat-message__tool-loading):not(.chat-message__tools-summary):not(.chat-tool-approval):not(.chat-weather-card) {
+.chat-message--tool-pending > :not(.chat-message__tool-loading):not(.chat-message__tools-summary):not(.chat-approval-card):not(.chat-weather-card) {
   display: none;
 }
 .chat-message__tool-loading {

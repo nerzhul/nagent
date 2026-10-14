@@ -41,7 +41,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::agents::{Agent, AgentError, UserContext};
+use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
 
 /// Hard cap on the expression length. `meval` itself imposes no
 /// length limit, but unbounded input is a denial-of-service risk
@@ -120,6 +120,19 @@ impl Agent for CalculateAgent {
             "required": ["expression"],
             "additionalProperties": false,
         })
+    }
+
+    fn requires_confirmation(
+        &self,
+        _ctx: &UserContext,
+        _args: &Value,
+    ) -> ConfirmationDecision {
+        // Pure arithmetic on a sandboxed expression parser. The
+        // deny-list in `validate_expression` already rejects I/O,
+        // variable binding, and unknown identifiers; gating every
+        // "combien font 15% de 87,50" round behind an approval
+        // prompt would be pure friction.
+        ConfirmationDecision::Allow
     }
 
     async fn invoke(&self, _ctx: &UserContext, args: Value) -> Result<String, AgentError> {
@@ -245,6 +258,20 @@ mod tests {
             .unwrap()
             .contains(&json!("expression")));
         assert_eq!(schema["properties"]["expression"]["maxLength"], 256);
+    }
+
+    #[test]
+    fn requires_confirmation_returns_allow() {
+        // `meval` is sandboxed and the deny-list in
+        // `validate_expression` rejects I/O, variable binding, and
+        // unknown identifiers. Gating every arithmetic round
+        // behind an approval prompt would be pure friction.
+        let agent = CalculateAgent::new();
+        let ctx = UserContext::for_tests(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::ServiceRegistry::empty()),
+        );
+        assert!(agent.requires_confirmation(&ctx, &Value::Null).is_allowed());
     }
 
     #[test]

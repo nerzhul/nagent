@@ -289,7 +289,7 @@ pub enum SmtpStreamInner {
 
 impl tokio::io::AsyncRead for SmtpStreamInner {
     fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
@@ -318,7 +318,7 @@ impl tokio::io::AsyncBufRead for SmtpStreamInner {
 }
 impl tokio::io::AsyncWrite for SmtpStreamInner {
     fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
@@ -328,7 +328,7 @@ impl tokio::io::AsyncWrite for SmtpStreamInner {
         }
     }
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.get_mut() {
@@ -337,7 +337,7 @@ impl tokio::io::AsyncWrite for SmtpStreamInner {
         }
     }
     fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.get_mut() {

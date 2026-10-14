@@ -209,9 +209,9 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | --- | --- | --- |
 | `web_fetch` | `web-agent` | Server-side HTTP GET → clean text. Hardened egress client (SSRF policy, DNS-rebinding mitigation, allow-list). |
 | `read_document` | `read-document-agent` | Fetches a single uploaded document by name, scoped to the current chat session. Danger: Low. |
-| `get_datetime` | `datetime-agent` | Pure local date math (`chrono`, `chrono-tz`). Danger: Low. |
-| `calculate` | `calculate-agent` | Pure local expression evaluator (`meval`). Danger: Low. |
-| `unit_convert` | `unit-convert-agent` | Pure local conversion tables. Danger: Low. |
+| `get_datetime` | `datetime-agent` | Pure local date math (`chrono`, `chrono-tz`). Danger: Low. No confirmation — reading the clock is side-effect-free. |
+| `calculate` | `calculate-agent` | Pure local expression evaluator (`meval`, sandboxed by a deny-list). Danger: Low. No confirmation — pure arithmetic on a sandboxed parser. |
+| `unit_convert` | `unit-convert-agent` | Pure local conversion tables. Danger: Low. No confirmation — pure table-driven math, no I/O. |
 | `get_weather` | `weather-agent` | WeatherAPI.com (free API key required). Danger: Low. |
 | `wikipedia` | `wikipedia-agent` | `wikipedia.org` REST, no API key, `User-Agent` set. Danger: Low. |
 | `dictionary` | `dictionary-agent` | Free Dictionary REST API, no API key. Danger: Low. |

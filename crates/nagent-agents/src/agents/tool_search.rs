@@ -26,9 +26,8 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use uuid::Uuid;
 
-use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
+use crate::agents::{Agent, AgentError, ConfirmationDecision, Uuid, UserContext};
 use crate::config::ToolSearchAgentConfig;
 use crate::tools_router::{ToolsRouter, SEARCH_TOOLS_NAME};
 

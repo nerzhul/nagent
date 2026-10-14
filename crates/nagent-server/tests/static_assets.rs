@@ -854,13 +854,13 @@ async fn css_carries_tools_footer_rules() {
         "style.css is missing one of `.chat-tool-args` / `.chat-tool-result`. The JSON toggle elements fall back to default `<details>` look and the layout breaks."
     );
     assert!(
-        css.contains(".chat-tool-approval"),
-        "style.css is missing the `.chat-tool-approval` block. The inline approval card renders unstyled (no padding, no left accent border)."
+        css.contains(".chat-approval-card"),
+        "style.css is missing the `.chat-approval-card` block. The inline approval card renders unstyled (no padding, no left accent border)."
     );
     assert!(
-        css.contains("chat-tool-approval__button--allow")
-            && css.contains("chat-tool-approval__button--always")
-            && css.contains("chat-tool-approval__button--deny"),
+        css.contains("chat-approval-card__button--allow")
+            && css.contains("chat-approval-card__button--always")
+            && css.contains("chat-approval-card__button--deny"),
         "style.css is missing one of the three button variants (--allow / --always / --deny). At least one approval button falls back to the default browser look."
     );
 
@@ -890,7 +890,7 @@ async fn css_carries_tools_footer_rules() {
             if depth == 0 {
                 if rule.contains("chat-message--tool-pending")
                     && rule.contains(":not(.chat-message__tools-summary)")
-                    && rule.contains(":not(.chat-tool-approval)")
+                    && rule.contains(":not(.chat-approval-card)")
                 {
                     tool_pending_rule_has_footer_exemption = true;
                     break;
@@ -903,7 +903,7 @@ async fn css_carries_tools_footer_rules() {
     }
     assert!(
         tool_pending_rule_has_footer_exemption,
-        "style.css hides every non-tool child of `.chat-message--tool-pending`; the new tools footer (`.chat-message__tools-summary`) and the approval card (`.chat-tool-approval`) are not in the `:not(...)` exemption list and become invisible while a tool is in flight — the user can't see what the LLM is doing."
+        "style.css hides every non-tool child of `.chat-message--tool-pending`; the new tools footer (`.chat-message__tools-summary`) and the approval card (`.chat-approval-card`) are not in the `:not(...)` exemption list and become invisible while a tool is in flight — the user can't see what the LLM is doing."
     );
 }
 
