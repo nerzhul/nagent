@@ -46,7 +46,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use nagent_agents::agents::email::{EmailImap, EmailSmtp};
+use nagent_agents::agents::email::EmailImap;
 use nagent_agents::egress::host_matches_allowlist;
 
 use crate::auth::error::AuthError;
