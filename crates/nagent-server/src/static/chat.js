@@ -3981,13 +3981,21 @@ async function refreshLocationOnBoot() {
 /// "Privacy & context" section. Used to be an `Advanced`-disclosure
 /// open + scroll; since the Settings tab rework, the location controls
 /// live under `#settings-privacy` (plan: settings-tab-rework), so the
-/// pill becomes a shortcut to that section. We dispatch a synthetic
-/// `modechange` so any listener that gates on Discussion-tab-only
-/// behaviour (e.g. the `AudioCapture` re-bind) tears down cleanly
-/// when the user jumps out of Discussion.
+/// pill becomes a shortcut to that section. After the llama.cpp-style
+/// settings shell landed, "Privacy" is its own rail button; we ask
+/// `__nagentMode.showSettingsSection` to activate it, then fall back
+/// to a button click + scroll for builds that still ship the old
+/// flat layout. The mode flip itself is the `mode-settings-btn`
+/// click so the rest of the UI still observes a real `modechange`
+/// event (chat.js listeners gate on it to tear down Discussion-mode
+/// resources).
 function openAdvancedForLocation() {
   const settingsBtn = document.getElementById("mode-settings-btn");
   if (settingsBtn) settingsBtn.click();
+  if (window.__nagentMode?.showSettingsSection) {
+    window.__nagentMode.showSettingsSection("privacy");
+    return;
+  }
   const privacy = document.getElementById("settings-privacy");
   if (privacy) privacy.scrollIntoView({ block: "start", behavior: "smooth" });
 }

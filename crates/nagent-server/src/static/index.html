@@ -540,6 +540,13 @@
       switch, or a fresh device login. The TTS sub-panel stays in the
       Discussion view's Advanced disclosure — it is chat-coupled and
       local-only by intent (see §4.4 above).
+
+      Layout follows llama.cpp's settings overlay: a fixed-width
+      left navigation rail (`.settings-nav`) listing the sections,
+      and a scrollable right pane (`.settings-pane`) that shows
+      only the active section. `mode.js` owns the sub-navigation
+      state so leaving and re-entering the Settings mode keeps the
+      last-visited section selected.
     -->
     <header class="settings-header">
       <h2>Settings</h2>
@@ -555,7 +562,70 @@
       </p>
     </header>
 
-    <section class="settings-section" id="settings-privacy" aria-labelledby="settings-privacy-title">
+    <div class="settings-shell">
+      <!--
+        Section navigation rail. Each button declares a
+        `data-section` matching the `data-section-page` attribute on
+        the corresponding `<section>` inside `.settings-pane`;
+        mode.js wires the toggle. The rail mirrors llama.cpp's
+        compact "icon + label" pattern.
+      -->
+      <nav class="settings-nav" id="settings-nav" role="tablist"
+           aria-label="Settings sections">
+        <button type="button" class="settings-nav-item" role="tab"
+                aria-selected="true" data-section="privacy"
+                id="settings-nav-privacy">
+          <svg class="settings-nav-icon" viewBox="0 0 24 24"
+               width="18" height="18" aria-hidden="true">
+            <path fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round"
+                  d="M12 3l8 3.5v5c0 4.4-3.4 8.4-8 9.5-4.6-1.1-8-5.1-8-9.5v-5L12 3z"/>
+            <rect x="9" y="11" width="6" height="5" rx="1"
+                  fill="currentColor"/>
+          </svg>
+          <span>Privacy</span>
+        </button>
+        <button type="button" class="settings-nav-item" role="tab"
+                aria-selected="false" data-section="llm"
+                id="settings-nav-llm">
+          <svg class="settings-nav-icon" viewBox="0 0 24 24"
+               width="18" height="18" aria-hidden="true">
+            <path fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round"
+                  d="M4 7h10M4 17h10M18 7l2 0M18 17l2 0"/>
+            <circle cx="17" cy="7"  r="1.6" fill="currentColor"/>
+            <circle cx="17" cy="17" r="1.6" fill="currentColor"/>
+          </svg>
+          <span>LLM</span>
+        </button>
+        <button type="button" class="settings-nav-item" role="tab"
+                aria-selected="false" data-section="integrations"
+                id="settings-nav-integrations">
+          <svg class="settings-nav-icon" viewBox="0 0 24 24"
+               width="18" height="18" aria-hidden="true">
+            <path fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round"
+                  d="M9.5 14.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/>
+            <path fill="none" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round" stroke-linejoin="round"
+                  d="M14.5 9.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/>
+          </svg>
+          <span>Integrations</span>
+        </button>
+      </nav>
+
+      <div class="settings-pane" id="settings-pane" role="tabpanel">
+        <!--
+          Each `<section class="settings-section">` is one page in
+          the right pane. `data-section-page` mirrors the
+          `data-section` on the rail button that activates it. mode.js
+          toggles `[hidden]` based on the active section. Inner
+          control IDs (`chat-system`, `chat-temperature`, etc.) are
+          preserved unchanged so the chat.js request-build code and
+          the per-row hydration handlers keep working without edits.
+        -->
+
+    <section class="settings-section" id="settings-privacy" data-section-page="privacy" aria-labelledby="settings-privacy-title">
       <h3 id="settings-privacy-title" class="settings-section-title">
         Privacy &amp; context
       </h3>
@@ -648,7 +718,7 @@
       </div>
     </section>
 
-    <section class="settings-section" id="settings-llm" aria-labelledby="settings-llm-title">
+    <section class="settings-section" id="settings-llm" data-section-page="llm" hidden aria-labelledby="settings-llm-title">
       <h3 id="settings-llm-title" class="settings-section-title">
         LLM
       </h3>
@@ -714,7 +784,7 @@
       drawer copy, so anonymous users see nothing and never a
       confusing "0 configured" placeholder.
     -->
-    <section class="settings-section" id="settings-integrations"
+    <section class="settings-section" id="settings-integrations" data-section-page="integrations" hidden
              aria-labelledby="settings-integrations-title">
       <h3 id="settings-integrations-title" class="settings-section-title">
         Integrations
@@ -732,6 +802,8 @@
         </li>
       </ul>
     </section>
+      </div>
+    </div>
   </main>
 
   <!-- Mode toggle is a plain script (no imports) so it can run as a

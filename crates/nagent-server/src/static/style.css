@@ -4040,10 +4040,11 @@ kbd {
 /* ---- Settings tab ------------------------------------------------------
  *
  * Top-level view reachable via the gear-icon tab in `#mode-toggle`.
- * Two sections: "Privacy & context" (DB-backed opt-ins) and "LLM"
- * (additional instructions + temperature). Section dividers reuse
- * the `--border` variable already used by `.chat-advanced` /
- * `.chat-location-advanced` so the visual rhythm stays consistent.
+ * llama.cpp-style 2-column layout (plan: settings-shell-rework):
+ * a fixed-width left navigation rail (`#settings-nav`) listing the
+ * sections, and a scrollable right pane (`#settings-pane`) that
+ * shows only the active `.settings-section`. mode.js wires the
+ * sub-nav state via `data-section` ↔ `data-section-page`.
  */
 .settings-header {
   margin: 0.25rem 0 1rem;
@@ -4053,13 +4054,108 @@ kbd {
   margin: 0 0 0.5rem;
 }
 
-.settings-section {
-  padding: 1rem 0;
-  border-bottom: 1px solid var(--border);
+/* 2-column shell: rail on the left, pane on the right. On narrow
+ * viewports the rail collapses to icons-only (kept above the pane
+ * via `flex-wrap`). Min-height guarantees the shell fills the
+ * viewport below the header so the pane becomes the scroll region
+ * instead of the whole page jumping on section switch. */
+.settings-shell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+  min-height: calc(100vh - 8rem);
 }
 
-.settings-section:last-of-type {
-  border-bottom: none;
+/* Left rail. Mirrors llama.cpp's compact "icon + label" tabs:
+ * muted text, subtle hover background, accent stripe on the active
+ * item. Width fits the longest label ("Integrations") with padding
+ * so the rail does not resize as labels load. */
+.settings-nav {
+  flex: 0 0 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  position: sticky;
+  top: 1rem;
+}
+
+.settings-nav-item {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-mute);
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 0.88rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease,
+              border-color 120ms ease;
+}
+
+.settings-nav-icon {
+  flex: 0 0 auto;
+  color: currentColor;
+  opacity: 0.85;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.settings-nav-item[aria-selected="true"] {
+  background: var(--accent);
+  color: #0b0d10;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.settings-nav-item[aria-selected="true"]:hover {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+.settings-nav-item[aria-selected="true"] .settings-nav-icon {
+  opacity: 1;
+}
+
+/* Right pane. `min-width: 0` lets flex children shrink below their
+ * intrinsic content width (otherwise long textareas force the pane
+ * to overflow). The pane itself is the scroll region on tall
+ * layouts; the rail stays sticky. */
+.settings-pane {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Each `.settings-section` is one paged view inside `.settings-pane`.
+ * Sections are full-width cards with the same surface as the chat
+ * sidebar so the layout reads as "nav rail + content card". The
+ * original `border-bottom` dividers are gone — sections no longer
+ * stack, so dividers were visually noisy. Inner dividers between
+ * rows (`.settings-row`) keep their own top borders for rhythm. */
+.settings-section {
+  padding: 1rem 1.25rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.settings-section[hidden] {
+  display: none;
 }
 
 /* Section heading + help line. Title mirrors the `.chat-tts-settings-title`
@@ -4112,6 +4208,30 @@ kbd {
  */
 #settings-llm-reset {
   margin-top: 1rem;
+}
+
+/* Narrow viewports: rail goes horizontal and full-width above the
+ * pane. Sticky positioning is dropped so the rail does not leave
+ * a phantom gap above the pane on short screens. The compact
+ * layout also trims the icon-only fallback to keep the rail from
+ * wrapping on small phones. */
+@media (max-width: 720px) {
+  .settings-shell {
+    flex-direction: column;
+    min-height: 0;
+  }
+  .settings-nav {
+    flex: 0 0 auto;
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    position: static;
+  }
+  .settings-nav-item {
+    flex: 1 1 auto;
+    justify-content: center;
+    padding: 0.4rem 0.5rem;
+  }
 }
 
 /* =====================================================================

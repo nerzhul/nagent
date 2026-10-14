@@ -7,6 +7,13 @@
 // pair lookups; `applyMode` still flips the three DOM nodes
 // by-id without any per-mode branching.
 //
+// The Settings view itself is a 2-column shell (llama.cpp style)
+// with a left rail of section tabs and a right pane that shows one
+// section at a time. `applySettingsSection` owns that sub-nav;
+// the active section is persisted in `localStorage` so leaving
+// and re-entering the Settings tab lands the user on the same
+// section.
+//
 // `modechange` is dispatched on `document` whenever the active
 // mode flips; `chat.js` listens for it to lazy-load the model
 // list / hydrate history on first entry to Discussion mode.
@@ -27,6 +34,14 @@
     settings:   { btn: "mode-settings-btn",   view: "view-settings"   },
   };
 
+  // Settings sub-navigation: rail-button ↔ pane-page mapping. Mirrors
+  // `data-section` on `.settings-nav-item` and `data-section-page`
+  // on `.settings-section` in `index.html`. Section change is a
+  // pure DOM toggle (one `aria-selected="true"`, one pane unhidden)
+  // — no `<details>` collapses or scroll bookkeeping involved.
+  const SECTION_DEFAULT = "privacy";
+  const SECTION_STORAGE_KEY = "nagent.settings.section";
+
   function readStoredMode() {
     try {
       const v = localStorage.getItem(STORAGE_KEY);
@@ -45,6 +60,52 @@
       // Same as above: ignore quota / availability errors. The in-page
       // toggle still works, only persistence is lost.
     }
+  }
+
+  function readStoredSection() {
+    try {
+      const v = localStorage.getItem(SECTION_STORAGE_KEY);
+      if (v) return v;
+    } catch (_e) { /* same fallback rationale as readStoredMode */ }
+    return SECTION_DEFAULT;
+  }
+
+  function writeStoredSection(section) {
+    try {
+      localStorage.setItem(SECTION_STORAGE_KEY, section);
+    } catch (_e) { /* same fallback rationale as writeStoredMode */ }
+  }
+
+  // Show the requested section in the right pane and mark the
+  // matching rail button as selected. Unknown section ids fall back
+  // to `SECTION_DEFAULT` so a stale localStorage value from an older
+  // build cannot strand the user on an empty pane.
+  function applySettingsSection(section, { dispatch = true } = {}) {
+    const target = document.querySelector(
+      `.settings-section[data-section-page="${section}"]`,
+    ) ? section : SECTION_DEFAULT;
+
+    for (const btn of document.querySelectorAll(".settings-nav-item")) {
+      const isActive = btn.dataset.section === target;
+      btn.setAttribute("aria-selected", String(isActive));
+    }
+    for (const pane of document.querySelectorAll(".settings-section")) {
+      pane.hidden = pane.dataset.sectionPage !== target;
+    }
+    if (dispatch) {
+      document.dispatchEvent(
+        new CustomEvent("settingssectionchange", {
+          detail: { section: target },
+        }),
+      );
+    }
+  }
+
+  function activeSettingsSection() {
+    const btn = document.querySelector(
+      '.settings-nav-item[aria-selected="true"]',
+    );
+    return btn ? btn.dataset.section : SECTION_DEFAULT;
   }
 
   function applyMode(mode, { dispatch = true } = {}) {
@@ -89,10 +150,24 @@
   // (no flash of the wrong tab being selected).
   const initial = readStoredMode();
   applyMode(initial, { dispatch: false });
+  applySettingsSection(readStoredSection(), { dispatch: false });
 
   for (const [mode, pair] of Object.entries(PAIRS)) {
     const btn = document.getElementById(pair.btn);
     if (btn) btn.addEventListener("click", onClick(mode));
+  }
+
+  // Settings sub-nav: clicking a rail button persists the new
+  // section and dispatches `settingssectionchange` for any
+  // subscriber that wants to react (e.g. re-hydrating the
+  // Integrations list once it becomes visible).
+  for (const btn of document.querySelectorAll(".settings-nav-item")) {
+    const section = btn.dataset.section;
+    if (!section) continue;
+    btn.addEventListener("click", () => {
+      writeStoredSection(section);
+      applySettingsSection(section);
+    });
   }
 
   // Export a tiny read-only handle for chat.js to detect re-entries
@@ -100,5 +175,10 @@
   // useful in tests / debugging).
   globalThis.__nagentMode = {
     current: () => activeMode(),
+    settingsSection: () => activeSettingsSection(),
+    showSettingsSection: (section) => {
+      writeStoredSection(section);
+      applySettingsSection(section);
+    },
   };
 })();
