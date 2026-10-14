@@ -23,6 +23,16 @@
 import { AudioCapture } from "/static/audio.js";
 import { preselectFromBrowser } from "/static/lang-preselect.js";
 
+// `build.rs` substitutes the literal string in the assignment below
+// with the 16-char frontend hash computed at compile time. The
+// placeholder is intentionally long and unique so it cannot collide
+// with any other identifier or string in this file (the substitution
+// is a global string replace). The constant is stable for the
+// lifetime of the loaded bundle; a reload that picks up a new build
+// picks up a new value. See `maybeShowUpdateBanner` for the
+// comparison logic.
+const __nagentSelfFrontendVersion = "02c1ecf7f953215c";
+
 // ---- DOM --------------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
@@ -299,10 +309,22 @@ if (authPillLogoutBtn) {
 
 // ---- Version drift detection ------------------------------------------------
 
-const VERSION_POLL_MS = 30_000;
+// Drift-check poll cadence. 5 minutes is frequent enough that a
+// half-day session catches a server rebuild within a few minutes of
+// landing on the dashboard, while keeping the background chatter
+// against `/api/version` low enough to be invisible in production
+// logs. Tighten this only if a use case (e.g. backgrounded dev tab
+// that needs an immediate prompt) demands it.
+const VERSION_POLL_MS = 5 * 60 * 1000;
 let versionPollId = 0;
 
 async function fetchSelfVersion() {
+  // The header display always reflects the latest version on disk
+  // (the `Cache-Control: no-cache` fetch guarantees it). This is
+  // purely cosmetic -- the drift check below uses the baked-in
+  // `__nagentSelfFrontendVersion` constant, which is stable for the
+  // lifetime of the loaded bundle. See `maybeShowUpdateBanner` for
+  // why the two paths are deliberately separated.
   try {
     const r = await fetch("/static/version.txt", { cache: "no-store" });
     if (!r.ok) throw new Error(`status ${r.status}`);
@@ -329,13 +351,26 @@ async function fetchServerVersion() {
   }
 }
 
+// Show the "new version available, please reload" banner when the
+// hash baked into the loaded bundle no longer matches the hash the
+// server is currently advertising.
+//
+// We deliberately do NOT compare against the `/static/version.txt`
+// fetch stored in `frontendVersionSelf.textContent`, because both
+// that value and `/api/version`'s `frontend` field come from the
+// same on-disk file and are therefore always equal -- which made the
+// previous version of this check tautological and the prompt never
+// fired. The baked-in `__nagentSelfFrontendVersion`, by contrast, is
+// frozen for the lifetime of the bundle and only updates on reload,
+// so it lets a stale tab detect that the server has been rebuilt
+// under it.
 function maybeShowUpdateBanner(serverFrontend) {
-  if (!frontendVersionSelf || !frontendVersionSelf.textContent) return;
-  if (frontendVersionSelf.textContent === serverFrontend) {
+  if (typeof serverFrontend !== "string" || !serverFrontend) return;
+  if (__nagentSelfFrontendVersion === serverFrontend) {
     updateBanner?.setAttribute("hidden", "");
-    return;
+  } else {
+    updateBanner?.removeAttribute("hidden");
   }
-  updateBanner?.removeAttribute("hidden");
 }
 
 if (updateBannerReload) {
