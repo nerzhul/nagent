@@ -474,7 +474,6 @@ mod tests {
         // pulling in env / TOML parsing.
         Config {
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-            whisper_model_path: std::path::PathBuf::from("/tmp/fake.bin"),
             max_queue: 32,
             inference_workers: None,
             session_idle_timeout: std::time::Duration::from_secs(30),
@@ -484,6 +483,14 @@ mod tests {
             trusted_proxies: crate::config::TrustedProxiesConfig::default(),
             llm: crate::config::LlmConfig::default(),
             agents: crate::config::AgentConfig::default(),
+            stt: crate::config::SttConfig {
+                // The Origin/Host tests don't dial the
+                // WebSocket; the path just needs to be set so
+                // `SttConfig::from_env_with_toml` doesn't
+                // trip. Inert otherwise.
+                whisper_model_path: std::path::PathBuf::from("/tmp/fake.bin"),
+                ..crate::config::SttConfig::default()
+            },
             tts: crate::config::TtsConfig::default(),
             auth: crate::config::AuthConfig::default(),
             documents: crate::config::DocumentsConfig::default(),

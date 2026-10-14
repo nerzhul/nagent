@@ -176,42 +176,67 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     };
 
     // ---- Backend ---------------------------------------------------------
-    let backend: Arc<dyn WhisperBackend> = build_backend(&cfg).await?;
-    let backend_info = backend.info();
-    info!(
-        backend = %backend_info.name,
-        model = %backend_info.model_id,
-        size_bytes = backend_info.model_size_bytes,
-        recommended_workers = backend_info.recommended_workers,
-        "backend ready"
-    );
+    //
+    // Built only when `[stt].enabled = true` (the default). When
+    // disabled, the whole pipeline — backend load, worker pool,
+    // session map, result router, watchdog, the `/ws` upgrade
+    // route — is skipped. The frontend reads `stt: false` from
+    // `/api/features` and hides every STT control.
+    if !cfg.stt.enabled {
+        info!("STT pipeline disabled (set STT_ENABLED=true to enable)");
+    }
+    let stt = if cfg.stt.enabled {
+        let backend: Arc<dyn WhisperBackend> = build_backend(&cfg).await?;
+        let backend_info = backend.info();
+        info!(
+            backend = %backend_info.name,
+            model = %backend_info.model_id,
+            size_bytes = backend_info.model_size_bytes,
+            recommended_workers = backend_info.recommended_workers,
+            "backend ready"
+        );
 
-    // ---- Worker pool sizing ----------------------------------------------
-    let worker_count = cfg
-        .inference_workers
-        .unwrap_or_else(|| default_worker_count(&backend_info))
-        .max(1);
-    info!(
-        inference_workers = worker_count,
-        "worker pool sizing decided"
-    );
+        // ---- Worker pool sizing ------------------------------------------
+        let worker_count = cfg
+            .inference_workers
+            .unwrap_or_else(|| default_worker_count(&backend_info))
+            .max(1);
+        info!(
+            inference_workers = worker_count,
+            "worker pool sizing decided"
+        );
 
-    let sessions: session::SessionMap = Arc::new(dashmap::DashMap::new());
-    let backend_for_pool = Arc::clone(&backend);
-    let pool = WorkerPool::spawn(worker_count, move || Arc::clone(&backend_for_pool));
-    let job_tx = pool.dispatch();
+        let sessions: session::SessionMap = Arc::new(dashmap::DashMap::new());
+        let backend_for_pool = Arc::clone(&backend);
+        let pool = WorkerPool::spawn(worker_count, move || Arc::clone(&backend_for_pool));
+        let job_tx = pool.dispatch();
 
-    let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(cfg.max_queue);
-    let _router_shutdown = result_router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
+        let (_resp_tx, resp_rx) = mpsc::channel::<stt_core::InferResponse>(cfg.max_queue);
+        let _router_shutdown = result_router::ResultRouter::spawn(Arc::clone(&sessions), resp_rx);
 
-    let watchdog_sessions = Arc::clone(&sessions);
-    let watchdog_timeout = cfg.session_idle_timeout;
-    tokio::spawn(async move {
-        watchdog::run(watchdog_sessions, watchdog_timeout).await;
-    });
+        let watchdog_sessions = Arc::clone(&sessions);
+        let watchdog_timeout = cfg.session_idle_timeout;
+        tokio::spawn(async move {
+            watchdog::run(watchdog_sessions, watchdog_timeout).await;
+        });
+
+        let (stt_rate_limiter, _) = build_rate_limiters(&cfg);
+        Some(SttState {
+            backend,
+            sessions: Arc::clone(&sessions),
+            job_tx,
+            ready: Arc::new(AtomicBool::new(true)),
+            rate_limiter: stt_rate_limiter,
+            ws_concurrency: crate::stt::ws_concurrency::WsConcurrency::new(
+                cfg.limits.ws_max_concurrent,
+                cfg.limits.ws_max_per_ip,
+            ),
+        })
+    } else {
+        None
+    };
 
     // ---- HTTP router prep ------------------------------------------------
-    let ready = Arc::new(AtomicBool::new(true));
     if !cfg.bind_addr.ip().is_loopback() && cfg.trusted_proxies.cidrs.is_empty() {
         warn!(
             bind_addr = %cfg.bind_addr,
@@ -267,9 +292,9 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         info!("LLM proxy disabled (set LLM_ENABLED=true to enable)");
         None
     };
-    // STT rate limiter (the LLM one was already used above if the
-    // proxy is enabled, or discarded otherwise).
-    let (stt_rate_limiter, _) = build_rate_limiters(&cfg);
+    // The STT rate limiter is built inside the `cfg.stt.enabled`
+    // block above. The LLM one is built (and consumed) inside the
+    // `cfg.llm.enabled` block. No top-level wiring needed here.
 
     // ---- Per-user credentials resolver ----------------------------------
     //
@@ -502,18 +527,8 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         }
     }
 
-    // ---- SttState -------------------------------------------------------
-    let stt = SttState {
-        backend,
-        sessions: Arc::clone(&sessions),
-        job_tx,
-        ready,
-        rate_limiter: stt_rate_limiter,
-        ws_concurrency: crate::stt::ws_concurrency::WsConcurrency::new(
-            cfg.limits.ws_max_concurrent,
-            cfg.limits.ws_max_per_ip,
-        ),
-    };
+    // ---- SttState is built above (inside the `cfg.stt.enabled`
+    //      block) and threaded straight into `AppState` below.
 
     Ok(Arc::new(AppState {
         stt,
@@ -536,13 +551,15 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
 async fn build_backend(cfg: &Config) -> anyhow::Result<Arc<dyn WhisperBackend>> {
     #[cfg(feature = "real-backend")]
     {
-        let backend = stt_core::whisper_backend::WhisperRsBackend::load(&cfg.whisper_model_path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let backend =
+            stt_core::whisper_backend::WhisperRsBackend::load(&cfg.stt.whisper_model_path)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Arc::new(backend))
     }
     #[cfg(not(feature = "real-backend"))]
     {
         let model_id = cfg
+            .stt
             .whisper_model_path
             .file_name()
             .and_then(|s| s.to_str())

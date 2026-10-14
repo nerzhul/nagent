@@ -25,6 +25,8 @@
 # Server knob — same shape as the main example. Tune to taste.
 [server]
 bind_addr = "127.0.0.1:8080"
+
+[stt]
 whisper_model_path = "/models/ggml-base.bin"
 
 # ---- Authentication ----

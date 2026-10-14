@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! AppState
-//! ├── stt:          SttState       (always Some)
+//! ├── stt:          Option<SttState>    (None when `[stt].enabled = false`)
 //! ├── llm:          Option<LlmState>
 //! ├── agents:       Option<AgentRegistry>
 //! ├── auth:         Option<AuthState>
@@ -50,8 +50,10 @@ use nagent_agents::ToolsRouter;
 #[cfg(feature = "x-agent")]
 use crate::oauth::x::XOAuthState;
 
-/// STT pipeline sub-state. Always present (the WebSocket
-/// `/ws` route is registered unconditionally).
+/// STT pipeline sub-state. `Some` when `[stt].enabled = true`
+/// (the default). When `None` the `/ws` WebSocket upgrade
+/// route is not registered and the frontend hides every STT
+/// control on `/api/features` reporting `stt: false`.
 #[derive(Clone)]
 pub struct SttState {
     pub backend: Arc<dyn WhisperBackend>,
@@ -255,7 +257,7 @@ impl std::fmt::Debug for TtsState {
 /// decide which routes to mount.
 #[derive(Clone)]
 pub struct AppState {
-    pub stt: SttState,
+    pub stt: Option<SttState>,
     pub llm: Option<LlmState>,
     pub agents: Option<agents::AgentRegistry>,
     pub auth: Option<AuthState>,
@@ -329,7 +331,9 @@ impl AppState {
 
 impl FromRef<Arc<AppState>> for SttState {
     fn from_ref(state: &Arc<AppState>) -> Self {
-        state.stt.clone()
+        state.stt.clone().expect(
+            "SttState handler reached without an SttState on AppState (check [stt].enabled)",
+        )
     }
 }
 
@@ -421,6 +425,12 @@ impl FromRef<Arc<AppState>> for agents::AgentRegistryNewtype {
 /// Bundles the two sub-states the WS task needs so the handler
 /// signature has a single `State<…>` extractor (axum 0.7 infers
 /// the router's state type from the first `State<T>` it sees).
+///
+/// The `/ws` route is only mounted when `state.stt.is_some()`; this
+/// `FromRef` impl therefore panics with a clear message if it is
+/// ever invoked without an `SttState` on `AppState` — a programmer
+/// error in `http::build_router` (a future contributor wiring the
+/// route up unconditionally).
 pub struct SttWithConfig {
     pub stt: Arc<SttState>,
     pub config: Arc<Config>,
@@ -447,7 +457,11 @@ impl std::fmt::Debug for SttWithConfig {
 impl FromRef<Arc<AppState>> for SttWithConfig {
     fn from_ref(state: &Arc<AppState>) -> Self {
         Self {
-            stt: Arc::new(state.stt.clone()),
+            stt: Arc::new(
+                state.stt.clone().expect(
+                    "ws route reached without an SttState on AppState (check [stt].enabled)",
+                ),
+            ),
             config: Arc::clone(&state.config),
         }
     }

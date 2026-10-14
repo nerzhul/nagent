@@ -74,6 +74,19 @@ class. `app.js` (Transcript) and `chat.js` (Discussion) each instantiate
 their own `AudioCapture` against their own DOM, sharing only the
 underlying Silero VAD.
 
+When the server reports `features.stt = false` (i.e. it was booted
+with `STT_ENABLED=false` or `[stt].enabled = false`), the
+`applyFeatureGates()` function in `chat.js` hides every STT
+control up-front: the Transcript Record button, language picker,
+translate-to-EN and auto-stop checkboxes, the transcript voice
+oscilloscope, the Discussion mic button, language picker,
+translate-to-EN, backend chip, inline voice oscilloscope, and the
+parent `.chat-audio` and `#view-transcript > .controls` sections.
+The body gets a `stt-disabled` class as defence-in-depth. The
+`Ctrl+Shift+R` (Transcript, in `shortcuts.js`) and `Ctrl+Shift+D`
+(Discussion, in `chat.js`) keyboard shortcuts are gated the same
+way and become no-ops.
+
 Pipeline:
 
 ```
@@ -199,8 +212,13 @@ fronted by a chat sidebar and a chat-main area.
   from the browser locale on first load.
 - `#chat-translate-check`: same semantics as the Transcript checkbox.
 - `#chat-tts-check` / `#chat-tts-label` (hidden when the server reports
-  TTS disabled at boot): toggles read-aloud. Created lazily from a
-  user gesture to satisfy the browser's autoplay policy.
+  TTS disabled at boot — `features.tts = false`): toggles read-aloud.
+  Created lazily from a user gesture to satisfy the browser's
+  autoplay policy. The `applyFeatureGates()` function in
+  `chat.js` keeps the label and the `#chat-tts-settings` drawer
+  hidden when the runtime flag is off, so an operator who started
+  the server with `TTS_ENABLED=false` never sees a "Read aloud"
+  surface at all.
 - `#chat-record-btn`: SVG mic/stop icons. Title says
   `Start voice recording (Ctrl+Shift+D)`.
 - `#chat-backend-info`: backend info chip.
@@ -520,16 +538,21 @@ with a tool that has no widget renderer has no widget inset, and so on.
     mid-stream, `chat-message--streaming` hides its
     `.chat-message-replay` button via `display: none`. The class is
     added at `streamReply` start and removed in its `finally`.
-  - **JS** (chat.js:2331-2336, `refreshReplayButtonVisibility`):
+  - **JS** (chat.js, `refreshReplayButtonVisibility`):
     on every state change the function walks every assistant
-    bubble and toggles `btn.hidden` purely from
-    `window.__ttsAvailable` — it does **not** look at streaming,
-    tool-pending, or weather-replaced state. Tool-pending bubbles
-    hide the button structurally (no `.chat-message-replay` is
-    attached to the placeholder), not via class.
-  - Net effect: the button is hidden only when Piper is unavailable
-    on the server (`__ttsAvailable === false`) or while the current
-    bubble is actively streaming.
+    bubble and toggles `btn.hidden` from BOTH the runtime
+    `feature("tts")` flag and the live `__ttsAvailable` probe —
+    it does **not** look at streaming, tool-pending, or
+    weather-replaced state. Tool-pending bubbles hide the button
+    structurally (no `.chat-message-replay` is attached to the
+    placeholder), not via class.
+  - Net effect: the button is hidden when Piper is unavailable on
+    the server (`__ttsAvailable === false` OR
+    `feature("tts") === false`) or while the current bubble is
+    actively streaming. The runtime `tts` flag is the
+    authoritative source — when the server was started with
+    `TTS_ENABLED=false` the probe is guaranteed to fail and every
+    replay button is hidden up-front.
 - **Click semantics** (chat.js:2354-2399, `replayMessage`):
   - Idle → speak the full sanitised bubble text in one HTTP
     round-trip (no per-sentence streaming).

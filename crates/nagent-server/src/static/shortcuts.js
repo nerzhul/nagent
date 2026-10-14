@@ -145,11 +145,18 @@
     // the browser's reload gesture stays usable from the chat
     // textarea (where `Cmd+R` would otherwise trigger a
     // Transcript-mode capture from inside a Discussion session).
+    //
+    // We also gate on `feature("stt")` so the shortcut is a
+    // no-op when the server was started with
+    // `STT_ENABLED=false` — the Record button is hidden in that
+    // case and clicking it (programmatically or otherwise) would
+    // only fail at the WebSocket layer.
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey
         && (e.key === "R" || e.key === "r")
         && !isTypingTarget(e.target)) {
       const current = globalThis.__nagentMode?.current?.();
       if (current !== "transcript") return;
+      if (globalThis.__nagentFeature && !globalThis.__nagentFeature("stt")) return;
       e.preventDefault();
       recordBtn?.click();
       return;

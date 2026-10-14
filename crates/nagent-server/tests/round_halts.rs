@@ -108,7 +108,6 @@ impl Agent for IdempotentStubAgent {
 fn make_server_cfg(upstream_url: String) -> nagent_server::Config {
     nagent_server::Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
         inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
@@ -136,6 +135,10 @@ fn make_server_cfg(upstream_url: String) -> nagent_server::Config {
             ollama_num_ctx: None,
         },
         agents: AgentConfig::default(),
+        stt: nagent_server::config::SttConfig {
+            whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
+            ..nagent_server::config::SttConfig::default()
+        },
         tts: nagent_server::config::TtsConfig::default(),
         auth: nagent_server::config::AuthConfig::default(),
         documents: nagent_server::config::DocumentsConfig::default(),

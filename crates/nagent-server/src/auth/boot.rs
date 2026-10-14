@@ -334,7 +334,6 @@ mod tests {
         // Force a fresh DB by removing any prior copy.
         let _ = std::fs::remove_file(&path);
         Config {
-            whisper_model_path: PathBuf::from("/tmp/m.bin"),
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             max_queue: 1,
             inference_workers: Some(1),
@@ -345,6 +344,10 @@ mod tests {
             trusted_proxies: Default::default(),
             llm: Default::default(),
             agents: Default::default(),
+            stt: crate::config::SttConfig {
+                whisper_model_path: PathBuf::from("/tmp/m.bin"),
+                ..Default::default()
+            },
             tts: Default::default(),
             allowed_origins: Default::default(),
             x_oauth: Default::default(),

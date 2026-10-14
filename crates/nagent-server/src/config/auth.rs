@@ -672,7 +672,7 @@ mod tests {
     fn minimal_auth_toml() -> TomlConfig {
         toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
 
                 [auth]
@@ -819,7 +819,7 @@ mod tests {
     fn auth_enabled_without_backends_is_rejected() {
         let toml: TomlConfig = toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
 
                 [auth]
@@ -843,7 +843,7 @@ mod tests {
     fn auth_enabled_without_db_backend_is_rejected() {
         let toml: TomlConfig = toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
 
                 [auth]
@@ -869,7 +869,7 @@ mod tests {
     fn auth_oidc_enabled_without_issuer_is_rejected() {
         let toml: TomlConfig = toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
 
                 [auth]
@@ -902,7 +902,7 @@ mod tests {
     fn auth_passkey_enabled_without_rp_id_is_rejected() {
         let toml: TomlConfig = toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
 
                 [auth]
@@ -939,7 +939,7 @@ mod tests {
         // required knob (which is unrelated to the test).
         let toml: TomlConfig = toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
             "#,
         )

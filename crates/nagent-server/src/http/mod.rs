@@ -118,8 +118,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // (which already returns `Router<Arc<AppState>>`) so axum
     // infers the state type from that branch's signature rather
     // than from the first `State<T>` extractor on a fresh `Router`.
-    let mut protected: Router<Arc<AppState>> =
-        mount_features(state.clone()).route("/ws", get(crate::stt::ws_handler::ws_upgrade));
+    let mut protected: Router<Arc<AppState>> = mount_features(state.clone());
+
+    // The WebSocket `/ws` STT upgrade is only mounted when the
+    // STT subsystem is wired. The operator can flip the runtime
+    // switch via `[stt].enabled = false` or `STT_ENABLED=false`;
+    // the frontend then reads `stt: false` from `/api/features`
+    // and hides every STT control. When STT is off the route is
+    // simply not registered (the URL 404s) — there is no
+    // 503-fallback handler because every consumer is expected to
+    // gate on the feature flag.
+    if state.stt.is_some() {
+        protected = protected.route("/ws", get(crate::stt::ws_handler::ws_upgrade));
+    }
 
     if state.agents.is_some() {
         protected = protected.merge(mount_agents(state.clone()));

@@ -36,7 +36,11 @@ use uuid::Uuid;
 /// isolation invariants.
 async fn start_test_server() -> (String, SessionMap) {
     let state = app_state().build();
-    let sessions: SessionMap = Arc::clone(&state.stt.sessions);
+    // `state.stt` is `Option<SttState>` since the runtime
+    // `STT_ENABLED` flag was introduced. The test builder wires
+    // it by default, so the unwrap is safe here.
+    let sessions: SessionMap =
+        Arc::clone(&state.stt.as_ref().expect("stt wired by builder").sessions);
 
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

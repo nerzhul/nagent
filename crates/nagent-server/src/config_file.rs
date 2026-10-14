@@ -25,7 +25,6 @@
 //! ```toml
 //! [server]
 //! bind_addr = "0.0.0.0:8080"
-//! whisper_model_path = "/models/ggml-base.bin"
 //! max_queue = 32
 //! session_idle_timeout_ms = 30_000
 //! infer_timeout_ms = 30_000
@@ -59,6 +58,16 @@
 //! [agents]
 //! enabled = true
 //! llm_max_tool_rounds = 4
+//!
+//! # WebSocket STT pipeline. The heavy STT knobs (model path,
+//! # queue size, idle timeout, …) used to live under `[server]`
+//! # but they belong to the same subsystem as the runtime
+//! # `enabled` master switch, so they now share the `[stt]`
+//! # section. `whisper_model_path` is required when
+//! # `enabled = true` (env: `WHISPER_MODEL_PATH`).
+//! [stt]
+//! enabled = true
+//! whisper_model_path = "/models/ggml-base.bin"
 //!
 //! [agents.web_fetch]
 //! allow_public = false
@@ -149,6 +158,12 @@ pub struct TomlConfig {
     /// sub-table per tool (`[agents.web_fetch]`, `[agents.get_weather]`).
     #[serde(default)]
     pub agents: Option<TomlAgentConfig>,
+    /// WebSocket STT pipeline master switch. The heavy STT knobs
+    /// (model path, queue size, idle timeout, …) keep living under
+    /// `[server]`; this section only carries the runtime `enabled`
+    /// flag mirrored by `STT_ENABLED`. See [`crate::config::SttConfig`].
+    #[serde(default)]
+    pub stt: Option<TomlSttConfig>,
     /// Local Piper TTS engine knobs. See [`crate::config::TtsConfig`].
     #[serde(default)]
     pub tts: Option<TomlTtsConfig>,
@@ -177,14 +192,16 @@ pub struct TomlConfig {
 
 /// Server-side knobs grouped under `[server]`.
 ///
-/// Includes the bind address, model path, queue sizes, timeouts, and
-/// the two nested sub-tables for inbound WS frame limits
-/// (`[server.limits]`) and per-IP rate limits (`[server.rate_limits]`).
+/// Includes the bind address, queue sizes, timeouts, and the two
+/// nested sub-tables for inbound WS frame limits
+/// (`[server.limits]`) and per-IP rate limits
+/// (`[server.rate_limits]`). The STT-specific knobs
+/// (`whisper_model_path`, …) live under `[stt]` since they belong
+/// to the same subsystem as the runtime `enabled` master switch.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TomlServerConfig {
     pub bind_addr: Option<String>,
-    pub whisper_model_path: Option<String>,
     pub max_queue: Option<usize>,
     pub session_idle_timeout_ms: Option<u64>,
     pub infer_timeout_ms: Option<u64>,
@@ -577,6 +594,24 @@ pub struct TomlTrustedProxiesConfig {
     pub loopback_bypass: Option<bool>,
 }
 
+/// WebSocket STT pipeline knobs. Mirrors
+/// [`crate::config::SttConfig`]. The runtime master switch
+/// (`enabled`, mirrored by `STT_ENABLED`) sits here, alongside
+/// the Whisper model path (mirrored by `WHISPER_MODEL_PATH` for
+/// back-compat with deployments that pre-date the `[stt]`
+/// section). When `enabled = false` the model path is ignored;
+/// when `true` it is required. Always parsed so a build that
+/// drops the STT feature still surfaces typos at boot.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlSttConfig {
+    pub enabled: Option<bool>,
+    /// Path to the ggml-format whisper model. Mirrors the
+    /// `WHISPER_MODEL_PATH` env var. Required when
+    /// `enabled = true`; ignored otherwise.
+    pub whisper_model_path: Option<String>,
+}
+
 /// Piper TTS engine knobs. Mirrors [`crate::config::TtsConfig`].
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -796,6 +831,7 @@ pub fn merge_toml_configs(earlier: &TomlConfig, later: &TomlConfig) -> TomlConfi
         server: merge_toml_server(earlier.server.as_ref(), later.server.as_ref()),
         llm: merge_toml_llm(earlier.llm.as_ref(), later.llm.as_ref()),
         agents: merge_toml_agents(earlier.agents.as_ref(), later.agents.as_ref()),
+        stt: merge_toml_stt(earlier.stt.as_ref(), later.stt.as_ref()),
         tts: merge_toml_tts(earlier.tts.as_ref(), later.tts.as_ref()),
         auth: merge_toml_auth(earlier.auth.as_ref(), later.auth.as_ref()),
         documents: merge_toml_documents(earlier.documents.as_ref(), later.documents.as_ref()),
@@ -837,10 +873,6 @@ fn merge_toml_server(
         (None, Some(l)) => Some(l.clone()),
         (Some(e), Some(l)) => Some(TomlServerConfig {
             bind_addr: l.bind_addr.clone().or_else(|| e.bind_addr.clone()),
-            whisper_model_path: l
-                .whisper_model_path
-                .clone()
-                .or_else(|| e.whisper_model_path.clone()),
             max_queue: l.max_queue.or(e.max_queue),
             inference_workers: l.inference_workers.or(e.inference_workers),
             session_idle_timeout_ms: l.session_idle_timeout_ms.or(e.session_idle_timeout_ms),
@@ -1210,6 +1242,24 @@ fn merge_toml_x_oauth(
     }
 }
 
+fn merge_toml_stt(
+    earlier: Option<&TomlSttConfig>,
+    later: Option<&TomlSttConfig>,
+) -> Option<TomlSttConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlSttConfig {
+            enabled: l.enabled.or(e.enabled),
+            whisper_model_path: l
+                .whisper_model_path
+                .clone()
+                .or_else(|| e.whisper_model_path.clone()),
+        }),
+    }
+}
+
 fn merge_toml_tts(
     earlier: Option<&TomlTtsConfig>,
     later: Option<&TomlTtsConfig>,
@@ -1361,6 +1411,7 @@ mod tests {
         assert!(cfg.server.is_none());
         assert!(cfg.llm.is_none());
         assert!(cfg.agents.is_none());
+        assert!(cfg.stt.is_none());
         assert!(cfg.tts.is_none());
     }
 
@@ -1369,7 +1420,6 @@ mod tests {
         let text = r#"
             [server]
             bind_addr = "127.0.0.1:9000"
-            whisper_model_path = "/tmp/ggml-base.bin"
             max_queue = 16
 
             [server.limits]
@@ -1388,6 +1438,10 @@ mod tests {
             cors_allow_origins = ["https://example.com"]
             system_prompt = "from-toml"
             llm_max_tool_rounds = 2
+
+            [stt]
+            enabled = true
+            whisper_model_path = "/tmp/ggml-base.bin"
 
             [agents]
             enabled = true
@@ -1412,10 +1466,6 @@ mod tests {
         let cfg: TomlConfig = toml::from_str(text).unwrap();
         let server = cfg.server.expect("server section parsed");
         assert_eq!(server.bind_addr.as_deref(), Some("127.0.0.1:9000"));
-        assert_eq!(
-            server.whisper_model_path.as_deref(),
-            Some("/tmp/ggml-base.bin")
-        );
         assert_eq!(server.max_queue, Some(16));
 
         let limits = server.limits.expect("server.limits parsed");
@@ -1423,6 +1473,14 @@ mod tests {
 
         let rates = server.rate_limits.expect("server.rate_limits parsed");
         assert_eq!(rates.stt_per_min, Some(60));
+
+        // The Whisper model path now lives under [stt], not [server].
+        let stt = cfg.stt.expect("stt section parsed");
+        assert_eq!(stt.enabled, Some(true));
+        assert_eq!(
+            stt.whisper_model_path.as_deref(),
+            Some("/tmp/ggml-base.bin")
+        );
 
         let agents = cfg.agents.expect("agents section parsed");
         assert_eq!(agents.enabled, Some(true));
@@ -1467,6 +1525,46 @@ mod tests {
         assert_eq!(tts.enabled, Some(true), "kept from earlier");
         assert_eq!(tts.voice_en.as_deref(), Some("en_US-amy-low"), "kept");
         assert_eq!(tts.length_scale, Some(1.3), "later wins");
+    }
+
+    #[test]
+    fn stt_merge_layered_configs() {
+        // Earlier sets `enabled = true`, later sets `enabled = false`:
+        // later wins (same per-key merge semantics as every other
+        // section).
+        let earlier: TomlConfig = toml::from_str(
+            r#"
+                [stt]
+                enabled = true
+            "#,
+        )
+        .unwrap();
+        let later: TomlConfig = toml::from_str(
+            r#"
+                [stt]
+                enabled = false
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml_configs(&earlier, &later);
+        let stt = merged.stt.expect("stt merged");
+        assert_eq!(stt.enabled, Some(false), "later wins");
+
+        // Earlier only → kept.
+        let only_earlier: TomlConfig = toml::from_str(
+            r#"
+                [stt]
+                enabled = false
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml_configs(&only_earlier, &TomlConfig::default());
+        let stt = merged.stt.expect("stt kept from earlier");
+        assert_eq!(stt.enabled, Some(false));
+
+        // Both None → no stt section in the merged config.
+        let merged = merge_toml_configs(&TomlConfig::default(), &TomlConfig::default());
+        assert!(merged.stt.is_none());
     }
 
     #[test]
@@ -1570,10 +1668,12 @@ mod tests {
                 [server]
                 bind_addr = "127.0.0.1:1111"
                 max_queue = 8
-                whisper_model_path = "/from/earlier.bin"
 
                 [server.rate_limits]
                 stt_per_min = 60
+
+                [stt]
+                whisper_model_path = "/from/earlier.bin"
 
                 [agents]
                 enabled = true
@@ -1588,10 +1688,12 @@ mod tests {
             r#"
                 [server]
                 max_queue = 99
-                whisper_model_path = "/from/later.bin"
 
                 [server.rate_limits]
                 llm_per_min = 30
+
+                [stt]
+                whisper_model_path = "/from/later.bin"
 
                 [llm]
                 llm_max_tool_rounds = 7
@@ -1607,11 +1709,9 @@ mod tests {
         assert_eq!(server.bind_addr.as_deref(), Some("127.0.0.1:1111"));
         // max_queue in both → later wins.
         assert_eq!(server.max_queue, Some(99));
-        // whisper_model_path in both → later wins.
-        assert_eq!(
-            server.whisper_model_path.as_deref(),
-            Some("/from/later.bin")
-        );
+        // whisper_model_path in both (now under [stt]) → later wins.
+        let stt = merged.stt.expect("stt section present after merge");
+        assert_eq!(stt.whisper_model_path.as_deref(), Some("/from/later.bin"));
         // stt_per_min only in earlier → kept; llm_per_min only in later → kept.
         let rates = server.rate_limits.expect("rate_limits merged");
         assert_eq!(rates.stt_per_min, Some(60));

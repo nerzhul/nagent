@@ -17,6 +17,7 @@
 //! - [`trusted_proxies`] — `[server].trusted_proxies` CIDR list.
 //! - [`limits`] — inbound WebSocket frame limits (`LimitsConfig`).
 //! - [`llm`] — `[llm]` section + `LlmAuthMode`.
+//! - [`stt`] — `[stt]` section: master switch for the WS pipeline.
 //! - [`tts`] — `[tts]` section.
 //! - [`auth`] — `[auth]` section + per-backend sub-configs.
 //! - [`agents`] — `[agents]` section + per-agent sub-configs.
@@ -30,6 +31,7 @@ pub mod limits;
 pub mod llm;
 pub mod ratelimit;
 pub mod server;
+pub mod stt;
 pub mod trusted_proxies;
 pub mod tts;
 pub mod x_oauth;
@@ -62,6 +64,7 @@ pub use documents::DocumentsConfig;
 pub use limits::LimitsConfig;
 pub use llm::{LlmAuthMode, LlmConfig};
 pub use ratelimit::RateLimitConfig;
+pub use stt::SttConfig;
 pub use trusted_proxies::TrustedProxiesConfig;
 pub use tts::TtsConfig;
 pub use x_oauth::XOAuthConfig;
@@ -288,14 +291,16 @@ mod tests {
 
     #[test]
     fn model_path_is_required_when_neither_is_set() {
-        let err = server::resolve_model_path(None, None).unwrap_err();
+        // The resolver moved to `config::stt::resolve_model_path`
+        // when `whisper_model_path` joined the `[stt]` section.
+        let err = stt::resolve_model_path(None, None).unwrap_err();
         assert!(matches!(err, ConfigError::MissingModelPath));
     }
 
     #[test]
     fn model_path_falls_back_to_toml_when_env_unset() {
         let p =
-            server::resolve_model_path(None, Some("/from/toml.bin")).expect("toml path must parse");
+            stt::resolve_model_path(None, Some("/from/toml.bin")).expect("toml path must parse");
         assert_eq!(p, PathBuf::from("/from/toml.bin"));
     }
 
@@ -357,8 +362,10 @@ mod tests {
         // TOML-only value is picked up.
         let toml: file::TomlConfig = toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
+
+                [server]
                 inference_workers = 4
             "#,
         )
@@ -369,8 +376,10 @@ mod tests {
         // Invalid TOML value (zero) must be clamped to 1, never panic.
         let toml: file::TomlConfig = toml::from_str(
             r#"
-                [server]
+                [stt]
                 whisper_model_path = "/tmp/m.bin"
+
+                [server]
                 inference_workers = 0
             "#,
         )
@@ -385,6 +394,8 @@ mod tests {
             r#"
                 [server]
                 max_queue = 8
+
+                [stt]
                 whisper_model_path = "/tmp/from-toml.bin"
 
                 [llm]
@@ -407,7 +418,7 @@ mod tests {
         let cfg = Config::from_env_with_toml(Some(&toml)).expect("config must load");
         assert_eq!(cfg.max_queue, 8, "max_queue from TOML");
         assert_eq!(
-            cfg.whisper_model_path,
+            cfg.stt.whisper_model_path,
             PathBuf::from("/tmp/from-toml.bin"),
             "model path from TOML"
         );

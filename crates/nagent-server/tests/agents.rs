@@ -58,15 +58,15 @@ use nagent_agents::agents::weather_agent::WeatherAgent;
 use nagent_agents::agents::web_fetch::WebFetchAgent;
 #[cfg(feature = "wikipedia-agent")]
 use nagent_agents::agents::wikipedia_agent::WikipediaAgent;
+use nagent_agents::DictionaryAgentConfig;
 use nagent_agents::ServiceRegistry;
+use nagent_agents::WikipediaAgentConfig;
 use nagent_server::agents::UserContext;
 use nagent_server::agents::{Agent, AgentRegistry};
 use nagent_server::config::{
     AgentConfig, DictionaryConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig,
     WikipediaConfig,
 };
-use nagent_agents::WikipediaAgentConfig;
-use nagent_agents::DictionaryAgentConfig;
 use nagent_server::http::build_router;
 use nagent_server::llm::LlmClient;
 use nagent_server::stt::session::SessionMap;
@@ -212,7 +212,6 @@ async fn start_test_server(state: Arc<AppState>) -> String {
 fn make_server_cfg(upstream_url: String) -> ServerConfig {
     ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
         inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
@@ -240,6 +239,10 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             ollama_num_ctx: None,
         },
         agents: AgentConfig::default(),
+        stt: nagent_server::config::SttConfig {
+            whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
+            ..nagent_server::config::SttConfig::default()
+        },
         tts: nagent_server::config::TtsConfig::default(),
         auth: nagent_server::config::AuthConfig::default(),
         documents: nagent_server::config::DocumentsConfig::default(),

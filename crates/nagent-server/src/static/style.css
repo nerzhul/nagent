@@ -3388,6 +3388,18 @@ body.chat-messages-disabled .chat-message-copy,
 body.chat-messages-disabled .chat-message-edit-pencil,
 body.chat-messages-disabled .chat-message-regenerate { display: none; }
 
+/* Defence-in-depth for the runtime STT/TTS kill switches.
+ * The JS sets `[hidden]` on the canonical elements through
+ * `applyFeatureGates()`; the body-level classes are a second
+ * gate for any element that ships with `display:` rules that
+ * beat `[hidden]` (none today, but the safety net is cheap). */
+body.stt-disabled .voice-graph,
+body.stt-disabled .chat-record-btn,
+body.stt-disabled .chat-audio { display: none !important; }
+body.tts-disabled .chat-tts-label,
+body.tts-disabled .chat-tts-settings,
+body.tts-disabled .chat-message-replay { display: none !important; }
+
 /* Inline edit form: rendered inside the user bubble when the
  * pencil is clicked. The form is intentionally compact:
  * a single-column textarea on top (the dominant element),

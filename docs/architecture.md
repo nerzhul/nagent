@@ -98,12 +98,12 @@ The subsystems it stitches together:
 
 | Subsystem | Module | Role |
 | --- | --- | --- |
-| STT | `stt/` | WebSocket upgrade, session map, whisper backend, watchdog. |
+| STT | `stt/` | WebSocket upgrade, session map, whisper backend, watchdog. Runtime-gated by `[stt].enabled` / `STT_ENABLED` — when off, the `/ws` route is not registered and `AppState.stt` is `None`. |
 | LLM proxy | `llm/` | Optional OpenAI-compatible proxy to a local LLM. Hosts the tool loop (§3). |
 | Agents | `agents/` + `nagent-agents` | Chat-agent subsystem (§2). |
 | Documents | `documents/` | Discussion-mode document uploads, extraction, the `read_document` tool. |
 | Auth | `auth/`, `credentials/`, `oauth/`, `memories/` | Multi-user auth (password / OIDC / passkey) + per-user credentials vault + per-user UI preferences row (location / timezone sharing opt-ins + reply-language picker, migration `0007`; additional-instructions textarea + per-turn temperature via migration `0008`; long-term memory opt-in via migration `0009` + `memories` table via `0010`). |
-| TTS | `tts/` | Local Piper text-to-speech engine. |
+| TTS | `tts/` | Local Piper text-to-speech engine. Runtime-gated by `[tts].enabled` / `TTS_ENABLED`. |
 | Static frontend | `static/`, `static_assets.rs` | Vendored UI served by the static handler. |
 
 ## 2. Agents (chat-agent subsystem)

@@ -120,13 +120,15 @@ runtime stage when `BACKEND=vulkan`.
 ### Environment variables
 
 All variables are read by `Config::from_env()` in
-`crates/nagent-server/src/config.rs`. `WHISPER_MODEL_PATH` is the only one
-without a default and is required.
+`crates/nagent-server/src/config.rs`. `WHISPER_MODEL_PATH` is the
+only one without a default — it is required only when the STT
+subsystem is on (`STT_ENABLED=true`, the default). A deployment
+that disables STT can leave it unset.
 
 | Variable                     | Default                                       | Section        | Meaning                                                                                                       |
 | ---------------------------- | --------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------- |
 | `BIND_ADDR`                  | `0.0.0.0:8080`                                | Core           | Socket address the HTTP server binds to.                                                                      |
-| `WHISPER_MODEL_PATH`         | _(required)_                                  | Core           | Path to the ggml-format Whisper model.                                                                        |
+| `WHISPER_MODEL_PATH`         | _(required when `STT_ENABLED=true`)_          | STT pipeline   | Path to the ggml-format Whisper model. Mirrors `[stt].whisper_model_path`. Ignored when the STT subsystem is off (`STT_ENABLED=false`), so a headless deployment that never speaks to Whisper doesn't have to provide a model. |
 | `MAX_QUEUE`                  | `32`                                          | Core           | Capacity of the global inference queue (one per session).                                                     |
 | `INFERENCE_WORKERS`          | _(backend-derived)_                           | Core           | Number of parallel inference workers (sticky per-session dispatch). Default is taken from the loaded model's size on GPU builds, or 1 on CPU. |
 | `SESSION_IDLE_TIMEOUT_MS`    | `30000`                                       | Core           | Watchdog threshold — sessions idle for this long are dropped.                                                |
@@ -140,6 +142,7 @@ without a default and is required.
 | `WS_MAX_PER_IP`              | `16`                                          | HTTP guardrails| Per-source-IP cap on concurrent WebSocket sessions. Reached upgrades are rejected with `503` + `Retry-After: 1`. |
 | `NAGENT_ALLOWED_ORIGINS`     | _(empty → derived from `BIND_ADDR`)_          | Origin/Host guard| Comma-separated list of `Origin` allow-list entries (`scheme://host[:port]`). Empty by default — the allow-list is derived from `[server].bind_addr` (loopback names plus the bind host). Mirrors `[server].allowed_origins].origins` in TOML. |
 | `STT_RATE_PER_MIN`           | `120`                                         | Rate limits    | Inbound STT WS frames allowed per source IP per minute (loopback bypasses).                                   |
+| `STT_ENABLED`                | `true`                                        | STT pipeline   | Master switch for the WebSocket STT pipeline. When `false` the `/ws` upgrade route is not registered, the whisper backend is not built, and the frontend hides every STT control (mic button, language picker, voice oscilloscope, in both Transcript and Discussion modes). Mirrors `[stt].enabled` in TOML. |
 | `LLM_RATE_PER_MIN`           | `30`                                          | Rate limits    | Inbound LLM HTTP requests allowed per source IP per minute (`/v1/chat/completions`, `/v1/models`).           |
 | `LLM_ENABLED`                | `false`                                       | LLM proxy      | Master switch. When `false` the `/v1/*` routes are not registered at all.                                     |
 | `OLLAMA_BASE_URL`            | `http://localhost:11434`                      | LLM proxy      | Base URL of the upstream OpenAI-compatible server (Ollama by default).                                        |
@@ -253,7 +256,6 @@ for per-source-IP rate limits:
 | TOML key                          | Equivalent env var          | Notes                                          |
 | --------------------------------- | --------------------------- | ---------------------------------------------- |
 | `[server].bind_addr`              | `BIND_ADDR`                 |                                                |
-| `[server].whisper_model_path`     | `WHISPER_MODEL_PATH`        | Required (env or TOML).                        |
 | `[server].max_queue`              | `MAX_QUEUE`                 |                                                |
 | `[server].inference_workers`      | `INFERENCE_WORKERS`         | Stick to backend-derived default unless overridden. |
 | `[server].session_idle_timeout_ms`| `SESSION_IDLE_TIMEOUT_MS`   |                                                |
@@ -263,6 +265,8 @@ for per-source-IP rate limits:
 | `[server.rate_limits].*`          | `STT_RATE_PER_MIN`, `LLM_*` | Per-IP buckets.                                |
 | `[server.trusted_proxies].*`      | `NAGENT_TRUSTED_PROXIES*`   | Reverse-proxy CIDR list (see "Trusted proxies" below). |
 | `[llm].*`                         | `LLM_*`, `OLLAMA_*`         | OpenAI-compatible proxy.                       |
+| `[stt].enabled`                   | `STT_ENABLED`               | Runtime master switch for the WebSocket STT pipeline. When `false` the `/ws` route is not registered and the frontend hides every STT control. Defaults to `true` (preserves the historical "STT is always wired" behaviour). |
+| `[stt].whisper_model_path`        | `WHISPER_MODEL_PATH`        | Path to the ggml-format Whisper model. Required when `[stt].enabled = true`; ignored when off. |
 | `[auth].*`                        | `NAGENT_AUTH_*`             | Multi-user authentication (see "Authentication" below). `[auth.db]` selects sqlite vs postgres at runtime. |
 | `[auth.credentials].key`          | _(none)_                    | AES-256-GCM encryption key for the per-user credentials vault, in plaintext inside the TOML file (64 hex chars / 32 bytes). REQUIRED when `auth.enabled = true` AND at least one agent is registered; the server refuses to boot otherwise. See "Per-user credentials" below for the key-generation recipe and the secret-handling caveat. |
 
@@ -276,8 +280,10 @@ agent registry.
 ```toml
 [server]
 bind_addr = "0.0.0.0:8080"
-whisper_model_path = "/models/ggml-base.bin"
 max_queue = 32
+
+[stt]
+whisper_model_path = "/models/ggml-base.bin"
 
 [server.limits]
 max_audio_frame_samples = 480_000
@@ -1228,6 +1234,7 @@ Cookie: nagent_session=<id>
 {
   "documents": true,
   "llm": true,
+  "stt": true,
   "tts": false,
   "agents": false,
   "agent_names": [],
@@ -1237,9 +1244,12 @@ Cookie: nagent_session=<id>
 ```
 
 The same endpoint also drives the Discussion-mode tab
-(`features.llm` — hidden when the LLM proxy is off), the TTS
-settings drawer (`features.tts`, future), and any other gated
-control. Operators flip a flag, rebuild the server, refresh the
+(`features.llm` — hidden when the LLM proxy is off), the STT
+mic button + voice oscilloscope in both modes (`features.stt` —
+hidden when `STT_ENABLED=false`), the TTS settings drawer
+(`features.tts` — hidden when `TTS_ENABLED=false` or the `tts`
+cargo feature is off), and any other gated control. Operators
+flip a flag, rebuild (or just restart) the server, refresh the
 browser; the UI hides the section that no longer has a backend.
 
 ## Text-to-Speech (Piper, local)
@@ -1382,9 +1392,32 @@ manually with `cargo build -p nagent-server`.
 
 The runtime surface follows `TTS_ENABLED`: when `false`, the
 `/v1/audio/*` routes are not registered and the discussion UI hides
-the "Read response aloud" checkbox. The Cargo feature only controls
+the "Read aloud" checkbox. The Cargo feature only controls
 the *binary's* ability to serve TTS; the runtime knob controls
 *whether it does*.
+
+## Speech-to-Text (Whisper, WebSocket) runtime kill switch
+
+The STT pipeline has the same shape as the TTS one above: a
+compile-time backend choice (mock vs `whisper-rs` + the GPU
+flavour) and a runtime master switch. The runtime switch lives in
+`[stt].enabled` (TOML) or `STT_ENABLED` (env); when `false`:
+
+- the `/ws` WebSocket upgrade route is not registered (the URL
+  simply 404s);
+- the whisper backend is not built, so a slim deployment
+  without a Whisper model file can still boot;
+- the frontend reads `stt: false` from `/api/features` and hides
+  every STT control — the Transcript Record button + language
+  picker + voice oscilloscope, and the Discussion mic button +
+  language picker + inline voice widget.
+
+Defaults to `true` so the historical "STT is always wired"
+behaviour holds; operators opt out by setting `[stt].enabled =
+false` in TOML or `STT_ENABLED=false` in the environment. The
+`Ctrl+Shift+R` (Transcript) and `Ctrl+Shift+D` (Discussion)
+shortcuts are gated the same way and become no-ops when STT is
+off.
 
 ### Browser-side playback model
 

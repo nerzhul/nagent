@@ -187,11 +187,12 @@ mod tests {
         // We never read the bind address; an ephemeral port is
         // fine. The `public_url` is set to `https://example.com`
         // so the cookie code path picks `Secure = true` for the
-        // test fixtures. We seed a `whisper_model_path` so the
-        // no-TOML config path doesn't trip on the model-path
-        // required knob (which is unrelated to the test).
+        // test fixtures. We seed a `whisper_model_path` under
+        // `[stt]` so the no-TOML config path doesn't trip on the
+        // model-path required knob (which is unrelated to the
+        // test).
         let toml_text = r#"
-            [server]
+            [stt]
             whisper_model_path = "/tmp/m.bin"
         "#;
         let toml: crate::config_file::TomlConfig =

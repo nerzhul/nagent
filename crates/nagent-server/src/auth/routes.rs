@@ -263,7 +263,7 @@ mod tests {
 
     async fn temp_store() -> (nagent_db::Db, std::sync::Arc<crate::config::Config>) {
         let toml_text = r#"
-            [server]
+            [stt]
             whisper_model_path = "/tmp/m.bin"
         "#;
         let toml: crate::config_file::TomlConfig =

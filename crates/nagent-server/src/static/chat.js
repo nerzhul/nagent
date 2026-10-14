@@ -4780,6 +4780,13 @@ const DEFAULT_FEATURES = Object.freeze({
   // dropdown empty (the loadModels fallback then renders the
   // "(no models)" placeholder).
   llm_models: Object.freeze([]),
+  // `stt` gates the entire speech-to-text surface — both modes
+  // (Transcript Record button + Discussion mic button + their
+  // language pickers + voice oscilloscope). `false` when the
+  // server was started with `[stt].enabled = false` or
+  // `STT_ENABLED=false`; defaults to `true` so the
+  // historical "STT is always wired" behaviour holds.
+  stt: true,
   tts: false,
   agents: false,
   agent_names: Object.freeze([]),
@@ -4917,9 +4924,61 @@ function applyFeatureGates() {
   const attachTray = document.getElementById("chat-attach-chips");
   if (attachBtn) attachBtn.toggleAttribute("hidden", !feature("documents"));
   if (attachTray) attachTray.toggleAttribute("hidden", !feature("documents"));
-  // Future: gate the TTS settings drawer on `feature("tts")`,
-  // etc. Each addition is one branch — the loop over a small
-  // map keeps the boot tidy.
+
+  // STT surface (mic button + language picker + voice
+  // oscilloscope, in both Transcript and Discussion modes).
+  // When the server reports `stt: false` we hide every STT
+  // control up-front; the `AudioCapture` constructor never
+  // runs in that case because the modes that would call it
+  // are unreachable from the UI.
+  const sttOff = !feature("stt");
+  for (const id of [
+    "record-btn",                     // Transcript Record
+    "lang-select",                    // Transcript language picker
+    "translate-check",                // Transcript translate-to-EN
+    "inactivity-check",               // Transcript auto-stop
+    "voice-graph-transcript",         // Transcript oscilloscope
+    "chat-record-btn",                // Discussion mic
+    "chat-lang-select",               // Discussion language picker
+    "chat-translate-check",           // Discussion translate-to-EN
+    "chat-backend-info",              // Discussion backend chip
+    "voice-graph-discussion",         // Discussion inline oscilloscope
+  ]) {
+    const el = document.getElementById(id);
+    if (el) el.toggleAttribute("hidden", sttOff);
+  }
+  // The Discussion-mode STT controls sit inside `<section
+  // class="chat-audio">`; hide the whole block so its label
+  // and layout chrome disappear too. The Transcript-mode
+  // controls live inside `<section class="controls">` — we
+  // hide the same way so the Record button + language
+  // picker + checkboxes disappear in one DOM flip.
+  for (const sel of [".chat-audio", "#view-transcript > .controls"]) {
+    const el = document.querySelector(sel);
+    if (el) el.toggleAttribute("hidden", sttOff);
+  }
+  // Body-level class lets the CSS fold any leftover STT
+  // surface (e.g. transcript shortcuts) without each consumer
+  // having to subscribe to the feature stream.
+  document.body.classList.toggle("stt-disabled", sttOff);
+
+  // TTS surface (master "Read aloud" toggle + the per-bubble
+  // replay button 🔊). The per-bubble visibility is
+  // refreshed through `refreshReplayButtonVisibility()` which
+  // already consults `feature("tts")`; here we hide the
+  // static DOM nodes (label, settings drawer, test button)
+  // that ship hidden in the HTML and are unhidden by
+  // `probeTtsVoices` on a 200 from `/v1/audio/voices`.
+  const ttsOff = !feature("tts");
+  for (const id of [
+    "chat-tts-label",
+    "chat-tts-settings",
+  ]) {
+    const el = document.getElementById(id);
+    if (el) el.toggleAttribute("hidden", ttsOff);
+  }
+  document.body.classList.toggle("tts-disabled", ttsOff);
+
   // Gate the export menu + per-bubble edit pencil on the
   // `chat_messages` table (the body-level class is the CSS
   // gate; the migration shim fires from here when the flag
@@ -4973,8 +5032,15 @@ rehydrateAfterMount();
 // mode's transcript. `preventDefault` stops Chromium from
 // interpreting Ctrl+D as "bookmark this page", which would steal
 // focus and pop a dialog on some browsers.
+//
+// We also gate on `feature("stt")`: when the server was started
+// with `STT_ENABLED=false` the `/ws` route is not registered, so
+// the AudioCapture instance would fail every connect attempt. The
+// Transcript-mode equivalent (`Ctrl+Shift+R` in `shortcuts.js`)
+// is gated the same way there.
 document.addEventListener("keydown", (e) => {
   if (globalThis.__nagentMode?.current() !== "discussion") return;
+  if (!feature("stt")) return;
   if (e.key !== "D" && e.key !== "d") return;
   if (!e.shiftKey) return;
   if (!e.ctrlKey && !e.metaKey) return;
@@ -5202,9 +5268,20 @@ function resolveTtsVoice() {
  * `__ttsAvailable` is undefined and we default to showing the
  * button optimistically; if the probe fails, the click handler's
  * 503 / network error surfaces a toast to the user.
+ *
+ * The runtime `feature("tts")` flag (from `/api/features`) is the
+ * authoritative source — when the server was started with
+ * `[tts].enabled = false` the `/v1/audio/*` routes are not even
+ * registered, so the probe is guaranteed to fail and we hide every
+ * replay button up-front. The probe still acts as a redundant
+ * runtime check (e.g. the operator may have rebuilt the server
+ * without the `tts` cargo feature, which removes the routes
+ * without flipping the runtime flag).
  */
 function refreshReplayButtonVisibility() {
-  const available = window.__ttsAvailable !== false;
+  const serverTtsOn = feature("tts");
+  const probeOk = window.__ttsAvailable !== false;
+  const available = serverTtsOn && probeOk;
   document.querySelectorAll(".chat-message-replay").forEach((btn) => {
     btn.hidden = !available;
   });

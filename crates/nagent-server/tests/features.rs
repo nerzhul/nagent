@@ -188,6 +188,10 @@ async fn features_returns_all_disabled_when_subsystems_off() {
     );
     assert_eq!(body["tts"], false, "tts flag must be false (TTS not wired)");
     assert_eq!(
+        body["stt"], true,
+        "stt flag must be true (STT is wired by default in the test builder)"
+    );
+    assert_eq!(
         body["agents"], false,
         "agents flag must be false (no agent registry)"
     );
@@ -247,8 +251,71 @@ async fn features_reflects_runtime_configuration() {
         "llm_models must collapse to [default_model] when the upstream fetch fails (offline fallback)"
     );
     assert_eq!(body["tts"], false);
+    assert_eq!(
+        body["stt"], true,
+        "stt flag must reflect AppState.stt.is_some()"
+    );
     assert_eq!(body["agents"], false);
     assert_eq!(body["chat_sessions"], true);
+}
+
+/// `STT_ENABLED=false` (mirrored by the test builder's
+/// `without_stt()` setter) drops the `/ws` upgrade route and
+/// reports `stt: false` on `/api/features` so the frontend hides
+/// every STT control. The endpoint must still answer 200 and the
+/// other flags must stay unaffected.
+#[tokio::test]
+async fn features_stt_disabled_reports_false() {
+    let auth_cfg = AuthConfig {
+        enabled: true,
+        backends: vec![AuthBackendKind::Local],
+        public_url: "https://example.com".into(),
+        session_ttl_days: 7,
+        csrf_header: "x-csrf-token".into(),
+        db: AuthDbConfig {
+            backend: "sqlite".into(),
+            url: format!(
+                "sqlite://file:features_no_stt_{}?mode=memory&cache=shared",
+                Uuid::new_v4()
+            ),
+            max_connections: 1,
+            auto_migrate: true,
+        },
+        ..AuthConfig::default()
+    };
+    let auth_store = connect_db(&auth_cfg).await;
+    auth_store.migrate().await.expect("migrations must apply");
+
+    let mut builder = app_state().without_stt();
+    Arc::make_mut(&mut builder.config).auth = auth_cfg.clone();
+    builder = builder.with_auth(auth_store.clone());
+    builder = builder.with_chat_sessions(nagent_server::chat::sessions::ChatSessions::new(
+        auth_store.admin().chat_sessions.clone(),
+    ));
+    let state = builder.build();
+
+    let app = build_router(state);
+    let cookie = login_cookie(&auth_store, "eve@test.invalid").await;
+
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/features")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        body["stt"], false,
+        "stt flag must be false when the test builder disables STT"
+    );
 }
 
 /// Anonymous (no session) calls are 401 under auth gating.

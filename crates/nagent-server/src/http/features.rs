@@ -21,6 +21,7 @@
 //! "documents": true,          // [documents].enabled = true
 //! "llm": true,                // LLM proxy is wired
 //! "llm_models": ["qwen2.5:14b", "llama3.1"], // upstream models (or [default_model] fallback)
+//! "stt": true,                // [stt].enabled = true (WebSocket /ws route is registered)
 //! "tts": true,                // TTS engine wired
 //! "agents": true,             // at least one agent registered
 //! "agent_names": ["get_weather", "read_document", ...],
@@ -92,6 +93,16 @@ pub struct Features {
     /// the dropdown is never empty.
     #[serde(rename = "llm_models")]
     pub llm_models: Vec<String>,
+    /// STT pipeline is wired (`state.stt.is_some()`, i.e.
+    /// `[stt].enabled = true`). When false the `/ws` upgrade
+    /// route is not registered and the frontend hides every STT
+    /// control (mic button, language picker, voice oscilloscope,
+    /// …) so the user never sees a broken Record button. The
+    /// mock-vs-real backend choice is a separate cargo feature
+    /// (`real-backend` + `stt-core/whisper-rs-*`); this flag is
+    /// the runtime switch on top of that.
+    #[serde(rename = "stt")]
+    pub stt_enabled: bool,
     /// TTS engine is wired (`state.tts.is_some()`). When false
     /// the TTS settings drawer is hidden and "Read aloud" is a
     /// no-op.
@@ -144,6 +155,7 @@ impl Features {
     pub async fn from_state(state: &Arc<AppState>) -> Self {
         let documents_enabled = state.documents.is_some();
         let llm_enabled = state.llm.is_some();
+        let stt_enabled = state.stt.is_some();
         let tts_enabled = state.tts.is_some();
         let chat_sessions_enabled = state.chat_sessions.is_some();
         let chat_messages_enabled = state.chat_messages.is_some();
@@ -180,6 +192,7 @@ impl Features {
             documents_enabled,
             llm_enabled,
             llm_models,
+            stt_enabled,
             tts_enabled,
             agents_enabled,
             agent_names,

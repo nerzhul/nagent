@@ -48,7 +48,7 @@ use crate::agents::AgentRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::config::{
     AgentConfig, AllowedOriginsConfig, AuthConfig, Config, DocumentsConfig, LimitsConfig,
-    LlmAuthMode, LlmConfig, RateLimitConfig, TrustedProxiesConfig, TtsConfig,
+    LlmAuthMode, LlmConfig, RateLimitConfig, SttConfig, TrustedProxiesConfig, TtsConfig,
 };
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::llm::LlmClient;
@@ -123,6 +123,11 @@ pub struct AppStateBuilder {
     /// limiter (e.g. `rate_limit.rs`) override via
     /// [`Self::with_stt_rate_per_min`].
     pub stt_rate_per_min: Option<u32>,
+    /// When `true` (the default) the builder wires a real
+    /// `SttState` into the resulting `AppState`. Tests that
+    /// exercise the runtime `STT_ENABLED=false` branch set this
+    /// to `false` via [`Self::without_stt`].
+    pub stt_enabled: bool,
     /// Custom LLM rate limiter policy (per-minute cap). Defaults
     /// to the config default. Tests that exercise the rate
     /// limiter override via [`Self::with_llm_rate_per_min`].
@@ -191,6 +196,7 @@ impl AppStateBuilder {
             tts: None,
             stt_rate_per_min: None,
             llm_rate_per_min: None,
+            stt_enabled: true,
         }
     }
 
@@ -274,6 +280,14 @@ impl AppStateBuilder {
     /// Override the per-minute STT rate-limit cap.
     pub fn with_stt_rate_per_min(mut self, per_min: u32) -> Self {
         self.stt_rate_per_min = Some(per_min);
+        self
+    }
+
+    /// Build an `AppState` with `stt = None` (mirrors
+    /// `STT_ENABLED=false` at boot). The mock whisper backend is
+    /// not constructed in that case.
+    pub fn without_stt(mut self) -> Self {
+        self.stt_enabled = false;
         self
     }
 
@@ -366,16 +380,20 @@ impl AppStateBuilder {
         };
         let tts = self.tts.map(|engine| TtsState { engine });
 
-        let stt = SttState {
-            backend,
-            sessions,
-            job_tx,
-            ready: Arc::new(AtomicBool::new(true)),
-            rate_limiter: stt_limiter,
-            ws_concurrency: WsConcurrency::new(
-                self.config.limits.ws_max_concurrent,
-                self.config.limits.ws_max_per_ip,
-            ),
+        let stt = if self.stt_enabled {
+            Some(SttState {
+                backend,
+                sessions,
+                job_tx,
+                ready: Arc::new(AtomicBool::new(true)),
+                rate_limiter: stt_limiter,
+                ws_concurrency: WsConcurrency::new(
+                    self.config.limits.ws_max_concurrent,
+                    self.config.limits.ws_max_per_ip,
+                ),
+            })
+        } else {
+            None
         };
 
         Arc::new(AppState {
@@ -434,7 +452,6 @@ fn default_test_config() -> Config {
     ];
     Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
-        whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
         max_queue: 32,
         inference_workers: None,
         session_idle_timeout: Duration::from_secs(30),
@@ -462,6 +479,15 @@ fn default_test_config() -> Config {
             ollama_num_ctx: None,
         },
         agents: AgentConfig::default(),
+        stt: SttConfig {
+            // The integration tests don't actually load a
+            // Whisper model; the path just needs to be set so
+            // the `SttConfig::from_env_with_toml` boot check
+            // doesn't trip. `MockBackend` only reads the
+            // file_name() so the value is otherwise inert.
+            whisper_model_path: std::path::PathBuf::from("/tmp/fake-model.bin"),
+            ..SttConfig::default()
+        },
         tts: TtsConfig::default(),
         auth: AuthConfig::default(),
         documents: DocumentsConfig::default(),

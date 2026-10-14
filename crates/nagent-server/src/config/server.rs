@@ -13,6 +13,7 @@ use crate::config::file::{merge_toml_configs, TomlConfig};
 use crate::config::limits::LimitsConfig;
 use crate::config::llm::LlmConfig;
 use crate::config::ratelimit::RateLimitConfig;
+use crate::config::stt::SttConfig;
 use crate::config::trusted_proxies::TrustedProxiesConfig;
 use crate::config::tts::TtsConfig;
 use crate::config::x_oauth::XOAuthConfig;
@@ -23,8 +24,6 @@ use crate::config::{env_opt, resolve_primitive};
 pub struct Config {
     /// Address the HTTP server binds to.
     pub bind_addr: SocketAddr,
-    /// Path to the ggml-format whisper model.
-    pub whisper_model_path: PathBuf,
     /// Capacity of the global inference queue.
     pub max_queue: usize,
     /// Operator override for the inference worker pool size. `None`
@@ -47,6 +46,13 @@ pub struct Config {
     /// off (so `curl /v1/agents/web_fetch/invoke` still works for
     /// local testing).
     pub agents: AgentConfig,
+    /// WebSocket STT pipeline master switch. When
+    /// `stt.enabled` is `false` the `/ws` upgrade route is not
+    /// registered, the whisper backend is not built, and the
+    /// `/api/features` JSON exposes `stt: false` so the frontend
+    /// hides every STT control. Mirrors `TTS_ENABLED` on the TTS
+    /// side.
+    pub stt: SttConfig,
     /// Limits applied to inbound WebSocket frames (defence against
     /// malicious or buggy clients).
     pub limits: LimitsConfig,
@@ -121,10 +127,10 @@ impl Config {
             env_opt("BIND_ADDR").as_deref(),
             server.and_then(|s| s.bind_addr.as_deref()),
         )?;
-        let whisper_model_path = resolve_model_path(
-            env_opt("WHISPER_MODEL_PATH").as_deref(),
-            server.and_then(|s| s.whisper_model_path.as_deref()),
-        )?;
+        // `whisper_model_path` now lives under `[stt]`; the
+        // resolver runs inside `SttConfig::from_env_with_toml`
+        // (called further down). The path is only consulted
+        // when `cfg.stt.enabled = true`.
 
         let max_queue = resolve_primitive(
             env_opt("MAX_QUEUE").as_deref(),
@@ -163,6 +169,7 @@ impl Config {
         let limits = LimitsConfig::from_env_with_toml(server.and_then(|s| s.limits.as_ref()))?;
         let llm = LlmConfig::from_env_with_toml(toml.and_then(|t| t.llm.as_ref()))?;
         let agents = AgentConfig::from_env_with_toml(toml.and_then(|t| t.agents.as_ref()))?;
+        let stt = SttConfig::from_env_with_toml(toml.and_then(|t| t.stt.as_ref()))?;
         let rate_limit =
             RateLimitConfig::from_env_with_toml(server.and_then(|s| s.rate_limits.as_ref()))?;
         let trusted_proxies = TrustedProxiesConfig::from_env_with_toml(
@@ -179,7 +186,6 @@ impl Config {
 
         Ok(Self {
             bind_addr,
-            whisper_model_path,
             max_queue,
             inference_workers,
             session_idle_timeout,
@@ -189,6 +195,7 @@ impl Config {
             trusted_proxies,
             llm,
             agents,
+            stt,
             tts,
             auth,
             documents,
@@ -333,20 +340,6 @@ pub(crate) fn resolve_bind_addr(
             .unwrap_or(DEFAULT)
             .parse::<SocketAddr>()
             .map_err(|e: std::net::AddrParseError| ConfigError::InvalidBindAddr(e.to_string())),
-    }
-}
-
-/// Resolve the Whisper model path: env > TOML > required.
-pub(crate) fn resolve_model_path(
-    env_value: Option<&str>,
-    toml_value: Option<&str>,
-) -> Result<PathBuf, ConfigError> {
-    match env_value {
-        Some(v) => Ok(PathBuf::from(v)),
-        None => match toml_value {
-            Some(v) => Ok(PathBuf::from(v)),
-            None => Err(ConfigError::MissingModelPath),
-        },
     }
 }
 

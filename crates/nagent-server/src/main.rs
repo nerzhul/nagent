@@ -34,7 +34,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // `info!` so a malformed `--config` exits cleanly without
     // producing a half-initialised log line.
     let cfg = Config::load(cli.config.as_deref()).map_err(|e| anyhow::anyhow!("{e}"))?;
-    tracing::info!(addr = %cfg.bind_addr, model = ?cfg.whisper_model_path, "starting nagent stt-server");
+    tracing::info!(
+        addr = %cfg.bind_addr,
+        stt_enabled = cfg.stt.enabled,
+        model = ?cfg.stt.whisper_model_path,
+        "starting nagent stt-server"
+    );
 
     let state = build_app(&cfg).await?;
     let app = build_router(state);

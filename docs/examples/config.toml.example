@@ -25,7 +25,6 @@
 
 # [server]
 # bind_addr = "0.0.0.0:8080"
-# whisper_model_path = "/models/ggml-base.bin"   # required (env or TOML)
 # max_queue = 32
 # session_idle_timeout_ms = 30_000
 # infer_timeout_ms = 30_000
@@ -217,6 +216,30 @@
 # synth_concurrency = 1                       # max concurrent Piper-rs calls on the bounded blocking pool (plan R4a)
 # synth_max_queue = 64                        # max callers queued for a synth permit (plan R1a); 0 = unbounded
 # synth_queue_timeout_ms = 5000               # max wait for a synth permit in ms (plan R1a); 0 = unbounded
+
+# ---------------------------------------------------------------------------
+# WebSocket STT pipeline (Whisper)
+# ---------------------------------------------------------------------------
+# Runtime master switch + the Whisper model path for the speech-to-text
+# pipeline. The model path used to live under `[server]` but it belongs
+# to the same subsystem as the runtime `enabled` switch, so the two now
+# share this section. The env-var name (`WHISPER_MODEL_PATH`) is kept
+# stable for back-compat with deployments that pre-date the move.
+#
+# When `enabled = false` the `/ws` upgrade route is not registered, the
+# whisper backend is not built, `whisper_model_path` is IGNORED (no
+# model required to boot a server that never speaks to Whisper), and
+# the frontend hides every STT control (mic button, language picker,
+# voice oscilloscope, in both Transcript and Discussion modes). Useful
+# for headless deployments, CI runs, and dev boxes without a microphone
+# device. Mirrors how `[tts].enabled` works on the TTS side.
+#
+# When `enabled = true` (the default) `whisper_model_path` is required
+# (env: `WHISPER_MODEL_PATH`).
+#
+# [stt]
+# enabled = true                              # default: true (preserves historical behaviour)
+# whisper_model_path = "/models/ggml-base.bin"   # required when enabled (env or TOML)
 
 # ---------------------------------------------------------------------------
 # Authentication & user identity (PR1)
