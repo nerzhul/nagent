@@ -226,8 +226,7 @@ fn substitute_app_js_version(static_dir: &Path, hash: &str) {
     let Some(dst) = rewrite_app_js_version(&src, hash) else {
         return;
     };
-    fs::write(&path, dst)
-        .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
+    fs::write(&path, dst).unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
 }
 
 #[cfg(test)]

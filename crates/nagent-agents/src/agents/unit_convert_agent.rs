@@ -158,11 +158,7 @@ impl Agent for UnitConvertAgent {
         })
     }
 
-    fn requires_confirmation(
-        &self,
-        _ctx: &UserContext,
-        _args: &Value,
-    ) -> ConfirmationDecision {
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
         // Pure table-driven conversion: no I/O, no variable binding,
         // no network. Gating every "12 miles en km" round behind
         // an approval prompt would be pure friction.

@@ -122,11 +122,7 @@ impl Agent for CalculateAgent {
         })
     }
 
-    fn requires_confirmation(
-        &self,
-        _ctx: &UserContext,
-        _args: &Value,
-    ) -> ConfirmationDecision {
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
         // Pure arithmetic on a sandboxed expression parser. The
         // deny-list in `validate_expression` already rejects I/O,
         // variable binding, and unknown identifiers; gating every

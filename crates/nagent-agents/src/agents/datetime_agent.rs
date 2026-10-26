@@ -86,11 +86,7 @@ impl Agent for DateTimeAgent {
         })
     }
 
-    fn requires_confirmation(
-        &self,
-        _ctx: &UserContext,
-        _args: &Value,
-    ) -> ConfirmationDecision {
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
         // Reading the clock is read-only and side-effect-free; the
         // tool loop's default-deny gate would otherwise force a
         // click on every "quelle heure est-il ?" round, which is
