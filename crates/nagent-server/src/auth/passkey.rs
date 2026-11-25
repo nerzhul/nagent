@@ -250,7 +250,7 @@ pub async fn register_finish_handler(
     // view (the same `cred` field wrapped differently) into the
     // `public_key` blob. The `passkey` half is kept for future
     // non-discoverable login flows; the `dk` half is what the
-    // current `finish_discoverable_authentication` path consumes.
+    // current `finish_discoverable_authentication_v2` path consumes.
     // The `CredentialID` is also extracted separately so the
     // `credential_id UNIQUE` lookup at login time is a straight
     // byte comparison.
@@ -399,7 +399,7 @@ pub async fn login_finish_handler(
     // wrappers around the same private `Credential` struct. Both
     // derive `Serialize + Deserialize` so the JSON we stored at
     // registration time round-trips into a `DiscoverableKey` for
-    // the `finish_discoverable_authentication` call without
+    // the `finish_discoverable_authentication_v2` call without
     // poking at any crate-private fields.
     let dk: DiscoverableKey = serde_json::from_slice(&stored.public_key).map_err(|e| {
         AuthError::Internal(format!(
@@ -410,7 +410,7 @@ pub async fn login_finish_handler(
         .map_err(|e| AuthError::Internal(format!("deserialise DiscoverableAuthentication: {e}")))?;
     let auth_result = inner
         .webauthn
-        .finish_discoverable_authentication(&assertion, sk_auth, &[dk])
+        .finish_discoverable_authentication_v2(&assertion, sk_auth, &dk)
         .map_err(|e| {
             tracing::warn!(
                 event = "auth.passkey.login",
@@ -419,9 +419,9 @@ pub async fn login_finish_handler(
                 user_id = %stored.user_id,
                 ip = %ip,
                 error = %e,
-                "passkey login failed (webauthn finish_discoverable_authentication)"
+                "passkey login failed (webauthn finish_discoverable_authentication_v2)"
             );
-            AuthError::BadRequest(format!("finish_discoverable_authentication: {e}"))
+            AuthError::BadRequest(format!("finish_discoverable_authentication_v2: {e}"))
         })?;
     require_admin_store_from_auth(&state)?
         .passkeys

@@ -369,11 +369,6 @@ pub async fn probe_smtp(
     // `MAIL FROM:<from>` so a misconfigured `from_address`
     // surfaces a 553-class error from the relay BEFORE the
     // user can ask the LLM to send.
-    let agent_cfg = Arc::new(nagent_agents::EmailAgentConfig::from(
-        crate::config::agents::EmailConfig::from_env_with_toml(None)
-            .map_err(|e| AuthError::Internal(e.to_string()))?,
-    ));
-    let smtp_impl = nagent_agents::agents::email::EmailSmtpImpl::new(agent_cfg);
     let smtp_cfg = nagent_agents::agents::email::SmtpConnectConfig {
         host: body.host.clone(),
         port: body.port,
@@ -383,7 +378,6 @@ pub async fn probe_smtp(
         password: body.password.clone(),
         from_address: body.from_address.clone(),
     };
-    let user_id = user.id;
     // Open a session, run MAIL FROM, and immediately close
     // (no recipient is supplied on the probe path — the
     // server's response to MAIL FROM alone is enough to

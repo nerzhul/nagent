@@ -27,7 +27,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext, Uuid};
+use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
 use crate::config::ToolSearchAgentConfig;
 use crate::tools_router::{ToolsRouter, SEARCH_TOOLS_NAME};
 
@@ -404,7 +404,8 @@ mod tests {
         // catalog query. The result is server-generated so there
         // is no remote content to redact.
         let agent = ToolSearchAgent::new();
-        let mut ctx = UserContext::for_tests(Uuid::new_v4(), ServiceRegistry::empty().into_arc());
+        let mut ctx =
+            UserContext::for_tests(uuid::Uuid::new_v4(), ServiceRegistry::empty().into_arc());
         assert!(agent.requires_confirmation(&ctx, &Value::Null).is_allowed());
         ctx.record_invocation(agent.name());
         assert!(
