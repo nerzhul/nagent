@@ -243,7 +243,7 @@ timezone opt-in, reply-language picker — moved to the new
 Settings tab (§4.4a) where it gets proper DB-backed persistence.
 
 - **TTS sub-panel** (`#chat-tts-settings`, hidden when read-aloud is
-  off):
+  off or when the server reports `features.tts = false`):
   - `#chat-tts-voice-en` and `#chat-tts-voice-fr` populated dynamically
     from `GET /v1/audio/voices` (only installed voices are shown).
   - `#chat-tts-speed` slider labelled `0.5x…1.5x`. Piper's

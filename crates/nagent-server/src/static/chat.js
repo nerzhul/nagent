@@ -4984,14 +4984,15 @@ function applyFeatureGates() {
   // that ship hidden in the HTML and are unhidden by
   // `probeTtsVoices` on a 200 from `/v1/audio/voices`.
   const ttsOff = !feature("tts");
-  for (const id of [
-    "chat-tts-label",
-    "chat-tts-settings",
-  ]) {
-    const el = document.getElementById(id);
-    if (el) el.toggleAttribute("hidden", ttsOff);
+  const ttsLabel = document.getElementById("chat-tts-label");
+  if (ttsLabel) ttsLabel.toggleAttribute("hidden", ttsOff);
+  const ttsSettings = document.getElementById("chat-tts-settings");
+  if (ttsSettings) {
+    const ttsCheck = document.getElementById("chat-tts-check");
+    ttsSettings.toggleAttribute("hidden", ttsOff || !ttsCheck?.checked);
   }
   document.body.classList.toggle("tts-disabled", ttsOff);
+  refreshReplayButtonVisibility();
 
   // Gate the export menu + per-bubble edit pencil on the
   // `chat_messages` table (the body-level class is the CSS
@@ -5440,7 +5441,7 @@ function wireTtsControls() {
   // `.chat-advanced` drawer) based on the master toggle. The block
   // is hidden by default; we toggle the `[hidden]` attribute here.
   function syncAdvancedVisibility() {
-    settings.hidden = !check.checked;
+    settings.hidden = !check.checked || !feature("tts");
   }
   syncAdvancedVisibility();
 

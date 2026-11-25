@@ -3396,7 +3396,7 @@ body.chat-messages-disabled .chat-message-regenerate { display: none; }
 body.stt-disabled .voice-graph,
 body.stt-disabled .chat-record-btn,
 body.stt-disabled .chat-audio { display: none !important; }
-body.tts-disabled .chat-tts-label,
+body.tts-disabled #chat-tts-label,
 body.tts-disabled .chat-tts-settings,
 body.tts-disabled .chat-message-replay { display: none !important; }
 
