@@ -1,8 +1,12 @@
 # Replace Stooq backend of `get_stock_quote` with Twelve Data (Finnhub soft-fallback)
 
+Status: **not implemented as of 2026-11-25** — the agent still uses
+Stooq (`crates/nagent-agents/src/agents/stock_agent.rs` calls
+`https://stooq.com/q/l/?…&e=csv`).
+
 ## Context
 
-`crates/stt-server/src/agents/stock_agent.rs` backs `get_stock_quote`
+`crates/nagent-agents/src/agents/stock_agent.rs` backs `get_stock_quote`
 with Stooq's free CSV endpoint. From datacenter IPs (Kubernetes, cloud
 VMs, Docker) Stooq is gated by Cloudflare and returns a JS challenge
 instead of CSV — see project memory `stt_server_stooq_browser_block`.
@@ -54,10 +58,15 @@ indices + datacenter-friendly n'existe à la date d'aujourd'hui.
    - Rate limiter token-bucket 8 req/min avec
      `AgentError::RateLimited` + hint `Retry-After`.
 
-2. **Config TOML `[agents.get_stock_quote]`** dans
-   `crates/stt-server/src/config.rs` (parallel à `[agents.get_weather]`):
+2. **Config TOML `[agents.stock]`** — the option now follows the
+   triple-definition pattern (see `architecture-restructure.md`
+   finding 3.1.1): `StockAgentConfig` in
+   `crates/nagent-agents/src/agents/config_doc.rs`, runtime mirror
+   `StockConfig` in `crates/nagent-server/src/config/agents.rs`, TOML
+   mirror `TomlStockConfig` in
+   `crates/nagent-server/src/config_file.rs`. New keys:
    ```toml
-   [agents.get_stock_quote]
+   [agents.stock]
    api_key = "your-twelve-data-key"
    timeout_ms = 8_000
    base_url = "https://api.twelvedata.com"
@@ -66,21 +75,26 @@ indices + datacenter-friendly n'existe à la date d'aujourd'hui.
    Env overrides: `STOCK_API_KEY`, `STOCK_TIMEOUT_MS`,
    `STOCK_BASE_URL`, `STOCK_REQUESTS_PER_MINUTE`.
 
-3. **Startup guard**: `lib.rs` / `main.rs` — si la feature `stock-agent`
-   est activée et aucune clé n'est fournie (ni TOML ni env), log
-   warning + l'agent n'est pas enregistré. Erreur claire pointant vers
-   `examples/config.toml.example`.
+3. **Startup guard**: `crates/nagent-server/src/app.rs::build_app` —
+   si la feature `stock-agent` est activée et aucune clé n'est
+   fournie (ni TOML ni env), log warning + l'agent n'est pas
+   enregistré. Erreur claire pointant vers
+   `docs/examples/config.toml.example`.
 
-4. **Feature flags Cargo** (`crates/stt-server/Cargo.toml`):
-   - `stock-agent` (default-on pour `make run*`) → Twelve Data.
-   - `stock-agent-stooq` (non-default) → chemin Stooq préservé pour
-     ceux qui y tiennent, aucun nouveau dev.
+4. **Feature flags Cargo**:
+   - `stock-agent` in `crates/nagent-agents/Cargo.toml` (forwarded
+     as `stock-agent = ["nagent-agents/stock-agent"]` in
+     `crates/nagent-server/Cargo.toml`, already listed in
+     `all-agents` on both crates) → Twelve Data.
+   - `stock-agent-stooq` (non-default) in `nagent-agents` → chemin
+     Stooq préservé pour ceux qui y tiennent, aucun nouveau dev.
 
 5. **Mise à jour des tests**
-   - Inline (dans `stock_agent.rs::tests`): remplacer les
-     `parse_stooq_csv_*` par 10 tests `parse_twelvedata_quote_*`
-     (voir détail dans la section "Validation").
-   - `tests/agents.rs::stock_agent_parses_csv_with_loopback_fixture`
+   - Inline (dans `crates/nagent-agents/src/agents/stock_agent.rs::tests`):
+     remplacer les `parse_stooq_csv_*` par 10 tests
+     `parse_twelvedata_quote_*` (voir détail dans la section
+     "Validation").
+   - `crates/nagent-server/tests/agents.rs::stock_agent_parses_csv_with_loopback_fixture`
      → renommé `stock_agent_parses_quote_with_loopback_fixture`,
      stub loopback Twelve Data via `base_url` override.
    - Ajouter
@@ -93,7 +107,7 @@ indices + datacenter-friendly n'existe à la date d'aujourd'hui.
      env, mentionner le cache 60 s.
    - Table de config maître (ligne 215) : ajouter l'entrée
      `[agents.get_stock_quote]`.
-   - `examples/config.toml.example` : ajouter le bloc d'exemple.
+   - `docs/examples/config.toml.example` : ajouter le bloc d'exemple.
 
 7. **`Makefile`**: aucun changement — `stock-agent` reste activé sur
    les 6 targets `make run*` (par défaut = Twelve Data maintenant).
@@ -113,9 +127,9 @@ provider / agent est pensée pour ça.
 ## Validation
 
 1. `make fmt && make clippy && make test` clean.
-2. `cargo build -p stt-server --no-default-features --features
-   stt-server/stock-agent,stt-server/stock-agent-stooq` — compile
-   des deux côtés.
+2. `cargo build -p nagent-server --no-default-features --features
+   nagent-server/stock-agent` et une variante avec
+   `nagent-agents/stock-agent-stooq` — compile des deux côtés.
 3. Tests unitaires `stock_agent::tests`:
    - `parse_twelvedata_quote_happy_path_equity` (`AAPL`),
    - `parse_twelvedata_quote_happy_path_index` (`^FCHI`),

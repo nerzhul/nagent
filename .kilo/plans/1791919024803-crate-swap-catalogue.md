@@ -36,7 +36,7 @@ itself is the wrong move:
 Format per item: **Where / What / Crate / Why / LOC saved / Risk /
 Migration sketch**.
 
-### 3. Rate limiting — `governor` / `tower-governor` ≈ 1 400 LOC
+### 1. Rate limiting — `governor` / `tower-governor` ≈ 1 400 LOC
 - **Where:**
   `crates/nagent-support/src/ratelimit.rs:170-355`
   (`TokenBucket`, `TokenBucketMap`),
@@ -66,7 +66,7 @@ Migration sketch**.
   the existing `sweep_clock` tick so the eviction cadence stays
   deterministic.
 
-### 4. TTL map / in-memory cache — `moka` ≈ 350 LOC
+### 2. TTL map / in-memory cache — `moka` ≈ 350 LOC
 - **Where:** `crates/nagent-support/src/ttl_map.rs:30-258`
   (`TtlMap`, `InsertOutcome`, opportunistic-on-insert sweep).
 - **What:** Hand-rolled `DashMap<K, Entry<V>>` with `expires_at`,
@@ -84,7 +84,7 @@ Migration sketch**.
   the wrapper. Keep the `sweep_expired` hook but make it a no-op
   (`moka` sweeps in the background).
 
-### 5. iCalendar parser (RFC 5545) — `icalendar` *if accessor available* ≈ 400 LOC
+### 3. iCalendar parser (RFC 5545) — `icalendar` *if accessor available* ≈ 400 LOC
 - **Where:** `crates/nagent-agents/src/agents/caldav/mod.rs:854-1230`
   (`unfold`, `parse_vevent`, `split_blocks`, `split_property`,
   `parse_dt`, `parse_duration`, `ical_escape`, `ical_unescape`) +
@@ -109,7 +109,7 @@ Migration sketch**.
   reachable in 0.7.x; if yes, swap the parser loop for `icalendar`
   iterators. If no, close out as "deliberate".
 
-### 6. PROPFIND / multistatus XML parser — `quick-xml` ≈ 400 LOC
+### 4. PROPFIND / multistatus XML parser — `quick-xml` ≈ 400 LOC
 - **Where:** `crates/nagent-agents/src/agents/caldav/mod.rs:445-841`
   (`extract_propfind_responses`, `extract_calendar_home_hrefs`,
   `is_user_calendar`, `find_open_tag`, `find_close_tag`,
@@ -126,7 +126,7 @@ Migration sketch**.
   `urn:ietf:params:xml:ns:caldav`); `quick-xml`'s namespace resolver
   handles them natively. No wire changes.
 
-### 7. BM25 router — `bm25` ≈ 500 LOC
+### 5. BM25 router — `bm25` ≈ 500 LOC
 - **Where:** `crates/nagent-agents/src/tools_router.rs:1-725`
   (`ToolsRouter`, `IndexedTool`, `ToolSearchHit`, `tokenise_*`,
   `count_term`, BM25 scoring math).
@@ -145,7 +145,7 @@ Migration sketch**.
 - **Migration sketch:** Likely **not worth swapping** until the
   registry grows past the current ~12 tools. Defer.
 
-### 8. SSRF IP classifier — `ipnet` allowlist (dep already) ≈ 90 LOC
+### 6. SSRF IP classifier — `ipnet` allowlist (dep already) ≈ 90 LOC
 - **Where:** `crates/nagent-agents/src/egress.rs:506-606`
   (`is_addr_allowed`, `is_v4_allowed`, `is_v6_allowed`,
   `host_matches_allowlist`, plus the `Ipv4AddrLinkbackExt` dead shim
@@ -162,7 +162,7 @@ Migration sketch**.
 - **Risk:** None — current logic is correct; swap is one-to-one plus
   a never-variant for IPv6 unspecified / multicast.
 
-### 9. Config env > TOML > default precedence — `figment` ≈ 400 LOC
+### 7. Config env > TOML > default precedence — `figment` ≈ 400 LOC
 - **Where:**
   `crates/nagent-server/src/config/mod.rs:66-152`
   (`env_opt`, `resolve_primitive`, `resolve_opt_string`,
@@ -182,7 +182,7 @@ Migration sketch**.
   `NAGENT_<SECTION>_<KEY>` shape need a small mapping table.
   `.env` semantics (handled by `dotenvy`) are unaffected.
 
-### 10. SSE byte-stream parser — `eventsource-stream` / `sse-stream` ≈ 70 LOC
+### 8. SSE byte-stream parser — `eventsource-stream` / `sse-stream` ≈ 70 LOC
 - **Where:** `crates/nagent-server/src/llm/sse.rs:214-298`
   (`SseStream`, `parse_sse_frame`).
 - **What:** Hand-written SSE frame parser that accumulates `event:`
@@ -199,7 +199,7 @@ Migration sketch**.
 - **Migration sketch:** Borderline; only worth doing if other SSE
   surfaces (real upstream, not just OpenAI) appear.
 
-### 11. Cookie Set-Cookie builder / parser — `cookie` (dep already) ≈ 40 LOC
+### 9. Cookie Set-Cookie builder / parser — `cookie` (dep already) ≈ 40 LOC
 - **Where:** `crates/nagent-server/src/auth/session.rs:73-114, 123-152`
   (`extract_session_token`, `build_set_cookie`, `build_clear_cookie`).
 - **What:** Manual `Cookie:` header split on `'; '` and a hand-built
@@ -219,38 +219,10 @@ Migration sketch**.
 
 ## Total swing
 
-≈ **4 100 LOC** of hand-rolled code still deletable on top of crates
-that already exist (and several are already in the dep tree). The
-original estimate was ~4 700 LOC; candidate #1 (`clap`) shipped as
-~800 LOC net deletion (over-delivered vs the 600 estimate). Largest
-remaining deltas: rate limiting (~1 400), OAuth2 X (~500), BM25
-router (~500), config layer (~400).
-
-## Progress
-
-- [x] **#1 `clap` derive** — DONE 2026-10-13 (commit `cc57400`).
-  Removed ~800 LOC net (1438 deletions / 634 insertions). `CliArgs`
-  retired; `Config::load` takes `Option<&Path>` directly. 12
-  snapshot tests in `cli/snapshots.rs` guard the wire contract.
-  The original implementation plan was kept in the commit history
-  as `.kilo/plans/1792262220000-clap-derive-migration.md` for
-  reference, then deleted once merged.
-
-- [x] **#2 `oauth2` 5** — DONE 2026-10-13 (uncommitted as of
-  this revision). Net ~85 LOC deleted in `oauth/x.rs`
-  (`507 → ~470` lines after the trim) plus a parallel ~30
-  deleted in `x_timeline/mod.rs::refresh_access_token` (the
-  same form-POST lived in both crates and now goes through
-  `oauth2::Client::exchange_refresh_token` in both). The
-  `XRefreshTokenClient` struct, the `RefreshTokenClient` trait,
-  and the `TokenSet`/`RefreshTokenError` types stay — the swap
-  was wired under the existing abstraction. The `PKCE` verifier
-  mint, the `state` round-trip, the `/2/users/me` lookup, the
-  vault encryption + UPSERT, and the audit row stay X-specific
-  (no crate replacement). 17/17 `oauth::` unit tests + 13/13
-  `x_timeline` unit tests pass; clippy introduces zero new
-  warnings. Actual saving: **~260 LOC** (catalogue estimate
-  ~500 was over-counted; the X-specific surface stays).
+≈ **3 800 LOC** of hand-rolled code still deletable on top of crates
+that already exist (and several are already in the dep tree). Largest
+remaining deltas: rate limiting (~1 400), BM25 router (~500),
+config layer (~400).
 
 ## Recommended implementation order (remaining)
 
@@ -259,29 +231,27 @@ Based on LOC savings × migration risk:
 1. **`moka`** — drops the `sweep_clock` dependency from `ttl_map`;
    low risk; existing tests use mostly `insert` / `get`.
 2. **`ipnet` allowlist** — already a dep; pure simplification.
-3. **`oauth2` X dance** — `oauth2` is already in `Cargo.lock`; the
-   swap is mechanical.
-4. **`governor`** — biggest win but requires keeping the loopback
+3. **`governor`** — biggest win but requires keeping the loopback
    carve-out and BucketKind diagnostics; plan must include an
    adapter shim.
-5. **`quick-xml` + maybe `icalendar`** — both CalDAV-shaped; bundle
+4. **`quick-xml` + maybe `icalendar`** — both CalDAV-shaped; bundle
    into one plan to avoid two migrations of the same module.
-6. **`figment` config layer** — touches every `with_env_and_toml`
+5. **`figment` config layer** — touches every `with_env_and_toml`
    constructor; needs a single PR with N agent config files
    updated together.
-7. **`sse-stream`** — only if another SSE surface appears; defer.
-8. **`bm25`** — defer until tool registry grows.
-9. **`cookie`** — defer; existing rejection comment is up-to-date.
+6. **`sse-stream`** — only if another SSE surface appears; defer.
+7. **`bm25`** — defer until tool registry grows.
+8. **`cookie`** — defer; existing rejection comment is up-to-date.
 
 ## Open questions
 
-- **#1 `icalendar`** — does 0.7.2+ or 0.8 expose the property
+- **`icalendar`** — does 0.7.2+ or 0.8 expose the property
   accessor? Needs a 30-min check before deciding on/off the list.
-- **#9 `figment` vs `config`** — workspace preference between
+- **`figment` vs `config`** — workspace preference between
   the two? Both fit; `figment` is lighter, `config` has wider
   recognition. No decision required for the catalogue, but the
   implementation plan will pick one.
-- **#3 `governor`** — is the loopback bypass a per-bucket attribute
+- **`governor`** — is the loopback bypass a per-bucket attribute
   or per-IP? The implementation plan needs to confirm where
   `RateLimiter` reads the bypass decision from.
 

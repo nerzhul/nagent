@@ -2,9 +2,8 @@
 
 A prioritized menu of UX improvements for the nagent web app.
 The proposal covers both **frontend features** (UI-only) and **new chat
-agents** that the LLM can call on the user's behalf. Nothing here is
-implemented in this turn — this document is a planning menu the user
-can pick from.
+agents** that the LLM can call on the user's behalf. Items that landed
+are removed from this document.
 
 ## 0. Scope and methodology
 
@@ -31,26 +30,13 @@ Existing reference points:
 - `UserContext::secret` / `UserContext::update_secret` (read + write).
 - `chat.js` (~2,800 lines), `app.js`, `audio.js`, `tts.js`,
   `geolocation.js`, `auth.js`, `chat-sessions.js` (localStorage).
-- Out-of-scope list today (`docs/ui_features.md` §9):
-  - No chat export, no drag-and-drop, no streaming partials, no
-    system-prompt presets, no light theme, no message
-    edit/regenerate, no cross-device session sync.
+- Out-of-scope list (`docs/ui_features.md` §9): no drag-and-drop, no
+  streaming partials, no system-prompt presets, no light theme, no
+  cross-device session sync.
 
 ## A. End-user UX gaps (UI / frontend-only)
 
-### A1. Chat session export (Markdown / JSON / PDF)
-
-- **Problem**: only Transcript mode offers a `.txt` download. A
-  multi-turn chat the user spent 20 min curating disappears if the
-  browser storage is cleared.
-- **Proposal**: a `Download ▾` menu next to `#chat-clear` offering
-  Markdown (with reasoning + tool traces collapsed by default), raw
-  JSON (machine-readable, same shape as localStorage), and HTML
-  (sanitised, printable). All three flows are pure-frontend — the
-  client renders and `URL.createObjectURL` triggers the save.
-- **UX gap**: 5. **Effort**: S. **Dependencies**: none.
-
-### A2. Streaming partial transcripts in Transcript view
+### A1. Streaming partial transcripts in Transcript view
 
 - **Problem**: `PartialTranscript` tags are received but discarded
   (`docs/ui_features.md` §9). The user sees nothing while they speak
@@ -64,24 +50,7 @@ Existing reference points:
 - **UX gap**: 5. **Effort**: S. **Dependencies**: `app.js`
   `appendLine` only.
 
-### A3. Message edit & regenerate
-
-- **Problem**: there's no way to fix a typo in a sent user message
-  other than deleting the rest of the session, and no way to ask the
-  LLM to retry a bad answer without rewriting the prompt.
-- **Proposal**:
-  - User bubble gets an inline pencil on hover → opens a textarea
-    that submits `PATCH /v1/chat/session/:id/messages/:mid` (new
-    route, owner-scoped). The edited message + every message after
-    it is re-fed into the next LLM request.
-  - Assistant bubble gets a "regenerate" icon → POSTs the same user
-    turn again. The existing `AbortController` + tools-footer
-    machinery already covers most of the wiring.
-- **UX gap**: 4. **Effort**: M. **Dependencies**: server-side
-  per-session message store; `UserContext` already handles history
-  injection.
-
-### A4. Drag-and-drop file upload (Discussion)
+### A2. Drag-and-drop file upload (Discussion)
 
 - **Problem**: `docs/ui_features.md` §9 lists drag-and-drop as
   missing. The `documents/` subsystem + `read_document` agent exist,
@@ -94,7 +63,7 @@ Existing reference points:
 - **UX gap**: 3. **Effort**: S. **Dependencies**: existing
   `documents/` mount + `read_document` agent.
 
-### A5. System prompt presets library
+### A3. System prompt presets library
 
 - **Problem**: `#chat-system` textarea starts empty. Users who want a
   "concise translator" persona or a "SRE copilot" persona have no
@@ -107,7 +76,7 @@ Existing reference points:
 - **UX gap**: 3. **Effort**: S–M. **Dependencies**: static assets
   loader; no new server route.
 
-### A6. In-session search (Ctrl+F-aware)
+### A4. In-session search (Ctrl+F-aware)
 
 - **Problem**: in a 200-message session the user can't find the
   earlier quote. Browser Ctrl+F hits code blocks / hidden reasoning.
@@ -117,7 +86,7 @@ Existing reference points:
   for re-streaming). Buttons for next / previous match.
 - **UX gap**: 3. **Effort**: S. **Dependencies**: none.
 
-### A7. Light theme switcher
+### A5. Light theme switcher
 
 - **Problem**: `docs/ui_features.md` §7.4: dark theme only. Bright
   rooms make the UI hard to read.
@@ -130,7 +99,7 @@ Existing reference points:
 - **UX gap**: 3. **Effort**: S. **Dependencies**: a new
   `user_preferences.theme` column + migration `0009`.
 
-### A8. Pinned / starred messages
+### A6. Pinned / starred messages
 
 - **Problem**: in a long chat the user has no way to mark "this is
   the answer I wanted". Search helps but the user wants the
@@ -139,21 +108,11 @@ Existing reference points:
   to a "Pinned" section at the top of `#chat-messages` (above the
   inline voice widget if active). Per-session; persists in
   `nagent.chat.pins.<session_id>` localStorage now, moves to the
-  server table when message storage lands (A3).
+  server table later.
 - **UX gap**: 2. **Effort**: S. **Dependencies**: none today;
-  later folds into the per-session store from A3.
+  later folds into the per-session store.
 
-### A9. Per-bubble "copy as Markdown" button
-
-- **Problem**: copying a code block currently strips the backticks.
-  Math, tables, lists lose formatting when pasted elsewhere.
-- **Proposal**: a small clipboard icon on assistant bubbles. Uses
-  `navigator.clipboard.writeText` with the raw markdown (the same
-  string `applyMarkdown` consumed). For user bubbles it copies
-  plaintext.
-- **UX gap**: 2. **Effort**: S. **Dependencies**: none.
-
-### A10. Mobile / tablet responsive layout
+### A7. Mobile / tablet responsive layout
 
 - **Problem**: the chat sidebar and the header are desktop-first;
   on a phone the sidebar overlays the conversation when expanded,
@@ -164,7 +123,7 @@ Existing reference points:
   iOS Safari.
 - **UX gap**: 3. **Effort**: M. **Dependencies**: none.
 
-### A11. PWA / install-to-home-screen
+### A8. PWA / install-to-home-screen
 
 - **Problem**: users on iPad / Android who treat the page as an app
   have to re-open the URL each session, and the browser may evict
@@ -176,7 +135,7 @@ Existing reference points:
 - **UX gap**: 2. **Effort**: M. **Dependencies**: none (assets are
   already served by the Rust static handler).
 
-### A12. Approval card: deny with reason
+### A9. Approval card: deny with reason
 
 - **Problem**: `requires_confirmation` denial today only emits
   `"Utilisateur refusé"`; the LLM cannot learn *why*.
@@ -207,21 +166,7 @@ Existing reference points:
   migration `0009_reminders.sql`; per-session WebSocket channel
   (already exists).
 
-### B2. Long-term memory (`memory-agent`)
-
-- **Problem**: the LLM forgets across `POST /v1/chat/session` calls.
-  The user has to re-explain "my doctor is Dr Martin" every session.
-- **Proposal**: a `memory_recall` / `memory_store` pair. `store`
-  writes a structured triple (`subject`, `predicate`, `value`,
-  `confidence`, `source_session_id`) to a new `memories` table;
-  `recall` does a tiny vector-less keyword+tag match. The system
-  prompt in `llm::prompt` auto-injects the top-N matches on every
-  turn (gated by a `user_preferences.memory_enabled` flag, off by
-  default). Audit log already covers the write path.
-- **UX gap**: 4. **Effort**: M. **Dependencies**: migration
-  `0010_memories.sql`; flag in `user_preferences`.
-
-### B3. Calendar update / delete (`caldav-agent` extension)
+### B2. Calendar update / delete (`caldav-agent` extension)
 
 - **Problem**: the CalDAV agents ship read + add only by design
   (`docs/architecture.md` §2.4). The user can create an event but
@@ -234,23 +179,7 @@ Existing reference points:
 - **UX gap**: 3. **Effort**: S–M. **Dependencies**: `caldav-agent`
   feature already on; `CalDavClient` plumbing.
 
-### B4. Email (IMAP/SMTP) — first concrete follow-up after CalDAV
-
-- **Problem**: `docs/architecture.md` §"Per-user credentials" lists
-  IMAP/SMTP as a follow-up PR. A voice-first assistant that can't
-  read or send email is a paperweight for productivity users.
-- **Proposal**: add an `email_imap` / `email_smtp` `ServiceDef`
-  (fields: host, username, password, port, tls). Agents:
-  `email_list_inbox(folder, since, limit)`,
-  `email_get_message(uid)`,
-  `email_send(to, subject, body, in_reply_to)`. Hardening: TLS
-  required by default; `confirm-on-send`; new `[email]`
-  allow-list for outbound recipients (operator-set).
-- **UX gap**: 4. **Effort**: L. **Dependencies**: new crate
-  (lettre / async-imap) or hand-rolled; credentials vault already
-  wired.
-
-### B5. Home Assistant (`home-assistant-agent`)
+### B3. Home Assistant (`home-assistant-agent`)
 
 - **Problem**: same shape as email — already named in the README as
   a follow-up. Users on the "voice assistant in the kitchen wall"
@@ -266,33 +195,17 @@ Existing reference points:
 - **UX gap**: 3. **Effort**: M. **Dependencies**: Home Assistant
   REST API; credentials vault.
 
-### B6. GitHub (`github-agent`)
+### B4. Personal transcript / chat search (`history-agent`)
 
-- **Problem**: README §"Per-user credentials" lists it explicitly.
-  Devs will ask the assistant "what's open in my team's repo?".
-- **Proposal**: `ServiceDef` `github` with `personal_access_token`.
-  Agents: `github_search_code`, `github_list_issues`,
-  `github_get_issue`, `github_create_issue`,
-  `github_list_prs`. All write paths `confirm-on-write`. Uses the
-  REST API (`api.github.com`); hostname allow-list mandatory.
-- **UX gap**: 3. **Effort**: M. **Dependencies**: GitHub REST API;
-  credentials vault.
+- **Problem**: the user wants "what did I tell the assistant last week
+  about the kitchen remodel?".
+- **Proposal**: a `history_search(query, since, until, session_id?)`
+  agent reading the server-side `chat_messages` store, plus a
+  `/`-keyed search bar at the top of `#chat-messages`.
+- **UX gap**: 3. **Effort**: S–M.
+  **Dependencies**: permission scope ("may read every session").
 
-### B7. Personal transcript / chat search (`history-agent`)
-
-- **Problem**: with per-session chat storage (A3) and possibly
-  server-side persistence, the user wants "what did I tell the
-  assistant last week about the kitchen remodel?". Today: no
-  — `chat.js` keeps each session in its own localStorage blob.
-- **Proposal**: `history_search(query, since, until, session_id?)`
-  agent. Once per-session storage lands on the server, this becomes
-  a small SQL query. Before that, it reads `localStorage` from
-  the browser via a new `DocumentSource`-like capability.
-- **UX gap**: 3. **Effort**: M (server-backed) / S (local-only).
-  **Dependencies**: A3; permission scope ("may read every
-  session").
-
-### B8. URL preview / unfurl (`link_preview-agent`)
+### B5. URL preview / unfurl (`link_preview-agent`)
 
 - **Problem**: the user pastes a URL in chat; the LLM has to call
   `web_fetch` (a full GET + clean text) just to render a one-line
@@ -305,7 +218,7 @@ Existing reference points:
 - **UX gap**: 2. **Effort**: S. **Dependencies**: reuses
   `web_fetch` egress client.
 
-### B9. Timer / stopwatch (`timer-agent`)
+### B6. Timer / stopwatch (`timer-agent`)
 
 - **Problem**: "set a timer for 12 minutes" is the canonical
   smart-speaker request; nagent cannot answer it.
@@ -317,7 +230,7 @@ Existing reference points:
 - **UX gap**: 4. **Effort**: S. **Dependencies**: WebSocket
   outbound; no DB needed.
 
-### B10. Translation (`translate-agent`)
+### B7. Translation (`translate-agent`)
 
 - **Problem**: STT already translates to English (checkbox); the
   user can't ask "translate this sentence to Japanese" in chat
@@ -329,14 +242,14 @@ Existing reference points:
 - **UX gap**: 3. **Effort**: S. **Dependencies**: optional HTTP
   client.
 
-### B11. Image generation / vision
+### B8. Image generation / vision
 
 - **Problem**: the user wants "draw a logo for my bakery" or "what
   does this screenshot say?".
 - **Proposal**: vision side first (cheaper): `vision_describe(image_url | upload_id)` that forwards to Ollama's vision-capable model (llava, llama3.2-vision). Generation: `image_generate(prompt, size, steps)` against a local Stable Diffusion backend is a much larger lift and out of scope for v1.
 - **UX gap**: 3. **Effort**: M (vision) / L (generation). **Dependencies**: image attachment path (A4); Ollama vision model.
 
-### B12. Map / directions (`maps-agent`)
+### B9. Map / directions (`maps-agent`)
 
 - **Problem**: "where is the nearest pharmacy" — chat has no sense
   of place beyond the optional location block (which the LLM has
@@ -367,7 +280,7 @@ Existing reference points:
   for short commands: "stop", "nouvelle conversation", "efface",
   "envoie". They bypass the chat submit path and call the same
   handlers as the keyboard shortcuts.
-- **UX gap**: 3. **Effort**: S. **Dependencies**: A2 (partial
+- **UX gap**: 3. **Effort**: S. **Dependencies**: A1 (partial
   transcript streaming).
 
 ### C3. Inline citations for `web_fetch`
@@ -398,8 +311,9 @@ Existing reference points:
   differently?" without losing the current thread.
 - **Proposal**: a "Fork from here" button on every assistant
   bubble. Creates a new chat session whose history is the
-  truncated parent. Backed by per-session storage from A3.
-- **UX gap**: 2. **Effort**: M. **Dependencies**: A3.
+  truncated parent. Backed by the server-side per-session store.
+- **UX gap**: 2. **Effort**: M. **Dependencies**: server-side
+  per-session store.
 
 ### C6. Tool call retry vs whole-turn retry
 
@@ -423,7 +337,7 @@ Existing reference points:
   the Settings tab. JSON file with every `user_preferences`
   field + the localStorage mirror keys the user has set. Import
   is gated by a confirm dialog.
-- **UX gap**: 2. **Effort**: S. **Dependencies**: A7 (theme
+- **UX gap**: 2. **Effort**: S. **Dependencies**: A5 (theme
   field exists in `user_preferences`).
 
 ### C8. Inline code-block copy + syntax highlighting
@@ -440,30 +354,20 @@ Existing reference points:
 
 If the user wants a "where do we start" list:
 
-1. **A1 — Chat export (Markdown / JSON)** — pure frontend, biggest
-   UX delta for power users, zero backend change.
-2. **A2 — Streaming partial transcripts** — small daily papercut;
+1. **A1 — Streaming partial transcripts** — small daily papercut;
    `PartialTranscript` is already on the wire, just unused.
-3. **B1 — Reminders** — fills the canonical voice-assistant
+2. **B1 — Reminders** — fills the canonical voice-assistant
    expectation; WebSocket plumbing already exists.
-4. **A7 — Light theme** — accessibility win, low risk, follows the
+3. **A5 — Light theme** — accessibility win, low risk, follows the
    existing `user_preferences` pattern.
-5. **B9 — Timers** — 30-line agent + WebSocket reuse; rides on
+4. **B6 — Timers** — 30-line agent + WebSocket reuse; rides on
    the same notification path as B1.
+5. **B5 — URL preview / unfurl** — cheap, reuses the `web_fetch`
+   egress client, makes pasted links readable in chat.
 
 ## Open questions
 
-- **B2 (memory)**: should the LLM *auto-extract* memories from
-  chat ("it sounds like your doctor's name is Martin — remember?"),
-  or only on explicit user request? Both have privacy implications
-  and need a UX choice.
-- **B4 (email)**: do we want a single IMAP/SMTP agent pair, or two
-  separate `ServiceDef`s with provider-specific UIs (Gmail OAuth vs
-  generic IMAP)?
-- **A3 / C5 (edit + fork)**: needs a server-side per-session store.
-  SQLite or Postgres — both compile today (`docs/architecture.md`
-  §"Storage engine"). Confirm direction before A3 lands.
-- **B11 (image gen)**: out of v1 scope? Or fold the vision side
+- **B8 (image gen)**: out of v1 scope? Or fold the vision side
   in early and revisit generation later?
-- **A11 (PWA)**: is the operator OK with shipping a service
+- **A8 (PWA)**: is the operator OK with shipping a service
   worker, or do they want a strict "no SW" footprint?

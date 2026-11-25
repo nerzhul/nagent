@@ -1,6 +1,6 @@
 # Architecture and security roadmap
 
-Status: living plan, reviewed against the current source on 2026-10-05; the working tree contains uncommitted changes. Priorities are in section 6.
+Status: living plan, reviewed against the current source on 2026-11-25 (clean tree, HEAD `7f276d1`). Feature plans that landed are deleted from `.kilo/plans/`; the live feature plans are Mistral API provider (`1795597719367-mistral-api-provider.md`), GitHub agent (`1795597719368-github-agent-plan.md`), Shortcut.com backlog agent (`1795597719369-shortcuts-backlog-agent.md`), plus the residuals in `1791464974103-chat-export-edit-copy.md`. Priorities are in section 6.
 
 The plan is written from two seats: the **software architect** (is the system cut along the right seams, can it evolve cheaply) and the **security architect** (what can an attacker reach, how far, and how fast would we notice). Items are labelled:
 
@@ -16,10 +16,10 @@ Every commit keeps `cargo fmt`, `cargo clippy`, `cargo test`, `cargo audit` and 
 | `stt-proto` | ~0.4k | Wire types and postcard codec. |
 | `stt-core` | ~1.2k | Whisper backend trait, mock, real backend, worker pool. Minor: `mock.rs` / `whisper_backend.rs` could sit under `backend/`. |
 | `nagent-support` | ~1.9k | Bounded primitives: token-bucket and windowed-bucket maps, `TtlMap`, `run_bounded` (queue depth and wait timeout). |
-| `nagent-db` | ~4.7k | `Db` with private per-domain repositories, `for_user` / `admin` capability views, migrations, row types; raw-SQL helpers behind `test-util`; Postgres CI job. |
-| `nagent-agents` | ~8.6k | `Agent` trait with policy metadata, static descriptor table, registry, `SecretSource` / `DocumentSource`, 9 agents behind per-agent features, `egress`, `ServiceRegistry`, `SecretCache` on `TtlMap`. |
+| `nagent-db` | ~7.3k | `Db` with private per-domain repositories, `for_user` / `admin` capability views, migrations, row types; raw-SQL helpers behind `test-util`; Postgres CI job. |
+| `nagent-agents` | ~20.6k | `Agent` trait with policy metadata, static descriptor table, registry, `SecretSource` / `DocumentSource`, 22 agents behind per-agent features, `egress`, `ServiceRegistry`, `SecretCache` on `TtlMap`. |
 | `nagent-tts` | ~1.1k | Piper engine. |
-| `nagent-server` | ~21.6k src + ~7.5k tests Rust, ~11k JS/CSS | Composition root: config, state, http, auth, credentials, documents, chat, llm, stt, oauth, cli. No `sqlx`. |
+| `nagent-server` | ~32k src + ~11.6k tests Rust, ~21k JS/CSS/HTML (incl. vendor) | Composition root: config, state, http, auth, credentials, documents, chat, llm, stt, oauth, memories, cli. No `sqlx`. |
 
 Strengths worth protecting: crate boundaries that match the dependency direction (`nagent-agents` has no `sqlx`, no server types); capability views that make cross-user queries unrepresentable for every user-bound domain; one construction site for hardened outbound HTTP; bounded CPU work (Argon2, PDF, TTS) with `503` + `Retry-After` on saturation; a default-deny egress `NetworkPolicy` with no ServiceAccount token; supply-chain gates in CI (`cargo audit`, `cargo deny`, Dependabot, CycloneDX and Syft SBOMs); a Postgres service job for the repository tests; zero-copy static serving with per-file `ETag` and `304`; `docs/architecture.md`.
 
@@ -66,8 +66,8 @@ src/
   main.rs app.rs state.rs testing.rs
   config/        one definition per section (Deserialize + defaults + validation + tests); file.rs = root loader only
   http/          route classes, security headers, static serving, index/health/version, features, build_router
-  auth/ oauth/ credentials/ documents/ chat/ llm/ stt/ cli/
-  (reserved, not created now: memory/, sources/)
+  auth/ oauth/ credentials/ documents/ chat/ llm/ stt/ memories/ cli/
+  (reserved, not created now: sources/)
 ```
 
 ## 3. Findings
@@ -82,7 +82,7 @@ src/
 6. **No layering test.** Nothing checks the direction in 2.1 or the capability rules inside `nagent-server` (`.admin()` only in `cli/` and the purge job, `reqwest::Client` only in egress and the LLM client, vault key types only under `credentials/`).
 7. **Workspace hygiene.** The new crates still pin versions inline (`nagent-db` 3, `nagent-agents` 4, `nagent-tts` 1 entries) instead of `[workspace.dependencies]`; `.dockerignore` still whitelists `crates/stt-server/src/static/...` and `.gitignore` ignores the old `version.txt` path; about 60 comments, `deny.toml` and manifests cite internal plan numbers ("plan 4.A", "plan S10", "PR1") that mean nothing to a future reader (AGENTS.md section 4); `stt-server` still appears in user-facing messages and several test names; `docs/architecture.md` still says "six crates" and omits `nagent-tts`.
 8. **`nagent-db` features are markers.** `db-sqlite` / `db-postgres` gate a few helper blocks, but both sqlx drivers are always linked and the per-domain modules import them unconditionally, so slim builds are impossible (decision 2).
-9. **`oauth/` has no consumer yet** (OIDC backend is still a stub, `501`).
+9. **`oauth/` has one consumer** (the X OAuth flow in `oauth/x.rs`); the OIDC backend is still a stub (`501`).
 10. **No observability.** No request id, no `TraceLayer`, no `/metrics`, no `with_graceful_shutdown`; the access log exists but there is nothing to alert on.
 11. **Frontend** (package H): no module boundary (`chat.js` 4048 lines and still growing, `audio.js` 933, `style.css` 2529, `index.html` 607); modules load before the app shell exists and talk through `window.__nagent*` globals; every page load fetches ~1.2 MB raw from 16 blocking script tags; the 11 MB VAD wasm and 2.3 MB model are fetched with only a 5-minute `max-age`; assistant bubbles are re-rendered from scratch per streamed token; the Deno tests in `scripts/verify-*.ts` run nowhere (not in `Makefile`, CI or README) while `tests/static_assets.rs` (1594 lines) guards the UI by substring-matching source.
 12. **Tests**: flat `tests/*.rs`; `static_assets.rs` 1594 and `agents.rs` 1475 lines; large inline test blocks in `config_file.rs`, `config/auth.rs`.
@@ -92,7 +92,7 @@ src/
 
 | # | Finding | Evidence |
 |---|---|---|
-| R-1 | Partial safeguards are now present: protected routes have a body cap, non-streaming timeout and shared per-IP rate limit; WebSocket upgrades have global and per-IP caps. Remaining gap: no general per-route HTTP concurrency limit or load shedding, and per-IP request limits do not cap concurrent or expensive LLM generations. Streaming LLM responses are intentionally outside the request timeout; see R-8 to R-10. | `http/mod.rs`, `http/llm_guards.rs`, `stt/ws_concurrency.rs` |
+| R-1 | No general per-route HTTP concurrency limit or load shedding, and per-IP request limits do not cap concurrent or expensive LLM generations. Streaming LLM responses are intentionally outside the request timeout; see R-8 to R-10. | `http/mod.rs`, `http/llm_guards.rs`, `stt/ws_concurrency.rs` |
 | R-2 | TTS: the global `synth_lock` still serializes synthesis, the per-voice `Piper` cache never evicts (tens of MiB per ONNX session), and it is read with `.expect("piper voice cache poisoned")`, so one panic while locked breaks TTS until restart. | `nagent-tts/src/lib.rs` |
 | R-3 | PDF extraction clones the payload (`bytes.to_vec()`) and its worker cannot be cancelled after a timeout; `documents/storage.rs` reads whole files with blocking `std::fs::read`. | `documents/extract.rs`, `documents/storage.rs` |
 | R-4 | Build and image: `tokio` with `full`; sqlx always builds both drivers; the Docker builder is `rust:1.81` while CI uses stable (verify the image still builds: dependencies may need a newer rustc); the "dependency caching" step copies all sources first so it never caches; `HEALTHCHECK` calls `wget`, absent from `debian:bookworm-slim` (probably always unhealthy under plain Docker; Kubernetes uses `httpGet`). | `Cargo.toml`, `Dockerfile` |
@@ -109,9 +109,9 @@ Attack surface in order of reachability: unauthenticated HTTP and WebSocket endp
 
 | # | Finding | Evidence |
 |---|---|---|
-| S-1 | Core transport bounds are implemented for protected HTTP routes and WS admission; the remaining denial-of-service risks are unbounded upstream SSE/error accumulation (R-8), concurrent expensive generations and cancellation (R-9/R-10), plus the unauthenticated single-user deployment mode in S-5. | R-1, R-8 to R-10 |
-| S-2 | Origin checks on state-changing routes and Host/Origin checks on WS upgrades are now wired through `http::origin_guard`; keep forged-header and reverse-proxy cases covered. This does not make a non-loopback server safe when auth is disabled; see S-5. | `http/origin_guard.rs`, `http/mod.rs`, `stt/ws_handler.rs` |
-| S-3 | Authenticated mutating requests now pass through method-aware CSRF validation in `RequireAuth`; explicit handler checks remain duplicated. Preserve middleware coverage and consolidate duplicates with route classes rather than treating CSRF as absent. | `auth/middleware.rs`, `http/mod.rs` |
+| S-1 | Remaining denial-of-service risks: unbounded upstream SSE/error accumulation (R-8), concurrent expensive generations and cancellation (R-9/R-10), plus the unauthenticated single-user deployment mode in S-5. | R-1, R-8 to R-10 |
+| S-2 | Origin/Host checks on state-changing routes and WS upgrades are wired through `http::origin_guard`; retain forged-header and reverse-proxy regression coverage. This does not make a non-loopback server safe when auth is disabled; see S-5. | `http/origin_guard.rs`, `http/mod.rs`, `stt/ws_handler.rs` |
+| S-3 | Method-aware CSRF validation lives in `RequireAuth`; explicit handler checks remain duplicated. Consolidate the duplicates behind route classes without weakening fail-closed behavior. | `auth/middleware.rs`, `http/mod.rs` |
 | S-4 | HTTP hardening gaps: CSP and `frame-ancestors` are set, but no HSTS option, no `Permissions-Policy` (microphone and geolocation `self` only), no COOP/CORP, `Cache-Control: no-store` only on agent and LLM routes; session cookie is `HttpOnly; SameSite=Lax` (+ `Secure` conditionally) without the `__Host-` prefix. | `http/security_headers.rs`, `auth/session.rs` |
 | S-5 | Unsafe deployment configurations still warn instead of failing closed: non-loopback bind without trusted proxies, disabled user auth, and bearer mode without an inbound key all permit unexpectedly broad access. Require an explicit insecure-mode override and fail startup when bearer auth is selected without a key. | `app.rs`, `http/llm_guards.rs`, `config/auth.rs` |
 | S-6 | **CI is not least-privilege.** The workflow sets no top-level `permissions:` (the default token may be write-capable on older repo settings), actions are pinned by tag not by commit SHA, the Syft SBOM is generated but the image is not scanned for vulnerabilities, and release artifacts are neither signed nor attested. | `.github/workflows/ci.yml` |
@@ -126,18 +126,15 @@ Attack surface in order of reachability: unauthenticated HTTP and WebSocket endp
 | S-15 | The cross-agent prompt-injection confirmation is not a reliable authorization boundary: the tool loop creates a fresh `UserContext` for each policy check and invocation, so `read_document` history is not present for a later `web_fetch` check. A model-generated request for plain-text confirmation is not proof of user approval. Preserve per-turn history and require a one-time server-side approval bound to user, session, tool and arguments. | `llm/tool_loop.rs`, `nagent-agents/src/agents/web_fetch.rs` |
 | S-16 | Agent request contexts are incomplete: the LLM loop supplies an empty `ServiceRegistry` and no `SecretSource`, while direct invocation uses `UserContext::for_tests`. Credential-backed agents cannot use the configured per-user vault consistently across entry points. Build one context factory with the authenticated identity, services, resolver and session capability. | `llm/tool_loop.rs`, `agents/routes.rs`, `state.rs` |
 
-Existing security plan (`.kilo/plans/1790748721616-security-plans-merge.md`) still owns: OIDC implementation (SF-1), passkey attestation (SF-2), bootstrap password handling (SF-3), idle session timeout (SF-4), per-user admin rate limit (SF-5), DNS-pinning in egress (SF-6), secrets-in-TOML hygiene (SF-7). This roadmap supplies the structure they need.
-
 ### 3.4 Upcoming work and where it lands
 
 | Plan in `.kilo/plans/` | Needs |
 |---|---|
-| LLM memory | A new scoped repository in `nagent-db` following the `for_user` pattern; its `0002_memory.sql` name collides with existing 0002-0007 and must be renumbered (next free number at landing time). |
-| Output-language preference | Persistence and routes landed (migration `0007_user_reply_language`); the prompt injection in `llm/` and the per-language voice choice in `nagent-tts` are the remaining touch points. One more option that illustrates the cost of the triple config definition (package B). |
-| Plugins / sources framework | The descriptor table (done) and a `sources/` module. |
-| X timeline agent | The `oauth/` module and verified use of the shared egress pool (R-7); the `SecretSource` trait exists, but production request-context wiring remains open (S-16). |
-| SF-5 | The windowed bucket map from `nagent-support` (done). |
-| SF-6 | Shared egress pools are present (R-7); pin validated DNS addresses and enforce redirect policy in `egress.rs` (S-14). |
+| Mistral API provider | `1795597719367-mistral-api-provider.md` — `[llm].provider` enum, per-provider defaults, gating the Ollama-specific `options.*` injection. Independent of the packages below; can land first. |
+| GitHub agent | `1795597719368-github-agent-plan.md` — `github` `ServiceDef` (PAT) + read-only account tools; mirrors the X/CalDAV wiring; needs S-16 context factory for full consistency. |
+| Shortcut.com backlog agent | `1795597719369-shortcuts-backlog-agent.md` — `shortcut` `ServiceDef` (API token) + read-only story/epic/iteration tools against `api.app.shortcut.com/api/v3`. |
+| Plugins / sources framework | A `sources/` module. |
+| SF-6 | Pin validated DNS addresses and enforce redirect policy in `egress.rs` (S-14). |
 | SF-7 | The single config definition (package B). |
 
 ## 4. Structure packages
@@ -226,9 +223,9 @@ Impact is judged by reachability and blast radius; cost by files touched. "Quick
 
 | ID | Change | Notes |
 |---|---|---|
-| S-1 | Protected HTTP routes have body and non-streaming time limits, per-IP request throttling, and WS upgrades have global/per-IP caps. Add general HTTP concurrency limits and load shedding; make the shared guards a route-class default. | Partially implemented. Keep SSE/WS out of ordinary request timeouts; add saturation tests for each remaining limit. |
-| S-2 | Preserve the implemented Origin/Host checks on state-changing routes and `/ws`; add or retain regression coverage for forged headers and reverse-proxy deployments. | Implemented in current source (`http::origin_guard`); maintenance obligation, not a new P0 task. |
-| S-3 | Consolidate the existing method-aware CSRF validation in `RequireAuth` and duplicated handler checks behind route classes without weakening fail-closed behavior. | Partially implemented; package A. |
+| S-1 | Add general HTTP concurrency limits and load shedding; make the shared guards a route-class default. | Keep SSE/WS out of ordinary request timeouts; add saturation tests for each remaining limit. |
+| S-2 | Retain regression coverage for forged headers and reverse-proxy deployments on the Origin/Host checks. | Maintenance obligation, not a new P0 task. |
+| S-3 | Consolidate the method-aware CSRF validation in `RequireAuth` and the duplicated handler checks behind route classes without weakening fail-closed behavior. | Package A. |
 | S-4 | Opt-in HSTS (`[server].hsts`), `Permissions-Policy` (microphone and geolocation `self`, everything else off), COOP/CORP, `Cache-Control: no-store` on authenticated `/api` responses, `__Host-` cookie prefix when `Secure`. | Quick. Extend `tests/ws_validation_and_headers.rs`. |
 | S-5 | Fail closed on non-loopback bind without trusted proxies, with `auth.enabled = false`, or when bearer mode has no inbound key, unless an explicit insecure-mode override is supplied. | Quick. Behavior change: call out in README and release notes. |
 | S-6 | CI: top-level `permissions: contents: read` (job-level elevation only where needed), pin every action by commit SHA (Dependabot keeps them fresh), image vulnerability scan (Trivy or Grype) gating on high severity, cosign keyless signature and SLSA provenance for released images, SBOM attached to the release. | Quick. Dependabot already watches the `github-actions` ecosystem. |
@@ -247,7 +244,7 @@ Impact is judged by reachability and blast radius; cost by files touched. "Quick
 
 | ID | Change | Notes |
 |---|---|---|
-| R-1 | Partially covered by S-1: body/time limits, per-IP rate limiting and WS caps exist; HTTP concurrency limits and load shedding remain. | |
+| R-1 | HTTP concurrency limits and load shedding remain (see S-1). | |
 | R-2 | TTS: LRU voice cache (`max_loaded_voices`, idle eviction), poison recovery on the cache, saturation answered with `429` / `503`; optional concurrent synthesis if `piper-rs` allows (drop `synth_lock`), 1 by default. | Quick; in `nagent-tts`. |
 | R-3 | PDF extraction without payload clone (`Bytes` / `Arc<[u8]>`), `tokio::fs` for file I/O, uploads streamed to disk; hard kill on timeout arrives with package G. | Small. |
 | R-4 | Trim `tokio` features; `HEALTHCHECK` through a built-in `healthcheck` subcommand (no `wget`); align the builder toolchain and verify the image builds; real dependency-cache layer (cargo-chef or equivalent). | Quick. Update `Dockerfile` comments and README. |
@@ -262,17 +259,17 @@ Impact is judged by reachability and blast radius; cost by files touched. "Quick
 
 | Tier | Items | Why |
 |---|---|---|
-| **P0: immediate security** | S-14 (egress SSRF enforcement); S-15 (server-side tool approval); S-5 (fail-closed startup); S-6 (CI least privilege, pinned actions, image scan); S-4 (security headers and cookie prefix); `.dockerignore` / `.gitignore` residue (package E, first bullet) | These are reachable trust-boundary failures or supply-chain exposure. S-1 transport bounds and S-2 Origin/Host checks are present in current source; retain regression tests while closing the remaining gaps. |
+| **P0: immediate security** | S-14 (egress SSRF enforcement); S-15 (server-side tool approval); S-5 (fail-closed startup); S-6 (CI least privilege, pinned actions, image scan); S-4 (security headers and cookie prefix); `.dockerignore` / `.gitignore` residue (package E, first bullet) | These are reachable trust-boundary failures or supply-chain exposure. |
 | **P1: resource and integration contracts** | R-1/S-1 (HTTP concurrency limits and load shedding); R-8 (LLM stream/body caps); R-9 (disconnect cancellation); R-10 (proxy-aware and per-user budgets); S-16 (complete agent context); B (one config definition) -> A (route classes, per-subsystem routers, observability, graceful shutdown, S-10) -> C follow-up (verify pool use and finish SF-6); D (layering test, architecture doc); S-7 (cluster policy); S-8 (threat model, `SECURITY.md`); R-5; R-2; S-9 (vault rotation design) | These bound expensive work and make per-user integrations reliable, then improve the module boundaries needed for later features. Write the threat model early to validate the remaining backlog. |
 | **P2: quality** | H phases 0-5 (frontend), in parallel with P1 and starting with phase 0 and phase 1 (about 1 MB less per page load, tests in CI); E (hygiene, features decision); I; F; S-11; S-12; R-3 | Maintainability and depth of defense; each item stands alone once P1 lands. |
-| **P3: only if needed** | G (agent-runner, inference tier); S-13 (Landlock, seccomp, RLS); memory, plugins, X-timeline plans; OIDC (SF-1) | Pay the operational cost only when the threat model, GPU scaling or product work requires it. OIDC and the X agent need package C and the `oauth/` module first. |
+| **P3: only if needed** | G (agent-runner, inference tier); S-13 (Landlock, seccomp, RLS); plugins plans; OIDC (SF-1) | Pay the operational cost only when the threat model, GPU scaling or product work requires it. OIDC needs package C and the `oauth/` module first. |
 
 Ordering notes:
 
 1. Inside P0, close S-14 and S-15 first, then make S-5 fail closed. Keep S-1 and S-2 regression tests green; do not re-implement their existing middleware. Do not mix security changes with deploy-manifest cleanup.
 2. B before A is deliberate: B removes the `From` glue that A would otherwise keep updating.
 3. Package H runs in parallel with the Rust work (disjoint files except `http/` and `build.rs`): phase 0 -> 1 -> 2 -> phases 3, 4, 5 in any order; split `chat.js` before the incremental renderer.
-4. Feature plans follow section 3.4. Renumber the memory plan's `0002_memory.sql` (0002-0007 exist).
+4. Feature plans follow section 3.4.
 
 ## 7. Rules and risks
 

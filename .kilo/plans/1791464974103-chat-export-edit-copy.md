@@ -1,37 +1,10 @@
-# Chat export (A1), per-bubble copy (A9), message edit & regenerate (A3) — residual
+# Chat messages — residual work
 
-Refresh of `.kilo/plans/1791464974103-chat-export-edit-copy.md` after the
-three catalog items landed in the codebase. The original §1–§6, §8 are
-all implemented:
-
-- `crates/nagent-db/src/chat_messages.rs` + migration `0012_chat_messages`
-  with `version int` optimistic-concurrency column.
-- `crates/nagent-server/src/chat/messages.rs` exposing the five
-  `/v1/chat/session/:sid/messages*` routes plus
-  `/v1/chat/session/:sid/regenerate`, mounted on the same auth envelope
-  as the session-mint endpoint (`documents/routes.rs:95-100`).
-- `migrateAllSessionsToServer()` in `chat.js:1222` POSTs every
-  not-yet-migrated localStorage session on the first authenticated load
-  and sets `nagent.chat.migrated.<id> = "1"` on success.
-- `chat-export.js` (Markdown / JSON / HTML) + `#chat-export-menu`
-  dropdown next to `#chat-clear` in `index.html:267`.
-- Per-bubble `chat-message-copy` (`chat.js:654`), `chat-message-edit-pencil`
-  (`chat.js:765`), `chat-message-regenerate` (`chat.js:798`) with the
-  two-tier visibility gate (streaming + widget-only) inherited from the
-  existing 🔊 replay button.
-- `chat-message-edit-form` (`chat.js:863`) with the GitHub-style hint
-  row above the action buttons (Enter to save, Esc to cancel) — see
-  `latest_session_digest: ses_ede53a749ffeeYdVz19exjbStX`.
-- Tests: `crates/nagent-server/tests/chat_messages.rs` (HTTP integration,
-  401/403/404/409 paths) + `scripts/verify-chat-export.ts` (Markdown /
-  JSON / HTML / DOMPurify guard).
-
-What is **not** done is documented below.
+Residual work after the chat export / per-bubble copy / edit &
+regenerate features. P0 ships next; P1 follows once P0 lands; P2 stays
+a menu until P0+P1 are stable.
 
 ## 0. Open work, reprioritised
-
-P0 ships next; P1 follows once P0 lands; P2 stays a menu until P0+P1
-are stable.
 
 ### P0 — Documentation sync (the §7 of the original plan that never landed)
 
