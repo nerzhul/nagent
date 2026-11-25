@@ -30,9 +30,9 @@ Existing reference points:
 - `UserContext::secret` / `UserContext::update_secret` (read + write).
 - `chat.js` (~2,800 lines), `app.js`, `audio.js`, `tts.js`,
   `geolocation.js`, `auth.js`, `chat-sessions.js` (localStorage).
-- Out-of-scope list (`docs/ui_features.md` §9): no drag-and-drop, no
-  streaming partials, no system-prompt presets, no light theme, no
-  cross-device session sync.
+- Out-of-scope list (`docs/ui_features.md` §9): no streaming
+  partials, no system-prompt presets, no light theme, no cross-device
+  session sync.
 
 ## A. End-user UX gaps (UI / frontend-only)
 
@@ -49,19 +49,6 @@ Existing reference points:
   screen readers don't double-announce.
 - **UX gap**: 5. **Effort**: S. **Dependencies**: `app.js`
   `appendLine` only.
-
-### A2. Drag-and-drop file upload (Discussion)
-
-- **Problem**: `docs/ui_features.md` §9 lists drag-and-drop as
-  missing. The `documents/` subsystem + `read_document` agent exist,
-  so the backend is ready; only the input affordance is missing.
-- **Proposal**: a `<button>` next to `#chat-send` opens the OS file
-  picker; `#chat-input` is also a drop target with a
-  `--drag-over` highlight. Both paths call the existing
-  `POST /v1/documents` and surface the file name as an inline
-  attachment chip.
-- **UX gap**: 3. **Effort**: S. **Dependencies**: existing
-  `documents/` mount + `read_document` agent.
 
 ### A3. System prompt presets library
 

@@ -1,6 +1,6 @@
 # Architecture and security roadmap
 
-Status: living plan, reviewed against the current source on 2026-11-25 (clean tree, HEAD `7f276d1`). Feature plans that landed are deleted from `.kilo/plans/`; the live feature plans are Mistral API provider (`1795597719367-mistral-api-provider.md`), GitHub agent (`1795597719368-github-agent-plan.md`), Shortcut.com backlog agent (`1795597719369-shortcuts-backlog-agent.md`), plus the residuals in `1791464974103-chat-export-edit-copy.md`. Priorities are in section 6.
+Status: living plan, reviewed against the current source on 2026-11-25 (clean tree, HEAD `ddc7fe9`). Feature plans that landed are deleted from `.kilo/plans/`; the Mistral API provider, GitHub agent and Shortcut.com backlog agent plans landed and were removed. The only live feature-plan residuals are in `1791464974103-chat-export-edit-copy.md`. Priorities are in section 6.
 
 The plan is written from two seats: the **software architect** (is the system cut along the right seams, can it evolve cheaply) and the **security architect** (what can an attacker reach, how far, and how fast would we notice). Items are labelled:
 
@@ -130,9 +130,6 @@ Attack surface in order of reachability: unauthenticated HTTP and WebSocket endp
 
 | Plan in `.kilo/plans/` | Needs |
 |---|---|
-| Mistral API provider | `1795597719367-mistral-api-provider.md` — `[llm].provider` enum, per-provider defaults, gating the Ollama-specific `options.*` injection. Independent of the packages below; can land first. |
-| GitHub agent | `1795597719368-github-agent-plan.md` — `github` `ServiceDef` (PAT) + read-only account tools; mirrors the X/CalDAV wiring; needs S-16 context factory for full consistency. |
-| Shortcut.com backlog agent | `1795597719369-shortcuts-backlog-agent.md` — `shortcut` `ServiceDef` (API token) + read-only story/epic/iteration tools against `api.app.shortcut.com/api/v3`. |
 | Plugins / sources framework | A `sources/` module. |
 | SF-6 | Pin validated DNS addresses and enforce redirect policy in `egress.rs` (S-14). |
 | SF-7 | The single config definition (package B). |

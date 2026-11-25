@@ -86,12 +86,6 @@ descending, ties broken by effort.
 These came up while reviewing the implementation; none are in the
 catalog yet. Listed for visibility, not for commitment.
 
-- **Streaming partial assistant text in Discussion mode**: today the
-  live bubble shows "…" / a typing indicator while the model emits
-  tokens, then snaps to the final text once `streamReply` finalises.
-  Wire `applyMarkdown` to be called on every token chunk (the server
-  already emits partial chunks — verify on
-  `/v1/chat/completions`). UX gap: 4, effort: S.
 - **Undo toast after edit / regenerate**: store the previous message
   blob in a small `window.__nagentEditUndo` slot for 5 s and offer an
   inline "Undo" pill. Pure-frontend; rolls back DOM + posts the
@@ -113,10 +107,6 @@ catalog yet. Listed for visibility, not for commitment.
   original, show a one-line "was: … / now: …" diff above the Save
   button so the user catches wrong-paste mistakes before submitting.
   Pure-frontend diff using `diff` (vendored). UX gap: 2, effort: S.
-- **Reasoning visibility toggle per bubble**: some models emit
-  `<think>` blocks. Today they either render inline or are dropped
-  (`chat.js` rendering pipeline). A per-bubble "Show reasoning"
-  toggle makes debugging retries much easier. UX gap: 3, effort: S–M.
 - **Confirm-before-regenerate when the prior turn used paid tools**:
   if the last assistant message contains a `web_fetch` / `wikipedia`
   / `caldav_*` trace, show a small "Re-runs N external calls"
