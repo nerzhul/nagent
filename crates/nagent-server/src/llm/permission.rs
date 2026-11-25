@@ -615,6 +615,50 @@ pub(crate) fn shape_permission_body(
     }
 }
 
+/// Splice a tool result for `tool_call_id` into the outgoing message
+/// list. The browser's persisted history already carries the
+/// original `assistant` tool_call entry and the `tool` wait message
+/// emitted at pause time, so when they are present we only REPLACE
+/// the wait message's content — appending a second `tool` row with
+/// the same `tool_call_id` would produce a duplicate id that strict
+/// upstreams reject. When the assistant entry is absent (a direct
+/// API caller that sent a bare sentinel), the synthetic assistant
+/// tool_call is appended first so the tool message is never orphaned
+/// (and then dropped by `sanitize_messages`).
+fn splice_tool_result(
+    messages: &mut Vec<serde_json::Value>,
+    tool_call_id: &str,
+    assistant_entry: Option<serde_json::Value>,
+    content: serde_json::Value,
+) {
+    let has_assistant = messages.iter().any(|m| {
+        m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            && m.get("tool_calls")
+                .and_then(|t| t.as_array())
+                .is_some_and(|a| {
+                    a.iter()
+                        .any(|tc| tc.get("id").and_then(|i| i.as_str()) == Some(tool_call_id))
+                })
+    });
+    if !has_assistant {
+        if let Some(entry) = assistant_entry {
+            messages.push(entry);
+        }
+    }
+    if let Some(t) = messages.iter_mut().find(|m| {
+        m.get("role").and_then(|r| r.as_str()) == Some("tool")
+            && m.get("tool_call_id").and_then(|i| i.as_str()) == Some(tool_call_id)
+    }) {
+        t["content"] = content;
+    } else {
+        messages.push(json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,33 +1029,39 @@ pub(crate) async fn run_permission_intercept(
                 None => {
                     // Stale / unknown id: surface an error so the
                     // LLM can re-prompt the user.
-                    new_messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": "[error] approval expired or unknown; please ask the user again",
-                    }));
+                    splice_tool_result(
+                        new_messages,
+                        &tool_call_id,
+                        None,
+                        json!("[error] approval expired or unknown; please ask the user again"),
+                    );
                     return Some((new_body, frames));
                 }
             };
             let agents = match agents {
                 Some(a) => a,
                 None => {
-                    new_messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": format!("[error] agents not registered; cannot run `{}`", pending.tool_name),
-                    }));
+                    splice_tool_result(
+                        new_messages,
+                        &tool_call_id,
+                        None,
+                        json!(format!(
+                            "[error] agents not registered; cannot run `{}`",
+                            pending.tool_name
+                        )),
+                    );
                     return Some((new_body, frames));
                 }
             };
             let agent = match agents.get(&pending.tool_name) {
                 Some(a) => a,
                 None => {
-                    new_messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": format!("[error] unknown agent: `{}`", pending.tool_name),
-                    }));
+                    splice_tool_result(
+                        new_messages,
+                        &tool_call_id,
+                        None,
+                        json!(format!("[error] unknown agent: `{}`", pending.tool_name)),
+                    );
                     return Some((new_body, frames));
                 }
             };
@@ -1050,23 +1100,23 @@ pub(crate) async fn run_permission_intercept(
                 ok,
                 &payload,
             )));
-            new_messages.push(json!({
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": pending.tool_name,
-                        "arguments": args_str,
-                    }
-                }],
-            }));
-            new_messages.push(json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": payload,
-            }));
+            splice_tool_result(
+                new_messages,
+                &tool_call_id,
+                Some(json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": pending.tool_name,
+                            "arguments": args_str,
+                        }
+                    }],
+                })),
+                json!(payload),
+            );
             Some((new_body, frames))
         }
         DecisionPrefix::ApproveAlways { tool_name } => {
@@ -1090,11 +1140,7 @@ pub(crate) async fn run_permission_intercept(
                 false,
                 deny_msg,
             )));
-            new_messages.push(json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": deny_msg,
-            }));
+            splice_tool_result(new_messages, &tool_call_id, None, json!(deny_msg));
             Some((new_body, frames))
         }
     }

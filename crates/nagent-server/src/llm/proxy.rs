@@ -288,64 +288,6 @@ pub async fn chat_completions(
 
     let upstream_url = crate::llm::provider::upstream_url(&llm.cfg.base_url, "chat/completions");
 
-    // Open the upstream connection eagerly so non-2xx responses
-    // surface as their original HTTP status (the same way the
-    // non-streaming proxy did). The streaming loop then owns the
-    // body. We must NOT call `.error_for_status()` because a 4xx/5xx
-    // body is still a valid SSE stream we want to forward verbatim.
-    let first_upstream = llm
-        .http
-        .post(&upstream_url)
-        .headers(fwd.clone())
-        .body(forward_body.to_string())
-        .send()
-        .await
-        .map_err(|e| LlmError::BadRequest(format!("upstream connect failed: {e}")))?;
-    if !first_upstream.status().is_success() {
-        let upstream_status = first_upstream.status();
-        let status =
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let body = first_upstream.text().await.unwrap_or_default();
-        warn!(%status, "upstream chat completion failed");
-
-        // Upstream rejected the request because the requested model
-        // is unknown to it. Surface a structured, friendly error with
-        // the upstream's model list so the chat UI can render a
-        // picker instead of a wall of JSON. We also fan out a
-        // follow-up `/v1/models` so the response includes the
-        // available alternatives even when the upstream hides them
-        // behind a 404. If that follow-up also fails (degraded
-        // upstream), the response is still actionable — `available`
-        // is `None` and the UI falls back to the raw message.
-        if let Some((name, upstream_message)) =
-            crate::llm::client::detect_model_not_found(status, &body)
-        {
-            let models_url = crate::llm::provider::upstream_url(&llm.cfg.base_url, "models");
-            let available = match llm.http.get(&models_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(v) => v.get("data").and_then(|d| d.as_array()).map(|arr| {
-                            arr.iter()
-                                .filter_map(|m| {
-                                    m.get("id").and_then(|id| id.as_str()).map(str::to_string)
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                        Err(_) => None,
-                    }
-                }
-                _ => None,
-            };
-            return Err(LlmError::ModelNotFound {
-                name,
-                upstream_message,
-                available,
-            });
-        }
-
-        return Err(LlmError::Upstream { status, body });
-    }
-
     let timeout = llm.cfg.request_timeout;
     let max_rounds = llm_state.cfg.llm_max_tool_rounds;
     // Plan R8 follow-up: max number of auto-continue rounds when the
@@ -364,7 +306,6 @@ pub async fn chat_completions(
     let http = llm.http.clone();
     let headers_clone = fwd.clone();
     let url_clone = upstream_url.clone();
-    let first_stream: crate::llm::sse::UpstreamByteStream = Box::pin(first_upstream.bytes_stream());
     // SEV 2 fix: thread the authenticated user id into the tool
     // loop. `auth_user` is `None` on the `auth.enabled = false`
     // path (and the integration tests that don't mount the
@@ -412,8 +353,13 @@ pub async fn chat_completions(
     // `tool_result` SSE frames into the response channel (so the
     // chat UI sees the approval outcome immediately) and returns
     // a new body with the sentinel stripped and the synthetic
-    // tool round appended; `Some((n, sender))` here is the
-    // fallback when no sentinel was present.
+    // tool round spliced in; `None` here is the fallback when no
+    // sentinel was present. This MUST run before the first upstream
+    // request below: round 0 is sent with `body_for_loop`, so the
+    // model never sees the raw `[APPROVE:…]` sentinel and cannot
+    // re-emit the just-approved tool call (which the loop would then
+    // refuse again, since the intercept already consumed the pending
+    // entry).
     let (body_for_loop, perm_pre_frames) = match run_permission_intercept(
         &forward_body,
         agents.as_ref(),
@@ -434,6 +380,69 @@ pub async fn chat_completions(
         let _ = tx_perm.send(Ok(frame)).await;
     }
     drop(tx_perm);
+
+    // Open the upstream connection eagerly so non-2xx responses
+    // surface as their original HTTP status (the same way the
+    // non-streaming proxy did). The streaming loop then owns the
+    // body. We must NOT call `.error_for_status()` because a 4xx/5xx
+    // body is still a valid SSE stream we want to forward verbatim.
+    // Round 0 is sent with `body_for_loop` — the permission intercept
+    // above already stripped any decision sentinel and spliced in the
+    // synthetic tool round, so the upstream never sees the raw
+    // sentinel.
+    let first_upstream = llm
+        .http
+        .post(&upstream_url)
+        .headers(fwd.clone())
+        .body(body_for_loop.to_string())
+        .send()
+        .await
+        .map_err(|e| LlmError::BadRequest(format!("upstream connect failed: {e}")))?;
+    if !first_upstream.status().is_success() {
+        let upstream_status = first_upstream.status();
+        let status =
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let body = first_upstream.text().await.unwrap_or_default();
+        warn!(%status, "upstream chat completion failed");
+
+        // Upstream rejected the request because the requested model
+        // is unknown to it. Surface a structured, friendly error with
+        // the upstream's model list so the chat UI can render a
+        // picker instead of a wall of JSON. We also fan out a
+        // follow-up `/v1/models` so the response includes the
+        // available alternatives even when the upstream hides them
+        // behind a 404. If that follow-up also fails (degraded
+        // upstream), the response is still actionable — `available`
+        // is `None` and the UI falls back to the raw message.
+        if let Some((name, upstream_message)) =
+            crate::llm::client::detect_model_not_found(status, &body)
+        {
+            let models_url = crate::llm::provider::upstream_url(&llm.cfg.base_url, "models");
+            let available = match llm.http.get(&models_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(v) => v.get("data").and_then(|d| d.as_array()).map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| {
+                                    m.get("id").and_then(|id| id.as_str()).map(str::to_string)
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+            return Err(LlmError::ModelNotFound {
+                name,
+                upstream_message,
+                available,
+            });
+        }
+
+        return Err(LlmError::Upstream { status, body });
+    }
+    let first_stream: crate::llm::sse::UpstreamByteStream = Box::pin(first_upstream.bytes_stream());
 
     // The tool loop re-applies the provider adapter on the body before
     // every round it opens itself, so it needs the resolved config.

@@ -426,6 +426,254 @@ async fn session_override_forces_allow_but_email_send_pin_holds() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Approve-sentinel regression
+// ---------------------------------------------------------------------------
+
+/// A gated stub whose `invoke` SUCCEEDS and counts invocations, so the
+/// approve-turn test can assert the intercept actually ran the tool
+/// exactly once.
+struct ApprovableStubAgent {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Agent for ApprovableStubAgent {
+    fn name(&self) -> &str {
+        "stub_approvable"
+    }
+    fn description(&self) -> &str {
+        "stub: gated, but invoke succeeds (approve-flow regression guard)"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object", "properties": {}, "additionalProperties": false})
+    }
+    async fn invoke(&self, _ctx: &UserContext, _args: Value) -> Result<String, AgentError> {
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("stub ran".to_string())
+    }
+    fn requires_confirmation(&self, _ctx: &UserContext, _args: &Value) -> ConfirmationDecision {
+        ConfirmationDecision::NeedsConfirmation {
+            reason: "stub_approvable: always requires confirmation".into(),
+        }
+    }
+}
+
+/// Upstream stub for the approve flow: when the request body carries
+/// no `tool` result for `call_gated`, answer with a single tool_call
+/// for `stub_approvable` (id `call_gated`); once the body already has
+/// that tool result (the approve turn, after the intercept spliced
+/// it in), answer with plain text and `finish_reason: "stop"`.
+async fn spawn_upstream_approve_flow() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_inner = Arc::clone(&captured);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let captured = Arc::clone(&captured_inner);
+            async move {
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+                captured.lock().await.push(parsed.clone());
+                let answered = parsed
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .map(|msgs| {
+                        msgs.iter().any(|m| {
+                            m.get("role").and_then(|r| r.as_str()) == Some("tool")
+                                && m.get("tool_call_id").and_then(|i| i.as_str())
+                                    == Some("call_gated")
+                        })
+                    })
+                    .unwrap_or(false);
+                let body = if answered {
+                    concat!(
+                        "event: message\n",
+                        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Done.\"},\"finish_reason\":null}]}\n\n",
+                        "event: message\n",
+                        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    )
+                } else {
+                    concat!(
+                        "event: message\n",
+                        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_gated\",\"type\":\"function\",\"function\":{\"name\":\"stub_approvable\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+                        "event: message\n",
+                        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    )
+                };
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/event-stream"),
+                    )],
+                    body,
+                )
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), captured)
+}
+
+/// Regression guard for the approve-turn bug: after the user clicks
+/// "Autoriser", the next `/v1/chat/completions` carries
+/// `[APPROVE:<id>]` as the last user message. The permission
+/// intercept must run BEFORE round 0 goes upstream, so:
+/// 1. The tool runs exactly once (intercept direct-invoke).
+/// 2. Round 0's upstream body has the sentinel STRIPPED and the real
+///    tool result spliced into the existing `tool` row — no duplicate
+///    `tool_call_id`, no raw `[APPROVE:…]` text.
+/// 3. The upstream is called exactly twice (turn 1 round 0 + approve
+///    turn round 0); the approve turn produces NO second
+///    `needs_approval` / `round_paused` — the loop never re-refuses
+///    the just-approved call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn approve_sentinel_runs_tool_and_is_not_refused_again() {
+    let (upstream_url, captured) = spawn_upstream_approve_flow().await;
+    let cfg = Arc::new(make_server_cfg(upstream_url));
+    let invoke_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut registry = registry_with_stubs();
+    registry.push_agent(ApprovableStubAgent {
+        count: invoke_count.clone(),
+    });
+    let llm_client =
+        LlmClient::new(Arc::new(cfg.llm.clone())).expect("LlmClient::new should succeed");
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = cfg.llm.clone();
+    let state = builder.with_llm(llm_client).with_agents(registry).build();
+    let url = start_test_server(state).await;
+    let sid = Uuid::new_v4();
+    let client = reqwest::Client::new();
+
+    // Turn 1: ask for the gated tool — the round halts on the gate.
+    let resp = client
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-chat-session-id", sid.to_string())
+        .body(
+            r#"{"messages":[{"role":"user","content":"do it"}],"stream":true,"model":"llama3.1"}"#,
+        )
+        .send()
+        .await
+        .expect("post turn 1");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body1 = resp.text().await.expect("body turn 1");
+    assert!(
+        body1.contains("\"needs_approval\":true"),
+        "turn 1 must pause on the gate: {body1}"
+    );
+    assert_eq!(body1.matches("event: round_paused").count(), 1);
+    assert_eq!(invoke_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // Turn 2: the approve sentinel, with the history the browser
+    // actually persists (assistant tool_calls + tool wait message).
+    let turn2 = json!({
+        "messages": [
+            {"role": "user", "content": "do it"},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "call_gated", "type": "function",
+                             "function": {"name": "stub_approvable", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_gated", "name": "stub_approvable",
+             "content": "turn is paused waiting for user approval"},
+            {"role": "user", "content": "[APPROVE:call_gated]"}
+        ],
+        "stream": true,
+        "model": "llama3.1",
+    });
+    let resp = client
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-chat-session-id", sid.to_string())
+        .body(turn2.to_string())
+        .send()
+        .await
+        .expect("post turn 2");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body2 = resp.text().await.expect("body turn 2");
+
+    // The intercept ran the tool: a pre-frame tool_result with ok:true
+    // for call_gated, and NO new approval prompt / pause.
+    assert!(
+        body2.contains("\"ok\":true") && body2.contains("call_gated"),
+        "approve turn must emit the tool_result pre-frame: {body2}"
+    );
+    assert!(
+        !body2.contains("needs_approval"),
+        "approve turn must NOT re-prompt: {body2}"
+    );
+    assert!(
+        !body2.contains("event: round_paused"),
+        "approve turn must NOT pause again: {body2}"
+    );
+    assert_eq!(
+        invoke_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the gated tool must run exactly once, on the approve turn"
+    );
+
+    // Upstream saw exactly two rounds: turn 1 round 0 and approve
+    // turn round 0. The approve round's body carries the spliced
+    // result, not the sentinel, and no duplicate tool rows.
+    let calls = captured.lock().await.clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected exactly 2 upstream rounds (no re-dispatch after approve); bodies={calls:?}"
+    );
+    let msgs2 = calls[1]
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .expect("turn 2 body has messages");
+    assert!(
+        msgs2.iter().all(|m| {
+            m.get("content")
+                .and_then(|c| c.as_str())
+                .is_none_or(|c| !c.contains("[APPROVE:"))
+        }),
+        "round 0 of the approve turn must not carry the raw sentinel: {msgs2:?}"
+    );
+    let tool_rows: Vec<&Value> = msgs2
+        .iter()
+        .filter(|m| {
+            m.get("role").and_then(|r| r.as_str()) == Some("tool")
+                && m.get("tool_call_id").and_then(|i| i.as_str()) == Some("call_gated")
+        })
+        .collect();
+    assert_eq!(
+        tool_rows.len(),
+        1,
+        "the approved call must have exactly one tool row (spliced, not duplicated): {msgs2:?}"
+    );
+    assert_eq!(
+        tool_rows[0].get("content").and_then(|c| c.as_str()),
+        Some("stub ran"),
+        "the tool row must carry the real result payload: {msgs2:?}"
+    );
+    let asst_rows = msgs2
+        .iter()
+        .filter(|m| {
+            m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                && m.get("tool_calls")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|a| {
+                        a.iter()
+                            .any(|tc| tc.get("id").and_then(|i| i.as_str()) == Some("call_gated"))
+                    })
+        })
+        .count();
+    assert_eq!(
+        asst_rows, 1,
+        "the assistant tool_call row must not be duplicated: {msgs2:?}"
+    );
+}
+
 // Quiet "unused" lints for items only referenced via `cfg` test
 // gates — the build pulls the test module unconditionally.
 #[allow(dead_code)]
