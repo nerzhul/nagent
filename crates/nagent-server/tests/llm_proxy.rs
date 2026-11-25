@@ -1803,6 +1803,37 @@ async fn base_url_ending_in_v1_is_not_doubled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_assistant_and_orphan_tool_history_entries_are_stripped() {
+    // Mistral rejects an assistant message with neither content nor
+    // tool_calls (HTTP 400 code 3240 "Assistant message must have either
+    // content or tool_calls"), and a tool message whose tool_call_id has
+    // no matching assistant tool call. The proxy must strip both before
+    // forwarding, whatever the client sent.
+    let (_up, _on_request, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let cfg = provider_test_cfg(_up.clone(), LlmProvider::Mistral);
+    let chat_url = start_test_server_with_llm_cfg(cfg).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{chat_url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":""},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_datetime","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"{}"},{"role":"tool","tool_call_id":"call_ghost","content":"{}"},{"role":"assistant","content":"done"}],"stream":true,"model":"mistral-small-latest"}"#)
+        .send()
+        .await
+        .expect("post chat");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+    let body = on_body
+        .lock()
+        .await
+        .take()
+        .expect("upstream must have captured a body");
+    let msgs = body["messages"].as_array().expect("messages array");
+    let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["user", "assistant", "tool", "assistant"]);
+    assert_eq!(msgs[2]["tool_call_id"], "call_1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_ollama_keeps_options_and_ignores_max_tokens() {
     // Regression guard: on `provider = "ollama"` the body shape is
     // unchanged from before the provider enum existed —

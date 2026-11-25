@@ -34,6 +34,7 @@ use crate::config::{LlmConfig, LlmProvider};
 ///   unset, so one knob covers both families — the generic
 ///   `max_tokens` wins when both are set.
 pub(crate) fn adapt_request_body(body: &mut Value, cfg: &LlmConfig) {
+    sanitize_messages(body);
     match cfg.provider {
         LlmProvider::Ollama => {
             inject_ollama_num_predict(body, cfg.ollama_num_predict);
@@ -66,6 +67,51 @@ pub(crate) fn upstream_url(base_url: &str, path: &str) -> String {
         format!("{base}/{path}")
     } else {
         format!("{base}/v1/{path}")
+    }
+}
+
+/// Drop history entries that strict OpenAI-compatible APIs reject: an
+/// `assistant` message with neither content nor `tool_calls` (Mistral
+/// answers 400 "Assistant message must have either content or
+/// tool_calls, but not none") and a `tool` message whose `tool_call_id`
+/// has no matching assistant tool call. Ollama tolerates both; hosted
+/// APIs do not. Runs for every provider — the dropped entries carry no
+/// information.
+fn sanitize_messages(body: &mut Value) {
+    let Some(arr) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    let call_ids: std::collections::HashSet<String> = arr
+        .iter()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        .filter_map(|m| m.get("tool_calls").and_then(|t| t.as_array()))
+        .flatten()
+        .filter_map(|tc| tc.get("id").and_then(|i| i.as_str()).map(str::to_string))
+        .collect();
+    arr.retain(|m| {
+        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        if role == "assistant" {
+            let has_calls = m
+                .get("tool_calls")
+                .and_then(|t| t.as_array())
+                .is_some_and(|a| !a.is_empty());
+            has_calls || has_content(m)
+        } else if role == "tool" {
+            m.get("tool_call_id")
+                .and_then(|i| i.as_str())
+                .is_some_and(|id| call_ids.contains(id))
+        } else {
+            true
+        }
+    });
+}
+
+fn has_content(m: &Value) -> bool {
+    match m.get("content") {
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Null) | None => false,
+        Some(_) => true,
     }
 }
 
@@ -251,6 +297,27 @@ mod tests {
             upstream_url("http://localhost:11434/", "models"),
             "http://localhost:11434/v1/models"
         );
+    }
+
+    #[test]
+    fn sanitize_drops_empty_assistant_and_orphan_tool_messages() {
+        let cfg = cfg(LlmProvider::Mistral);
+        let mut b = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": ""},
+                {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_datetime", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "{}"},
+                {"role": "tool", "tool_call_id": "call_ghost", "content": "{}"},
+                {"role": "assistant", "content": "done"}
+            ]
+        });
+        adapt_request_body(&mut b, &cfg);
+        let msgs = b["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "assistant"]);
+        assert_eq!(msgs[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(msgs[2]["tool_call_id"], "call_1");
     }
 
     #[test]

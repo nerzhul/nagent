@@ -4103,7 +4103,17 @@ async function streamReply(sessionId, userText, opts = {}) {
       : []),
     ...earlier
       .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role, content: m.content })),
+      .map((m) => {
+        const out = { role: m.role, content: m.content == null ? "" : m.content };
+        if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+          out.tool_calls = m.tool_calls;
+        }
+        if (m.role === "tool" && m.tool_call_id) {
+          out.tool_call_id = m.tool_call_id;
+          if (m.name) out.name = m.name;
+        }
+        return out;
+      }),
     { role: "user", content: userText != null ? userText : last.content },
   ];
   // The location block is *ephemeral*: it travels only in the
