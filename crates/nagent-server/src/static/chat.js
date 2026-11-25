@@ -1071,9 +1071,11 @@ async function regenerateLastAssistant() {
   const h = loadHistory(sid);
   let removedAny = false;
   for (let i = h.length - 1; i >= 0; i--) {
-    if (h[i].role === "assistant") {
-      h.splice(i, 1);
-      removedAny = true;
+    if (h[i].role === "user") {
+      if (i < h.length - 1) {
+        h.length = i + 1;
+        removedAny = true;
+      }
       break;
     }
   }
@@ -1129,6 +1131,7 @@ function chatMessagesEnabled() {
 
 async function appendMessageToServer(sessionId, msg) {
   if (!chatMessagesEnabled()) return null;
+  if (!msg.content || !msg.content.trim()) return null;
   const serverSid = await getServerSessionId();
   const resp = await fetch(`/v1/chat/session/${serverSid}/messages`, {
     method: "POST",
@@ -4037,8 +4040,9 @@ async function streamReply(sessionId, userText, opts = {}) {
   // on history-load timing).
   const history = loadHistory(sessionId);
   const last = history[history.length - 1];
-  if (!last || last.role !== "user") return; // nothing to reply to
-  const earlier = history.slice(0, -1);
+  const tailIsUserTurn = Boolean(last && last.role === "user");
+  if (!tailIsUserTurn && userText == null) return; // nothing to reply to
+  const earlier = tailIsUserTurn ? history.slice(0, -1) : history;
 
   const model = modelEl.value || undefined;
   const assistantEl = appendBubble("assistant", "", {
