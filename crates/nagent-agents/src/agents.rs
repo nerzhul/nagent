@@ -80,6 +80,13 @@ pub enum AgentError {
     /// the rows; the row is now unrecoverable.
     #[error("credentials decrypt failed for service={service} field={field}")]
     CredentialsDecryptFailed { service: String, field: String },
+    /// The upstream API rate-limited the call (GitHub 403/429 with
+    /// `X-RateLimit-Remaining: 0`). The `hint` carries the
+    /// `Retry-After` / `X-RateLimit-Reset` information so the LLM
+    /// can tell the user when to retry. Surfaces as a 429-class
+    /// signal; never logged at WARN.
+    #[error("rate limited by upstream: {hint}")]
+    RateLimited { hint: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,6 +1560,115 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
             )))
         },
     },
+    // Plan 1795597719368: ten read-only GitHub tools. All share
+    // the `GithubAgentConfig` and drain the shared
+    // `pool.public()` client; each descriptor builds its own
+    // `GithubClient` (own cache, same reqwest pool). Write
+    // tools (create issue / PR / comment) are deliberately NOT
+    // registered — the tool loop returns "unknown tool".
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_me",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::me::MeAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_list_repos",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::list_repos::ListReposAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_get_repo",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::get_repo::GetRepoAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_list_issues",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::list_issues::ListIssuesAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_get_issue",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::get_issue::GetIssueAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_list_prs",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::list_prs::ListPrsAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_get_pr",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::get_pr::GetPrAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_list_notifications",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(
+                github::list_notifications::ListNotificationsAgent::new(github::GithubClient::new(
+                    cfgs.github.clone(),
+                    pool.public(),
+                )),
+            ))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_search_issues",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::search_issues::SearchIssuesAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
+    #[cfg(feature = "github-agent")]
+    AgentDescriptor {
+        id: "github_read_file",
+        feature: "github-agent",
+        build: |cfgs, pool| {
+            Ok(Box::new(github::read_file::ReadFileAgent::new(
+                github::GithubClient::new(cfgs.github.clone(), pool.public()),
+            )))
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -1789,6 +1905,12 @@ pub mod caldav;
 
 #[cfg(feature = "email-agent")]
 pub mod email;
+
+/// Plan 1795597719368: ten read-only `github_*` tools over the
+/// GitHub REST API (per-user personal access token). One cargo
+/// feature gates the whole family.
+#[cfg(feature = "github-agent")]
+pub mod github;
 
 #[cfg(feature = "calculate-agent")]
 pub mod calculate_agent;

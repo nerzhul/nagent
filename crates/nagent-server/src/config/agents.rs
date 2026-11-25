@@ -70,6 +70,11 @@ pub struct AgentConfig {
     /// agents are only registered when the `email-agent` cargo
     /// feature is on.
     pub email: EmailConfig,
+    /// Knobs for the ten read-only `github_*` agents (plan
+    /// 1795597719368). The field is always parsed; the actual
+    /// agents are only registered when the `github-agent` cargo
+    /// feature is on.
+    pub github: GithubConfig,
 }
 
 impl Default for AgentConfig {
@@ -87,6 +92,7 @@ impl Default for AgentConfig {
             x_timeline: XTimelineConfig::default(),
             memory: MemoryConfig::default(),
             email: EmailConfig::default(),
+            github: GithubConfig::default(),
         }
     }
 }
@@ -113,6 +119,7 @@ impl AgentConfig {
             x_timeline: XTimelineConfig::from_env_with_toml(toml.x_timeline.as_ref())?,
             memory: MemoryConfig::from_env_with_toml(toml.memory.as_ref())?,
             email: EmailConfig::from_env_with_toml(toml.email.as_ref())?,
+            github: GithubConfig::from_env_with_toml(toml.github.as_ref())?,
         })
     }
 }
@@ -833,5 +840,139 @@ impl EmailConfig {
                 "EMAIL_STRICT_TLS",
             )?,
         })
+    }
+}
+
+/// Knobs for the ten read-only `github_*` agents (plan
+/// 1795597719368). Mirrors the shape of the agents crate's
+/// `GithubAgentConfig`; the `From` impl in `crate::agents`
+/// converts one to the other.
+///
+/// The per-user personal access token is NOT part of this
+/// config — it lives in the per-user vault under the `github`
+/// service id. This struct holds the operator knobs only.
+#[derive(Debug, Clone)]
+pub struct GithubConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Hard cap on the `limit` argument of every list tool.
+    pub max_items: usize,
+    /// Cap on issue / PR / file bodies the LLM ever sees (bytes).
+    pub max_body_bytes: usize,
+    /// In-process response cache TTL keyed by
+    /// `(user_id, tool, args)`. `0` disables the cache.
+    pub cache_ttl_secs: u64,
+    /// Hostname allow-list applied to every GitHub API URL.
+    /// Default `["api.github.com"]`. GitHub Enterprise Server
+    /// deployments override `base_url` AND this list.
+    pub allowlist: Vec<String>,
+    /// Override the upstream base URL — useful for integration
+    /// tests against a loopback fixture and for GHES. Defaults
+    /// to `https://api.github.com`.
+    pub base_url: String,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 10_000,
+            max_items: 100,
+            max_body_bytes: 65_536,
+            cache_ttl_secs: 60,
+            allowlist: vec!["api.github.com".to_string()],
+            base_url: "https://api.github.com".to_string(),
+        }
+    }
+}
+
+impl GithubConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlGithubConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("GITHUB_AGENT_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "GITHUB_AGENT_TIMEOUT_MS",
+            )?,
+            max_items: resolve_primitive(
+                env_opt("GITHUB_AGENT_MAX_ITEMS").as_deref(),
+                toml.max_items,
+                defaults.max_items,
+                "GITHUB_AGENT_MAX_ITEMS",
+            )?,
+            max_body_bytes: resolve_primitive(
+                env_opt("GITHUB_AGENT_MAX_BODY_BYTES").as_deref(),
+                toml.max_body_bytes,
+                defaults.max_body_bytes,
+                "GITHUB_AGENT_MAX_BODY_BYTES",
+            )?,
+            cache_ttl_secs: resolve_primitive(
+                env_opt("GITHUB_AGENT_CACHE_TTL_SECS").as_deref(),
+                toml.cache_ttl_secs,
+                defaults.cache_ttl_secs,
+                "GITHUB_AGENT_CACHE_TTL_SECS",
+            )?,
+            allowlist: resolve_csv(
+                env_opt("GITHUB_AGENT_ALLOWLIST").as_deref(),
+                toml.allowlist,
+                defaults.allowlist,
+            ),
+            base_url: resolve_opt_string(
+                env_opt("GITHUB_AGENT_BASE_URL").as_deref(),
+                toml.base_url.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.base_url.clone()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod github_config_tests {
+    use super::*;
+
+    #[test]
+    fn github_defaults_match_docs() {
+        // The defaults documented in docs/integrations/github.md
+        // and README.md's env matrix.
+        let cfg = GithubConfig::default();
+        assert_eq!(cfg.timeout_ms, 10_000);
+        assert_eq!(cfg.max_items, 100);
+        assert_eq!(cfg.max_body_bytes, 65_536);
+        assert_eq!(cfg.cache_ttl_secs, 60);
+        assert_eq!(cfg.allowlist, vec!["api.github.com".to_string()]);
+        assert_eq!(cfg.base_url, "https://api.github.com");
+    }
+
+    #[test]
+    fn github_from_env_with_toml_prefers_toml_over_default() {
+        // No env vars set in the test process for these keys
+        // (resolve_primitive reads the real env; the GITHUB_AGENT_*
+        // vars are not set by the test harness), so the TOML
+        // values win over the defaults.
+        let toml = crate::config::file::TomlGithubConfig {
+            timeout_ms: Some(7_000),
+            max_items: Some(25),
+            max_body_bytes: Some(1_024),
+            cache_ttl_secs: Some(0),
+            allowlist: Some(vec!["ghes.example.com".to_string()]),
+            base_url: Some("https://ghes.example.com/api/v3".to_string()),
+        };
+        let cfg = GithubConfig::from_env_with_toml(Some(&toml)).expect("parses");
+        assert_eq!(cfg.timeout_ms, 7_000);
+        assert_eq!(cfg.max_items, 25);
+        assert_eq!(cfg.max_body_bytes, 1_024);
+        assert_eq!(cfg.cache_ttl_secs, 0);
+        assert_eq!(cfg.allowlist, vec!["ghes.example.com".to_string()]);
+        assert_eq!(cfg.base_url, "https://ghes.example.com/api/v3");
+    }
+
+    #[test]
+    fn agent_config_carries_github_section() {
+        let cfg = AgentConfig::from_env_with_toml(None).expect("defaults parse");
+        assert_eq!(cfg.github.base_url, "https://api.github.com");
     }
 }

@@ -26,6 +26,10 @@ read-document-agent = ["nagent-agents/read-document-agent"]
 caldav-agent = ["nagent-agents/caldav-agent"]
 x-agent = ["nagent-agents/x-agent"]
 email-agent = ["nagent-agents/email-agent"]
+# Ten read-only `github_*` chat tools + the setup-only
+# `POST /api/integrations/github/probe` endpoint (plan
+# 1795597719368).
+github-agent = ["nagent-agents/github-agent"]
 # `search_tools` meta-agent + BM25 router. Always compiled in
 # alongside `all-agents` so every target that dispatches tools
 # has the discovery surface.
@@ -51,6 +55,7 @@ all-agents = [
     "caldav-agent",
     "x-agent",
     "email-agent",
+    "github-agent",
     "tool-search-agent",
 ]
 # Piper TTS; pulls piper-rs + ort + espeak-ng FFI through

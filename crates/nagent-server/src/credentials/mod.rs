@@ -33,6 +33,9 @@ pub mod caldav_probe;
 #[cfg(feature = "email-agent")]
 pub mod email_probe;
 
+#[cfg(feature = "github-agent")]
+pub mod github_probe;
+
 pub use crypto::{decrypt, encrypt, EncryptedSecret};
 pub use key::{CredentialsKey, CredentialsKeyError};
 pub use resolver::{CredentialError, CredentialResolver};

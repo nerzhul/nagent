@@ -364,6 +364,20 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
                 danger: Danger::Medium,
             }
         }
+        // Plan 1795597719368: every `github_*` tool is read-only
+        // but still hits a third-party service with the user's
+        // PAT — same Medium danger as `x_timeline`.
+        name if name.starts_with("github_") => {
+            let body = format!(
+                "The assistant wants to read your GitHub account via `{name}` using your \
+                 personal access token. Please confirm before it is accessed."
+            );
+            ApprovalPrompt {
+                title: "Lire votre compte GitHub ?".to_string(),
+                body,
+                danger: Danger::Medium,
+            }
+        }
         _ => ApprovalPrompt {
             title: "Autoriser cet outil ?".to_string(),
             body: format!("L'assistant veut appeler l'outil « {tool_name} »."),

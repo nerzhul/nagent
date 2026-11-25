@@ -30,6 +30,10 @@ memory-agent = []
 # `search_tools` meta-agent + in-process BM25 router (same
 # feature gates both since they boot as a pair).
 tool-search-agent = []
+# `github_*` read-only tools (GitHub REST API, per-user PAT).
+# Only `base64` is needed beyond the unconditional deps (the
+# contents endpoint returns base64-encoded file bodies).
+github-agent = ["dep:base64"]
 all-agents = [
     "datetime-agent",
     "weather-agent",
@@ -45,6 +49,7 @@ all-agents = [
     "email-agent",
     "memory-agent",
     "tool-search-agent",
+    "github-agent",
 ]
 
 [dependencies]

@@ -229,6 +229,16 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `memory_recall` | `memory-agent` | Decrypt + return up to `recalled_top_k` rows matching the supplied `subject` / `predicate` / `tags` LIKE filters. Danger: Medium. |
 | `memory_list` | `memory-agent` | List metadata-only rows for the calling user. Danger: Medium — the list shape never includes plaintext. Pairs with `memory_recall` to retrieve the value of a specific id (the list shape never includes plaintext). |
 | `memory_forget` | `memory-agent` | Forget one memory by id. `NeedsConfirmation` (even though reversible through `memory_store`) so the chat UI surfaces a "forget this memory?" bubble. Danger: Medium. |
+| `github_me` | `github-agent` | Per-user GitHub `GET /user` (profile, plan). Read-only. Confirm-on-read. Plan 1795597719368. |
+| `github_list_repos` | `github-agent` | Per-user GitHub repos (`GET /user/repos` or `GET /users/{owner}/repos`). Read-only. Confirm-on-read. |
+| `github_get_repo` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}`. Read-only. Confirm-on-read. |
+| `github_list_issues` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/issues` (PRs filtered out). Read-only. Confirm-on-read. |
+| `github_get_issue` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/issues/{n}` (body capped). Read-only. Confirm-on-read. |
+| `github_list_prs` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/pulls`. Read-only. Confirm-on-read. |
+| `github_get_pr` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/pulls/{n}` (body capped). Read-only. Confirm-on-read. |
+| `github_list_notifications` | `github-agent` | Per-user GitHub `GET /notifications`. Read-only. Confirm-on-read. |
+| `github_search_issues` | `github-agent` | Per-user GitHub `GET /search/issues` (query passthrough). Read-only. Confirm-on-read. |
+| `github_read_file` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/contents/{path}` — base64-decoded, capped. Read-only. Confirm-on-read. |
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:
@@ -320,6 +330,20 @@ table (migration `0013_email_allowed_from.sql`) so the
 `email_send` agent can never hand a misconfigured vault row to
 an arbitrary envelope sender. See
 `docs/integrations/email.md` for the operator-facing guide.
+
+When the `github-agent` cargo feature is on, the registry also
+contains the `github` `ServiceDef` (id `"github"`, two fields:
+`personal_access_token` (Password) and `username` (Text, filled
+by the probe)). The ten read-only `github_*` agents read the PAT
+through `UserContext::secret("github", "personal_access_token")`
+and call `api.github.com` through the shared egress pool with the
+`[agents.github].allowlist` (default `["api.github.com"]`). One
+setup-only HTTP endpoint — `POST /api/integrations/github/probe` —
+validates the PAT against `GET /user` before the user saves it and
+writes `github_probe_<outcome>` audit rows (the token never lands
+on an audit row). Write tools (create issue / PR / comment) are
+deliberately not registered in v1. See
+`docs/integrations/github.md` for the operator-facing guide.
 
 #### 2.7 Setup-only helpers
 

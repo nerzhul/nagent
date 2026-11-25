@@ -6,9 +6,9 @@
 
 pub use crate::agents::config_doc::{
     CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig, DictionaryAgentConfig,
-    EmailAgentConfig, MemoryAgentConfig, ReadDocumentAgentConfig, StockAgentConfig,
-    ToolSearchAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig, WebFetchAgentConfig,
-    WikipediaAgentConfig, XTimelineAgentConfig,
+    EmailAgentConfig, GithubAgentConfig, MemoryAgentConfig, ReadDocumentAgentConfig,
+    StockAgentConfig, ToolSearchAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig,
+    WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
 };
 
 /// Bag of every per-agent config. Plain data only — the server
@@ -36,4 +36,8 @@ pub struct AgentConfigs {
     /// `build` closure receives it through the same
     /// `AgentConfigs` handle every other agent reads.
     pub tool_search: ToolSearchAgentConfig,
+    /// Plan 1795597719368 — ten read-only `github_*` tools.
+    /// Field is always parsed; the agents are only registered
+    /// when the `github-agent` cargo feature is on.
+    pub github: GithubAgentConfig,
 }

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use axum::extract::FromRef;
 use nagent_db::NewAuthEvent;
 
-use crate::config::agents::{CalDavConfig, EmailConfig};
+use crate::config::agents::{CalDavConfig, EmailConfig, GithubConfig};
 use crate::state::AppState;
 
 /// Trait implemented by every per-integration config that
@@ -158,6 +158,32 @@ impl ProbeConfig for EmailSmtpConfig {
     }
 }
 
+/// Plan 1795597719368 — the GitHub probe uses the same
+/// `ProbeConfig` trait so the audit-row schema and the
+/// fail-closed allowlist posture are identical to the CalDAV /
+/// email probes. The allow-list is the `[agents.github]`
+/// allow-list (default `["api.github.com"]`); the audit kind
+/// prefix is `github_probe`.
+impl ProbeConfig for GithubConfig {
+    fn service_id(&self) -> &'static str {
+        "github"
+    }
+    fn audit_kind_prefix(&self) -> &'static str {
+        "github_probe"
+    }
+    fn allowlist(&self) -> &[String] {
+        &self.allowlist
+    }
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+    fn max_body_bytes(&self) -> usize {
+        // The `/user` probe response is a single JSON object
+        // (a few KiB); 256 KiB is a generous cap.
+        256 * 1024
+    }
+}
+
 /// Per-route state for any setup-only probe handler. The
 /// `cfg` field is the agent's per-integration config (so
 /// the SSRF allowlist is identical to the chat agents'
@@ -237,6 +263,24 @@ impl FromRef<Arc<AppState>> for ProbeState<EmailSmtpConfig> {
             .clone();
         Self {
             cfg: Arc::new(EmailSmtpConfig(state.config.agents.email.clone())),
+            store,
+        }
+    }
+}
+
+/// Plan 1795597719368 — GitHub probe state. Built from the
+/// `[agents.github]` config so the probe validates the API host
+/// against the same allow-list the chat agents use.
+impl FromRef<Arc<AppState>> for ProbeState<GithubConfig> {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        let store = state
+            .auth
+            .as_ref()
+            .expect("github probe requires auth to be enabled")
+            .store
+            .clone();
+        Self {
+            cfg: Arc::new(state.config.agents.github.clone()),
             store,
         }
     }

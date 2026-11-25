@@ -372,6 +372,13 @@ pub struct TomlAgentConfig {
     /// feature is on.
     #[serde(default)]
     pub email: Option<TomlEmailConfig>,
+    /// Knobs for the ten read-only `github_*` agents (plan
+    /// 1795597719368). Mirrors [`crate::config::agents::GithubConfig`].
+    /// Parsed unconditionally so a TOML typo surfaces at boot; the
+    /// agents are only registered when the `github-agent` cargo
+    /// feature is on.
+    #[serde(default)]
+    pub github: Option<TomlGithubConfig>,
 }
 
 /// Knobs for the `memory_*` agents (plan 1791267136806).
@@ -515,6 +522,23 @@ pub struct TomlEmailConfig {
     pub allow_cleartext_imap: Option<bool>,
     pub allow_cleartext_smtp: Option<bool>,
     pub strict_tls: Option<bool>,
+}
+
+/// Knobs for the ten read-only `github_*` agents (plan
+/// 1795597719368). Mirrors
+/// [`crate::config::agents::GithubConfig`]. Parsed
+/// unconditionally so a TOML typo surfaces at boot; the agents
+/// are only registered when the `github-agent` cargo feature is
+/// on.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlGithubConfig {
+    pub timeout_ms: Option<u64>,
+    pub max_items: Option<usize>,
+    pub max_body_bytes: Option<usize>,
+    pub cache_ttl_secs: Option<u64>,
+    pub allowlist: Option<Vec<String>>,
+    pub base_url: Option<String>,
 }
 
 /// WebSocket frame-limit knobs and HTTP transport guardrails (S-1).
@@ -1025,6 +1049,26 @@ fn merge_toml_agents(
             x_timeline: merge_toml_x_timeline(e.x_timeline.as_ref(), l.x_timeline.as_ref()),
             memory: merge_toml_memory(e.memory.as_ref(), l.memory.as_ref()),
             email: merge_toml_email(e.email.as_ref(), l.email.as_ref()),
+            github: merge_toml_github(e.github.as_ref(), l.github.as_ref()),
+        }),
+    }
+}
+
+fn merge_toml_github(
+    earlier: Option<&TomlGithubConfig>,
+    later: Option<&TomlGithubConfig>,
+) -> Option<TomlGithubConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlGithubConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            max_items: l.max_items.or(e.max_items),
+            max_body_bytes: l.max_body_bytes.or(e.max_body_bytes),
+            cache_ttl_secs: l.cache_ttl_secs.or(e.cache_ttl_secs),
+            allowlist: l.allowlist.clone().or_else(|| e.allowlist.clone()),
+            base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
         }),
     }
 }
@@ -1890,5 +1934,95 @@ mod tests {
         assert_eq!(auth.session_ttl_days, Some(30));
         let pwd = auth.password.expect("auth.password merged");
         assert_eq!(pwd.min_password_length, Some(12), "later wins");
+    }
+}
+
+#[cfg(test)]
+mod github_config_tests {
+    use super::*;
+
+    #[test]
+    fn agents_github_subtable_parses() {
+        let text = r#"
+            [agents.github]
+            timeout_ms = 12_000
+            max_items = 50
+            max_body_bytes = 32_768
+            cache_ttl_secs = 30
+            allowlist = ["api.github.com", "ghes.example.com"]
+            base_url = "https://ghes.example.com/api/v3"
+        "#;
+        let cfg: TomlConfig = toml::from_str(text).unwrap();
+        let gh = cfg
+            .agents
+            .and_then(|a| a.github)
+            .expect("agents.github parsed");
+        assert_eq!(gh.timeout_ms, Some(12_000));
+        assert_eq!(gh.max_items, Some(50));
+        assert_eq!(gh.max_body_bytes, Some(32_768));
+        assert_eq!(gh.cache_ttl_secs, Some(30));
+        assert_eq!(
+            gh.allowlist.as_deref(),
+            Some(&["api.github.com".to_string(), "ghes.example.com".to_string()][..])
+        );
+        assert_eq!(
+            gh.base_url.as_deref(),
+            Some("https://ghes.example.com/api/v3")
+        );
+    }
+
+    #[test]
+    fn agents_github_unknown_field_is_rejected() {
+        // `deny_unknown_fields` on TomlGithubConfig: a typo must
+        // fail loudly at boot (AGENTS.md §5 — the documented
+        // contract is the TOML schema).
+        let text = r#"
+            [agents.github]
+            timeoutm_ms = 1000
+        "#;
+        let err = toml::from_str::<TomlConfig>(text).unwrap_err();
+        assert!(
+            err.to_string().contains("timeoutm_ms"),
+            "unknown-field error must mention the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn agents_github_merges_later_wins() {
+        let earlier: TomlConfig = toml::from_str(
+            r#"
+                [agents.github]
+                timeout_ms = 1_000
+                max_items = 10
+                base_url = "https://ghes.example.com/api/v3"
+            "#,
+        )
+        .unwrap();
+        let later: TomlConfig = toml::from_str(
+            r#"
+                [agents.github]
+                timeout_ms = 2_000
+                allowlist = ["ghes.example.com"]
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml_configs(&earlier, &later);
+        let gh = merged
+            .agents
+            .and_then(|a| a.github)
+            .expect("merged agents.github");
+        // later wins where both set it.
+        assert_eq!(gh.timeout_ms, Some(2_000));
+        // only in later → carried over.
+        assert_eq!(
+            gh.allowlist.as_deref(),
+            Some(&["ghes.example.com".to_string()][..])
+        );
+        // only in earlier → kept.
+        assert_eq!(gh.max_items, Some(10));
+        assert_eq!(
+            gh.base_url.as_deref(),
+            Some("https://ghes.example.com/api/v3")
+        );
     }
 }

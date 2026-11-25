@@ -193,6 +193,26 @@
 # allow_cleartext_smtp = false
 # strict_tls = true                         # refuse self-signed certs regardless of the user form
 
+# `github_*` agents — ten read-only GitHub tools (plan
+# 1795597719368) over the REST API with the per-user personal
+# access token stored in the credentials vault under the `github`
+# service id. The agents are only registered when the
+# `github-agent` cargo feature is on. See
+# `docs/integrations/github.md`.
+#
+# `allowlist` defaults to ["api.github.com"] and also gates the
+# setup-only probe endpoint (`POST /api/integrations/github/probe`).
+# For GitHub Enterprise Server, set BOTH `base_url` (…/api/v3) and
+# `allowlist` to the GHES host. An explicitly empty allowlist
+# fails closed.
+# [agents.github]
+# timeout_ms = 10_000
+# max_items = 100                           # hard cap on `limit` for every list tool
+# max_body_bytes = 65_536                   # cap on issue/PR/file bodies the LLM sees
+# cache_ttl_secs = 60                       # 0 disables the in-process cache
+# allowlist = ["api.github.com"]
+# base_url = "https://api.github.com"
+
 # ---------------------------------------------------------------------------
 # Text-to-speech (Piper ONNX, local)
 # ---------------------------------------------------------------------------

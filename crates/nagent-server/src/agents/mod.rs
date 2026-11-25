@@ -706,6 +706,7 @@ pub fn build_registry(
         x_timeline: cfg.x_timeline.clone().into(),
         memory: cfg.memory.clone().into(),
         email: cfg.email.clone().into(),
+        github: cfg.github.clone().into(),
         // Plan 1791317253718: the `search_tools` meta-agent has
         // its own per-feature knob (`default_top_k`); the v1
         // server-side config does not surface it — `default()` is
@@ -917,6 +918,19 @@ impl From<crate::config::agents::EmailConfig> for nagent_agents::EmailAgentConfi
             default_probe_helo: c.default_probe_helo,
             imap_allowlist: c.imap_allowlist,
             smtp_allowlist: c.smtp_allowlist,
+        }
+    }
+}
+
+impl From<crate::config::agents::GithubConfig> for nagent_agents::GithubAgentConfig {
+    fn from(c: crate::config::agents::GithubConfig) -> Self {
+        Self {
+            timeout_ms: c.timeout_ms,
+            max_items: c.max_items,
+            max_body_bytes: c.max_body_bytes,
+            cache_ttl_secs: c.cache_ttl_secs,
+            allowlist: c.allowlist,
+            base_url: c.base_url,
         }
     }
 }

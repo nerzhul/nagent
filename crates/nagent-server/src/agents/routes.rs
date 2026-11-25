@@ -129,6 +129,13 @@ pub async fn agent_invoke(
             "response exceeded max_bytes={budget}"
         ))),
         Err(AgentError::AgentFailed(msg)) => Err(LlmError::BadRequest(msg)),
+        // Upstream rate limit (GitHub 403/429 with
+        // `X-RateLimit-Remaining: 0`) — surfaced as a 429-class
+        // signal with the retry hint so clients can back off.
+        Err(AgentError::RateLimited { hint }) => Err(LlmError::Upstream {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: hint,
+        }),
         // Per-user credentials not configured / decrypt failed —
         // surfaced as 400 with a stable message so the chat UI can
         // detect it and offer a "configure integration" link.

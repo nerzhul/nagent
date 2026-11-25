@@ -26,6 +26,8 @@ pub mod egress;
 pub mod email_imap_service;
 #[cfg(feature = "email-agent")]
 pub mod email_smtp_service;
+#[cfg(feature = "github-agent")]
+pub mod github_service;
 pub mod services;
 pub mod tools_router;
 #[cfg(feature = "x-agent")]
@@ -38,9 +40,9 @@ pub use agents::{
 };
 pub use config::{
     AgentConfigs, CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig,
-    DictionaryAgentConfig, EmailAgentConfig, ReadDocumentAgentConfig, StockAgentConfig,
-    ToolSearchAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig, WebFetchAgentConfig,
-    WikipediaAgentConfig, XTimelineAgentConfig,
+    DictionaryAgentConfig, EmailAgentConfig, GithubAgentConfig, ReadDocumentAgentConfig,
+    StockAgentConfig, ToolSearchAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig,
+    WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
 };
 pub use tools_router::{ToolsRouter, SEARCH_TOOLS_NAME};
 
