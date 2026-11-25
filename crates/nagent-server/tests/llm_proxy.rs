@@ -17,7 +17,7 @@ use std::time::Duration;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
-use nagent_server::config::LlmConfig;
+use nagent_server::config::{LlmConfig, LlmProvider};
 use nagent_server::http::build_router;
 use nagent_server::llm::LlmClient;
 use nagent_server::testing::app_state;
@@ -120,6 +120,8 @@ async fn start_test_server_with_llm_and_system_prompt(
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -574,6 +576,8 @@ async fn start_test_server_with_llm_ollama_predict(
         llm_max_auto_continues: 0,
         ollama_num_predict,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -627,6 +631,8 @@ async fn start_test_server_with_llm_ollama_ctx(
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -822,6 +828,8 @@ async fn start_test_server_with_llm_auth(
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -1267,6 +1275,8 @@ async fn tool_loop_auto_continues_on_reasoning_truncation_until_visible_answer()
         llm_max_auto_continues: 3,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -1458,6 +1468,8 @@ async fn start_test_server_with_llm_and_agents(upstream_url: String) -> String {
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new should succeed for test config");
@@ -1614,4 +1626,392 @@ async fn tool_search_round_trip() {
         sse_seen_weather_call,
         "SSE stream must surface the get_weather tool_call event; got: {body}"
     );
+}
+
+// ---- Provider selection (`[llm].provider`) ----------------------------------
+//
+// Plan 1795597719367: `provider = "mistral"` must forward the body
+// without the Ollama-native `options` object, with top-level
+// `max_tokens`, with the `MISTRAL_API_KEY` bearer, and with a
+// `nagent/<version>` User-Agent — while `provider = "ollama"` keeps
+// today's `options.*` behaviour exactly (regression guard).
+
+/// Base `[llm]` config for provider tests, pointed at a mock
+/// upstream. Callers tweak `provider` / knobs per test.
+fn provider_test_cfg(upstream_url: String, provider: LlmProvider) -> LlmConfig {
+    LlmConfig {
+        enabled: true,
+        provider,
+        base_url: upstream_url,
+        default_model: match provider {
+            LlmProvider::Mistral => "mistral-small-latest".into(),
+            _ => "llama3.1".into(),
+        },
+        api_key: match provider {
+            LlmProvider::Mistral => Some("sk-mistral-test".into()),
+            _ => None,
+        },
+        inbound_auth_key: None,
+        auth_mode: nagent_server::config::LlmAuthMode::Forward,
+        request_timeout: Duration::from_secs(120),
+        cors_allow_origins: vec![],
+        system_prompt: None,
+        allow_user_location: true,
+        allow_user_timezone: true,
+        allow_user_reply_language: true,
+        allow_user_memory: true,
+        llm_max_tool_rounds: 4,
+        llm_max_auto_continues: 0,
+        ollama_num_predict: None,
+        ollama_num_ctx: None,
+        max_tokens: None,
+    }
+}
+
+/// Start a test server with a caller-supplied `[llm]` config (no
+/// agents) and return its base URL.
+async fn start_test_server_with_llm_cfg(llm_cfg: LlmConfig) -> String {
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    let state = builder.with_llm(llm_client).build();
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+    url
+}
+
+/// POST a minimal streaming chat request (with a stray Ollama-native
+/// `options` object on the body so the stripping assertion is
+/// meaningful) and return the upstream-captured headers + body.
+async fn post_chat_and_capture(
+    chat_url: &str,
+    on_request: Arc<tokio::sync::Mutex<Option<axum::http::HeaderMap>>>,
+    on_body: Arc<tokio::sync::Mutex<Option<Value>>>,
+) -> (axum::http::HeaderMap, Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{chat_url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"messages":[{"role":"user","content":"hi"}],"stream":true,"model":"mistral-small-latest","options":{"num_predict":128,"seed":7}}"#,
+        )
+        .send()
+        .await
+        .expect("post chat");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+    let headers = on_request
+        .lock()
+        .await
+        .take()
+        .expect("upstream must have received a request");
+    let body = on_body
+        .lock()
+        .await
+        .take()
+        .expect("upstream must have captured a body");
+    (headers, body)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_mistral_strips_options_sets_max_tokens_bearer_and_user_agent() {
+    let (_up, on_request, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let mut cfg = provider_test_cfg(_up.clone(), LlmProvider::Mistral);
+    cfg.max_tokens = Some(2048);
+    let chat_url = start_test_server_with_llm_cfg(cfg).await;
+
+    let (headers, body) = post_chat_and_capture(&chat_url, on_request, on_body).await;
+
+    // The Ollama-native `options` object must NOT reach a hosted API.
+    assert!(
+        body.get("options").is_none(),
+        "mistral provider must strip `options`, got: {body}"
+    );
+    assert_eq!(body["max_tokens"], Value::from(2048));
+    assert_eq!(body["model"], "mistral-small-latest");
+    // Outbound bearer comes from the mistral api_key.
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(auth, "Bearer sk-mistral-test");
+    // Every upstream request carries the nagent User-Agent.
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ua.starts_with("nagent/"),
+        "User-Agent must be nagent/<version>, got: {ua}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_mistral_ollama_num_predict_alias_becomes_max_tokens() {
+    // One knob covers both families: on non-Ollama providers
+    // `ollama_num_predict` is honoured as `max_tokens` when the
+    // generic knob is unset.
+    let (_up, on_request, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let mut cfg = provider_test_cfg(_up.clone(), LlmProvider::Mistral);
+    cfg.ollama_num_predict = Some(1024);
+    let chat_url = start_test_server_with_llm_cfg(cfg).await;
+
+    let (_headers, body) = post_chat_and_capture(&chat_url, on_request, on_body).await;
+    assert!(body.get("options").is_none(), "got: {body}");
+    assert_eq!(body["max_tokens"], Value::from(1024));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_mistral_generic_max_tokens_wins_over_alias() {
+    let (_up, on_request, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let mut cfg = provider_test_cfg(_up.clone(), LlmProvider::Mistral);
+    cfg.max_tokens = Some(512);
+    cfg.ollama_num_predict = Some(1024);
+    let chat_url = start_test_server_with_llm_cfg(cfg).await;
+
+    let (_headers, body) = post_chat_and_capture(&chat_url, on_request, on_body).await;
+    assert_eq!(body["max_tokens"], Value::from(512));
+    assert!(body.get("options").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_ollama_keeps_options_and_ignores_max_tokens() {
+    // Regression guard: on `provider = "ollama"` the body shape is
+    // unchanged from before the provider enum existed —
+    // `options.num_predict` is injected, client `options` survive,
+    // and the generic `max_tokens` knob is NOT forwarded (Ollama has
+    // no such top-level field).
+    let (_up, on_request, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let mut cfg = provider_test_cfg(_up.clone(), LlmProvider::Ollama);
+    cfg.ollama_num_predict = Some(2048);
+    cfg.max_tokens = Some(999);
+    let chat_url = start_test_server_with_llm_cfg(cfg).await;
+
+    let (_headers, body) = post_chat_and_capture(&chat_url, on_request, on_body).await;
+    assert_eq!(body["options"]["num_predict"], Value::from(2048));
+    assert_eq!(
+        body["options"]["seed"],
+        Value::from(7),
+        "client-supplied options must survive on ollama"
+    );
+    assert!(
+        body.get("max_tokens").is_none(),
+        "max_tokens must not be forwarded on ollama, got: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn models_list_parses_mistral_shaped_catalog() {
+    // Mistral's `/v1/models` returns the same `{object:"list",
+    // data:[{id,…}]}` envelope as Ollama, with extra per-model fields
+    // (`created`, `owned_by`, …) the parser must ignore.
+    let app = Router::new().route(
+        "/v1/models",
+        get(|| async {
+            (
+                StatusCode::OK,
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                r#"{"object":"list","data":[
+                    {"id":"mistral-large-latest","object":"model","created":1730000000,"owned_by":"mistral"},
+                    {"id":"mistral-small-latest","object":"model","created":1730000001,"owned_by":"mistral"},
+                    {"id":"codestral-latest","object":"model","created":1730000002,"owned_by":"mistral"}
+                ]}"#,
+            )
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let cfg = provider_test_cfg(format!("http://{addr}"), LlmProvider::Mistral);
+    let chat_url = start_test_server_with_llm_cfg(cfg).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{chat_url}/v1/models"))
+        .send()
+        .await
+        .expect("get models");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.expect("json");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "mistral-large-latest",
+            "mistral-small-latest",
+            "codestral-latest"
+        ]
+    );
+}
+
+/// Mock upstream speaking recorded Mistral SSE: round 0 emits an
+/// indexed `tool_calls` delta for `get_datetime` split across three
+/// chunks, round 1 emits content + a trailing `usage` chunk with
+/// `finish_reason: "stop"`.
+async fn spawn_mistral_tool_round_trip_upstream(
+    captured_bodies: Arc<tokio::sync::Mutex<Vec<Value>>>,
+    first_call: Arc<Once>,
+) -> String {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let captured_bodies = Arc::clone(&captured_bodies);
+            let first_call = Arc::clone(&first_call);
+            async move {
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                captured_bodies.lock().await.push(parsed);
+                let mut is_first = false;
+                first_call.call_once(|| {
+                    is_first = true;
+                });
+                let sse_body = if is_first {
+                    concat!(
+                        r#"data: {"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#, "\n\n",
+                        r#"data: {"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_m1","type":"function","function":{"name":"get_datetime","arguments":""}}]},"finish_reason":null}]}"#, "\n\n",
+                        r#"data: {"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"timezone\":"}}]},"finish_reason":null}]}"#, "\n\n",
+                        r#"data: {"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Europe/Paris\"}"}}]},"finish_reason":null}]}"#, "\n\n",
+                        r#"data: {"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#, "\n\n",
+                        "data: [DONE]\n\n",
+                    )
+                } else {
+                    concat!(
+                        r#"data: {"id":"cmpl-m2","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"role":"assistant","content":"It is "},"finish_reason":null}]}"#, "\n\n",
+                        r#"data: {"id":"cmpl-m2","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":"10:00 in Paris."},"finish_reason":null}]}"#, "\n\n",
+                        r#"data: {"id":"cmpl-m2","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#, "\n\n",
+                        "data: [DONE]\n\n",
+                    )
+                };
+                (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/event-stream"),
+                    )],
+                    sse_body.to_string(),
+                )
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// Like [`start_test_server_with_llm_and_agents`] but takes a full
+/// caller-supplied `[llm]` config (provider knobs included).
+async fn start_test_server_with_llm_cfg_and_agents(llm_cfg: LlmConfig) -> String {
+    use nagent_agents::AgentConfigs;
+    let llm_client = LlmClient::new(Arc::new(llm_cfg.clone()))
+        .expect("LlmClient::new should succeed for test config");
+    let mut builder = app_state();
+    Arc::make_mut(&mut builder.config).llm = llm_cfg;
+    let cfgs = AgentConfigs::default();
+    let pool = nagent_agents::egress::EgressPool::new();
+    let registry = nagent_agents::AgentRegistry::from_config(&cfgs, true, &pool);
+    let state = builder
+        .with_llm(llm_client)
+        .with_agents(registry.clone())
+        .build();
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    std::mem::forget(tx);
+    url
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mistral_recorded_tool_call_round_trips_through_tool_loop() {
+    // A recorded Mistral stream (indexed `tool_calls` delta split
+    // across chunks + trailing `usage` chunk) must round-trip
+    // through `run_tool_loop`'s accumulator into one complete
+    // `get_datetime` dispatch, and round 1's forwarded body must
+    // still be provider-adapted (no `options`, `max_tokens` present).
+    let captured_bodies: Arc<tokio::sync::Mutex<Vec<Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let first_call = Arc::new(Once::new());
+    let upstream_url =
+        spawn_mistral_tool_round_trip_upstream(captured_bodies.clone(), first_call).await;
+    let mut cfg = provider_test_cfg(upstream_url.clone(), LlmProvider::Mistral);
+    cfg.max_tokens = Some(2048);
+    let url = start_test_server_with_llm_cfg_and_agents(cfg).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(r#"{"messages":[{"role":"user","content":"what time is it in Paris?"}],"stream":true,"model":"mistral-small-latest"}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("data: [DONE]"), "stream must close: {body}");
+    assert!(
+        body.contains("event: tool_call") && body.contains("\"name\":\"get_datetime\""),
+        "tool_call event for get_datetime must be surfaced; got: {body}"
+    );
+    assert!(
+        body.contains("event: tool_result"),
+        "tool_result event must be surfaced; got: {body}"
+    );
+    assert!(
+        body.contains("10:00 in Paris."),
+        "final assistant content must stream through; got: {body}"
+    );
+
+    let bodies = captured_bodies.lock().await.clone();
+    assert!(
+        bodies.len() >= 2,
+        "expected at least 2 upstream rounds, got {}",
+        bodies.len()
+    );
+    for (i, b) in bodies.iter().enumerate() {
+        assert!(
+            b.get("options").is_none(),
+            "round {i} body must not carry `options` on mistral provider: {b}"
+        );
+        assert_eq!(
+            b["max_tokens"],
+            Value::from(2048),
+            "round {i} body must carry max_tokens"
+        );
+    }
+    // Round 1 must carry the tool history: assistant tool_calls +
+    // the role:"tool" result for call_m1.
+    let round1_messages = bodies[1]["messages"].as_array().expect("messages");
+    let saw_tool_result = round1_messages
+        .iter()
+        .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_m1" && m["content"].is_string());
+    assert!(saw_tool_result, "round 1 must include the tool result");
 }

@@ -20,6 +20,8 @@
 //! location and timezone blocks.
 //! - [`prompt`] — server-default system prompt and the
 //! user-integration block injected into every chat completion.
+//! - [`provider`] — per-provider request-body adaptation
+//! (`options.*` on Ollama vs. top-level `max_tokens` elsewhere).
 //! - [`sse`] — SSE frame parser + tool-loop event builders.
 //! - [`tool_loop`] — the per-chat-completion tool loop, including
 //! the security-plan-#10 "read_document → web_fetch" rule.
@@ -36,6 +38,7 @@ pub mod discovered_tools;
 pub mod permission;
 pub mod privacy;
 pub mod prompt;
+pub mod provider;
 pub mod proxy;
 pub mod sse;
 pub mod tool_loop;

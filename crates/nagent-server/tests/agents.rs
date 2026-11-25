@@ -64,8 +64,8 @@ use nagent_agents::WikipediaAgentConfig;
 use nagent_server::agents::UserContext;
 use nagent_server::agents::{Agent, AgentRegistry};
 use nagent_server::config::{
-    AgentConfig, DictionaryConfig, LlmConfig, RateLimitConfig, WeatherConfig, WebFetchConfig,
-    WikipediaConfig,
+    AgentConfig, DictionaryConfig, LlmConfig, LlmProvider, RateLimitConfig, WeatherConfig,
+    WebFetchConfig, WikipediaConfig,
 };
 use nagent_server::http::build_router;
 use nagent_server::llm::LlmClient;
@@ -250,6 +250,8 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
             llm_max_auto_continues: 0,
             ollama_num_predict: None,
             ollama_num_ctx: None,
+            provider: LlmProvider::Ollama,
+            max_tokens: None,
         },
         agents: AgentConfig::default(),
         stt: nagent_server::config::SttConfig {

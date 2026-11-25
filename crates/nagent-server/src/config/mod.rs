@@ -63,7 +63,7 @@ pub use auth::{
 };
 pub use documents::DocumentsConfig;
 pub use limits::LimitsConfig;
-pub use llm::{LlmAuthMode, LlmConfig};
+pub use llm::{LlmAuthMode, LlmConfig, LlmProvider};
 pub use ratelimit::RateLimitConfig;
 pub use stt::SttConfig;
 pub use trusted_proxies::TrustedProxiesConfig;

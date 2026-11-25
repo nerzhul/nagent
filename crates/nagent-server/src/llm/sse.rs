@@ -434,4 +434,88 @@ mod tests {
     fn tool_call_names_handles_empty_input() {
         assert_eq!(tool_call_names(&[]), "");
     }
+
+    /// Recorded Mistral API stream (`chat.completion.chunk` objects):
+    /// a content chunk, an indexed `tool_calls` delta split across
+    /// three chunks (name, then two `arguments` fragments), a
+    /// `finish_reason: "tool_calls"` chunk, then a final content +
+    /// `usage` chunk with `finish_reason: "stop"`, and `[DONE]`.
+    /// Mistral uses the same OpenAI-shaped SSE framing as Ollama, so
+    /// this must round-trip through `drain_upstream_round` into one
+    /// complete tool call — a future Mistral wire drift should fail
+    /// here, not in production.
+    /// Frame a list of JSON chunk payloads as a proper SSE byte
+    /// stream (`data: …\n\n` per frame + the `[DONE]` sentinel).
+    fn mistral_sse_stream(frames: &[&str]) -> Vec<Result<Bytes, reqwest::Error>> {
+        let mut all = String::new();
+        for f in frames {
+            all.push_str("data: ");
+            all.push_str(f);
+            all.push_str("\n\n");
+        }
+        all.push_str("data: [DONE]\n\n");
+        // Split into two uneven byte chunks so the parser also
+        // exercises partial-frame buffering.
+        let mid = all.len() / 2;
+        vec![
+            Ok(Bytes::from(all[..mid].to_string())),
+            Ok(Bytes::from(all[mid..].to_string())),
+        ]
+    }
+
+    #[tokio::test]
+    async fn mistral_recorded_stream_round_trips_through_accumulator() {
+        let chunks = mistral_sse_stream(&[
+            r#"{"id":"cmpl-m1","object":"chat.completion.chunk","created":1763000000,"model":"mistral-small-latest","choices":[{"index":0,"delta":{"role":"assistant","content":"Let me check. "},"finish_reason":null}]}"#,
+            r#"{"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_datetime","arguments":""}}]},"finish_reason":null}]}"#,
+            r#"{"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"timezone\":"}}]},"finish_reason":null}]}"#,
+            r#"{"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Europe/Paris\"}"}}]},"finish_reason":null}]}"#,
+            r#"{"id":"cmpl-m1","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ]);
+        let stream = futures_util::stream::iter(chunks);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let outcome = drain_upstream_round(stream, Duration::from_secs(5), &tx)
+            .await
+            .expect("drain must succeed");
+
+        // The forwarded frames must be the verbatim upstream bytes
+        // minus the swallowed `[DONE]` sentinel.
+        let mut forwarded = String::new();
+        while let Ok(Ok(b)) = rx.try_recv() {
+            forwarded.push_str(&String::from_utf8_lossy(&b));
+        }
+        assert!(forwarded.contains("chat.completion.chunk"));
+        assert!(
+            !forwarded.contains("[DONE]"),
+            "upstream [DONE] must be swallowed by the forwarder"
+        );
+
+        assert_eq!(outcome.tool_calls.len(), 1, "one complete tool call");
+        let tc = &outcome.tool_calls[0];
+        assert_eq!(tc.id, "call_abc123");
+        assert_eq!(tc.name.as_deref(), Some("get_datetime"));
+        assert_eq!(tc.arguments, r#"{"timezone":"Europe/Paris"}"#);
+        assert_eq!(outcome.assistant_text, "Let me check. ");
+        assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    /// Second half of a recorded Mistral round trip: the final round
+    /// carries content chunks, a trailing `usage` object on the
+    /// `finish_reason: "stop"` chunk, and `[DONE]`.
+    #[tokio::test]
+    async fn mistral_final_round_with_usage_chunk_is_clean_stop() {
+        let chunks = mistral_sse_stream(&[
+            r#"{"id":"cmpl-m2","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"role":"assistant","content":"It is "},"finish_reason":null}]}"#,
+            r#"{"id":"cmpl-m2","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":"10:00 in Paris."},"finish_reason":null}]}"#,
+            r#"{"id":"cmpl-m2","object":"chat.completion.chunk","model":"mistral-small-latest","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#,
+        ]);
+        let stream = futures_util::stream::iter(chunks);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let outcome = drain_upstream_round(stream, Duration::from_secs(5), &tx)
+            .await
+            .expect("drain must succeed");
+        assert!(outcome.tool_calls.is_empty());
+        assert_eq!(outcome.assistant_text, "It is 10:00 in Paris.");
+        assert_eq!(outcome.finish_reason.as_deref(), Some("stop"));
+    }
 }

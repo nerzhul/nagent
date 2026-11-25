@@ -44,6 +44,12 @@ use nagent_agents::{ServiceDef, ServiceRegistry, ToolsRouter};
 pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
     let cfg = Arc::new(cfg.clone());
 
+    // Fail-closed `[llm]` validation: a hosted provider without its
+    // API key (or `openai-compatible` without `base_url` /
+    // `default_model`) must refuse to boot rather than 401 on every
+    // chat round. Skipped when `llm.enabled = false`.
+    cfg.llm.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // ---- Auth subsystem --------------------------------------------------
     //
     // `auto_bootstrap` runs the migrations and (when the auth

@@ -23,7 +23,9 @@ async fn connect_db(cfg: &nagent_server::config::AuthConfig) -> nagent_db::Db {
     nagent_db::Db::connect(&opts).await.expect("store connects")
 }
 
-use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig};
+use nagent_server::config::{
+    AuthBackendKind, AuthConfig, AuthDbConfig, LlmAuthMode, LlmConfig, LlmProvider,
+};
 use nagent_server::http::build_router;
 use nagent_server::testing::app_state;
 use nagent_server::AppState;
@@ -302,5 +304,7 @@ fn _suppress_unused_warnings() {
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
 }

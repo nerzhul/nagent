@@ -363,4 +363,10 @@ pub enum ConfigError {
     /// pointed message rather than a generic "invalid env var".
     #[error("invalid auth config: {0}")]
     InvalidAuth(String),
+    /// The `[llm]` section failed fail-closed validation (e.g.
+    /// `provider = "mistral"` without an API key, or
+    /// `provider = "openai-compatible"` without `base_url`). Surfaced
+    /// at boot from `app::build_app` via `LlmConfig::validate`.
+    #[error("invalid llm config: {0}")]
+    InvalidLlm(String),
 }

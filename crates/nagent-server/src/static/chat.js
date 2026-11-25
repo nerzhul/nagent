@@ -2088,9 +2088,18 @@ async function renderModelNotFoundIfApplicable(assistantEl, err) {
     // backend serves.
     const hint = document.createElement("p");
     hint.className = "chat-model-not-found-hint";
-    hint.textContent =
-      "Run `ollama pull <name>` on the upstream, then re-send. " +
-      "Or set `OLLAMA_MODEL` / `[llm].default_model` on this server.";
+    if (nagentFeatures.llm_provider && nagentFeatures.llm_provider !== "ollama") {
+      // Hosted / non-Ollama upstream: there is nothing to `pull` —
+      // the model either does not exist in the provider's catalog or
+      // the key lacks access to it. Point at the dropdown instead.
+      hint.textContent =
+        "Pick another model in the dropdown, then re-send the last turn. " +
+        "Or set `LLM_MODEL` / `[llm].default_model` on this server.";
+    } else {
+      hint.textContent =
+        "Run `ollama pull <name>` on the upstream, then re-send. " +
+        "Or set `OLLAMA_MODEL` / `[llm].default_model` on this server.";
+    }
     wrap.appendChild(hint);
   }
 
@@ -4780,6 +4789,11 @@ const DEFAULT_FEATURES = Object.freeze({
   // dropdown empty (the loadModels fallback then renders the
   // "(no models)" placeholder).
   llm_models: Object.freeze([]),
+  // `llm_provider` is the `[llm].provider` string from
+  // `/api/features` ("ollama" | "openai-compatible" | "mistral");
+  // `null` when the LLM proxy is off or the fetch failed. Used to
+  // pick the right remediation hint on a `model_not_found` error.
+  llm_provider: null,
   // `stt` gates the entire speech-to-text surface — both modes
   // (Transcript Record button + Discussion mic button + their
   // language pickers + voice oscilloscope). `false` when the
@@ -5989,7 +6003,7 @@ Documents.setSessionId(currentSessionId);
 document.addEventListener("visibilitychange", () => {
   // Re-fetch `/api/features` on tab return in case the server's
   // model list changed while the tab was backgrounded (e.g.
-  // another `ollama pull` while the user was away). The
+  // a new model appeared on the upstream while the user was away). The
   // `subscribeFeatures(loadModels)` subscriber paints the dropdown
   // when the response resolves; this path is just a nudge to make
   // that happen. The agents banner still has its own fetch

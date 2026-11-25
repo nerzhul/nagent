@@ -147,9 +147,15 @@ that disables STT can leave it unset.
 | `STT_ENABLED`                | `true`                                        | STT pipeline   | Master switch for the WebSocket STT pipeline. When `false` the `/ws` upgrade route is not registered, the whisper backend is not built, and the frontend hides every STT control (mic button, language picker, voice oscilloscope, in both Transcript and Discussion modes). Mirrors `[stt].enabled` in TOML. |
 | `LLM_RATE_PER_MIN`           | `30`                                          | Rate limits    | Inbound LLM HTTP requests allowed per source IP per minute (`/v1/chat/completions`, `/v1/models`).           |
 | `LLM_ENABLED`                | `false`                                       | LLM proxy      | Master switch. When `false` the `/v1/*` routes are not registered at all.                                     |
-| `OLLAMA_BASE_URL`            | `http://localhost:11434`                      | LLM proxy      | Base URL of the upstream OpenAI-compatible server (Ollama by default).                                        |
-| `OLLAMA_MODEL`               | `llama3.1`                                    | LLM proxy      | Default model for `/v1/chat/completions` when the client omits it.                                            |
-| `OLLAMA_API_KEY`             | _(unset)_                                     | LLM proxy      | Optional bearer token forwarded as `Authorization: Bearer …`.                                                 |
+| `LLM_PROVIDER`               | `ollama`                                      | LLM proxy      | Upstream provider family: `ollama` (default), `mistral`, or `openai-compatible`. Strict parse — a typo is a boot error. Selects the `base_url` / `default_model` / `api_key` defaults and the request-body adaptation. See `docs/llm-configuration.md` §Providers. |
+| `LLM_BASE_URL`               | per provider                                  | LLM proxy      | Base URL of the upstream, any provider (`http://localhost:11434` for ollama, `https://api.mistral.ai/v1` for mistral).                                                            |
+| `LLM_MODEL`                  | per provider                                  | LLM proxy      | Default model for `/v1/chat/completions` when the client omits it (`llama3.1` for ollama, `mistral-small-latest` for mistral).                                                   |
+| `LLM_UPSTREAM_API_KEY`       | _(unset)_                                     | LLM proxy      | Generic outbound bearer token forwarded as `Authorization: Bearer …`, any provider.                                                                                          |
+| `MISTRAL_API_KEY`            | _(unset)_                                     | LLM proxy      | Mistral API key; required when `LLM_PROVIDER=mistral` (startup fails closed without it). Falls back to `LLM_UPSTREAM_API_KEY`.                                                |
+| `LLM_MAX_TOKENS`             | _(unset)_                                     | LLM proxy      | Generic per-response generation cap (tokens) forwarded as top-level `max_tokens` on non-Ollama providers. `ollama_num_predict` is honoured as `max_tokens` when this is unset. |
+| `OLLAMA_BASE_URL`            | `http://localhost:11434`                      | LLM proxy      | Legacy alias for `LLM_BASE_URL`, honoured only when `provider = "ollama"` (the default).                       |
+| `OLLAMA_MODEL`               | `llama3.1`                                    | LLM proxy      | Legacy alias for `LLM_MODEL`, honoured only when `provider = "ollama"`.                                        |
+| `OLLAMA_API_KEY`             | _(unset)_                                     | LLM proxy      | Legacy alias for the outbound bearer, honoured only when `provider = "ollama"`.                                |
 | `LLM_REQUEST_TIMEOUT_SECS`   | `120`                                         | LLM proxy      | Per-chunk idle timeout on the upstream stream.                                                                |
 | `LLM_CORS_ALLOW_ORIGINS`     | _(empty)_                                     | LLM proxy      | Comma-separated list of origins allowed to call `/v1/*` cross-origin. Empty = same-origin only (preflight blocked for others). |
 | `LLM_SYSTEM_PROMPT`          | _(unset)_                                     | LLM proxy      | Optional default system prompt prepended to every `/v1/chat/completions` request as `messages[0]`. The browser's "Additional instructions" textarea is appended after it. Empty / whitespace-only values are treated as unset (no injection). Sent on every round of the tool loop — very long custom prompts may exhaust the model's context window. |
@@ -736,6 +742,7 @@ Render any overlay locally with `make kustomize-build-<name>` (see `make help`).
 - `make run-mock` — in-process mock backend, no model needed (CI / tests).
 - `make run-vulkan` / `make run-cuda` / `make run-hipblas` — GPU backends.
 - `make run-llm` — CPU backend + LLM proxy enabled (`LLM_ENABLED=true`).
+- `make run-mistral` — CPU Whisper backend + LLM proxy pointed at the Mistral API (`LLM_ENABLED=true LLM_PROVIDER=mistral`, requires `WHISPER_MODEL_PATH` + `MISTRAL_API_KEY`).
 - `make docker-build[-<backend>]` and `make docker-run[-gpu-*]` — image and container entry points per backend.
 - `make kustomize-build-{base,dev,prod}` / `make apply-prod` — Kubernetes workflow.
 
@@ -814,6 +821,21 @@ server" notice.
 
 3. Open <http://localhost:8080>, click **Discussion**, type a message.
 
+To use the hosted Mistral API instead of a local Ollama, set the
+provider and its key (the server fails closed at boot if the key is
+missing):
+
+```
+MISTRAL_API_KEY=sk-… make run-mistral
+# equivalent to: LLM_ENABLED=true LLM_PROVIDER=mistral MISTRAL_API_KEY=sk-… \
+#     cargo run -p nagent-server --release \
+#     --features real-backend,tts,all-agents,stt-core/whisper-rs-backend
+```
+
+See `docs/llm-configuration.md` §Providers for the full contract
+(`provider`, `max_tokens`, per-provider defaults, request-body
+adaptation).
+
 ### Configuration
 
 All settings are environment variables (no code changes required). The full
@@ -823,9 +845,15 @@ LLM-specific knobs are:
 | Variable                     | Default                  | Meaning                                                           |
 | ---------------------------- | ------------------------ | ----------------------------------------------------------------- |
 | `LLM_ENABLED`                | `false`                  | Master switch; when `false` the `/v1/*` routes are not registered |
-| `OLLAMA_BASE_URL`            | `http://localhost:11434` | Base URL of the OpenAI-compatible upstream (Ollama by default)    |
-| `OLLAMA_MODEL`               | `llama3.1`               | Default model for `/v1/chat/completions` when the client omits it |
-| `OLLAMA_API_KEY`             | _(unset)_                | Optional bearer token forwarded as `Authorization: Bearer …` on outbound upstream requests. Unrelated to `LLM_API_KEY` below. |
+| `LLM_PROVIDER`               | `ollama`                 | Upstream provider: `ollama` (default), `mistral`, `openai-compatible`. Picks the `base_url`/`default_model` defaults and the request-body shape (`options.*` vs `max_tokens`). Strict parse. |
+| `LLM_BASE_URL`               | per provider             | Base URL of the upstream, any provider (`https://api.mistral.ai/v1` for mistral) |
+| `LLM_MODEL`                  | per provider             | Default model when the client omits it (`mistral-small-latest` for mistral) |
+| `LLM_UPSTREAM_API_KEY`       | _(unset)_                | Generic outbound bearer token on upstream requests, any provider    |
+| `MISTRAL_API_KEY`            | _(unset)_                | Required when `LLM_PROVIDER=mistral` (fail-closed at boot); falls back to `LLM_UPSTREAM_API_KEY` |
+| `LLM_MAX_TOKENS`             | _(unset)_                | Per-response token cap sent as top-level `max_tokens` on non-Ollama providers |
+| `OLLAMA_BASE_URL`            | `http://localhost:11434` | Legacy alias for `LLM_BASE_URL`, only when `provider = "ollama"`      |
+| `OLLAMA_MODEL`               | `llama3.1`               | Legacy alias for `LLM_MODEL`, only when `provider = "ollama"`         |
+| `OLLAMA_API_KEY`             | _(unset)_                | Legacy outbound bearer, only when `provider = "ollama"`. Unrelated to `LLM_API_KEY` below. |
 | `LLM_API_KEY`                | _(unset)_                | Optional bearer token required on inbound `/v1/*` requests when `LLM_AUTH_MODE=bearer`. Has no effect in `forward` / `disabled` modes. |
 | `LLM_AUTH_MODE`              | `forward`                | Inbound auth gate for `/v1/*` requests. `bearer` requires `Authorization: Bearer <LLM_API_KEY>` (returns `401` otherwise). `forward` keeps the historical behaviour (no inbound inspection). `disabled` is the explicit opt-out — `main` logs a startup warning when the server binds a non-loopback address. |
 | `LLM_REQUEST_TIMEOUT_SECS`   | `120`                    | Per-chunk idle timeout on the upstream stream                     |

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use futures_util::StreamExt;
-use nagent_server::config::{LlmAuthMode, LlmConfig, RateLimitConfig};
+use nagent_server::config::{LlmAuthMode, LlmConfig, LlmProvider, RateLimitConfig};
 use nagent_server::http::build_router;
 use nagent_server::rate_limit::RateLimiter;
 use nagent_server::testing::app_state;
@@ -62,6 +62,8 @@ async fn start_test_server_with(
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     builder = builder
         .with_stt_rate_per_min(rate_limit.stt_per_min)

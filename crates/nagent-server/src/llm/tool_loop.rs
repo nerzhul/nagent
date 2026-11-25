@@ -26,8 +26,10 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::agents::{AgentRegistry, SecretSource, UserContext};
+use crate::config::LlmConfig;
 use crate::llm::discovered_tools::DiscoveredTools;
 use crate::llm::permission::{approval_prompt, approval_prompt_json, PermissionStore};
+use crate::llm::provider::adapt_request_body;
 use crate::llm::proxy::build_tools_for_round;
 use crate::llm::sse::{
     drain_upstream_round, sse_error_event, sse_round_paused, sse_tool_call_event,
@@ -123,6 +125,11 @@ pub(crate) async fn run_tool_loop(
     headers: reqwest::header::HeaderMap,
     url: String,
     initial_body: Value,
+    // Resolved `[llm]` config — the loop re-applies
+    // `provider::adapt_request_body` on the outgoing body before every
+    // round it opens itself, so round 1+ carry the same provider-shaped
+    // body as round 0 (which the proxy already adapted).
+    llm_cfg: Arc<LlmConfig>,
     agents: Option<AgentRegistry>,
     max_rounds: u32,
     max_auto_continues: u32,
@@ -149,6 +156,12 @@ pub(crate) async fn run_tool_loop(
 ) {
     let agents = agents.unwrap_or_else(AgentRegistry::empty);
     let mut body = initial_body;
+    // Provider-aware body adaptation (ollama `options.*` vs. generic
+    // `max_tokens` + `options` stripping). The proxy already ran this
+    // on round 0's body; re-applying here is idempotent and keeps the
+    // loop correct even when a future caller hands it an unadapted
+    // body.
+    adapt_request_body(&mut body, &llm_cfg);
     // `tool_round` counts only rounds that produced at least one
     // tool call. The reasoning path does not consume this
     // budget — a long thinking chain followed by a final answer

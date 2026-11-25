@@ -48,7 +48,8 @@ use crate::agents::AgentRegistry;
 use crate::auth::login_rate_limit::LoginRateLimiter;
 use crate::config::{
     AgentConfig, AllowedOriginsConfig, AuthConfig, Config, DocumentsConfig, LimitsConfig,
-    LlmAuthMode, LlmConfig, RateLimitConfig, SttConfig, TrustedProxiesConfig, TtsConfig,
+    LlmAuthMode, LlmConfig, LlmProvider, RateLimitConfig, SttConfig, TrustedProxiesConfig,
+    TtsConfig,
 };
 use crate::credentials::{CredentialResolver, CredentialsKey};
 use crate::llm::LlmClient;
@@ -477,6 +478,8 @@ fn default_test_config() -> Config {
             llm_max_auto_continues: 0,
             ollama_num_predict: None,
             ollama_num_ctx: None,
+            provider: LlmProvider::Ollama,
+            max_tokens: None,
         },
         agents: AgentConfig::default(),
         stt: SttConfig {

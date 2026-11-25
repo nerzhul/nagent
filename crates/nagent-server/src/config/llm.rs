@@ -65,6 +65,92 @@ impl From<String> for LlmAuthMode {
     }
 }
 
+/// Upstream LLM provider family selected by `[llm].provider`.
+///
+/// The proxy speaks the OpenAI-compatible `/v1/chat/completions`
+/// wire protocol to every variant; the provider only selects
+/// (a) the resolution defaults for `base_url` / `default_model` /
+/// `api_key` and (b) the request-body adaptation in
+/// `crate::llm::provider::adapt_request_body` (Ollama-native
+/// `options.*` knobs vs. the generic top-level `max_tokens`).
+///
+/// `Ollama` is the default so existing deployments keep today's
+/// behaviour exactly; `Mistral` targets the hosted Mistral API
+/// (`https://api.mistral.ai/v1`, API key required); `OpenAiCompatible`
+/// is any other self-hosted OpenAI-compatible server, where the
+/// operator must supply `base_url` and `default_model` explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LlmProvider {
+    /// Local Ollama (default). Legacy `OLLAMA_*` env names apply.
+    #[default]
+    Ollama,
+    /// Any other OpenAI-compatible upstream (llama.cpp's llama-server,
+    /// vLLM, LM Studio, …). No defaults: `base_url` and
+    /// `default_model` must be set explicitly (startup error).
+    OpenAiCompatible,
+    /// Hosted Mistral API (`https://api.mistral.ai/v1`). An outbound
+    /// API key is required (startup fails closed without one).
+    Mistral,
+}
+
+impl LlmProvider {
+    /// Parse the human-friendly form (`ollama`, `openai-compatible`,
+    /// `mistral`). Case-insensitive; unknown values surface as an
+    /// error so a typo in the env var fails at boot instead of
+    /// silently reverting to the default.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ollama" => Ok(Self::Ollama),
+            "openai-compatible" | "openai_compatible" | "openai" => Ok(Self::OpenAiCompatible),
+            "mistral" => Ok(Self::Mistral),
+            other => Err(format!(
+                "expected one of `ollama`, `openai-compatible`, `mistral`, got `{other}`"
+            )),
+        }
+    }
+
+    /// Canonical wire/TOML spelling of the provider.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::Mistral => "mistral",
+        }
+    }
+
+    /// Provider-default `base_url` when neither env nor TOML set one.
+    /// `None` for `OpenAiCompatible` — the operator must be explicit
+    /// there, and `validate()` turns the empty result into a startup
+    /// error when the proxy is enabled.
+    pub fn default_base_url(&self) -> Option<&'static str> {
+        match self {
+            Self::Ollama => Some("http://localhost:11434"),
+            Self::OpenAiCompatible => None,
+            Self::Mistral => Some("https://api.mistral.ai/v1"),
+        }
+    }
+
+    /// Provider-default `default_model` when neither env nor TOML set
+    /// one. `None` for `OpenAiCompatible` (see [`Self::default_base_url`]).
+    pub fn default_model(&self) -> Option<&'static str> {
+        match self {
+            Self::Ollama => Some("llama3.1"),
+            Self::OpenAiCompatible => None,
+            Self::Mistral => Some("mistral-small-latest"),
+        }
+    }
+}
+
+impl From<String> for LlmProvider {
+    /// Conversion used by the TOML path — same lenient contract as
+    /// [`LlmAuthMode::from`]: an unknown value in a config file falls
+    /// back to the default instead of blocking boot; the env-var
+    /// path (`LLM_PROVIDER`) is the strict one.
+    fn from(s: String) -> Self {
+        Self::parse(&s).unwrap_or_default()
+    }
+}
+
 /// Configuration for the optional server-side Ollama proxy.
 ///
 /// When `enabled` is `false` the `/v1/chat/completions` and `/v1/models`
@@ -74,8 +160,17 @@ impl From<String> for LlmAuthMode {
 pub struct LlmConfig {
     /// Master switch for the `/v1/*` routes.
     pub enabled: bool,
+    /// Upstream provider family. Selects the resolution defaults for
+    /// `base_url` / `default_model` / `api_key` (see
+    /// [`LlmProvider::default_base_url`]) and the request-body
+    /// adaptation in `crate::llm::provider::adapt_request_body`.
+    /// Env var `LLM_PROVIDER` (strict parse), TOML key
+    /// `[llm].provider` (lenient). Defaults to `ollama`.
+    pub provider: LlmProvider,
     /// Base URL of the upstream OpenAI-compatible server (typically
-    /// `http://localhost:11434` for Ollama).
+    /// `http://localhost:11434` for Ollama, `https://api.mistral.ai/v1`
+    /// for Mistral). Env var `LLM_BASE_URL`; the legacy
+    /// `OLLAMA_BASE_URL` is honoured when `provider = "ollama"`.
     pub base_url: String,
     /// Default model id for `/v1/chat/completions` when the browser
     /// does not specify one.
@@ -242,12 +337,25 @@ pub struct LlmConfig {
     /// `[llm].ollama_num_ctx`. See
     /// `docs/llm-configuration.md` for the full contract.
     pub ollama_num_ctx: Option<u32>,
+    /// Optional generic per-response generation cap (in tokens)
+    /// forwarded to the upstream as the top-level `max_tokens` field
+    /// of the `/v1/chat/completions` body — the spelling every
+    /// non-Ollama OpenAI-compatible API (Mistral, OpenAI, vLLM, …)
+    /// honours. On `provider = "ollama"` this knob is ignored in favour
+    /// of `ollama_num_predict`; on every other provider
+    /// `ollama_num_predict` is honoured *as* `max_tokens` when
+    /// `max_tokens` itself is unset, so one knob covers both families —
+    /// the generic `max_tokens` wins when both are set. Env var
+    /// `LLM_MAX_TOKENS`, TOML key `[llm].max_tokens`. `None` (the
+    /// default) leaves the upstream's own cap untouched.
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: LlmProvider::default(),
             base_url: "http://localhost:11434".to_string(),
             default_model: "llama3.1".to_string(),
             api_key: None,
@@ -264,6 +372,7 @@ impl Default for LlmConfig {
             llm_max_auto_continues: 32,
             ollama_num_predict: None,
             ollama_num_ctx: None,
+            max_tokens: None,
         }
     }
 }
@@ -278,20 +387,55 @@ impl LlmConfig {
             defaults.enabled,
             "LLM_ENABLED",
         )?;
-        let base_url = resolve_opt_string(
-            env_opt("OLLAMA_BASE_URL").as_deref(),
-            toml.base_url.as_deref(),
-        )
-        .unwrap_or_else(|| defaults.base_url.clone());
-        let default_model = resolve_opt_string(
-            env_opt("OLLAMA_MODEL").as_deref(),
-            toml.default_model.as_deref(),
-        )
-        .unwrap_or_else(|| defaults.default_model.clone());
-        let api_key = resolve_opt_string(
-            env_opt("OLLAMA_API_KEY").as_deref(),
-            toml.api_key.as_deref(),
-        );
+        // The provider is resolved first because the env-var names for
+        // `base_url` / `default_model` / `api_key` are provider-scoped:
+        // the generic `LLM_BASE_URL` / `LLM_MODEL` / `LLM_UPSTREAM_API_KEY`
+        // apply to every provider, the legacy `OLLAMA_*` names only when
+        // `provider = "ollama"` (so existing deployments are untouched),
+        // and `MISTRAL_API_KEY` only when `provider = "mistral"`.
+        // `LLM_PROVIDER` is the strict env path (a typo is a boot
+        // error); the TOML `provider` key is lenient like `auth_mode`.
+        let provider = match env_opt("LLM_PROVIDER").as_deref() {
+            Some(v) => LlmProvider::parse(v)
+                .map_err(|e| ConfigError::InvalidEnv("LLM_PROVIDER".into(), e))?,
+            None => toml.provider.map(LlmProvider::from).unwrap_or_default(),
+        };
+        // env (generic, then provider-specific legacy alias) > TOML >
+        // provider default > built-in default. The provider default
+        // reproduces today's `LlmConfig::default()` values for
+        // `ollama`; `openai-compatible` has no default and leaves the
+        // string empty for `validate()` to reject at boot.
+        let base_url_env = env_opt("LLM_BASE_URL").or_else(|| match provider {
+            LlmProvider::Ollama => env_opt("OLLAMA_BASE_URL"),
+            _ => None,
+        });
+        // No fallthrough to `defaults.base_url` here: for
+        // `openai-compatible` the provider default is `None` and the
+        // empty string is what `validate()` turns into a startup
+        // error when the proxy is enabled. For `ollama` the provider
+        // default *is* the built-in default, so existing deployments
+        // resolve exactly as before.
+        let base_url = resolve_opt_string(base_url_env.as_deref(), toml.base_url.as_deref())
+            .or_else(|| provider.default_base_url().map(str::to_string))
+            .unwrap_or_default();
+        let default_model_env = env_opt("LLM_MODEL").or_else(|| match provider {
+            LlmProvider::Ollama => env_opt("OLLAMA_MODEL"),
+            _ => None,
+        });
+        let default_model =
+            resolve_opt_string(default_model_env.as_deref(), toml.default_model.as_deref())
+                .or_else(|| provider.default_model().map(str::to_string))
+                .unwrap_or_default();
+        let api_key_env = match provider {
+            LlmProvider::Mistral => {
+                env_opt("MISTRAL_API_KEY").or_else(|| env_opt("LLM_UPSTREAM_API_KEY"))
+            }
+            LlmProvider::OpenAiCompatible => env_opt("LLM_UPSTREAM_API_KEY"),
+            LlmProvider::Ollama => {
+                env_opt("OLLAMA_API_KEY").or_else(|| env_opt("LLM_UPSTREAM_API_KEY"))
+            }
+        };
+        let api_key = resolve_opt_string(api_key_env.as_deref(), toml.api_key.as_deref());
         let inbound_auth_key = resolve_opt_string(
             env_opt("LLM_API_KEY").as_deref(),
             toml.inbound_auth_key.as_deref(),
@@ -369,9 +513,18 @@ impl LlmConfig {
             toml.ollama_num_ctx,
             "LLM_OLLAMA_NUM_CTX",
         )?;
+        // Generic generation cap — forwarded as top-level `max_tokens`
+        // on non-Ollama providers (see `adapt_request_body`). Same
+        // `None`-means-unset contract as the two Ollama-native knobs.
+        let max_tokens = resolve_opt_primitive(
+            env_opt("LLM_MAX_TOKENS").as_deref(),
+            toml.max_tokens,
+            "LLM_MAX_TOKENS",
+        )?;
 
         Ok(Self {
             enabled,
+            provider,
             base_url,
             default_model,
             api_key,
@@ -388,7 +541,90 @@ impl LlmConfig {
             llm_max_auto_continues,
             ollama_num_predict,
             ollama_num_ctx,
+            max_tokens,
         })
+    }
+
+    /// Fail-closed startup validation, called from
+    /// `app::build_app` before the LLM client is built.
+    ///
+    /// - `provider = "mistral"` without an outbound `api_key` is a
+    ///   hard error naming the env vars / TOML key that fix it — a
+    ///   hosted provider cannot work keyless, and failing at boot is
+    ///   far better than a 401 on every chat round.
+    /// - `provider = "openai-compatible"` without `base_url` /
+    ///   `default_model` is a hard error (there is no sane default
+    ///   for an arbitrary upstream).
+    /// - `provider = "mistral"` with a `base_url` host other than
+    ///   `api.mistral.ai` is allowed (Mistral-compatible gateways,
+    ///   Azure AI) but logged at `WARN` with the resolved host.
+    /// - any provider with a non-loopback `base_url` over plain
+    ///   `http://` while an `api_key` is set logs a `WARN` — the
+    ///   bearer token would cross the wire in cleartext.
+    ///
+    /// Skipped entirely when `enabled = false` (the `/v1/*` routes
+    /// are not registered, so the values are inert).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        match self.provider {
+            LlmProvider::Mistral => {
+                if self
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    return Err(ConfigError::InvalidLlm(
+                        "[llm] provider = \"mistral\" requires an outbound API key: \
+                         set MISTRAL_API_KEY (or LLM_UPSTREAM_API_KEY) or [llm].api_key"
+                            .into(),
+                    ));
+                }
+            }
+            LlmProvider::OpenAiCompatible => {
+                if self.base_url.trim().is_empty() {
+                    return Err(ConfigError::InvalidLlm(
+                        "[llm] provider = \"openai-compatible\" requires base_url: \
+                         set LLM_BASE_URL or [llm].base_url"
+                            .into(),
+                    ));
+                }
+                if self.default_model.trim().is_empty() {
+                    return Err(ConfigError::InvalidLlm(
+                        "[llm] provider = \"openai-compatible\" requires default_model: \
+                         set LLM_MODEL or [llm].default_model"
+                            .into(),
+                    ));
+                }
+            }
+            LlmProvider::Ollama => {}
+        }
+        if let Ok(parsed) = url::Url::parse(&self.base_url) {
+            let host = parsed.host_str().unwrap_or("");
+            if self.provider == LlmProvider::Mistral && host != "api.mistral.ai" {
+                tracing::warn!(
+                    provider = "mistral",
+                    host,
+                    "[llm] provider = \"mistral\" with a non-default base_url host; \
+                     assuming a Mistral-compatible gateway (Azure AI, …)"
+                );
+            }
+            let loopback = match host.parse::<std::net::IpAddr>() {
+                Ok(ip) => ip.is_loopback(),
+                Err(_) => host == "localhost" || host.ends_with(".localhost"),
+            };
+            if parsed.scheme() == "http" && !loopback && self.api_key.is_some() {
+                tracing::warn!(
+                    base_url = %self.base_url,
+                    "[llm] non-loopback base_url over plain http:// with an api_key set — \
+                     the upstream bearer token crosses the wire in cleartext; use https://"
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -495,6 +731,236 @@ mod tests {
             resolve_primitive::<bool>(None, None, default, "LLM_ALLOW_USER_TIMEZONE")
                 .expect("default must parse");
         assert!(from_default, "default must win when neither is set");
+    }
+
+    #[test]
+    fn llm_provider_parse_accepts_known_values() {
+        assert!(matches!(
+            LlmProvider::parse("ollama").unwrap(),
+            LlmProvider::Ollama
+        ));
+        assert!(matches!(
+            LlmProvider::parse(" OpenAI-Compatible ").unwrap(),
+            LlmProvider::OpenAiCompatible
+        ));
+        assert!(matches!(
+            LlmProvider::parse("MISTRAL").unwrap(),
+            LlmProvider::Mistral
+        ));
+    }
+
+    #[test]
+    fn llm_provider_parse_rejects_unknown_values() {
+        // A typo in `LLM_PROVIDER` must surface as an error at boot,
+        // not silently revert to ollama.
+        let err = LlmProvider::parse("mistrall").unwrap_err();
+        assert!(
+            err.contains("mistral") && err.contains("mistrall"),
+            "error must list valid options and echo the value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn llm_provider_toml_from_is_lenient() {
+        // Same contract as `LlmAuthMode::from`: a typo in the TOML file
+        // falls back to the default instead of blocking boot.
+        assert!(matches!(
+            LlmProvider::from("bogus".to_string()),
+            LlmProvider::Ollama
+        ));
+        assert!(matches!(
+            LlmProvider::from("mistral".to_string()),
+            LlmProvider::Mistral
+        ));
+    }
+
+    #[test]
+    fn llm_provider_default_is_ollama_with_today_defaults() {
+        // Backward compatibility: the default provider reproduces the
+        // historical base_url / default_model exactly.
+        let cfg = LlmConfig::default();
+        assert!(matches!(cfg.provider, LlmProvider::Ollama));
+        assert_eq!(cfg.base_url, "http://localhost:11434");
+        assert_eq!(cfg.default_model, "llama3.1");
+        assert!(cfg.max_tokens.is_none());
+        assert!(LlmProvider::default().default_base_url() == Some("http://localhost:11434"));
+        assert_eq!(LlmProvider::default().default_model(), Some("llama3.1"));
+    }
+
+    #[test]
+    fn llm_provider_per_provider_defaults() {
+        assert_eq!(
+            LlmProvider::Mistral.default_base_url(),
+            Some("https://api.mistral.ai/v1")
+        );
+        assert_eq!(
+            LlmProvider::Mistral.default_model(),
+            Some("mistral-small-latest")
+        );
+        // `openai-compatible` has no defaults — `validate()` turns the
+        // empty resolution into a startup error when enabled.
+        assert!(LlmProvider::OpenAiCompatible.default_base_url().is_none());
+        assert!(LlmProvider::OpenAiCompatible.default_model().is_none());
+    }
+
+    #[test]
+    fn llm_provider_toml_resolution_applies_per_provider_defaults() {
+        // TOML-only path (env unset in CI): `provider = "mistral"`
+        // must yield the Mistral base_url / model defaults without
+        // any env var. `validate()` is NOT called here (it runs in
+        // `build_app`), so the missing API key does not fail this
+        // resolution test.
+        let toml: crate::config::file::TomlLlmConfig = toml::from_str(
+            r#"
+                provider = "mistral"
+                enabled = true
+            "#,
+        )
+        .unwrap();
+        let cfg = LlmConfig::from_env_with_toml(Some(&toml)).expect("config must load");
+        assert!(matches!(cfg.provider, LlmProvider::Mistral));
+        assert_eq!(cfg.base_url, "https://api.mistral.ai/v1");
+        assert_eq!(cfg.default_model, "mistral-small-latest");
+    }
+
+    #[test]
+    fn llm_provider_toml_base_url_and_model_override_provider_default() {
+        // An explicit TOML base_url / default_model beats the provider
+        // default (gateway / pinned-model case).
+        let toml: crate::config::file::TomlLlmConfig = toml::from_str(
+            r#"
+                provider = "mistral"
+                base_url = "https://my-gateway.example.com/v1"
+                default_model = "mistral-large-latest"
+                max_tokens = 4096
+            "#,
+        )
+        .unwrap();
+        let cfg = LlmConfig::from_env_with_toml(Some(&toml)).expect("config must load");
+        assert_eq!(cfg.base_url, "https://my-gateway.example.com/v1");
+        assert_eq!(cfg.default_model, "mistral-large-latest");
+        assert_eq!(cfg.max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn llm_provider_default_resolution_keeps_ollama_defaults() {
+        // No `[llm]` section at all → provider ollama, historical
+        // defaults, no API key.
+        let cfg = LlmConfig::from_env_with_toml(None).expect("config must load");
+        assert!(matches!(cfg.provider, LlmProvider::Ollama));
+        assert_eq!(cfg.base_url, "http://localhost:11434");
+        assert_eq!(cfg.default_model, "llama3.1");
+        assert!(cfg.api_key.is_none());
+    }
+
+    #[test]
+    fn llm_validate_fails_closed_for_mistral_without_api_key() {
+        let cfg = LlmConfig {
+            enabled: true,
+            provider: LlmProvider::Mistral,
+            base_url: "https://api.mistral.ai/v1".into(),
+            default_model: "mistral-small-latest".into(),
+            api_key: None,
+            ..LlmConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MISTRAL_API_KEY") && msg.contains("[llm].api_key"),
+            "error must name the env var and the TOML key, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn llm_validate_accepts_mistral_with_api_key() {
+        let cfg = LlmConfig {
+            enabled: true,
+            provider: LlmProvider::Mistral,
+            api_key: Some("sk-test".into()),
+            ..LlmConfig::default()
+        };
+        // Default provider base_url for mistral is set via default();
+        // override to the canonical one for clarity.
+        let cfg = LlmConfig {
+            base_url: "https://api.mistral.ai/v1".into(),
+            default_model: "mistral-small-latest".into(),
+            ..cfg
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn llm_validate_fails_for_openai_compatible_without_base_url_or_model() {
+        let cfg = LlmConfig {
+            enabled: true,
+            provider: LlmProvider::OpenAiCompatible,
+            base_url: String::new(),
+            default_model: String::new(),
+            ..LlmConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("base_url"), "got: {err}");
+        let cfg = LlmConfig {
+            base_url: "http://localhost:8000/v1".into(),
+            ..cfg
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("default_model"), "got: {err}");
+        let cfg = LlmConfig {
+            default_model: "my-model".into(),
+            ..cfg
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn llm_validate_skipped_when_disabled() {
+        // `enabled = false` → the /v1/* routes are not registered, so
+        // even a keyless mistral config must not block boot.
+        let cfg = LlmConfig {
+            enabled: false,
+            provider: LlmProvider::Mistral,
+            api_key: None,
+            ..LlmConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn llm_validate_warns_but_allows_custom_mistral_gateway() {
+        // A non-api.mistral.ai host is allowed (WARN only) — the
+        // warning itself is a log line, so the assertion is just that
+        // validation passes.
+        let cfg = LlmConfig {
+            enabled: true,
+            provider: LlmProvider::Mistral,
+            base_url: "https://azure-mistral.example.com/v1".into(),
+            default_model: "mistral-small-latest".into(),
+            api_key: Some("sk-test".into()),
+            ..LlmConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn llm_validate_allows_loopback_http_with_api_key() {
+        // The cleartext warning only fires for NON-loopback http
+        // upstreams; a loopback Ollama with a key is the historical
+        // setup and must stay silent.
+        let cfg = LlmConfig {
+            enabled: true,
+            provider: LlmProvider::Ollama,
+            base_url: "http://localhost:11434".into(),
+            api_key: Some("key".into()),
+            ..LlmConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+        let cfg = LlmConfig {
+            base_url: "http://192.0.2.10:11434".into(),
+            ..cfg
+        };
+        // Still Ok — the cleartext case is a WARN, not a hard error.
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

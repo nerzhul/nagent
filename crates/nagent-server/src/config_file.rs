@@ -223,6 +223,14 @@ pub struct TomlServerConfig {
 #[serde(deny_unknown_fields)]
 pub struct TomlLlmConfig {
     pub enabled: Option<bool>,
+    /// Upstream provider family (`ollama`, `openai-compatible`,
+    /// `mistral`). Mirrors the `LLM_PROVIDER` env var; env wins when
+    /// both are set. Unknown values fall back to the default
+    /// (`ollama`) so a typo in the file never blocks boot — the env
+    /// path is the strict one. Selects the `base_url` /
+    /// `default_model` / `api_key` defaults when neither env nor TOML
+    /// set them.
+    pub provider: Option<String>,
     pub base_url: Option<String>,
     pub default_model: Option<String>,
     pub api_key: Option<String>,
@@ -313,6 +321,14 @@ pub struct TomlLlmConfig {
     /// `/v1/chat/completions` body. See
     /// `docs/llm-configuration.md` for the full contract.
     pub ollama_num_ctx: Option<u32>,
+    /// Optional generic per-response generation cap (in tokens)
+    /// forwarded as the top-level `max_tokens` field on non-Ollama
+    /// providers (`provider != "ollama"`); on Ollama the
+    /// `ollama_num_predict` knob keeps its `options.num_predict`
+    /// spelling. Mirrors the `LLM_MAX_TOKENS` env var; env wins when
+    /// both are set. When both `max_tokens` and `ollama_num_predict`
+    /// are set on a non-Ollama provider, `max_tokens` wins.
+    pub max_tokens: Option<u32>,
 }
 
 /// Agent master switches + per-tool sub-tables.
@@ -1017,6 +1033,7 @@ fn merge_toml_llm(
         (None, Some(l)) => Some(l.clone()),
         (Some(e), Some(l)) => Some(TomlLlmConfig {
             enabled: l.enabled.or(e.enabled),
+            provider: l.provider.clone().or_else(|| e.provider.clone()),
             base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
             default_model: l.default_model.clone().or_else(|| e.default_model.clone()),
             api_key: l.api_key.clone().or_else(|| e.api_key.clone()),
@@ -1039,6 +1056,7 @@ fn merge_toml_llm(
             llm_max_auto_continues: l.llm_max_auto_continues.or(e.llm_max_auto_continues),
             ollama_num_predict: l.ollama_num_predict.or(e.ollama_num_predict),
             ollama_num_ctx: l.ollama_num_ctx.or(e.ollama_num_ctx),
+            max_tokens: l.max_tokens.or(e.max_tokens),
         }),
     }
 }

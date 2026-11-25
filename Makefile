@@ -52,6 +52,12 @@ run-llm: ## Run with the real Whisper backend on CPU, the LLM proxy, TTS, and ch
 	cargo run -p nagent-server --release \
 	    --features real-backend,tts,all-agents,stt-core/whisper-rs-backend
 
+.PHONY: run-mistral
+run-mistral: ## Run with the real Whisper backend on CPU, TTS, chat agents, and the LLM proxy pointed at the Mistral API (requires WHISPER_MODEL_PATH + MISTRAL_API_KEY; LLM_PROVIDER=mistral LLM_ENABLED=true).
+	LLM_ENABLED=true LLM_PROVIDER=mistral \
+	    cargo run -p nagent-server --release \
+	    --features real-backend,tts,all-agents,stt-core/whisper-rs-backend
+
 .PHONY: run-tts
 run-tts: ## Run with the real Whisper backend on CPU, TTS, and chat agents but no LLM proxy (TTS_ENABLED=true, LLM_ENABLED=false).
 	cargo run -p nagent-server --release \

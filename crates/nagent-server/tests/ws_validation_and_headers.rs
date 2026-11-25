@@ -19,7 +19,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{header, Request as HttpRequest, StatusCode};
 use futures_util::{SinkExt, StreamExt};
-use nagent_server::config::{LimitsConfig, LlmConfig, RateLimitConfig};
+use nagent_server::config::{LimitsConfig, LlmConfig, LlmProvider, RateLimitConfig};
 use nagent_server::http::build_router;
 use nagent_server::llm::LlmClient;
 use nagent_server::rate_limit::{RateLimitPolicy, RateLimiter};
@@ -102,6 +102,8 @@ async fn start_test_server_with_overrides(
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let stt_limiter = RateLimiter::new(RateLimitPolicy::stt(rate_limit.stt_per_min));
     let llm_limiter = RateLimiter::new(RateLimitPolicy::llm(rate_limit.llm_per_min));

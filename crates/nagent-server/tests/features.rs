@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 
-use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmConfig};
+use nagent_server::config::{AuthBackendKind, AuthConfig, AuthDbConfig, LlmConfig, LlmProvider};
 use nagent_server::http::build_router;
 use nagent_server::testing::app_state;
 use nagent_server::AppState;
@@ -185,6 +185,11 @@ async fn features_returns_all_disabled_when_subsystems_off() {
         body["llm_models"],
         serde_json::json!([]),
         "llm_models must be an empty array when LLM is disabled (the dropdown should never list phantom models)"
+    );
+    assert_eq!(
+        body["llm_provider"],
+        serde_json::Value::Null,
+        "llm_provider must be null when the LLM proxy is not wired"
     );
     assert_eq!(body["tts"], false, "tts flag must be false (TTS not wired)");
     assert_eq!(
@@ -413,6 +418,8 @@ async fn features_llm_models_reflects_upstream_list() {
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Mistral,
+        max_tokens: None,
     };
     let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");
@@ -455,6 +462,11 @@ async fn features_llm_models_reflects_upstream_list() {
         models,
         vec!["qwen2.5:14b", "llama3.1", "deepseek-r1:14b"],
         "llm_models must mirror the upstream /v1/models list byte-for-byte so an operator who pulled a model sees it in the dropdown"
+    );
+    assert_eq!(
+        body["llm_provider"].as_str(),
+        Some("mistral"),
+        "llm_provider must surface the resolved [llm].provider so the chat UI can pick the right model_not_found hint"
     );
 }
 
@@ -512,6 +524,8 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
         llm_max_auto_continues: 0,
         ollama_num_predict: None,
         ollama_num_ctx: None,
+        provider: LlmProvider::Ollama,
+        max_tokens: None,
     };
     let llm_client = nagent_server::llm::LlmClient::new(Arc::new(llm_cfg.clone()))
         .expect("LlmClient::new must succeed");
@@ -556,5 +570,10 @@ async fn features_llm_models_falls_back_when_upstream_unreachable() {
         body["llm_models"],
         serde_json::json!(["fallback-model"]),
         "upstream unreachable must collapse to [default_model] — empty array would break the dropdown contract"
+    );
+    assert_eq!(
+        body["llm_provider"].as_str(),
+        Some("ollama"),
+        "default provider must surface as ollama when [llm].provider is unset"
     );
 }

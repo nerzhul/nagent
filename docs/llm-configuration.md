@@ -9,6 +9,71 @@ and the two Ollama-native knobs the operator controls
 upstream-side (`ollama_num_predict`, `ollama_num_ctx`) that have
 the biggest impact on long reasoning chains.
 
+## Providers
+
+`[llm].provider` selects the upstream family and its defaults:
+
+| `provider` | `base_url` default | `default_model` default | outbound `api_key` | env vars for the key |
+| --- | --- | --- | --- | --- |
+| `ollama` (default) | `http://localhost:11434` | `llama3.1` | optional | `OLLAMA_API_KEY`, then `LLM_UPSTREAM_API_KEY` |
+| `mistral` | `https://api.mistral.ai/v1` | `mistral-small-latest` | **required** (startup fails closed without it) | `MISTRAL_API_KEY`, then `LLM_UPSTREAM_API_KEY` |
+| `openai-compatible` | none — **startup error** if unset and `enabled = true` | none — **startup error** if unset | optional | `LLM_UPSTREAM_API_KEY` |
+
+- TOML key: `[llm].provider` (`"ollama"` | `"openai-compatible"` | `"mistral"`)
+- Env var: `LLM_PROVIDER` (strict — a typo is a boot error)
+
+Resolution order for every field stays **env > TOML > provider
+default > built-in default**. The generic env names `LLM_BASE_URL`,
+`LLM_MODEL` and `LLM_UPSTREAM_API_KEY` apply to every provider; the
+legacy `OLLAMA_BASE_URL` / `OLLAMA_MODEL` / `OLLAMA_API_KEY` names
+are honoured only when `provider = "ollama"` (the default), so
+existing deployments keep working untouched. `MISTRAL_API_KEY` is
+only read when `provider = "mistral"`.
+
+### Request-body adaptation per provider
+
+The proxy speaks the same OpenAI-compatible wire protocol to every
+provider, but the generation-cap knob differs:
+
+- `provider = "ollama"` → `ollama_num_predict` / `ollama_num_ctx`
+  are merged into the Ollama-native `options` object of the
+  forwarded body (see the two dedicated sections below).
+- any other provider → the `options` object is **stripped** from
+  the forwarded body (strict hosted APIs may 422 on it), and the
+  generic `[llm].max_tokens` (env `LLM_MAX_TOKENS`) is injected as
+  the top-level `max_tokens` field. `ollama_num_predict` is honoured
+  *as* `max_tokens` on non-Ollama providers when `max_tokens` itself
+  is unset, so one knob covers both families — the generic
+  `max_tokens` wins when both are set.
+
+Every upstream request (chat completions, `/v1/models`, tool-loop
+rounds) also carries a `User-Agent: nagent/<version>` header, which
+some hosted APIs require.
+
+### Startup validation (fail closed)
+
+- `provider = "mistral"` without an API key → startup error naming
+  `MISTRAL_API_KEY` / `[llm].api_key`.
+- `provider = "mistral"` with a `base_url` host other than
+  `api.mistral.ai` → allowed (Mistral-compatible gateways, Azure
+  AI), logged at `WARN` with the resolved host.
+- any provider with a non-loopback `base_url` over plain `http://`
+  and an `api_key` set → `WARN` (the bearer token would cross the
+  wire in cleartext).
+- `provider = "openai-compatible"` without `base_url` /
+  `default_model` → startup error.
+
+### `max_tokens`
+
+Generic per-response generation cap (in tokens) for non-Ollama
+providers, forwarded as the top-level `max_tokens` field of
+`/v1/chat/completions`. `None` (the default) leaves the upstream's
+own cap untouched. On `provider = "ollama"` this knob is ignored —
+use `ollama_num_predict` there.
+
+- TOML key: `[llm].max_tokens`
+- Env var: `LLM_MAX_TOKENS`
+
 ## Server-side knobs
 
 Both knobs live on the `[llm]` section of `config.toml` (or the

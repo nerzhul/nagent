@@ -86,14 +86,16 @@
 # loopback_bypass = true
 
 # ---------------------------------------------------------------------------
-# LLM proxy (Ollama or any OpenAI-compatible upstream)
+# LLM proxy (Ollama, Mistral API, or any OpenAI-compatible upstream)
 # ---------------------------------------------------------------------------
 
 # [llm]
 # enabled = false
-# base_url = "http://localhost:11434"
-# default_model = "llama3.1"
-# api_key = ""                              # optional bearer token
+# provider = "ollama"                       # "ollama" (default) | "openai-compatible" | "mistral"; mirrors LLM_PROVIDER
+# base_url = "http://localhost:11434"      # default per provider: ollama → http://localhost:11434, mistral → https://api.mistral.ai/v1, openai-compatible → must be set
+# default_model = "llama3.1"                # default per provider: ollama → llama3.1, mistral → mistral-small-latest, openai-compatible → must be set
+# api_key = ""                              # optional outbound bearer token; REQUIRED when provider = "mistral" (env MISTRAL_API_KEY)
+# max_tokens = 4096                         # generic per-response cap forwarded as top-level max_tokens on non-Ollama providers (env LLM_MAX_TOKENS); on ollama use ollama_num_predict instead
 # request_timeout_secs = 120
 # cors_allow_origins = []                   # empty = same-origin only
 # system_prompt = "You are a strict, concise assistant."   # mirrors LLM_SYSTEM_PROMPT
@@ -110,8 +112,8 @@
 # [llm]
 # llm_max_tool_rounds = 64                  # hard cap on tool-call rounds per user turn (defends against tool loops)
 # llm_max_auto_continues = 32              # max reasoning-truncation auto-continue rounds (set 0 to disable; see docs/llm-configuration.md)
-# ollama_num_predict = 2048                # Ollama-specific per-response generation cap (in tokens) forwarded as options.num_predict; 2048 for 9B reasoners, 4096 for 32B+ (see docs/llm-configuration.md)
-# ollama_num_ctx = 32768                   # Ollama-specific context-window size forwarded as options.num_ctx; 32768 for 9B-14B reasoners, 65536 for 32B+ (see docs/llm-configuration.md)
+# ollama_num_predict = 2048                # Ollama-specific per-response generation cap (in tokens) forwarded as options.num_predict; 2048 for 9B reasoners, 4096 for 32B+ (see docs/llm-configuration.md). On non-Ollama providers this knob is forwarded as top-level max_tokens when max_tokens is unset
+# ollama_num_ctx = 32768                   # Ollama-specific context-window size forwarded as options.num_ctx; 32768 for 9B-14B reasoners, 65536 for 32B+ (see docs/llm-configuration.md); the whole `options` object is stripped on non-Ollama providers
 
 # `web_fetch` agent — sandbox + transfer knobs
 # [agents.web_fetch]

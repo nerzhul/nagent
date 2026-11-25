@@ -21,6 +21,7 @@
 //! "documents": true,          // [documents].enabled = true
 //! "llm": true,                // LLM proxy is wired
 //! "llm_models": ["qwen2.5:14b", "llama3.1"], // upstream models (or [default_model] fallback)
+//! "llm_provider": "ollama",   // [llm].provider ("ollama" | "openai-compatible" | "mistral")
 //! "stt": true,                // [stt].enabled = true (WebSocket /ws route is registered)
 //! "tts": true,                // TTS engine wired
 //! "agents": true,             // at least one agent registered
@@ -93,6 +94,13 @@ pub struct Features {
     /// the dropdown is never empty.
     #[serde(rename = "llm_models")]
     pub llm_models: Vec<String>,
+    /// Upstream provider family (`ollama`, `openai-compatible`,
+    /// `mistral`) from `[llm].provider`. `None` when the LLM proxy is
+    /// not wired. The frontend uses it to pick the right remediation
+    /// hint on a `model_not_found` error (e.g. "pick another model in
+    /// the dropdown" for a hosted provider instead of `ollama pull`).
+    #[serde(rename = "llm_provider")]
+    pub llm_provider: Option<String>,
     /// STT pipeline is wired (`state.stt.is_some()`, i.e.
     /// `[stt].enabled = true`). When false the `/ws` upgrade
     /// route is not registered and the frontend hides every STT
@@ -170,6 +178,10 @@ impl Features {
         } else {
             Vec::new()
         };
+        let llm_provider = state
+            .llm
+            .as_ref()
+            .map(|llm_state| llm_state.cfg.provider.as_str().to_string());
 
         // Agent registry: empty when the master `agents.enabled`
         // toggle is off OR when no individual agent cargo
@@ -192,6 +204,7 @@ impl Features {
             documents_enabled,
             llm_enabled,
             llm_models,
+            llm_provider,
             stt_enabled,
             tts_enabled,
             agents_enabled,

@@ -43,6 +43,11 @@ impl LlmClient {
             // a generation.
             .timeout(Duration::from_secs(86_400))
             .connect_timeout(Duration::from_secs(10))
+            // Some hosted OpenAI-compatible APIs (Mistral included)
+            // reject requests without a User-Agent; identify the
+            // proxy on every upstream call (chat completions, /models,
+            // tool-loop rounds all share this client).
+            .user_agent(concat!("nagent/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| LlmError::BadRequest(format!("reqwest build failed: {e}")))?;
         Ok(Self { http, cfg })
