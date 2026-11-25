@@ -707,6 +707,7 @@ pub fn build_registry(
         memory: cfg.memory.clone().into(),
         email: cfg.email.clone().into(),
         github: cfg.github.clone().into(),
+        shortcut: cfg.shortcut.clone().into(),
         // Plan 1791317253718: the `search_tools` meta-agent has
         // its own per-feature knob (`default_top_k`); the v1
         // server-side config does not surface it — `default()` is
@@ -931,6 +932,20 @@ impl From<crate::config::agents::GithubConfig> for nagent_agents::GithubAgentCon
             cache_ttl_secs: c.cache_ttl_secs,
             allowlist: c.allowlist,
             base_url: c.base_url,
+        }
+    }
+}
+
+impl From<crate::config::agents::ShortcutConfig> for nagent_agents::ShortcutAgentConfig {
+    fn from(c: crate::config::agents::ShortcutConfig) -> Self {
+        Self {
+            timeout_ms: c.timeout_ms,
+            max_items: c.max_items,
+            max_body_bytes: c.max_body_bytes,
+            cache_ttl_secs: c.cache_ttl_secs,
+            allowlist: c.allowlist,
+            base_url: c.base_url,
+            backlog_query: c.backlog_query,
         }
     }
 }

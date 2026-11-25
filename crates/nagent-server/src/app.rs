@@ -381,6 +381,8 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         nagent_agents::email_smtp_service::EMAIL_SMTP_SERVICE,
         #[cfg(feature = "github-agent")]
         nagent_agents::github_service::GITHUB_SERVICE,
+        #[cfg(feature = "shortcut-agent")]
+        nagent_agents::shortcut_service::SHORTCUT_SERVICE,
     ];
     let services = ServiceRegistry::new(SERVICES).into_arc();
 

@@ -52,8 +52,9 @@ pub use server::{Config, ConfigError};
 // canonical paths resolving unchanged for downstream users (lib,
 /// agents/*, llm/*, …).
 pub use agents::{
-    AgentConfig, DictionaryConfig, GithubConfig, MemoryConfig, ReadDocumentConfig, StockConfig,
-    UnitConvertConfig, WeatherConfig, WebFetchConfig, WikipediaConfig, XTimelineConfig,
+    AgentConfig, DictionaryConfig, GithubConfig, MemoryConfig, ReadDocumentConfig, ShortcutConfig,
+    StockConfig, UnitConvertConfig, WeatherConfig, WebFetchConfig, WikipediaConfig,
+    XTimelineConfig,
 };
 pub use allowed_origins::AllowedOriginsConfig;
 pub use auth::{

@@ -29,6 +29,8 @@ pub mod email_smtp_service;
 #[cfg(feature = "github-agent")]
 pub mod github_service;
 pub mod services;
+#[cfg(feature = "shortcut-agent")]
+pub mod shortcut_service;
 pub mod tools_router;
 #[cfg(feature = "x-agent")]
 pub mod x_account_service;
@@ -41,8 +43,8 @@ pub use agents::{
 pub use config::{
     AgentConfigs, CalDavAgentConfig, CalculateAgentConfig, DateTimeAgentConfig,
     DictionaryAgentConfig, EmailAgentConfig, GithubAgentConfig, ReadDocumentAgentConfig,
-    StockAgentConfig, ToolSearchAgentConfig, UnitConvertAgentConfig, WeatherAgentConfig,
-    WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
+    ShortcutAgentConfig, StockAgentConfig, ToolSearchAgentConfig, UnitConvertAgentConfig,
+    WeatherAgentConfig, WebFetchAgentConfig, WikipediaAgentConfig, XTimelineAgentConfig,
 };
 pub use tools_router::{ToolsRouter, SEARCH_TOOLS_NAME};
 

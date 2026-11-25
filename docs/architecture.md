@@ -239,6 +239,16 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `github_list_notifications` | `github-agent` | Per-user GitHub `GET /notifications`. Read-only. Confirm-on-read. |
 | `github_search_issues` | `github-agent` | Per-user GitHub `GET /search/issues` (query passthrough). Read-only. Confirm-on-read. |
 | `github_read_file` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/contents/{path}` — base64-decoded, capped. Read-only. Confirm-on-read. |
+| `shortcut_me` | `shortcut-agent` | Per-user Shortcut `GET /members/me` (member the API token belongs to). Read-only. Confirm-on-read. Plan 1795597719369. |
+| `shortcut_list_workflows` | `shortcut-agent` | Per-user Shortcut `GET /workflows` (state id → name/category map). Read-only. Confirm-on-read. |
+| `shortcut_list_projects` | `shortcut-agent` | Per-user Shortcut `GET /projects`. Read-only. Confirm-on-read. |
+| `shortcut_list_epics` | `shortcut-agent` | Per-user Shortcut `GET /epics` (`state?` filtered client-side). Read-only. Confirm-on-read. |
+| `shortcut_get_epic` | `shortcut-agent` | Per-user Shortcut `GET /epics/{id}` (description capped). Read-only. Confirm-on-read. |
+| `shortcut_list_iterations` | `shortcut-agent` | Per-user Shortcut `GET /iterations` (current + upcoming). Read-only. Confirm-on-read. |
+| `shortcut_search_stories` | `shortcut-agent` | Per-user Shortcut `GET /search/stories` (query passthrough). Read-only. Confirm-on-read. |
+| `shortcut_list_backlog` | `shortcut-agent` | Per-user Shortcut story search with the configured `[agents.shortcut].backlog_query`. Read-only. Confirm-on-read. |
+| `shortcut_get_story` | `shortcut-agent` | Per-user Shortcut `GET /stories/{id}` + `/comments` (description/comments capped). Read-only. Confirm-on-read. |
+| `shortcut_list_labels` | `shortcut-agent` | Per-user Shortcut `GET /labels`. Read-only. Confirm-on-read. |
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:
@@ -344,6 +354,20 @@ writes `github_probe_<outcome>` audit rows (the token never lands
 on an audit row). Write tools (create issue / PR / comment) are
 deliberately not registered in v1. See
 `docs/integrations/github.md` for the operator-facing guide.
+
+When the `shortcut-agent` cargo feature is on, the registry also
+contains the `shortcut` `ServiceDef` (id `"shortcut"`, two fields:
+`api_token` (Password) and `username` (Text, filled by the probe)).
+The ten read-only `shortcut_*` agents read the token through
+`UserContext::secret("shortcut", "api_token")` and call
+`api.app.shortcut.com` through the shared egress pool with the
+`[agents.shortcut].allowlist` (default `["api.app.shortcut.com"]`).
+One setup-only HTTP endpoint — `POST /api/integrations/shortcut/probe`
+— validates the token against `GET /members/me` before the user
+saves it and writes `shortcut_probe_<outcome>` audit rows (the
+token never lands on an audit row). Write tools (create story /
+comment / move story) are deliberately not registered in v1. See
+`docs/integrations/shortcut.md` for the operator-facing guide.
 
 #### 2.7 Setup-only helpers
 

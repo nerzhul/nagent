@@ -34,6 +34,9 @@ tool-search-agent = []
 # Only `base64` is needed beyond the unconditional deps (the
 # contents endpoint returns base64-encoded file bodies).
 github-agent = ["dep:base64"]
+# `shortcut_*` read-only tools (Shortcut REST API v3, per-user
+# API token). No extra dep beyond the unconditional `reqwest`.
+shortcut-agent = []
 all-agents = [
     "datetime-agent",
     "weather-agent",
@@ -50,6 +53,7 @@ all-agents = [
     "memory-agent",
     "tool-search-agent",
     "github-agent",
+    "shortcut-agent",
 ]
 
 [dependencies]

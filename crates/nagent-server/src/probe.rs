@@ -25,7 +25,7 @@ use std::sync::Arc;
 use axum::extract::FromRef;
 use nagent_db::NewAuthEvent;
 
-use crate::config::agents::{CalDavConfig, EmailConfig, GithubConfig};
+use crate::config::agents::{CalDavConfig, EmailConfig, GithubConfig, ShortcutConfig};
 use crate::state::AppState;
 
 /// Trait implemented by every per-integration config that
@@ -281,6 +281,51 @@ impl FromRef<Arc<AppState>> for ProbeState<GithubConfig> {
             .clone();
         Self {
             cfg: Arc::new(state.config.agents.github.clone()),
+            store,
+        }
+    }
+}
+
+/// Plan 1795597719369 — the Shortcut probe uses the same
+/// `ProbeConfig` trait so the audit-row schema and the
+/// fail-closed allowlist posture are identical to the CalDAV /
+/// email / GitHub probes. The allow-list is the
+/// `[agents.shortcut]` allow-list (default
+/// `["api.app.shortcut.com"]`); the audit kind prefix is
+/// `shortcut_probe`.
+impl ProbeConfig for ShortcutConfig {
+    fn service_id(&self) -> &'static str {
+        "shortcut"
+    }
+    fn audit_kind_prefix(&self) -> &'static str {
+        "shortcut_probe"
+    }
+    fn allowlist(&self) -> &[String] {
+        &self.allowlist
+    }
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+    fn max_body_bytes(&self) -> usize {
+        // The `/members/me` probe response is a single JSON
+        // object (a few KiB); 256 KiB is a generous cap.
+        256 * 1024
+    }
+}
+
+/// Plan 1795597719369 — Shortcut probe state. Built from the
+/// `[agents.shortcut]` config so the probe validates the API host
+/// against the same allow-list the chat agents use.
+impl FromRef<Arc<AppState>> for ProbeState<ShortcutConfig> {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        let store = state
+            .auth
+            .as_ref()
+            .expect("shortcut probe requires auth to be enabled")
+            .store
+            .clone();
+        Self {
+            cfg: Arc::new(state.config.agents.shortcut.clone()),
             store,
         }
     }

@@ -435,3 +435,54 @@ impl Default for GithubAgentConfig {
         }
     }
 }
+
+/// Knobs for the ten read-only `shortcut_*` agents (plan
+/// 1795597719369).
+///
+/// The agent family shares one `[agents.shortcut]` section: every
+/// tool goes through the same `ShortcutClient`, so one timeout /
+/// item cap / body cap / cache TTL / allow-list / base URL /
+/// backlog query governs the whole family. The per-user API token
+/// lives in the vault under the `shortcut` service id — it is not
+/// part of this config.
+#[derive(Debug, Clone)]
+pub struct ShortcutAgentConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Hard cap on the `limit` argument of every list tool.
+    pub max_items: usize,
+    /// Cap on story/epic descriptions and comment bodies the LLM
+    /// ever sees (bytes). Longer values are truncated with a
+    /// marker.
+    pub max_body_bytes: usize,
+    /// In-process response cache TTL, keyed by
+    /// `(user_id, tool, args)`. `0` disables the cache.
+    /// Shortcut's quota is 200 req/min per token, so a short TTL
+    /// keeps repeated "what's in my backlog?" questions cheap.
+    pub cache_ttl_secs: u64,
+    /// Hostname allow-list applied by the egress client to every
+    /// Shortcut API URL. Default `["api.app.shortcut.com"]`.
+    pub allowlist: Vec<String>,
+    /// Override the upstream base URL — useful for integration
+    /// tests against a loopback fixture. Defaults to
+    /// `https://api.app.shortcut.com/api/v3`.
+    pub base_url: String,
+    /// Default Shortcut search query used by `shortcut_list_backlog`:
+    /// stories in the backlog (unstarted workflow state, not in an
+    /// iteration — the `is:backlog` operator), not archived.
+    pub backlog_query: String,
+}
+
+impl Default for ShortcutAgentConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 10_000,
+            max_items: 200,
+            max_body_bytes: 65_536,
+            cache_ttl_secs: 60,
+            allowlist: vec!["api.app.shortcut.com".to_string()],
+            base_url: "https://api.app.shortcut.com/api/v3".to_string(),
+            backlog_query: "is:story is:backlog !is:archived".to_string(),
+        }
+    }
+}

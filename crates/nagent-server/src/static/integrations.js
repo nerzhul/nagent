@@ -431,6 +431,8 @@ const PROBE_PATH_EMAIL_IMAP = "/api/integrations/email_imap/probe";
 const PROBE_PATH_EMAIL_SMTP = "/api/integrations/email_smtp/probe";
 const GITHUB_SERVICE_ID = "github";
 const PROBE_PATH_GITHUB = "/api/integrations/github/probe";
+const SHORTCUT_SERVICE_ID = "shortcut";
+const PROBE_PATH_SHORTCUT = "/api/integrations/shortcut/probe";
 
 // One-line subtitle per service. Sets the user's mental
 // model before they read the field labels. Falls back to a
@@ -447,6 +449,8 @@ const MODAL_SUBTITLES = {
     "Connect your SMTP submission server so the assistant can send mail on your behalf. The `from` address is validated against the server and never picked by the LLM.",
   github:
     "Connect your GitHub account with a personal access token so the assistant can read your repos, issues, PRs and notifications. Read-only — the agent never creates or modifies anything on your behalf.",
+  shortcut:
+    "Connect your Shortcut (app.shortcut.com) workspace with an API token so the assistant can read your backlog, stories, epics and iterations and help you plan the next one. Read-only — the agent never creates or modifies anything on your behalf.",
 };
 
 async function probeCalendars(principalUrl, username, password) {
@@ -908,6 +912,97 @@ async function probeGithub(personalAccessToken) {
   return await resp.json();
 }
 
+async function probeShortcut(apiToken) {
+  const resp = await fetch(PROBE_PATH_SHORTCUT, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "content-type": "application/json",
+      ...(csrfHeaders() || {}),
+    },
+    body: JSON.stringify({ api_token: apiToken }),
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const body = await resp.json();
+      if (body && typeof body.error === "string") msg = body.error;
+    } catch {
+      try {
+        msg = `${msg}: ${await resp.text()}`;
+      } catch {
+        /* fall through */
+      }
+    }
+    throw new Error(msg);
+  }
+  return await resp.json();
+}
+
+function attachShortcutTestButton(form, actions) {
+  const tokenField = form.querySelector('[data-key="api_token"]');
+  const usernameField = form.querySelector('[data-key="username"]');
+  if (!tokenField || !usernameField || !actions) return;
+
+  const cancelBtn = actions.querySelector('[data-action="cancel"]');
+  const testBtn = document.createElement("button");
+  testBtn.type = "button";
+  testBtn.className = "ghost";
+  testBtn.textContent = "Test connection";
+  if (cancelBtn) {
+    actions.insertBefore(testBtn, cancelBtn);
+  } else {
+    actions.appendChild(testBtn);
+  }
+
+  let probePanel = null;
+  let status = null;
+  const ensureProbePanel = () => {
+    if (probePanel) return status;
+    probePanel = document.createElement("div");
+    probePanel.className = "chat-integration-probe-panel";
+    probePanel.setAttribute("role", "group");
+    probePanel.setAttribute("aria-label", "Test connection status");
+    status = document.createElement("p");
+    status.className = "chat-integration-discover-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    probePanel.appendChild(status);
+    actions.parentNode.insertBefore(probePanel, actions);
+    return status;
+  };
+
+  testBtn.addEventListener("click", async () => {
+    testBtn.disabled = true;
+    const statusEl = ensureProbePanel();
+    statusEl.textContent = "Testing Shortcut connection…";
+    statusEl.dataset.state = "pending";
+    const token = tokenField.value.trim();
+    if (!token) {
+      testBtn.disabled = false;
+      statusEl.textContent = "Please fill in the API token first.";
+      statusEl.dataset.state = "error";
+      return;
+    }
+    try {
+      const body = await probeShortcut(token);
+      statusEl.dataset.state = "ok";
+      const name = body.name ? ` — ${body.name}` : "";
+      statusEl.textContent = `Connected as @${body.mention_name}${name}.`;
+      if (!usernameField.value) {
+        usernameField.value = body.mention_name;
+        usernameField.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } catch (e) {
+      console.error("shortcut probe failed:", e);
+      statusEl.textContent = `Probe failed: ${e.message}`;
+      statusEl.dataset.state = "error";
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+}
+
 function attachGithubTestButton(form, actions) {
   const tokenField = form.querySelector('[data-key="personal_access_token"]');
   const usernameField = form.querySelector('[data-key="username"]');
@@ -1125,6 +1220,9 @@ function openEditor(svc) {
   }
   if (svc.id === GITHUB_SERVICE_ID) {
     attachGithubTestButton(form, actions);
+  }
+  if (svc.id === SHORTCUT_SERVICE_ID) {
+    attachShortcutTestButton(form, actions);
   }
 
   form.addEventListener("submit", async (e) => {

@@ -75,6 +75,11 @@ pub struct AgentConfig {
     /// agents are only registered when the `github-agent` cargo
     /// feature is on.
     pub github: GithubConfig,
+    /// Knobs for the ten read-only `shortcut_*` agents (plan
+    /// 1795597719369). The field is always parsed; the actual
+    /// agents are only registered when the `shortcut-agent` cargo
+    /// feature is on.
+    pub shortcut: ShortcutConfig,
 }
 
 impl Default for AgentConfig {
@@ -93,6 +98,7 @@ impl Default for AgentConfig {
             memory: MemoryConfig::default(),
             email: EmailConfig::default(),
             github: GithubConfig::default(),
+            shortcut: ShortcutConfig::default(),
         }
     }
 }
@@ -120,6 +126,7 @@ impl AgentConfig {
             memory: MemoryConfig::from_env_with_toml(toml.memory.as_ref())?,
             email: EmailConfig::from_env_with_toml(toml.email.as_ref())?,
             github: GithubConfig::from_env_with_toml(toml.github.as_ref())?,
+            shortcut: ShortcutConfig::from_env_with_toml(toml.shortcut.as_ref())?,
         })
     }
 }
@@ -974,5 +981,148 @@ mod github_config_tests {
     fn agent_config_carries_github_section() {
         let cfg = AgentConfig::from_env_with_toml(None).expect("defaults parse");
         assert_eq!(cfg.github.base_url, "https://api.github.com");
+    }
+}
+
+/// Knobs for the ten read-only `shortcut_*` agents (plan
+/// 1795597719369). Mirrors the shape of the agents crate's
+/// `ShortcutAgentConfig`; the `From` impl in `crate::agents`
+/// converts one to the other.
+///
+/// The per-user API token is NOT part of this config — it lives
+/// in the per-user vault under the `shortcut` service id. This
+/// struct holds the operator knobs only.
+#[derive(Debug, Clone)]
+pub struct ShortcutConfig {
+    /// Per-request connect+read timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Hard cap on the `limit` argument of every list tool.
+    pub max_items: usize,
+    /// Cap on story/epic descriptions and comment bodies the LLM
+    /// ever sees (bytes).
+    pub max_body_bytes: usize,
+    /// In-process response cache TTL keyed by
+    /// `(user_id, tool, args)`. `0` disables the cache.
+    pub cache_ttl_secs: u64,
+    /// Hostname allow-list applied to every Shortcut API URL.
+    /// Default `["api.app.shortcut.com"]`.
+    pub allowlist: Vec<String>,
+    /// Override the upstream base URL — useful for integration
+    /// tests against a loopback fixture. Defaults to
+    /// `https://api.app.shortcut.com/api/v3`.
+    pub base_url: String,
+    /// Default Shortcut search query used by `shortcut_list_backlog`.
+    pub backlog_query: String,
+}
+
+impl Default for ShortcutConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 10_000,
+            max_items: 200,
+            max_body_bytes: 65_536,
+            cache_ttl_secs: 60,
+            allowlist: vec!["api.app.shortcut.com".to_string()],
+            base_url: "https://api.app.shortcut.com/api/v3".to_string(),
+            backlog_query: "is:story is:backlog !is:archived".to_string(),
+        }
+    }
+}
+
+impl ShortcutConfig {
+    pub fn from_env_with_toml(
+        toml: Option<&crate::config::file::TomlShortcutConfig>,
+    ) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let toml = toml.cloned().unwrap_or_default();
+        Ok(Self {
+            timeout_ms: resolve_primitive(
+                env_opt("SHORTCUT_AGENT_TIMEOUT_MS").as_deref(),
+                toml.timeout_ms,
+                defaults.timeout_ms,
+                "SHORTCUT_AGENT_TIMEOUT_MS",
+            )?,
+            max_items: resolve_primitive(
+                env_opt("SHORTCUT_AGENT_MAX_ITEMS").as_deref(),
+                toml.max_items,
+                defaults.max_items,
+                "SHORTCUT_AGENT_MAX_ITEMS",
+            )?,
+            max_body_bytes: resolve_primitive(
+                env_opt("SHORTCUT_AGENT_MAX_BODY_BYTES").as_deref(),
+                toml.max_body_bytes,
+                defaults.max_body_bytes,
+                "SHORTCUT_AGENT_MAX_BODY_BYTES",
+            )?,
+            cache_ttl_secs: resolve_primitive(
+                env_opt("SHORTCUT_AGENT_CACHE_TTL_SECS").as_deref(),
+                toml.cache_ttl_secs,
+                defaults.cache_ttl_secs,
+                "SHORTCUT_AGENT_CACHE_TTL_SECS",
+            )?,
+            allowlist: resolve_csv(
+                env_opt("SHORTCUT_AGENT_ALLOWLIST").as_deref(),
+                toml.allowlist,
+                defaults.allowlist,
+            ),
+            base_url: resolve_opt_string(
+                env_opt("SHORTCUT_AGENT_BASE_URL").as_deref(),
+                toml.base_url.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.base_url.clone()),
+            backlog_query: resolve_opt_string(
+                env_opt("SHORTCUT_AGENT_BACKLOG_QUERY").as_deref(),
+                toml.backlog_query.as_deref(),
+            )
+            .unwrap_or_else(|| defaults.backlog_query.clone()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod shortcut_config_tests {
+    use super::*;
+
+    #[test]
+    fn shortcut_defaults_match_docs() {
+        // The defaults documented in docs/integrations/shortcut.md
+        // and README.md's env matrix.
+        let cfg = ShortcutConfig::default();
+        assert_eq!(cfg.timeout_ms, 10_000);
+        assert_eq!(cfg.max_items, 200);
+        assert_eq!(cfg.max_body_bytes, 65_536);
+        assert_eq!(cfg.cache_ttl_secs, 60);
+        assert_eq!(cfg.allowlist, vec!["api.app.shortcut.com".to_string()]);
+        assert_eq!(cfg.base_url, "https://api.app.shortcut.com/api/v3");
+        assert_eq!(cfg.backlog_query, "is:story is:backlog !is:archived");
+    }
+
+    #[test]
+    fn shortcut_from_env_with_toml_prefers_toml_over_default() {
+        // No env vars set in the test process for these keys, so
+        // the TOML values win over the defaults.
+        let toml = crate::config::file::TomlShortcutConfig {
+            timeout_ms: Some(7_000),
+            max_items: Some(25),
+            max_body_bytes: Some(1_024),
+            cache_ttl_secs: Some(0),
+            allowlist: Some(vec!["shortcut.example.com".to_string()]),
+            base_url: Some("https://shortcut.example.com/api/v3".to_string()),
+            backlog_query: Some("is:story is:unstarted".to_string()),
+        };
+        let cfg = ShortcutConfig::from_env_with_toml(Some(&toml)).expect("parses");
+        assert_eq!(cfg.timeout_ms, 7_000);
+        assert_eq!(cfg.max_items, 25);
+        assert_eq!(cfg.max_body_bytes, 1_024);
+        assert_eq!(cfg.cache_ttl_secs, 0);
+        assert_eq!(cfg.allowlist, vec!["shortcut.example.com".to_string()]);
+        assert_eq!(cfg.base_url, "https://shortcut.example.com/api/v3");
+        assert_eq!(cfg.backlog_query, "is:story is:unstarted");
+    }
+
+    #[test]
+    fn agent_config_carries_shortcut_section() {
+        let cfg = AgentConfig::from_env_with_toml(None).expect("defaults parse");
+        assert_eq!(cfg.shortcut.base_url, "https://api.app.shortcut.com/api/v3");
     }
 }

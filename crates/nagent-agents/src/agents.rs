@@ -1265,411 +1265,519 @@ pub struct AgentDescriptor {
 /// [`AgentRegistry::from_config`]; every entry is gated by its
 /// own cargo feature so a slim build drops the heavy machinery
 /// (one cargo feature per agent).
-pub static AGENT_DESCRIPTORS: &[AgentDescriptor] = &[
-    #[cfg(feature = "web-agent")]
-    AgentDescriptor {
-        id: "web_fetch",
-        feature: "web-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(web_fetch::WebFetchAgent::with_pool(
-                pool.strict(),
-                cfgs.web_fetch.clone(),
-            )))
+pub static AGENT_DESCRIPTORS: &[AgentDescriptor] =
+    &[
+        #[cfg(feature = "web-agent")]
+        AgentDescriptor {
+            id: "web_fetch",
+            feature: "web-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(web_fetch::WebFetchAgent::with_pool(
+                    pool.strict(),
+                    cfgs.web_fetch.clone(),
+                )))
+            },
         },
-    },
-    #[cfg(feature = "datetime-agent")]
-    AgentDescriptor {
-        id: "get_datetime",
-        feature: "datetime-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(datetime_agent::DateTimeAgent::from_config(
-                cfgs.datetime.clone(),
-            )))
+        #[cfg(feature = "datetime-agent")]
+        AgentDescriptor {
+            id: "get_datetime",
+            feature: "datetime-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(datetime_agent::DateTimeAgent::from_config(
+                    cfgs.datetime.clone(),
+                )))
+            },
         },
-    },
-    #[cfg(feature = "weather-agent")]
-    AgentDescriptor {
-        id: "get_weather",
-        feature: "weather-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(weather_agent::WeatherAgent::with_shared_pool(
-                pool.public(),
-                cfgs.weather.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "stock-agent")]
-    AgentDescriptor {
-        id: "get_stock_quote",
-        feature: "stock-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(stock_agent::StockAgent::with_shared_pool(
-                pool.public(),
-                cfgs.stock.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "calculate-agent")]
-    AgentDescriptor {
-        id: "calculate",
-        feature: "calculate-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(calculate_agent::CalculateAgent::from_config(
-                cfgs.calculate.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "unit-convert-agent")]
-    AgentDescriptor {
-        id: "unit_convert",
-        feature: "unit-convert-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(unit_convert_agent::UnitConvertAgent::new(
-                cfgs.unit_convert.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "wikipedia-agent")]
-    AgentDescriptor {
-        id: "wikipedia",
-        feature: "wikipedia-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(wikipedia_agent::WikipediaAgent::with_shared_pool(
-                pool.public(),
-                cfgs.wikipedia.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "dictionary-agent")]
-    AgentDescriptor {
-        id: "dictionary",
-        feature: "dictionary-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(
-                dictionary_agent::DictionaryAgent::with_shared_pool(
+        #[cfg(feature = "weather-agent")]
+        AgentDescriptor {
+            id: "get_weather",
+            feature: "weather-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(weather_agent::WeatherAgent::with_shared_pool(
                     pool.public(),
-                    cfgs.dictionary.clone(),
-                ),
-            ))
+                    cfgs.weather.clone(),
+                )))
+            },
         },
-    },
-    // Plan 1790963194218: CalDAV plugin (read + add only). The
-    // three agents share the same `CalDavAgentConfig` and the
-    // same per-call `CalDavClient` shape — built inside `invoke`
-    // because credentials must be fresh per request. v1 does NOT
-    // register `caldav_list_calendars`, `caldav_update_event`, or
-    // `caldav_delete_event`; the LLM tool loop returns "unknown
-    // tool" if it tries.
-    #[cfg(feature = "caldav-agent")]
-    AgentDescriptor {
-        id: "caldav_list_events",
-        feature: "caldav-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(caldav::list_events::ListEventsAgent::new(
-                cfgs.caldav.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "caldav-agent")]
-    AgentDescriptor {
-        id: "caldav_get_event",
-        feature: "caldav-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(caldav::get_event::GetEventAgent::new(
-                cfgs.caldav.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "caldav-agent")]
-    AgentDescriptor {
-        id: "caldav_create_event",
-        feature: "caldav-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(caldav::create_event::CreateEventAgent::new(
-                cfgs.caldav.clone(),
-            )))
-        },
-    },
-    // Plan 1790695073418: X timeline agent. Read-only v1; refresh
-    // is handled inside the agent itself when X returns 401
-    // (locked decision). The shared client is `pool.public()`
-    // because `api.x.com` is a public host (with the agent's
-    // `allowlist` enforcing exactly that host).
-    #[cfg(feature = "x-agent")]
-    AgentDescriptor {
-        id: "x_timeline",
-        feature: "x-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(x_timeline::XTimelineAgent::new(
-                cfgs.x_timeline.clone(),
-                pool.public(),
-            )))
-        },
-    },
-    // Plan 1791267136806 §2.3: four memory agents (memory_store /
-    // memory_recall / memory_list / memory_forget). They share the
-    // `MemoryAgentConfig` knob (currently just `recalled_top_k`)
-    // and the `MemorySource` capability (the per-request adapter
-    // is wired by the chat-session constructor on the server
-    // side). The agents themselves are stateless — every
-    // store / recall / forget round-trips through the trait.
-    #[cfg(feature = "memory-agent")]
-    AgentDescriptor {
-        id: "memory_store",
-        feature: "memory-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(memory::MemoryStoreAgent::from_config(
-                cfgs.memory.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "memory-agent")]
-    AgentDescriptor {
-        id: "memory_recall",
-        feature: "memory-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(memory::MemoryRecallAgent::from_config(
-                cfgs.memory.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "memory-agent")]
-    AgentDescriptor {
-        id: "memory_list",
-        feature: "memory-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(memory::MemoryListAgent::from_config(
-                cfgs.memory.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "memory-agent")]
-    AgentDescriptor {
-        id: "memory_forget",
-        feature: "memory-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(memory::MemoryForgetAgent::from_config(
-                cfgs.memory.clone(),
-            )))
-        },
-    },
-    // Plan 1791317253718: `search_tools` meta-agent. The router
-    // is wired post-construction by the server's boot path
-    // (`AgentRegistry::wire_router`); the descriptor table only
-    // shapes the agent's config and registers the name. The
-    // tool loop treats it like every other agent — the generic
-    // `agents.get(&name)` dispatch is unchanged.
-    #[cfg(feature = "tool-search-agent")]
-    AgentDescriptor {
-        id: "search_tools",
-        feature: "tool-search-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(tool_search::ToolSearchAgent::from_config(
-                cfgs.tool_search.clone(),
-            )))
-        },
-    },
-    // Plan 1791566269874: IMAP/SMTP email agent family. v1 ships
-    // five LLM tools (read + flag-set + send); the wire client
-    // itself is a Phase 3-5 follow-up so the agents return a
-    // clear "wire layer not implemented" error today. The
-    // capability traits, ServiceDefs, configs, and probe
-    // endpoints are stable so the follow-up commit can fill the
-    // body in without touching the agent code.
-    //
-    // The agents are constructed with `imap: None` /
-    // `smtp: None` because the per-user secret resolver + the
-    // `EmailImap` / `EmailSmtp` capability wiring lives in
-    // `nagent-server`; the descriptor-level factory cannot
-    // reach it. The post-build wiring path
-    // (`AgentRegistry::wire_router`-style hook) is what will
-    // attach the server-side impls once the wire layer lands.
-    // Until then, the agents' `invoke` returns
-    // `AgentError::AgentFailed("email: ... capability not wired
-    // in this context")` so a caller that reaches them sees a
-    // clear, actionable error instead of a silent success.
-    #[cfg(feature = "email-agent")]
-    AgentDescriptor {
-        id: "email_list_inbox",
-        feature: "email-agent",
-        build: |cfgs, _pool| {
-            // IMAP-side agent: thread the IMAP allow-list so a
-            // permissive read posture cannot accidentally
-            // expose a write path. `imap: None` is the wire-
-            // layer placeholder (the descriptor-level factory
-            // cannot reach the per-user secret resolver; the
-            // server wires the real `EmailImapImpl` at boot).
-            Ok(Box::new(email::list_inbox::ListInboxAgent::new(
-                std::sync::Arc::new(cfgs.email.clone()),
-                None,
-                cfgs.email.imap_allowlist.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "email-agent")]
-    AgentDescriptor {
-        id: "email_get_message",
-        feature: "email-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(email::get_message::GetMessageAgent::new(
-                std::sync::Arc::new(cfgs.email.clone()),
-                None,
-                cfgs.email.imap_allowlist.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "email-agent")]
-    AgentDescriptor {
-        id: "email_search",
-        feature: "email-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(email::search::SearchAgent::new(
-                std::sync::Arc::new(cfgs.email.clone()),
-                None,
-                cfgs.email.imap_allowlist.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "email-agent")]
-    AgentDescriptor {
-        id: "email_send",
-        feature: "email-agent",
-        build: |cfgs, _pool| {
-            // SMTP-side agent: thread the SMTP allow-list.
-            // The split from the IMAP list keeps an operator
-            // who only allows read access from a personal
-            // mailbox (e.g. `imap_allowlist = ["*"]` for
-            // any server) from accidentally exposing the
-            // corporate write path.
-            Ok(Box::new(email::send::SendAgent::new(
-                std::sync::Arc::new(cfgs.email.clone()),
-                None,
-                cfgs.email.smtp_allowlist.clone(),
-            )))
-        },
-    },
-    #[cfg(feature = "email-agent")]
-    AgentDescriptor {
-        id: "email_mark_read",
-        feature: "email-agent",
-        build: |cfgs, _pool| {
-            Ok(Box::new(email::mark_read::MarkReadAgent::new(
-                std::sync::Arc::new(cfgs.email.clone()),
-                None,
-                cfgs.email.imap_allowlist.clone(),
-            )))
-        },
-    },
-    // Plan 1795597719368: ten read-only GitHub tools. All share
-    // the `GithubAgentConfig` and drain the shared
-    // `pool.public()` client; each descriptor builds its own
-    // `GithubClient` (own cache, same reqwest pool). Write
-    // tools (create issue / PR / comment) are deliberately NOT
-    // registered — the tool loop returns "unknown tool".
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_me",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::me::MeAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
-        },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_list_repos",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::list_repos::ListReposAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
-        },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_get_repo",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::get_repo::GetRepoAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
-        },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_list_issues",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::list_issues::ListIssuesAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
-        },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_get_issue",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::get_issue::GetIssueAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
-        },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_list_prs",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::list_prs::ListPrsAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
-        },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_get_pr",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::get_pr::GetPrAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
-        },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_list_notifications",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(
-                github::list_notifications::ListNotificationsAgent::new(github::GithubClient::new(
-                    cfgs.github.clone(),
+        #[cfg(feature = "stock-agent")]
+        AgentDescriptor {
+            id: "get_stock_quote",
+            feature: "stock-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(stock_agent::StockAgent::with_shared_pool(
                     pool.public(),
-                )),
-            ))
+                    cfgs.stock.clone(),
+                )))
+            },
         },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_search_issues",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::search_issues::SearchIssuesAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
+        #[cfg(feature = "calculate-agent")]
+        AgentDescriptor {
+            id: "calculate",
+            feature: "calculate-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(calculate_agent::CalculateAgent::from_config(
+                    cfgs.calculate.clone(),
+                )))
+            },
         },
-    },
-    #[cfg(feature = "github-agent")]
-    AgentDescriptor {
-        id: "github_read_file",
-        feature: "github-agent",
-        build: |cfgs, pool| {
-            Ok(Box::new(github::read_file::ReadFileAgent::new(
-                github::GithubClient::new(cfgs.github.clone(), pool.public()),
-            )))
+        #[cfg(feature = "unit-convert-agent")]
+        AgentDescriptor {
+            id: "unit_convert",
+            feature: "unit-convert-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(unit_convert_agent::UnitConvertAgent::new(
+                    cfgs.unit_convert.clone(),
+                )))
+            },
         },
-    },
-];
+        #[cfg(feature = "wikipedia-agent")]
+        AgentDescriptor {
+            id: "wikipedia",
+            feature: "wikipedia-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(wikipedia_agent::WikipediaAgent::with_shared_pool(
+                    pool.public(),
+                    cfgs.wikipedia.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "dictionary-agent")]
+        AgentDescriptor {
+            id: "dictionary",
+            feature: "dictionary-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(
+                    dictionary_agent::DictionaryAgent::with_shared_pool(
+                        pool.public(),
+                        cfgs.dictionary.clone(),
+                    ),
+                ))
+            },
+        },
+        // Plan 1790963194218: CalDAV plugin (read + add only). The
+        // three agents share the same `CalDavAgentConfig` and the
+        // same per-call `CalDavClient` shape — built inside `invoke`
+        // because credentials must be fresh per request. v1 does NOT
+        // register `caldav_list_calendars`, `caldav_update_event`, or
+        // `caldav_delete_event`; the LLM tool loop returns "unknown
+        // tool" if it tries.
+        #[cfg(feature = "caldav-agent")]
+        AgentDescriptor {
+            id: "caldav_list_events",
+            feature: "caldav-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(caldav::list_events::ListEventsAgent::new(
+                    cfgs.caldav.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "caldav-agent")]
+        AgentDescriptor {
+            id: "caldav_get_event",
+            feature: "caldav-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(caldav::get_event::GetEventAgent::new(
+                    cfgs.caldav.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "caldav-agent")]
+        AgentDescriptor {
+            id: "caldav_create_event",
+            feature: "caldav-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(caldav::create_event::CreateEventAgent::new(
+                    cfgs.caldav.clone(),
+                )))
+            },
+        },
+        // Plan 1790695073418: X timeline agent. Read-only v1; refresh
+        // is handled inside the agent itself when X returns 401
+        // (locked decision). The shared client is `pool.public()`
+        // because `api.x.com` is a public host (with the agent's
+        // `allowlist` enforcing exactly that host).
+        #[cfg(feature = "x-agent")]
+        AgentDescriptor {
+            id: "x_timeline",
+            feature: "x-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(x_timeline::XTimelineAgent::new(
+                    cfgs.x_timeline.clone(),
+                    pool.public(),
+                )))
+            },
+        },
+        // Plan 1791267136806 §2.3: four memory agents (memory_store /
+        // memory_recall / memory_list / memory_forget). They share the
+        // `MemoryAgentConfig` knob (currently just `recalled_top_k`)
+        // and the `MemorySource` capability (the per-request adapter
+        // is wired by the chat-session constructor on the server
+        // side). The agents themselves are stateless — every
+        // store / recall / forget round-trips through the trait.
+        #[cfg(feature = "memory-agent")]
+        AgentDescriptor {
+            id: "memory_store",
+            feature: "memory-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(memory::MemoryStoreAgent::from_config(
+                    cfgs.memory.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "memory-agent")]
+        AgentDescriptor {
+            id: "memory_recall",
+            feature: "memory-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(memory::MemoryRecallAgent::from_config(
+                    cfgs.memory.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "memory-agent")]
+        AgentDescriptor {
+            id: "memory_list",
+            feature: "memory-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(memory::MemoryListAgent::from_config(
+                    cfgs.memory.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "memory-agent")]
+        AgentDescriptor {
+            id: "memory_forget",
+            feature: "memory-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(memory::MemoryForgetAgent::from_config(
+                    cfgs.memory.clone(),
+                )))
+            },
+        },
+        // Plan 1791317253718: `search_tools` meta-agent. The router
+        // is wired post-construction by the server's boot path
+        // (`AgentRegistry::wire_router`); the descriptor table only
+        // shapes the agent's config and registers the name. The
+        // tool loop treats it like every other agent — the generic
+        // `agents.get(&name)` dispatch is unchanged.
+        #[cfg(feature = "tool-search-agent")]
+        AgentDescriptor {
+            id: "search_tools",
+            feature: "tool-search-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(tool_search::ToolSearchAgent::from_config(
+                    cfgs.tool_search.clone(),
+                )))
+            },
+        },
+        // Plan 1791566269874: IMAP/SMTP email agent family. v1 ships
+        // five LLM tools (read + flag-set + send); the wire client
+        // itself is a Phase 3-5 follow-up so the agents return a
+        // clear "wire layer not implemented" error today. The
+        // capability traits, ServiceDefs, configs, and probe
+        // endpoints are stable so the follow-up commit can fill the
+        // body in without touching the agent code.
+        //
+        // The agents are constructed with `imap: None` /
+        // `smtp: None` because the per-user secret resolver + the
+        // `EmailImap` / `EmailSmtp` capability wiring lives in
+        // `nagent-server`; the descriptor-level factory cannot
+        // reach it. The post-build wiring path
+        // (`AgentRegistry::wire_router`-style hook) is what will
+        // attach the server-side impls once the wire layer lands.
+        // Until then, the agents' `invoke` returns
+        // `AgentError::AgentFailed("email: ... capability not wired
+        // in this context")` so a caller that reaches them sees a
+        // clear, actionable error instead of a silent success.
+        #[cfg(feature = "email-agent")]
+        AgentDescriptor {
+            id: "email_list_inbox",
+            feature: "email-agent",
+            build: |cfgs, _pool| {
+                // IMAP-side agent: thread the IMAP allow-list so a
+                // permissive read posture cannot accidentally
+                // expose a write path. `imap: None` is the wire-
+                // layer placeholder (the descriptor-level factory
+                // cannot reach the per-user secret resolver; the
+                // server wires the real `EmailImapImpl` at boot).
+                Ok(Box::new(email::list_inbox::ListInboxAgent::new(
+                    std::sync::Arc::new(cfgs.email.clone()),
+                    None,
+                    cfgs.email.imap_allowlist.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "email-agent")]
+        AgentDescriptor {
+            id: "email_get_message",
+            feature: "email-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(email::get_message::GetMessageAgent::new(
+                    std::sync::Arc::new(cfgs.email.clone()),
+                    None,
+                    cfgs.email.imap_allowlist.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "email-agent")]
+        AgentDescriptor {
+            id: "email_search",
+            feature: "email-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(email::search::SearchAgent::new(
+                    std::sync::Arc::new(cfgs.email.clone()),
+                    None,
+                    cfgs.email.imap_allowlist.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "email-agent")]
+        AgentDescriptor {
+            id: "email_send",
+            feature: "email-agent",
+            build: |cfgs, _pool| {
+                // SMTP-side agent: thread the SMTP allow-list.
+                // The split from the IMAP list keeps an operator
+                // who only allows read access from a personal
+                // mailbox (e.g. `imap_allowlist = ["*"]` for
+                // any server) from accidentally exposing the
+                // corporate write path.
+                Ok(Box::new(email::send::SendAgent::new(
+                    std::sync::Arc::new(cfgs.email.clone()),
+                    None,
+                    cfgs.email.smtp_allowlist.clone(),
+                )))
+            },
+        },
+        #[cfg(feature = "email-agent")]
+        AgentDescriptor {
+            id: "email_mark_read",
+            feature: "email-agent",
+            build: |cfgs, _pool| {
+                Ok(Box::new(email::mark_read::MarkReadAgent::new(
+                    std::sync::Arc::new(cfgs.email.clone()),
+                    None,
+                    cfgs.email.imap_allowlist.clone(),
+                )))
+            },
+        },
+        // Plan 1795597719368: ten read-only GitHub tools. All share
+        // the `GithubAgentConfig` and drain the shared
+        // `pool.public()` client; each descriptor builds its own
+        // `GithubClient` (own cache, same reqwest pool). Write
+        // tools (create issue / PR / comment) are deliberately NOT
+        // registered — the tool loop returns "unknown tool".
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_me",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::me::MeAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_list_repos",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::list_repos::ListReposAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_get_repo",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::get_repo::GetRepoAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_list_issues",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::list_issues::ListIssuesAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_get_issue",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::get_issue::GetIssueAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_list_prs",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::list_prs::ListPrsAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_get_pr",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::get_pr::GetPrAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_list_notifications",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(
+                    github::list_notifications::ListNotificationsAgent::new(
+                        github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                    ),
+                ))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_search_issues",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::search_issues::SearchIssuesAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_read_file",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::read_file::ReadFileAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
+        // Plan 1795597719369: ten read-only Shortcut tools. All share
+        // the `ShortcutAgentConfig` and drain the shared
+        // `pool.public()` client; each descriptor builds its own
+        // `ShortcutClient` (own cache, same reqwest pool). Write
+        // tools (create story / comment / move story) are deliberately
+        // NOT registered — the tool loop returns "unknown tool".
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_me",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::me::MeAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_workflows",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::list_workflows::ListWorkflowsAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_projects",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::list_projects::ListProjectsAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_epics",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::list_epics::ListEpicsAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_get_epic",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::get_epic::GetEpicAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_iterations",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(
+                    shortcut::list_iterations::ListIterationsAgent::new(
+                        shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                    ),
+                ))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_search_stories",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::search_stories::SearchStoriesAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_backlog",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::list_backlog::ListBacklogAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_get_story",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::get_story::GetStoryAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_labels",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::list_labels::ListLabelsAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+    ];
 
 #[cfg(test)]
 mod descriptor_table_tests {
@@ -1911,6 +2019,12 @@ pub mod email;
 /// feature gates the whole family.
 #[cfg(feature = "github-agent")]
 pub mod github;
+
+/// Plan 1795597719369: ten read-only `shortcut_*` tools over the
+/// Shortcut REST API v3 (per-user API token). One cargo feature
+/// gates the whole family.
+#[cfg(feature = "shortcut-agent")]
+pub mod shortcut;
 
 #[cfg(feature = "calculate-agent")]
 pub mod calculate_agent;

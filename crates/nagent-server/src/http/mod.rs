@@ -244,12 +244,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::credentials::github_probe::build_github_probe_router(state.clone());
         #[cfg(not(feature = "github-agent"))]
         let github_probe_routes = axum::Router::new();
+        // Plan 1795597719369: the Shortcut setup-only probe endpoint
+        // is mounted the same way as the GitHub probe —
+        // feature-gated on `shortcut-agent`, empty router otherwise.
+        #[cfg(feature = "shortcut-agent")]
+        let shortcut_probe_routes =
+            crate::credentials::shortcut_probe::build_shortcut_probe_router(state.clone());
+        #[cfg(not(feature = "shortcut-agent"))]
+        let shortcut_probe_routes = axum::Router::new();
         let protected_with_auth = protected
             .merge(identity)
             .merge(credentials_routes)
             .merge(caldav_probe_routes)
             .merge(email_probe_routes)
             .merge(github_probe_routes)
+            .merge(shortcut_probe_routes)
             .merge(mount_memories(state.clone()))
             .layer(auth_layer);
         // Layer order is applied bottom-up; the LAST `.layer()`

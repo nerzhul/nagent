@@ -379,6 +379,13 @@ pub struct TomlAgentConfig {
     /// feature is on.
     #[serde(default)]
     pub github: Option<TomlGithubConfig>,
+    /// Knobs for the ten read-only `shortcut_*` agents (plan
+    /// 1795597719369). Mirrors [`crate::config::agents::ShortcutConfig`].
+    /// Parsed unconditionally so a TOML typo surfaces at boot; the
+    /// agents are only registered when the `shortcut-agent` cargo
+    /// feature is on.
+    #[serde(default)]
+    pub shortcut: Option<TomlShortcutConfig>,
 }
 
 /// Knobs for the `memory_*` agents (plan 1791267136806).
@@ -539,6 +546,24 @@ pub struct TomlGithubConfig {
     pub cache_ttl_secs: Option<u64>,
     pub allowlist: Option<Vec<String>>,
     pub base_url: Option<String>,
+}
+
+/// Knobs for the ten read-only `shortcut_*` agents (plan
+/// 1795597719369). Mirrors
+/// [`crate::config::agents::ShortcutConfig`]. Parsed
+/// unconditionally so a TOML typo surfaces at boot; the agents
+/// are only registered when the `shortcut-agent` cargo feature
+/// is on.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlShortcutConfig {
+    pub timeout_ms: Option<u64>,
+    pub max_items: Option<usize>,
+    pub max_body_bytes: Option<usize>,
+    pub cache_ttl_secs: Option<u64>,
+    pub allowlist: Option<Vec<String>>,
+    pub base_url: Option<String>,
+    pub backlog_query: Option<String>,
 }
 
 /// WebSocket frame-limit knobs and HTTP transport guardrails (S-1).
@@ -1050,6 +1075,7 @@ fn merge_toml_agents(
             memory: merge_toml_memory(e.memory.as_ref(), l.memory.as_ref()),
             email: merge_toml_email(e.email.as_ref(), l.email.as_ref()),
             github: merge_toml_github(e.github.as_ref(), l.github.as_ref()),
+            shortcut: merge_toml_shortcut(e.shortcut.as_ref(), l.shortcut.as_ref()),
         }),
     }
 }
@@ -1069,6 +1095,26 @@ fn merge_toml_github(
             cache_ttl_secs: l.cache_ttl_secs.or(e.cache_ttl_secs),
             allowlist: l.allowlist.clone().or_else(|| e.allowlist.clone()),
             base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
+        }),
+    }
+}
+
+fn merge_toml_shortcut(
+    earlier: Option<&TomlShortcutConfig>,
+    later: Option<&TomlShortcutConfig>,
+) -> Option<TomlShortcutConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlShortcutConfig {
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+            max_items: l.max_items.or(e.max_items),
+            max_body_bytes: l.max_body_bytes.or(e.max_body_bytes),
+            cache_ttl_secs: l.cache_ttl_secs.or(e.cache_ttl_secs),
+            allowlist: l.allowlist.clone().or_else(|| e.allowlist.clone()),
+            base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
+            backlog_query: l.backlog_query.clone().or_else(|| e.backlog_query.clone()),
         }),
     }
 }
@@ -2024,5 +2070,94 @@ mod github_config_tests {
             gh.base_url.as_deref(),
             Some("https://ghes.example.com/api/v3")
         );
+    }
+}
+
+#[cfg(test)]
+mod shortcut_config_tests {
+    use super::*;
+
+    #[test]
+    fn agents_shortcut_subtable_parses() {
+        let text = r#"
+            [agents.shortcut]
+            timeout_ms = 12_000
+            max_items = 150
+            max_body_bytes = 32_768
+            cache_ttl_secs = 30
+            allowlist = ["api.app.shortcut.com"]
+            base_url = "https://api.app.shortcut.com/api/v3"
+            backlog_query = "is:story is:unstarted"
+        "#;
+        let cfg: TomlConfig = toml::from_str(text).unwrap();
+        let sc = cfg
+            .agents
+            .and_then(|a| a.shortcut)
+            .expect("agents.shortcut parsed");
+        assert_eq!(sc.timeout_ms, Some(12_000));
+        assert_eq!(sc.max_items, Some(150));
+        assert_eq!(sc.max_body_bytes, Some(32_768));
+        assert_eq!(sc.cache_ttl_secs, Some(30));
+        assert_eq!(
+            sc.allowlist.as_deref(),
+            Some(&["api.app.shortcut.com".to_string()][..])
+        );
+        assert_eq!(
+            sc.base_url.as_deref(),
+            Some("https://api.app.shortcut.com/api/v3")
+        );
+        assert_eq!(sc.backlog_query.as_deref(), Some("is:story is:unstarted"));
+    }
+
+    #[test]
+    fn agents_shortcut_unknown_field_is_rejected() {
+        // `deny_unknown_fields` on TomlShortcutConfig: a typo must
+        // fail loudly at boot (AGENTS.md §5 — the documented
+        // contract is the TOML schema).
+        let text = r#"
+            [agents.shortcut]
+            timeoutm_ms = 1000
+        "#;
+        let err = toml::from_str::<TomlConfig>(text).unwrap_err();
+        assert!(
+            err.to_string().contains("timeoutm_ms"),
+            "unknown-field error must mention the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn agents_shortcut_merges_later_wins() {
+        let earlier: TomlConfig = toml::from_str(
+            r#"
+                [agents.shortcut]
+                timeout_ms = 1_000
+                max_items = 10
+                backlog_query = "is:story is:unstarted"
+            "#,
+        )
+        .unwrap();
+        let later: TomlConfig = toml::from_str(
+            r#"
+                [agents.shortcut]
+                timeout_ms = 2_000
+                allowlist = ["api.app.shortcut.com"]
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml_configs(&earlier, &later);
+        let sc = merged
+            .agents
+            .and_then(|a| a.shortcut)
+            .expect("merged agents.shortcut");
+        // later wins where both set it.
+        assert_eq!(sc.timeout_ms, Some(2_000));
+        // only in later → carried over.
+        assert_eq!(
+            sc.allowlist.as_deref(),
+            Some(&["api.app.shortcut.com".to_string()][..])
+        );
+        // only in earlier → kept.
+        assert_eq!(sc.max_items, Some(10));
+        assert_eq!(sc.backlog_query.as_deref(), Some("is:story is:unstarted"));
     }
 }
