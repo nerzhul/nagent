@@ -394,7 +394,7 @@ function buildFormField(field) {
     }
   }
   // The input lives inside a flex group so a service that
-  // exposes a probe affordance (currently CalDAV + email)
+  // exposes a probe affordance (CalDAV, email, GitHub)
   // can place a button next to it without changing the
   // markup contract for the other services.
   const group = document.createElement("div");
@@ -429,6 +429,8 @@ const PROBE_PATH = "/api/integrations/caldav/probe-calendars";
 // light up the real probe once the wire layer lands.
 const PROBE_PATH_EMAIL_IMAP = "/api/integrations/email_imap/probe";
 const PROBE_PATH_EMAIL_SMTP = "/api/integrations/email_smtp/probe";
+const GITHUB_SERVICE_ID = "github";
+const PROBE_PATH_GITHUB = "/api/integrations/github/probe";
 
 // One-line subtitle per service. Sets the user's mental
 // model before they read the field labels. Falls back to a
@@ -443,6 +445,8 @@ const MODAL_SUBTITLES = {
     "Connect your IMAP mailbox so the assistant can list / read / search your messages and mark them as read. App-specific password recommended.",
   email_smtp:
     "Connect your SMTP submission server so the assistant can send mail on your behalf. The `from` address is validated against the server and never picked by the LLM.",
+  github:
+    "Connect your GitHub account with a personal access token so the assistant can read your repos, issues, PRs and notifications. Read-only — the agent never creates or modifies anything on your behalf.",
 };
 
 async function probeCalendars(principalUrl, username, password) {
@@ -877,6 +881,98 @@ function renderProbeMailboxList(container, mailboxes) {
   container.appendChild(list);
 }
 
+async function probeGithub(personalAccessToken) {
+  const resp = await fetch(PROBE_PATH_GITHUB, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "content-type": "application/json",
+      ...(csrfHeaders() || {}),
+    },
+    body: JSON.stringify({ personal_access_token: personalAccessToken }),
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const body = await resp.json();
+      if (body && typeof body.error === "string") msg = body.error;
+    } catch {
+      try {
+        msg = `${msg}: ${await resp.text()}`;
+      } catch {
+        /* fall through */
+      }
+    }
+    throw new Error(msg);
+  }
+  return await resp.json();
+}
+
+function attachGithubTestButton(form, actions) {
+  const tokenField = form.querySelector('[data-key="personal_access_token"]');
+  const usernameField = form.querySelector('[data-key="username"]');
+  if (!tokenField || !usernameField || !actions) return;
+
+  const cancelBtn = actions.querySelector('[data-action="cancel"]');
+  const testBtn = document.createElement("button");
+  testBtn.type = "button";
+  testBtn.className = "ghost";
+  testBtn.textContent = "Test connection";
+  if (cancelBtn) {
+    actions.insertBefore(testBtn, cancelBtn);
+  } else {
+    actions.appendChild(testBtn);
+  }
+
+  let probePanel = null;
+  let status = null;
+  const ensureProbePanel = () => {
+    if (probePanel) return status;
+    probePanel = document.createElement("div");
+    probePanel.className = "chat-integration-probe-panel";
+    probePanel.setAttribute("role", "group");
+    probePanel.setAttribute("aria-label", "Test connection status");
+    status = document.createElement("p");
+    status.className = "chat-integration-discover-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    probePanel.appendChild(status);
+    actions.parentNode.insertBefore(probePanel, actions);
+    return status;
+  };
+
+  testBtn.addEventListener("click", async () => {
+    testBtn.disabled = true;
+    const statusEl = ensureProbePanel();
+    statusEl.textContent = "Testing GitHub connection…";
+    statusEl.dataset.state = "pending";
+    const token = tokenField.value.trim();
+    if (!token) {
+      testBtn.disabled = false;
+      statusEl.textContent = "Please fill in the personal access token first.";
+      statusEl.dataset.state = "error";
+      return;
+    }
+    try {
+      const body = await probeGithub(token);
+      statusEl.dataset.state = "ok";
+      const name = body.name ? ` — ${body.name}` : "";
+      const plan = body.plan ? ` (${body.plan} plan)` : "";
+      statusEl.textContent = `Connected as @${body.login}${name}${plan}.`;
+      if (!usernameField.value) {
+        usernameField.value = body.login;
+        usernameField.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } catch (e) {
+      console.error("github probe failed:", e);
+      statusEl.textContent = `Probe failed: ${e.message}`;
+      statusEl.dataset.state = "error";
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+}
+
 // Async wrapper around `openEditor`. Refetches the single
 // integration summary (which decrypts the `echo_on_edit` fields)
 // and only opens the modal once we have the populated data —
@@ -1026,6 +1122,9 @@ function openEditor(svc) {
     // the very first `change` event surfaces a default.
     attachEmailPortAutofill(form, svc.id);
     attachEmailTestButton(form, modal, actions, svc.id);
+  }
+  if (svc.id === GITHUB_SERVICE_ID) {
+    attachGithubTestButton(form, actions);
   }
 
   form.addEventListener("submit", async (e) => {

@@ -193,6 +193,19 @@ fn make_app_state(
     builder.build()
 }
 
+// `build_registry` installs the process-wide IMAP / SMTP impls
+// through `OnceLock` slots whose setters panic on a second call,
+// so it may run only once per test binary. Every test here uses
+// the same default `AgentConfig`, so one shared registry is
+// enough — `OnceLock::get_or_init` runs the closure exactly once
+// even when the multi-threaded tests race on it.
+fn shared_registry(cfg: &AgentConfig) -> AgentRegistry {
+    static REGISTRY: std::sync::OnceLock<AgentRegistry> = std::sync::OnceLock::new();
+    REGISTRY
+        .get_or_init(|| nagent_server::agents::build_registry(cfg, None, None, None))
+        .clone()
+}
+
 async fn start_test_server(state: Arc<AppState>) -> String {
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -256,7 +269,7 @@ fn make_server_cfg(upstream_url: String) -> ServerConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_list_returns_web_fetch_when_feature_enabled() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -427,7 +440,7 @@ async fn web_fetch_adaptive_retry_caps_at_server_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_fetch_invoke_unknown_agent_404s() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -446,7 +459,7 @@ async fn web_fetch_invoke_unknown_agent_404s() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_fetch_invoke_invalid_args_400s() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -543,7 +556,7 @@ async fn tool_loop_dispatches_and_completes() {
     // Disable `web_fetch` from actually doing network: empty
     // allow-list + public blocked = the call to `example.com` will
     // be rejected by the sandbox. The proxy still emits the events.
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
     let llm_client = LlmClient::new(llm_cfg).unwrap();
@@ -668,7 +681,7 @@ async fn tool_loop_aborts_after_max_rounds() {
     let mut server_cfg = make_server_cfg(upstream_url);
     server_cfg.llm.llm_max_tool_rounds = 2;
     let cfg = Arc::new(server_cfg);
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
     let llm_client = LlmClient::new(llm_cfg).unwrap();
@@ -733,7 +746,7 @@ async fn datetime_agent_rejects_unknown_timezone() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn datetime_agent_invoke_endpoint_returns_400_for_bad_timezone() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -870,7 +883,7 @@ async fn stock_agent_parses_csv_with_loopback_fixture() {
     // public schema + name on the wired-up registry, so a
     // regression that renamed the tool surfaces here.
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     assert!(
         agents.get("get_stock_quote").is_some(),
         "registry must contain `get_stock_quote` when `stock-agent` feature is on"
@@ -915,7 +928,7 @@ async fn stock_agent_rejects_invalid_ticker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stock_agent_invoke_endpoint_returns_400_for_bad_ticker() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -957,7 +970,7 @@ async fn calculate_agent_invoke_endpoint_returns_400_for_invalid_chars() {
     // gate, the agent returns `InvalidArguments`, and the proxy
     // surfaces it as 400.
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1001,7 +1014,7 @@ async fn unit_convert_agent_rejects_cross_category() {
     // 500. The proxy relies on this distinction to tell the LLM
     // "your args are wrong" vs "the upstream broke".
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1148,7 +1161,7 @@ async fn wikipedia_agent_sends_descriptive_user_agent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wikipedia_agent_invoke_endpoint_returns_400_for_missing_title() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1248,7 +1261,7 @@ async fn dictionary_agent_parses_entries_fixture() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dictionary_agent_invoke_endpoint_returns_400_for_missing_word() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let state = make_app_state(cfg, None, Some(agents), sessions);
     let url = start_test_server(state).await;
@@ -1284,7 +1297,7 @@ async fn dictionary_agent_invoke_endpoint_returns_400_for_missing_word() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tools_schema_includes_every_registered_agent() {
     let cfg = Arc::new(make_server_cfg("http://127.0.0.1:1".into()));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let listed = agents.list();
     let names: Vec<&str> = listed.iter().map(|s| s.name.as_str()).collect();
     let schemas = agents.tools_schema();
@@ -1350,7 +1363,7 @@ async fn tool_loop_auto_continues_after_reasoning_truncation() {
     let upstream_url = spawn_reasoning_truncation_upstream(captured.clone()).await;
 
     let cfg = Arc::new(make_server_cfg(upstream_url));
-    let agents = nagent_server::agents::build_registry(&cfg.agents, None, None, None);
+    let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
     let llm_client = LlmClient::new(llm_cfg).unwrap();
