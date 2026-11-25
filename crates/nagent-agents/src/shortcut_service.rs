@@ -28,7 +28,8 @@ use crate::services::{FieldDef, FieldKind, ServiceDef, ECHO_ON_EDIT_PASSWORD};
 /// The `api_token` is supplied by the user on the integrations
 /// form and validated by the setup probe
 /// (`POST /api/integrations/shortcut/probe`), which calls
-/// `GET /members/me` and stores the returned `mention_name` into
+/// `GET /members` and matches the `username` handle against the
+/// returned member list; the resolved `mention_name` is stored into
 /// the `username` field.
 pub const SHORTCUT_SERVICE: ServiceDef = ServiceDef {
     id: "shortcut",

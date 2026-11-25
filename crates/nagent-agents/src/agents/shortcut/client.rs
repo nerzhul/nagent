@@ -158,7 +158,7 @@ impl ShortcutClient {
 
     /// Perform one authenticated GET against the Shortcut REST
     /// API v3 and return the parsed JSON body. `path` is the
-    /// API-relative path starting with `/` (e.g. `/members/me`);
+    /// API-relative path starting with `/` (e.g. `/members`);
     /// `query` is a list of `(key, value)` pairs, percent-encoded
     /// by [`build_url`].
     pub async fn get(
@@ -353,8 +353,8 @@ mod tests {
 
     #[test]
     fn build_url_without_query_has_no_question_mark() {
-        let url = build_url("https://api.app.shortcut.com/api/v3", "/members/me", &[]);
-        assert_eq!(url, "https://api.app.shortcut.com/api/v3/members/me");
+        let url = build_url("https://api.app.shortcut.com/api/v3", "/members", &[]);
+        assert_eq!(url, "https://api.app.shortcut.com/api/v3/members");
     }
 
     #[test]

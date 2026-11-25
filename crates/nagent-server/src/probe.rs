@@ -307,8 +307,8 @@ impl ProbeConfig for ShortcutConfig {
         self.timeout_ms
     }
     fn max_body_bytes(&self) -> usize {
-        // The `/members/me` probe response is a single JSON
-        // object (a few KiB); 256 KiB is a generous cap.
+        // The `/members` probe response is a JSON array of member
+        // objects (a few KiB each); 256 KiB is a generous cap.
         256 * 1024
     }
 }

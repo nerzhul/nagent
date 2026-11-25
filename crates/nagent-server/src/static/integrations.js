@@ -912,7 +912,7 @@ async function probeGithub(personalAccessToken) {
   return await resp.json();
 }
 
-async function probeShortcut(apiToken) {
+async function probeShortcut(apiToken, username) {
   const resp = await fetch(PROBE_PATH_SHORTCUT, {
     method: "POST",
     credentials: "same-origin",
@@ -920,7 +920,7 @@ async function probeShortcut(apiToken) {
       "content-type": "application/json",
       ...(csrfHeaders() || {}),
     },
-    body: JSON.stringify({ api_token: apiToken }),
+    body: JSON.stringify({ api_token: apiToken, username: username || undefined }),
   });
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
@@ -985,7 +985,7 @@ function attachShortcutTestButton(form, actions) {
       return;
     }
     try {
-      const body = await probeShortcut(token);
+      const body = await probeShortcut(token, usernameField.value.trim());
       statusEl.dataset.state = "ok";
       const name = body.name ? ` — ${body.name}` : "";
       statusEl.textContent = `Connected as @${body.mention_name}${name}.`;

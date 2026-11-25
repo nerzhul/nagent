@@ -6,7 +6,7 @@ The `shortcut-agent` cargo feature adds a per-user **Shortcut**
 
 | Tool | Shortcut endpoint | Args |
 | --- | --- | --- |
-| `shortcut_me` | `GET /members/me` | — |
+| `shortcut_me` | `GET /members` (member matched by mention name) | — |
 | `shortcut_list_workflows` | `GET /workflows` | — (state id → name/category map) |
 | `shortcut_list_projects` | `GET /projects` | `limit?` (default 50, cap 200) |
 | `shortcut_list_epics` | `GET /epics` | `state?` (unstarted/started/done, client-side filter), `limit?` |
@@ -34,10 +34,14 @@ model tries to call them.
 1. Generate an API token at
    <https://app.shortcut.com/settings/account/api-tokens>.
 2. In Settings → Integrations, add the **Shortcut
-   (app.shortcut.com)** connector, paste the token, and run the
-   probe. The probe calls `GET {base_url}/members/me` with the
-   token and stores the returned `mention_name` into the
-   `username` field, so the UI can show "Connected as @jane".
+   (app.shortcut.com)** connector, paste the token and your mention
+   name, and run the probe. The probe calls `GET {base_url}/members`
+   with the token and picks the member whose `mention_name` (or
+   display name / email) matches the `username` field — the v3 API has
+   no `/members/me` route (`/members/{member-public-id}` requires a
+   UUID, so `/members/me` answers 400). The returned `mention_name`
+   is stored into the `username` field, so the UI can show
+   "Connected as @jane".
 3. The token is stored AES-256-GCM encrypted in the per-user
    credentials vault under the `shortcut` service id. It is never
    logged, never echoed back on edit, and never surfaced in an
@@ -47,9 +51,12 @@ Setup-only HTTP endpoint (not an LLM tool):
 
 ```
 POST /api/integrations/shortcut/probe
-{"api_token": "…"}
+{"api_token": "…", "username": "jane"}
 → 200 {"ok": true, "id": "<member-uuid>", "name": "Jane Doe", "mention_name": "jane"}
 ```
+
+`username` is optional: without it the probe only succeeds when the
+workspace lists a single member.
 
 Every probe call writes one `auth_events` row of kind
 `shortcut_probe_<outcome>` (plus a `_host:<host>` companion). The

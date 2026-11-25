@@ -239,7 +239,7 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `github_list_notifications` | `github-agent` | Per-user GitHub `GET /notifications`. Read-only. Confirm-on-read. |
 | `github_search_issues` | `github-agent` | Per-user GitHub `GET /search/issues` (query passthrough). Read-only. Confirm-on-read. |
 | `github_read_file` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/contents/{path}` — base64-decoded, capped. Read-only. Confirm-on-read. |
-| `shortcut_me` | `shortcut-agent` | Per-user Shortcut `GET /members/me` (member the API token belongs to). Read-only. Confirm-on-read. Plan 1795597719369. |
+| `shortcut_me` | `shortcut-agent` | Per-user Shortcut `GET /members` (member matched by mention name; the v3 API has no `/members/me`). Read-only. Confirm-on-read. Plan 1795597719369. |
 | `shortcut_list_workflows` | `shortcut-agent` | Per-user Shortcut `GET /workflows` (state id → name/category map). Read-only. Confirm-on-read. |
 | `shortcut_list_projects` | `shortcut-agent` | Per-user Shortcut `GET /projects`. Read-only. Confirm-on-read. |
 | `shortcut_list_epics` | `shortcut-agent` | Per-user Shortcut `GET /epics` (`state?` filtered client-side). Read-only. Confirm-on-read. |
@@ -363,7 +363,7 @@ The ten read-only `shortcut_*` agents read the token through
 `api.app.shortcut.com` through the shared egress pool with the
 `[agents.shortcut].allowlist` (default `["api.app.shortcut.com"]`).
 One setup-only HTTP endpoint — `POST /api/integrations/shortcut/probe`
-— validates the token against `GET /members/me` before the user
+— validates the token against `GET /members` before the user
 saves it and writes `shortcut_probe_<outcome>` audit rows (the
 token never lands on an audit row). Write tools (create story /
 comment / move story) are deliberately not registered in v1. See

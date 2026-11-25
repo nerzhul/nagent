@@ -11,12 +11,19 @@
 //!
 //! ## What the probe does
 //!
-//! `GET {base_url}/members/me` with `Shortcut-Token: <token>`
-//! (plus `Accept: application/json` and a `User-Agent`). On 2xx
-//! the response body carries the authenticated member; the
-//! handler returns `{id, name, mention_name}` and the UI stores
-//! `username = mention_name` next to the token through the
-//! existing `PUT /api/integrations/shortcut/credentials` flow.
+//! `GET {base_url}/members` with `Shortcut-Token: <token>`
+//! (plus `Accept: application/json` and a `User-Agent`). The v3 API
+//! has no `/members/me` route — that path falls through to
+//! `/members/{member-public-id}`, whose spec requires a UUID, so the
+//! server answers 400 `member-public-id … not instance? UUID "me"`.
+//! The list route is the supported way to resolve the token's member:
+//! when the request carries a `username` (the mention name the user
+//! typed in the form), the handler matches it against
+//! `profile.mention_name` / `profile.name` / `profile.email_address`
+//! (case-insensitive, `@`-tolerant) and returns
+//! `{id, name, mention_name}` for that member; the UI stores
+//! `username = mention_name` next to the token through the existing
+//! `PUT /api/integrations/shortcut/credentials` flow.
 //!
 //! ## Hardening
 //!
@@ -57,6 +64,10 @@ pub struct ProbeShortcutBody {
     /// The API token to validate. Never logged, never echoed
     /// back, never written to the audit row.
     pub api_token: String,
+    /// Optional mention name (the form's `username` field) used to
+    /// pick the token's member out of the `/members` list.
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 /// JSON shape returned by the probe on success.
@@ -82,7 +93,7 @@ fn error_response(status: StatusCode, message: String) -> Response {
 }
 
 /// Handler: validate the supplied token against
-/// `GET {base_url}/members/me`.
+/// `GET {base_url}/members` and resolve the member from the list.
 pub async fn probe_shortcut(
     State(state): State<ProbeState<ShortcutConfig>>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -96,7 +107,7 @@ pub async fn probe_shortcut(
         ));
     }
     let base = state.cfg.base_url.trim_end_matches('/').to_string();
-    let url_str = format!("{base}/members/me");
+    let url_str = format!("{base}/members");
     let url = match Url::parse(&url_str) {
         Ok(u) => u,
         Err(e) => {
@@ -224,29 +235,51 @@ pub async fn probe_shortcut(
             write_probe_audit(&state, user.id, &host, ProbeOutcome::UpstreamError);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
-                format!("Shortcut /members/me returned invalid JSON: {e}"),
+                format!("Shortcut /members returned invalid JSON: {e}"),
             ));
         }
+    };
+    let Some(member) =
+        nagent_agents::agents::shortcut::find_member(&parsed, body.username.as_deref())
+    else {
+        write_probe_audit(&state, user.id, &host, ProbeOutcome::UpstreamError);
+        let wanted = body
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let msg = if wanted.is_empty() {
+            "Shortcut /members returned several members and no `username` was provided; \
+             fill the mention-name field so the probe can pick yours"
+                .into()
+        } else {
+            format!(
+                "no Shortcut workspace member matches `{wanted}` \
+                 (checked mention_name, display name, email)"
+            )
+        };
+        return Ok(error_response(StatusCode::BAD_GATEWAY, msg));
     };
     // The v3 member nests the profile under `profile`; accept a
     // top-level field as a fallback so the probe survives minor
     // API drift.
-    let profile = parsed
+    let profile = member
         .get("profile")
         .cloned()
-        .unwrap_or_else(|| parsed.clone());
+        .unwrap_or_else(|| member.clone());
     let Some(mention_name) = profile.get("mention_name").and_then(|v| v.as_str()) else {
         write_probe_audit(&state, user.id, &host, ProbeOutcome::UpstreamError);
         return Ok(error_response(
             StatusCode::BAD_GATEWAY,
-            "Shortcut /members/me response has no `mention_name` field".into(),
+            "the matched Shortcut member has no `mention_name` field".into(),
         ));
     };
-    let Some(id) = parsed.get("id").and_then(|v| v.as_str()) else {
+    let Some(id) = member.get("id").and_then(|v| v.as_str()) else {
         write_probe_audit(&state, user.id, &host, ProbeOutcome::UpstreamError);
         return Ok(error_response(
             StatusCode::BAD_GATEWAY,
-            "Shortcut /members/me response has no `id` field".into(),
+            "the matched Shortcut member has no `id` field".into(),
         ));
     };
     write_probe_audit(&state, user.id, &host, ProbeOutcome::Ok);

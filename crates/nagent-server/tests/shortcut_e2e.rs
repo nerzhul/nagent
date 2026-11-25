@@ -10,9 +10,9 @@
 //! 3. The full setup flow against a loopback Shortcut API
 //!    fixture: `PUT /api/integrations/shortcut/credentials` (the
 //!    token into the vault), `POST /api/integrations/shortcut/probe`
-//!    (`GET /members/me` round-trip → `mention_name`), then
-//!    `POST /v1/agents/shortcut_list_backlog/invoke` against the
-//!    same fixture.
+//!    (`GET /members` list round-trip → member matched by mention
+//!    name), then `POST /v1/agents/shortcut_list_backlog/invoke`
+//!    against the same fixture.
 //! 4. AGENTS.md §6: the token never appears in any HTTP response
 //!    body (probe error included).
 
@@ -155,19 +155,30 @@ impl Fixture {
 
 fn route(path: &str) -> (u16, &'static str, String) {
     let json = |v: serde_json::Value| v.to_string();
-    if path == "/members/me" {
+    if path == "/members" {
         return (
             200,
             "OK",
-            json(serde_json::json!({
-                "id": "12345678-9012-3456-7890-123456789012",
-                "profile": {
-                    "name": "Jane Doe",
-                    "mention_name": "jane",
-                    "email_address": "jane@example.com"
+            json(serde_json::json!([
+                {
+                    "id": "12345678-9012-3456-7890-123456789012",
+                    "profile": {
+                        "name": "Jane Doe",
+                        "mention_name": "jane",
+                        "email_address": "jane@example.com"
+                    },
+                    "disabled": false
                 },
-                "disabled": false
-            })),
+                {
+                    "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                    "profile": {
+                        "name": "John Roe",
+                        "mention_name": "john",
+                        "email_address": "john@example.com"
+                    },
+                    "disabled": false
+                }
+            ])),
         );
     }
     if path.starts_with("/search/stories") {
@@ -407,7 +418,8 @@ async fn put_probe_invoke_list_flow_against_loopback() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "PUT credentials");
 
     // 2. Probe: POST /api/integrations/shortcut/probe → GET
-    //    /members/me on the fixture → {mention_name: "jane", …}.
+    //    /members on the fixture → member matched by `username` →
+    //    {mention_name: "jane", …}.
     let resp = app
         .clone()
         .oneshot(
@@ -417,7 +429,7 @@ async fn put_probe_invoke_list_flow_against_loopback() {
                 .header(axum::http::header::AUTHORIZATION, &bearer)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"api_token": TEST_TOKEN}).to_string(),
+                    serde_json::json!({"api_token": TEST_TOKEN, "username": "jane"}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -435,6 +447,40 @@ async fn put_probe_invoke_list_flow_against_loopback() {
     assert!(
         !probe_text.contains(TEST_TOKEN),
         "AGENTS.md §6: probe response must not contain the token; got {probe_text}"
+    );
+
+    // 2b. Probe with an unknown mention name → 502, token redacted.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/integrations/shortcut/probe")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_token": TEST_TOKEN, "username": "nobody"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "unknown handle must fail with 502"
+    );
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        text.contains("nobody"),
+        "error should name the handle: {text}"
+    );
+    assert!(
+        !text.contains(TEST_TOKEN),
+        "AGENTS.md §6: probe error must not contain the token; got {text}"
     );
 
     // 3. Direct invoke: POST /v1/agents/shortcut_list_backlog/invoke.
@@ -480,6 +526,20 @@ async fn put_probe_invoke_list_flow_against_loopback() {
     assert!(
         fx.requests().len() >= 2,
         "probe + invoke both hit the fixture"
+    );
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|(line, _)| line.starts_with("GET /members ")),
+        "probe must call GET /members (the v3 API has no /members/me); got {:?}",
+        fx.requests()
+    );
+    assert!(
+        !fx.requests()
+            .iter()
+            .any(|(line, _)| line.contains("/members/me")),
+        "no request may hit the non-existent /members/me route; got {:?}",
+        fx.requests()
     );
     // The backlog invoke hit the search endpoint with the default query.
     assert!(

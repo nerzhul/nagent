@@ -5,7 +5,7 @@
 //!
 //! | Tool | Endpoint |
 //! | --- | --- |
-//! | `shortcut_me` | `GET /members/me` |
+//! | `shortcut_me` | `GET /members` (member picked by mention name) |
 //! | `shortcut_list_workflows` | `GET /workflows` |
 //! | `shortcut_list_projects` | `GET /projects` |
 //! | `shortcut_list_epics` | `GET /epics` |
@@ -163,6 +163,47 @@ pub(crate) fn cap_text(value: &Value, cap: usize) -> Value {
     match value {
         Value::String(s) => Value::String(client::truncate(s, cap)),
         other => other.clone(),
+    }
+}
+
+/// Normalise a handle for comparison: trim, strip a leading `@`,
+/// lowercase.
+fn normalize_handle(s: &str) -> String {
+    s.trim().trim_start_matches('@').to_lowercase()
+}
+
+/// Pick the token's member out of a `GET /members` response. The v3
+/// API has no `/members/me` route — that path falls through to
+/// `/members/{member-public-id}`, whose spec requires a UUID — so the
+/// list route plus a handle match is the supported resolution. With a
+/// `handle`, matches `profile.mention_name` first, then
+/// `profile.name`, then `profile.email_address` (case-insensitive,
+/// `@`-tolerant). Without a handle, only a single-member list is
+/// unambiguous. Accepts either a member array or a single member
+/// object so callers survive minor API drift. Shared by the
+/// `shortcut_me` agent and the server-side setup probe.
+pub fn find_member<'a>(parsed: &'a Value, handle: Option<&str>) -> Option<&'a Value> {
+    let members: Vec<&Value> = match parsed.as_array() {
+        Some(arr) => arr.iter().collect(),
+        None => vec![parsed],
+    };
+    match handle.map(normalize_handle).filter(|h| !h.is_empty()) {
+        Some(h) => members.iter().copied().find(|m| {
+            let profile = m.get("profile").unwrap_or(*m);
+            ["mention_name", "name", "email_address"].iter().any(|f| {
+                profile
+                    .get(*f)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| normalize_handle(v) == h)
+            })
+        }),
+        None => {
+            if members.len() == 1 {
+                members.first().copied()
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -358,6 +399,8 @@ mod loopback {
         ) -> Result<Option<secrecy::SecretString>, AgentError> {
             if service == "shortcut" && field == "api_token" {
                 Ok(Some(secrecy::SecretString::from(TEST_TOKEN)))
+            } else if service == "shortcut" && field == "username" {
+                Ok(Some(secrecy::SecretString::from("jane")))
             } else {
                 Ok(None)
             }
@@ -454,16 +497,23 @@ mod loopback {
     /// exact request target (path + query).
     fn route(path: &str) -> (u16, &'static str, Vec<(&'static str, String)>, String) {
         let json = |v: Value| v.to_string();
-        if path == "/members/me" {
+        if path == "/members" {
             return (
                 200,
                 "OK",
                 vec![],
-                json(json!({
-                    "id": "12345678-9012-3456-7890-123456789012",
-                    "profile": {"name": "Jane Doe", "mention_name": "jane", "email_address": "jane@example.com"},
-                    "disabled": false
-                })),
+                json(json!([
+                    {
+                        "id": "12345678-9012-3456-7890-123456789012",
+                        "profile": {"name": "Jane Doe", "mention_name": "jane", "email_address": "jane@example.com"},
+                        "disabled": false
+                    },
+                    {
+                        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                        "profile": {"name": "John Roe", "mention_name": "john", "email_address": "john@example.com"},
+                        "disabled": false
+                    }
+                ])),
             );
         }
         if path.starts_with("/search/stories") {
@@ -571,20 +621,73 @@ mod loopback {
         )
     }
 
+    #[test]
+    fn find_member_matches_mention_name_case_and_at_insensitive() {
+        let parsed = json!([
+            {"id": "uuid-1", "profile": {"name": "Jane Doe", "mention_name": "jane", "email_address": "jane@example.com"}},
+            {"id": "uuid-2", "profile": {"name": "John Roe", "mention_name": "john", "email_address": "john@example.com"}}
+        ]);
+        let m = find_member(&parsed, Some("@JANE")).expect("match on mention_name");
+        assert_eq!(m["id"], "uuid-1");
+        let m = find_member(&parsed, Some("john@example.com")).expect("match on email");
+        assert_eq!(m["id"], "uuid-2");
+        let m = find_member(&parsed, Some("John Roe")).expect("match on display name");
+        assert_eq!(m["id"], "uuid-2");
+        assert!(find_member(&parsed, Some("nobody")).is_none());
+        assert!(
+            find_member(&parsed, None).is_none(),
+            "ambiguous without handle"
+        );
+    }
+
+    #[test]
+    fn find_member_single_member_list_needs_no_handle() {
+        let parsed = json!({
+            "id": "uuid-1",
+            "profile": {"name": "Jane Doe", "mention_name": "jane"}
+        });
+        let m = find_member(&parsed, None).expect("single object works without handle");
+        assert_eq!(m["profile"]["mention_name"], "jane");
+        let arr = json!([{"id": "uuid-1", "profile": {"mention_name": "jane"}}]);
+        let m = find_member(&arr, None).expect("single-element array works");
+        assert_eq!(m["id"], "uuid-1");
+    }
+
     #[tokio::test]
-    async fn happy_path_get_members_me_sends_shortcut_token_and_parses() {
+    async fn happy_path_get_members_sends_shortcut_token_and_parses() {
         let fx = Fixture::start().await;
         let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
         let ctx = test_ctx();
         let v = client
-            .get(&ctx, "/members/me", &[])
+            .get(&ctx, "/members", &[])
             .await
-            .expect("GET /members/me");
-        assert_eq!(v["profile"]["mention_name"], "jane");
+            .expect("GET /members");
+        let m = find_member(&v, Some("jane")).expect("jane is in the fixture list");
+        assert_eq!(m["profile"]["mention_name"], "jane");
         let reqs = fx.requests();
         assert_eq!(reqs.len(), 1);
-        assert_eq!(reqs[0].0, "GET /members/me HTTP/1.1");
+        assert_eq!(reqs[0].0, "GET /members HTTP/1.1");
         assert_eq!(reqs[0].1, TEST_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn me_agent_resolves_member_from_list_by_stored_username() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let agent = me::MeAgent::new(client);
+        let ctx = test_ctx();
+        let out = agent.invoke(&ctx, json!({})).await.expect("invoke");
+        let v: Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["data"]["mention_name"], "jane");
+        assert_eq!(v["data"]["id"], "12345678-9012-3456-7890-123456789012");
+        assert_eq!(v["data"]["email"], "jane@example.com");
+        let reqs = fx.requests();
+        assert!(
+            reqs.iter()
+                .any(|(line, _)| line.starts_with("GET /members ")),
+            "shortcut_me must call GET /members, not /members/me; got {reqs:?}"
+        );
     }
 
     #[tokio::test]
