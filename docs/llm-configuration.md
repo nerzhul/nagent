@@ -30,6 +30,16 @@ are honoured only when `provider = "ollama"` (the default), so
 existing deployments keep working untouched. `MISTRAL_API_KEY` is
 only read when `provider = "mistral"`.
 
+`base_url` may already end in `/v1` (Mistral's default does): the
+proxy appends the endpoint path (`chat/completions`, `models`)
+without doubling the version segment, so
+`https://api.mistral.ai/v1` + `chat/completions` becomes
+`https://api.mistral.ai/v1/chat/completions`, not
+`…/v1/v1/chat/completions` (which the hosted API rejects with
+404 "no Route matched with those values"). A base without the
+suffix (Ollama's `http://localhost:11434`) gets `/v1` added as
+before.
+
 ### Request-body adaptation per provider
 
 The proxy speaks the same OpenAI-compatible wire protocol to every

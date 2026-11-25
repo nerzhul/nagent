@@ -1786,6 +1786,23 @@ async fn provider_mistral_generic_max_tokens_wins_over_alias() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn base_url_ending_in_v1_is_not_doubled() {
+    // Regression: `provider = "mistral"` defaults `base_url` to
+    // `https://api.mistral.ai/v1` — already versioned. The proxy must
+    // not append a second `/v1` (the hosted API answers
+    // `…/v1/v1/chat/completions` with 404 "no Route matched with those
+    // values"). The mock serves `/v1/chat/completions` at its root,
+    // so a `base_url` of `http://{addr}/v1` only works when the join
+    // is correct; `post_chat_and_capture` asserts the 200 and that
+    // the upstream actually received the request.
+    let (_up, on_request, on_body) = spawn_capturing_upstream(sse_body(&["ok"])).await;
+    let cfg = provider_test_cfg(format!("{_up}/v1"), LlmProvider::Mistral);
+    let chat_url = start_test_server_with_llm_cfg(cfg).await;
+
+    let (_headers, _body) = post_chat_and_capture(&chat_url, on_request, on_body).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_ollama_keeps_options_and_ignores_max_tokens() {
     // Regression guard: on `provider = "ollama"` the body shape is
     // unchanged from before the provider enum existed —

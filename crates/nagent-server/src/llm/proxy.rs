@@ -286,10 +286,7 @@ pub async fn chat_completions(
         fwd.insert(name, value);
     }
 
-    let upstream_url = format!(
-        "{}/v1/chat/completions",
-        llm.cfg.base_url.trim_end_matches('/')
-    );
+    let upstream_url = crate::llm::provider::upstream_url(&llm.cfg.base_url, "chat/completions");
 
     // Open the upstream connection eagerly so non-2xx responses
     // surface as their original HTTP status (the same way the
@@ -323,7 +320,7 @@ pub async fn chat_completions(
         if let Some((name, upstream_message)) =
             crate::llm::client::detect_model_not_found(status, &body)
         {
-            let models_url = format!("{}/v1/models", llm.cfg.base_url.trim_end_matches('/'));
+            let models_url = crate::llm::provider::upstream_url(&llm.cfg.base_url, "models");
             let available = match llm.http.get(&models_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<serde_json::Value>().await {
@@ -662,7 +659,7 @@ fn merge_pre_then_loop(
 pub(crate) async fn fetch_upstream_model_list(
     client: &crate::llm::client::LlmClient,
 ) -> Vec<String> {
-    let url = format!("{}/v1/models", client.cfg().base_url.trim_end_matches('/'));
+    let url = crate::llm::provider::upstream_url(&client.cfg().base_url, "models");
     debug!(%url, "fetching upstream models for /api/features");
 
     let mut req = client.http.get(&url);

@@ -51,6 +51,24 @@ pub(crate) fn adapt_request_body(body: &mut Value, cfg: &LlmConfig) {
     }
 }
 
+/// Join the configured `base_url` with an OpenAI-style endpoint path
+/// (`chat/completions`, `models`). A base that already ends in `/v1`
+/// — Mistral's default `https://api.mistral.ai/v1`, or a gateway that
+/// pins the version segment — keeps it: the path is appended without
+/// a second `/v1`, which hosted APIs answer with 404
+/// "no Route matched with those values". Any other base (Ollama's
+/// `http://localhost:11434`, test fixtures) gets the `/v1` segment
+/// added as before.
+pub(crate) fn upstream_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/{path}")
+    } else {
+        format!("{base}/v1/{path}")
+    }
+}
+
 /// Merge the admin-configured `ollama_num_predict` into the
 /// `options.num_predict` slot of the upstream body. A no-op when the
 /// operator has not opted in (`ollama_num_predict = None`). Moved
@@ -221,5 +239,35 @@ mod tests {
         let once = b.clone();
         adapt_request_body(&mut b, &cfg);
         assert_eq!(b, once);
+    }
+
+    #[test]
+    fn upstream_url_appends_v1_to_bare_base() {
+        assert_eq!(
+            upstream_url("http://localhost:11434", "chat/completions"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert_eq!(
+            upstream_url("http://localhost:11434/", "models"),
+            "http://localhost:11434/v1/models"
+        );
+    }
+
+    #[test]
+    fn upstream_url_does_not_double_v1() {
+        // Mistral's documented default already carries the segment.
+        assert_eq!(
+            upstream_url("https://api.mistral.ai/v1", "chat/completions"),
+            "https://api.mistral.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            upstream_url("https://api.mistral.ai/v1/", "models"),
+            "https://api.mistral.ai/v1/models"
+        );
+        // A gateway pinning a different version keeps its own prefix.
+        assert_eq!(
+            upstream_url("https://gateway.example.com/api/v3", "models"),
+            "https://gateway.example.com/api/v3/v1/models"
+        );
     }
 }
