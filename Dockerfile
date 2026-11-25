@@ -27,7 +27,9 @@
 #     nagent/nagent-server
 
 # ---- Builder --------------------------------------------------------------
-FROM rust:1.81-bookworm AS builder
+# 1.94 is the workspace MSRV: `sqlx` 0.9 declares `rust-version = "1.94.0"`,
+# so an older builder image cannot resolve the workspace at all.
+FROM rust:1.94-bookworm AS builder
 
 ARG BACKEND=vulkan
 

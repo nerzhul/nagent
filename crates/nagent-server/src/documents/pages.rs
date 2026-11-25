@@ -72,7 +72,7 @@ pub const OVERVIEW_PREVIEW_CHARS: usize = 2_000;
 ///
 /// Note: `pdf-extract` (used for the real extraction path) parses
 /// ToUnicode CMaps via the bundled `adobe-cmap-parser`, which is
-/// noticeably more lenient than lopdf 0.34's own CMap parser. The
+/// noticeably more lenient than lopdf's own CMap parser. The
 /// classic "lopdf rejects every page of an Office PDF" failure
 /// therefore no longer reaches this marker for that reason —
 /// but the marker is still wired for the genuinely unrecoverable
@@ -196,7 +196,7 @@ pub enum PagesError {
 /// delegates to `pdf_extract::output_doc_page` instead of
 /// `lopdf::Document::extract_text`. Both end up walking the same
 /// `lopdf::Document`; the difference is the CMap parser they use.
-/// `lopdf::Document::extract_text` uses lopdf 0.34's bundled CMap
+/// `lopdf::Document::extract_text` uses lopdf's bundled CMap
 /// parser, which rejects a meaningful slice of real-world PDFs
 /// (Microsoft Office + scanners + a few publishing tools all
 /// produce ToUnicode CMaps in formats lopdf cannot decode, even
@@ -301,7 +301,7 @@ pub fn extract_pages(
 /// or the page content cannot be decoded.
 ///
 /// Why `pdf_extract` and not `lopdf::Document::extract_text`: the
-/// latter uses lopdf 0.34's bundled CMap parser, which raises
+/// latter uses lopdf's bundled CMap parser, which raises
 /// `ToUnicodeCMap(Parse(Error))` on a non-trivial slice of
 /// real-world PDFs (Office + a few scanners). `pdf-extract` uses
 /// `adobe-cmap-parser` for the same step and recovers the

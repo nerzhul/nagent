@@ -188,6 +188,13 @@ impl Db {
     // (plan S10) so production binaries cannot reach them at the
     // type level. The `nagent-server` dev-dependency enables
     // `test-util` so the integration tests still compile.
+    //
+    // sqlx 0.9 replaced `&str` query strings with the
+    // `SqlSafeStr` trait, which only `&'static str` implements.
+    // Every call site below wraps its caller-supplied statement
+    // in `AssertSqlSafe` — the explicit opt-out of the static
+    // check, sound here because the only callers are tests that
+    // build their SQL from literals and bound parameters.
 
     /// Run a raw statement (DML or DDL). Used by tests for
     /// schema probes (`COUNT(*)`, `PRAGMA`) and for INSERTs that
@@ -198,11 +205,17 @@ impl Db {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
             AnyPool::Sqlite(p) => {
-                sqlx::query(sql).execute(p).await.map_err(Error::Database)?;
+                sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .execute(p)
+                    .await
+                    .map_err(Error::Database)?;
             }
             #[cfg(feature = "db-postgres")]
             AnyPool::Postgres(p) => {
-                sqlx::query(sql).execute(p).await.map_err(Error::Database)?;
+                sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .execute(p)
+                    .await
+                    .map_err(Error::Database)?;
             }
         }
         Ok(())
@@ -217,7 +230,7 @@ impl Db {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
             AnyPool::Sqlite(p) => {
-                let row = sqlx::query(sql)
+                let row = sqlx::query(sqlx::AssertSqlSafe(sql))
                     .fetch_one(p)
                     .await
                     .map_err(Error::Database)?;
@@ -226,7 +239,7 @@ impl Db {
             }
             #[cfg(feature = "db-postgres")]
             AnyPool::Postgres(p) => {
-                let row = sqlx::query(sql)
+                let row = sqlx::query(sqlx::AssertSqlSafe(sql))
                     .fetch_one(p)
                     .await
                     .map_err(Error::Database)?;
@@ -244,7 +257,7 @@ impl Db {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
             AnyPool::Sqlite(p) => {
-                let rows = sqlx::query(sql)
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
                     .fetch_all(p)
                     .await
                     .map_err(Error::Database)?;
@@ -255,7 +268,7 @@ impl Db {
             }
             #[cfg(feature = "db-postgres")]
             AnyPool::Postgres(p) => {
-                let rows = sqlx::query(sql)
+                let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
                     .fetch_all(p)
                     .await
                     .map_err(Error::Database)?;
@@ -281,7 +294,7 @@ impl Db {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
             AnyPool::Sqlite(p) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
                 for p in params {
                     q = q.bind(*p);
                 }
@@ -295,7 +308,7 @@ impl Db {
             }
             #[cfg(feature = "db-postgres")]
             AnyPool::Postgres(p) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
                 for p in params {
                     q = q.bind(*p);
                 }
@@ -319,7 +332,7 @@ impl Db {
         match &self.pool {
             #[cfg(feature = "db-sqlite")]
             AnyPool::Sqlite(p) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
                 for p in params {
                     q = q.bind(*p);
                 }
@@ -327,7 +340,7 @@ impl Db {
             }
             #[cfg(feature = "db-postgres")]
             AnyPool::Postgres(p) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
                 for p in params {
                     q = q.bind(*p);
                 }

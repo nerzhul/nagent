@@ -107,12 +107,19 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"], op
 # consumes the engine through that crate.
 meval = { version = "0.2", optional = true }
 argon2 = "0.5"
-openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
-# Pinned to `=0.6.1-dev` so a future dev-build cannot slip in
-# via semver-compatible ranges; `cargo-deny` mirrors the
-# constraint. `danger-allow-state-serialisation` lets the
+# `openidconnect` was dropped: `auth/oidc.rs` is a stub that parses
+# the claims itself, so nothing imported the crate, and it pinned
+# `rsa ^0.9`, which has no release fixing RUSTSEC-2023-0071.
+# Re-declare it (>= 4.1, needs `rsa` 0.10) when the JWKS signature
+# verification lands.
+
+# Pinned to `=0.6.2` so a future dev-build cannot slip in via
+# semver-compatible ranges; `cargo-deny` mirrors the constraint.
+# 0.6.2 is also the release that moved the tree to `crypto-glue`
+# 0.2 / `elliptic-curve` 0.14 and dropped `crypto-bigint` 0.5
+# (RUSTSEC-2026-0387). `danger-allow-state-serialisation` lets the
 # ceremony state cross the HTTP round-trip.
-webauthn-rs = { version = "=0.6.1-dev", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"] }
+webauthn-rs = { version = "=0.6.2", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"] }
 # OS-RNG for session ids, CSRF tokens, OIDC nonces.
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom"] }
 # We drop `time` — session expiry lives in the DB row, not the cookie.
@@ -130,13 +137,17 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 # PDF parsing for read_document; runtime-gated by `[documents].enabled`.
 # Per-page text extraction goes through `pdf_extract::output_doc_page`
-# (NOT `lopdf::Document::extract_text`): the latter uses lopdf 0.34's
+# (NOT `lopdf::Document::extract_text`): the latter uses lopdf's
 # bundled CMap parser, which raises `ToUnicodeCMap(Parse(Error))` on
 # real-world PDFs (MS Office + scanners). `pdf-extract` routes
 # ToUnicode through `adobe-cmap-parser` and recovers correctly —
 # `five_steps_perform_2009.pdf` is the regression pin.
-pdf-extract = "0.7"
-lopdf = { version = "0.34", default-features = false, features = ["pom_parser"] }
+# `lopdf` >= 0.42 clears RUSTSEC-2026-0187 (stack overflow on deeply
+# nested objects); `pdf-extract` 0.12 is the first release that pulls
+# it. Default features stay off: they add chrono/jiff/rayon/time,
+# none of which the read_document path uses.
+pdf-extract = "0.12"
+lopdf = { version = "0.42", default-features = false }
 mime_guess = "2"
 # Trusted-proxy CIDR parser (security plan #5).
 ipnet = "2"

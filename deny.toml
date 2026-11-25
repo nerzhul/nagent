@@ -37,7 +37,14 @@ all-features = true
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+# Mirrors `.cargo/audit.toml` so the two RustSec surfaces agree.
+# RUSTSEC-2023-0071 (`rsa` Marvin timing side channel) is the one
+# advisory the tree has to carry: the reachable `rsa`
+# 0.10.0-rc.19 comes from `webauthn-rs` 0.6.2 -> `crypto-glue`
+# 0.2.2, which requires `rsa` 0.10.0-rc but with the `sha2`
+# feature that `rsa` 0.10.0 stable dropped. The side channel needs
+# a decryption oracle; we only verify public-key signatures.
+ignore = ["RUSTSEC-2023-0071"]
 
 # ----------------------------------------------------------------------------
 # Licenses
@@ -118,10 +125,11 @@ deny = [
     # time_t overflow. We pin >= 0.4.35 in Cargo.toml so a
     # transitive downgrade cannot revert the fix.
     { name = "chrono", version = "<0.4.20" },
-    # `webauthn-rs` pre-release with an unpinned version can pull
-    # a newer dev build that has not been audited. Pin exactly
-    # `0.6.1-dev` (S2a).
-    { name = "webauthn-rs", version = "<0.6.1-dev" },
+    # `webauthn-rs` 0.6.2 is the stable release that moved the
+    # tree to `crypto-glue` 0.2 / `elliptic-curve` 0.14 and
+    # dropped `crypto-bigint` 0.5 (RUSTSEC-2026-0387). Keep the
+    # floor at that release so a downgrade cannot reintroduce it.
+    { name = "webauthn-rs", version = "<0.6.2" },
 ]
 # Note: `native-tls` and `openssl` are NOT banned here even
 # though the binary is `rustls`-aware. They are pulled in only as

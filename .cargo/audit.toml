@@ -1,0 +1,29 @@
+# cargo-audit configuration.
+#
+# CI runs `cargo audit` (see `.github/workflows/ci.yml`), which fails
+# the build on any advisory affecting the tree pinned by `Cargo.lock`.
+# Every entry in `ignore` is a deliberate, reviewed exception; keep the
+# list as short as possible and re-check it on every `cargo update`.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack: potential key recovery
+    # through timing sidechannels" in `rsa`.
+    #
+    # The only reachable `rsa` is 0.10.0-rc.19, pulled by
+    # `webauthn-rs` 0.6.2 -> `webauthn-rs-core` -> `crypto-glue`
+    # 0.2.2, whose requirement is `rsa = "0.10.0-rc.18"` plus the
+    # `sha2` feature. `rsa` 0.10.0 (the version the advisory lists
+    # as patched) dropped that feature, so cargo cannot select it
+    # against `crypto-glue`; the release candidate is the furthest
+    # the current upstream chain goes. RustSec compares versions
+    # literally, so a pre-release of the fixed line still reports.
+    #
+    # The timing side channel only matters for an adversary with a
+    # decryption oracle: this code uses `rsa` for WebAuthn
+    # signature verification with public keys only, never for
+    # private-key decryption. Drop this entry as soon as
+    # `crypto-glue` accepts `rsa` 0.10.0 stable (`rsa 0.9`, once
+    # pulled by the unused `openidconnect` dependency, is gone).
+    "RUSTSEC-2023-0071",
+]

@@ -16,12 +16,16 @@ edition = "2021"
 # SPDX-License-Identifier: LicenseRef-OpenCore-Source-Available-1.0
 # See the LICENSE file at the root of the repository for the full terms.
 license = "LicenseRef-OpenCore-Source-Available-1.0"
-rust-version = "1.75"
+rust-version = "1.94"
 authors = ["nagent contributors"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-postcard = { version = "1", features = ["alloc"] }
+# `default-features = false` drops postcard's `heapless-cas`
+# default feature: the STT wire codec only uses `from_bytes` /
+# `to_allocvec`, and heapless 0.7 carries a batch of RUSTSEC
+# soundness advisories (RUSTSEC-2026-0574 … -0582).
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

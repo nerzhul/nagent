@@ -345,7 +345,10 @@ pub(crate) mod sqlite {
                      WHERE user_id = ? AND id IN ({})",
                     placeholders
                 );
-                let mut q = sqlx::query(&sql).bind(&user_id_str);
+                // sqlx 0.9 requires a `SqlSafeStr` query string; the
+                // placeholder list is built above, so opt out of the
+                // static-literal check explicitly.
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(&user_id_str);
                 for id in &ids {
                     q = q.bind(id);
                 }

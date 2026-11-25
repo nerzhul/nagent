@@ -38,7 +38,12 @@ uuid = { workspace = true }
 # `cfg`, so the cost is one libpq / libsqlite pair rather than
 # the full PostgreSQL client. See `db-sqlite` / `db-postgres`
 # features above for the slim-build limitation.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "macros", "migrate"] }
+# sqlx 0.9 split the old `runtime-tokio-rustls` umbrella into
+# `runtime-tokio` + `tls-rustls`, and `sqlite-bundled` is the 1:1
+# successor of the 0.8 `sqlite` feature (bare `sqlite` now also
+# pulls deserialize / load-extension / unlock-notify).
+# libsqlite3-sys >= 0.39 clears RUSTSEC-2026-0459.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite-bundled", "postgres", "chrono", "uuid", "macros", "migrate"] }
 
 [dev-dependencies]
 nagent-db = { path = ".", features = ["test-util"] }

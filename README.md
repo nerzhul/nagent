@@ -20,7 +20,7 @@ no audio or transcript can ever leak across sessions.
 
 ## Prerequisites
 
-- Rust stable (1.75+).
+- Rust stable (1.94+).
 - For GPU builds: a working Vulkan, CUDA, or ROCm/HIP toolchain on the host.
   Without one, whisper.cpp falls back to CPU.
 - A ggml-format Whisper model, e.g. `ggml-base.bin` from
@@ -114,7 +114,7 @@ set available; disable any of them by editing the target's
 | ---------- | --------- | ----------------------- | -------------------------------------------------------------------- |
 | `BACKEND`  | `vulkan`  | `cpu`, `vulkan`, `cuda`, `hipblas` | Translated to the matching Cargo feature pair at build time. |
 
-The CUDA and HIP backends are **not** installed in the `rust:1.81-bookworm`
+The CUDA and HIP backends are **not** installed in the `rust:1.94-bookworm`
 base image; supply them via an extended base image if you pick those
 backends. The Vulkan loader (`libvulkan1`) is installed automatically in the
 runtime stage when `BACKEND=vulkan`.
@@ -450,7 +450,7 @@ exposes its own login route; the operator enables a subset via
 | --------- | --------------------------------------------------- | ------------------------ | ----- |
 | `local`   | `POST /api/auth/login/password`                     | argon2id in `users.password_hash` | Argon2id with OWASP 2025 default parameters (m = 19 MiB, t = 2, p = 1). Passwords are never logged, never echoed back to the client. |
 | `oidc`    | `GET /api/auth/login/oidc/start` + `/callback`       | none (IdP is the source of truth) | PKCE + state persisted in the `pending_oidc_states` table. Auto-provisioning is on by default — first login creates a `users` row keyed on the IdP's email claim. Set `auth.oidc.auto_provision = false` to reject unknown emails with `403`. |
-| `passkey` | `POST /api/auth/login/passkey/{start,finish}`       | WebAuthn credentials in `passkeys` | Discoverable credentials (no `userHandle` round-trip). `webauthn-rs` 0.6 pre-release with `conditional-ui` + `resident-key-support` features. The registration ceremony is gated by `RequireAuth` and `auth.passkey.self_registration` (default `true`). |
+| `passkey` | `POST /api/auth/login/passkey/{start,finish}`       | WebAuthn credentials in `passkeys` | Discoverable credentials (no `userHandle` round-trip). `webauthn-rs` 0.6.2 with `conditional-ui` + `resident-key-support` features. The registration ceremony is gated by `RequireAuth` and `auth.passkey.self_registration` (default `true`). |
 
 The OIDC handlers accept the `state` and `nonce` standard claims and
 verify them, but the JWT signature is not checked against the IdP's
@@ -762,13 +762,20 @@ Three independent checks plus a weekly Dependabot scan
 keep the dependency tree auditable:
 
 - `cargo deny check` — driven by [`deny.toml`](deny.toml).
-  Bans cover `chrono <0.4.20` (Y2K38), `webauthn-rs <0.6.1-dev`
-  (must be the audited dev build), and any future supply-chain
+  Bans cover `chrono <0.4.20` (Y2K38), `webauthn-rs <0.6.2`
+  (must be the audited stable build), and any future supply-chain
   addition; licenses allow the standard permissive family plus
   the project's `LicenseRef-OpenCore-Source-Available-1.0`;
   sources pin `crates-io`. CI runs `cargo deny check bans
   licenses sources` so CVEs (separate `cargo audit` run) do not
   hide the other categories.
+- `cargo audit` — reads the RustSec database and fails CI on any
+  vulnerability. The single advisory the tree has to carry
+  (`RUSTSEC-2023-0071`, the `rsa` Marvin timing side channel) is
+  ignored in [`.cargo/audit.toml`](.cargo/audit.toml) and
+  mirrored in `deny.toml`; the file documents why no fixed
+  release is reachable from the current `webauthn-rs` /
+  `crypto-glue` chain.
 - `cargo cyclonedx` — emits `target/sbom.cargo.json`, uploaded
   as a build artefact for downstream consumers.
 - Syft (`anchore/sbom-action`) — emits a CycloneDX manifest of
