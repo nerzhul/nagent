@@ -128,6 +128,10 @@ fn error_response(status: StatusCode, message: String) -> Response {
 /// helper even though they reach it through different state
 /// types — each handler's `C` impl points at the right
 /// allow-list (`imap_allowlist` vs `smtp_allowlist`).
+// `Response` is axum's error carrier and is large by design; this helper
+// hands it straight to the handler's `Ok(resp)` arm, so boxing would ripple
+// through every call site for no runtime gain on a cold error path.
+#[allow(clippy::result_large_err)]
 async fn validate_host<C: ProbeConfig>(
     state: &ProbeState<C>,
     user_id: uuid::Uuid,

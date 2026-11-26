@@ -165,6 +165,10 @@ fn write_api_audit(store: &nagent_db::Db, user_id: Uuid, call: &str, outcome: Pr
 /// `SecretString` and is handed to `GithubClient::get`, which puts
 /// it in the `Authorization` header — never in an error path
 /// (AGENTS.md §6).
+// `Response` is axum's error carrier and is large by design; boxing would
+// ripple through every handler's `Ok(resp)` arm for no runtime gain on a
+// cold error path.
+#[allow(clippy::result_large_err)]
 async fn vault_token(state: &GithubApiState, user_id: Uuid) -> Result<SecretString, Response> {
     let row = state
         .store
@@ -212,6 +216,8 @@ async fn vault_token(state: &GithubApiState, user_id: Uuid) -> Result<SecretStri
 /// capped at [`nagent_github::MAX_DASHBOARD_REPOS`]. A missing or
 /// unparsable field yields an empty list (the dashboard then shows
 /// an empty table, not an error).
+// See `vault_token` for why the `Response` error variant is not boxed.
+#[allow(clippy::result_large_err)]
 async fn vault_repos(state: &GithubApiState, user_id: Uuid) -> Result<Vec<String>, Response> {
     let Ok(Some(row)) = state
         .store

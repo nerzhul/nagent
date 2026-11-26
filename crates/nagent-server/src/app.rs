@@ -598,7 +598,7 @@ fn setup_espeak_data_dir() {
                         find_data(&out_share).map(|p| (modified, p))
                     })
                     .collect();
-                candidates.sort_by(|a, b| b.0.cmp(&a.0));
+                candidates.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
                 if let Some((_, path)) = candidates.into_iter().next() {
                     std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &path);
                     return;

@@ -125,6 +125,10 @@ fn write_api_audit(store: &nagent_db::Db, user_id: Uuid, call: &str, outcome: Pr
 /// The plaintext only lives in the returned `SecretString` and is
 /// handed to `ShortcutClient::get`, which puts it in the
 /// `Shortcut-Token` header — never in an error path (AGENTS.md §6).
+// `Response` is axum's error carrier and is large by design; boxing would
+// ripple through every handler's `Ok(resp)` arm for no runtime gain on a
+// cold error path.
+#[allow(clippy::result_large_err)]
 async fn vault_token(state: &ShortcutApiState, user_id: Uuid) -> Result<SecretString, Response> {
     let row = state
         .store

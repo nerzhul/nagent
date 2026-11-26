@@ -124,8 +124,8 @@ argon2 = "0.5"
 webauthn-rs = { version = "=0.6.2", default-features = false, features = ["attestation", "conditional-ui", "resident-key-support", "danger-allow-state-serialisation"] }
 # OS-RNG for session ids, CSRF tokens, OIDC nonces.
 rand = { version = "0.8", default-features = false, features = ["std", "getrandom"] }
-# We drop `time` — session expiry lives in the DB row, not the cookie.
-cookie = { version = "0.18", features = ["percent-encode"] }
+# Session expiry lives in the DB row, not the cookie; the cookie itself is
+# written through axum's `Set-Cookie` header, so the `cookie` crate is gone.
 hex = "0.4"
 base64 = "0.22"
 sha2 = "0.10"

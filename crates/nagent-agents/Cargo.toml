@@ -103,3 +103,10 @@ mailparse = { version = "0.18", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["logging", "tls12"] }
 webpki-roots = { version = "1", optional = true }
+
+[lints.cargo]
+# `icalendar` and `mailparse` are only referenced from the
+# `caldav-agent` / `email-agent` modules, so a default-features manifest
+# scan reports them as unused; the `dep:…` wiring in those features is the
+# actual usage.
+unused_dependencies = "allow"

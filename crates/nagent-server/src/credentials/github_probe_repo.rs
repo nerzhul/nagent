@@ -152,6 +152,10 @@ fn base_url_host(cfg: &GithubConfig) -> String {
 /// vault row. The plaintext only lives in the returned
 /// `SecretString` and is handed to `GithubClient::get` — never in
 /// an error path (AGENTS.md §6).
+// `Response` is axum's error carrier and is large by design; boxing would
+// ripple through every handler's `Ok(resp)` arm for no runtime gain on a
+// cold error path.
+#[allow(clippy::result_large_err)]
 async fn vault_token(
     state: &GithubProbeRepoState,
     user_id: uuid::Uuid,
