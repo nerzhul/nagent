@@ -595,10 +595,7 @@ fn is_user_calendar(resourcetype: &str) -> bool {
             return false;
         }
     }
-    if find_open_tag(resourcetype, 0, "schedule").is_some() {
-        return false;
-    }
-    true
+    !find_open_tag(resourcetype, 0, "schedule").is_some()
 }
 
 /// One `<D:response>` from a PROPFIND multistatus body.
