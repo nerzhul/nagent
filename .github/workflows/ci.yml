@@ -118,18 +118,22 @@ jobs:
 
       # Build the runtime image but DO NOT push it — the build
       # cache is enough for Syft to inspect the resulting image.
-      # `load: true` exports it to the local Docker daemon so
-      # Syft can read layers directly.
+      # `--load` exports it to the local Docker daemon so Syft can
+      # read layers directly.
+      # NOTE: `docker/buildx-action` no longer exists upstream (the repo
+      # returns 404), so drive the builder created by
+      # `docker/setup-buildx-action` directly with the buildx CLI.
       - name: Build runtime image (cpu backend, no push)
-        uses: docker/buildx-action@v3
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          file: Dockerfile
-          build-args: BACKEND=cpu
-          load: true
-          tags: nagent/nagent-server:sbom
-          cache-from: type=gha
+        run: |
+          docker buildx build \
+            --builder "${{ steps.buildx.outputs.name }}" \
+            --file Dockerfile \
+            --build-arg BACKEND=cpu \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --load \
+            --tag nagent/nagent-server:sbom \
+            .
 
       - name: Install Syft
         uses: anchore/sbom-action@v0
