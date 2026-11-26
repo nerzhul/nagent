@@ -239,9 +239,7 @@ pub async fn probe_shortcut(
             ));
         }
     };
-    let Some(member) =
-        nagent_agents::agents::shortcut::find_member(&parsed, body.username.as_deref())
-    else {
+    let Some(member) = nagent_shortcut::find_member(&parsed, body.username.as_deref()) else {
         write_probe_audit(&state, user.id, &host, ProbeOutcome::UpstreamError);
         let wanted = body
             .username

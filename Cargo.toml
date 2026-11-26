@@ -4,6 +4,7 @@ members = [
     "crates/stt-proto",
     "crates/stt-core",
     "crates/nagent-support",
+    "crates/nagent-shortcut",
     "crates/nagent-db",
     "crates/nagent-agents",
     "crates/nagent-tts",

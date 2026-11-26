@@ -1,11 +1,15 @@
-// nagent — mode toggle (Transcript / Discussion / Settings).
+// nagent — mode toggle (Transcript / Discussion / Settings / Stories).
 //
-// Three views, only one visible at a time. The active mode is
+// Four views, only one visible at a time. The active mode is
 // persisted in `localStorage` so a reload lands the user where
-// they left off. Adding the Settings tab (plan: settings-tab-rework)
-// only required extending `VALID_MODES` and the button / view
-// pair lookups; `applyMode` still flips the three DOM nodes
-// by-id without any per-mode branching.
+// they left off. `applyMode` flips the DOM nodes by-id from the
+// PAIRS table without any per-mode branching.
+//
+// The Stories view is special: its tab only exists when the
+// Shortcut integration has "Show my stories dashboard" checked
+// (shortcut-stories.js calls `setStoriesEnabled`). A persisted
+// "stories" mode with the tab hidden falls back to the default
+// mode instead of stranding the user on an empty view.
 //
 // The Settings view itself is a 2-column shell (llama.cpp style)
 // with a left rail of section tabs and a right pane that shows one
@@ -22,8 +26,13 @@
   "use strict";
 
   const STORAGE_KEY = "nagent.mode";
-  const VALID_MODES = new Set(["transcript", "discussion", "settings"]);
+  const VALID_MODES = new Set(["transcript", "discussion", "settings", "stories"]);
   const DEFAULT_MODE = "transcript";
+  // Whether the Stories tab is currently available (driven by the
+  // Shortcut integration's `show_dashboard` checkbox — see
+  // shortcut-stories.js). Read by `applyMode` so a persisted
+  // "stories" mode cannot select a hidden view.
+  let storiesEnabled = false;
 
   // Tab-button ↔ view-id mapping. Kept as a single object so the
   // list of modes is the only source of truth — `applyMode` walks
@@ -32,6 +41,7 @@
     transcript: { btn: "mode-transcript-btn", view: "view-transcript" },
     discussion: { btn: "mode-discussion-btn", view: "view-discussion" },
     settings:   { btn: "mode-settings-btn",   view: "view-settings"   },
+    stories:    { btn: "mode-stories-btn",    view: "view-stories"    },
   };
 
   // Settings sub-navigation: rail-button ↔ pane-page mapping. Mirrors
@@ -109,7 +119,13 @@
   }
 
   function applyMode(mode, { dispatch = true } = {}) {
-    const active = VALID_MODES.has(mode) ? mode : DEFAULT_MODE;
+    // A "stories" mode requested while the tab is hidden (dashboard
+    // checkbox off) falls back to the default mode — the view would
+    // be empty otherwise.
+    const active =
+      VALID_MODES.has(mode) && (mode !== "stories" || storiesEnabled)
+        ? mode
+        : DEFAULT_MODE;
     for (const [m, pair] of Object.entries(PAIRS)) {
       const btn = document.getElementById(pair.btn);
       const view = document.getElementById(pair.view);
@@ -170,6 +186,24 @@
     });
   }
 
+  // Show / hide the Stories tab (called by shortcut-stories.js once
+  // it has read the Shortcut integration's `show_dashboard` flag).
+  // Re-applies the persisted mode when it flips so a user who left
+  // the app on the Stories tab lands back there when the tab
+  // becomes available (and is moved off it when the tab disappears).
+  function setStoriesEnabled(on) {
+    storiesEnabled = on;
+    const btn = document.getElementById(PAIRS.stories.btn);
+    if (btn) btn.hidden = !on;
+    const stored = readStoredMode();
+    if (on && stored === "stories") {
+      applyMode("stories");
+    } else if (!on && activeMode() === "stories") {
+      writeStoredMode(DEFAULT_MODE);
+      applyMode(DEFAULT_MODE);
+    }
+  }
+
   // Export a tiny read-only handle for chat.js to detect re-entries
   // (the `modechange` event already covers this, but the helper is
   // useful in tests / debugging).
@@ -180,5 +214,7 @@
       writeStoredSection(section);
       applySettingsSection(section);
     },
+    setStoriesEnabled,
+    storiesEnabled: () => storiesEnabled,
   };
 })();

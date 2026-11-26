@@ -10,3 +10,9 @@ description = "Shared building blocks (sweep clock, TTL map, bounded blocking he
 tokio = { workspace = true }
 dashmap = { workspace = true }
 thiserror = { workspace = true }
+# The `egress` module owns the hardened HTTP egress client; it is
+# shared by `nagent-shortcut` and `nagent-agents` alike.
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+url = "2"
+bytes = "1"
+futures-util = "0.3"

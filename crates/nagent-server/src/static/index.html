@@ -120,6 +120,18 @@
               data-mode="transcript">Transcript</button>
       <button role="tab" id="mode-discussion-btn" aria-selected="false"
               data-mode="discussion">Discussion</button>
+      <!-- Stories dashboard tab. Hidden by default; shortcut-stories.js
+           unhides it when the Shortcut integration has
+           `show_dashboard` checked (GET /api/integrations/shortcut).
+           Backed by pure-API endpoints — never the LLM. Placed before
+           Settings so the per-user dashboard sits with the main views. -->
+      <button role="tab" id="mode-stories-btn" aria-selected="false"
+              data-mode="stories" hidden>
+        <svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="currentColor" d="M4 5a2 2 0 0 1 2-2h13a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V5zm2 0v14h13V5H6zm2 4h9v2H8V9zm0 4h9v2H8v-2zm0 4h5v2H8v-2z"/>
+        </svg>
+        <span>Stories</span>
+      </button>
       <button role="tab" id="mode-settings-btn" aria-selected="false"
               data-mode="settings">
         <svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -806,11 +818,58 @@
     </div>
   </main>
 
+  <!-- Stories dashboard view. Only reachable when the Shortcut
+       integration has "Show my stories dashboard" checked —
+       shortcut-stories.js hides both the tab and this view
+       otherwise. Content comes from the pure-API endpoints
+       /api/integrations/shortcut/stories… (never the LLM). -->
+  <main id="view-stories" class="view" hidden>
+    <div class="stories-dashboard">
+      <header class="stories-header">
+        <h2>My Shortcut stories</h2>
+        <div class="stories-header-actions">
+          <input id="stories-search" type="search"
+                 placeholder="Search my stories… (e.g. is:started label:backend)"
+                 autocomplete="off" spellcheck="false">
+          <label class="stories-include-done">
+            <input id="stories-include-done" type="checkbox">
+            <span>Include done</span>
+          </label>
+          <button id="stories-refresh" type="button" class="ghost">Refresh</button>
+        </div>
+      </header>
+      <p id="stories-status" class="stories-status" role="status" aria-live="polite"></p>
+      <!-- List pane: one button per story. -->
+      <ul id="stories-list" class="stories-list"></ul>
+    </div>
+
+    <!-- Story detail opens as an overlay on top of the list (closed
+         with the × button, by clicking the backdrop, or with Esc). -->
+    <div id="stories-overlay" class="stories-overlay" hidden>
+      <article id="stories-detail" class="stories-detail stories-overlay-card"
+               role="dialog" aria-modal="true" aria-labelledby="stories-detail-title">
+        <button id="stories-close" type="button" class="stories-overlay-close"
+                aria-label="Close">×</button>
+        <header class="stories-detail-header">
+          <h3 id="stories-detail-title"></h3>
+          <span id="stories-detail-meta" class="stories-detail-meta"></span>
+        </header>
+        <div id="stories-detail-labels" class="stories-detail-labels"></div>
+        <div id="stories-detail-body" class="stories-detail-body markdown-body"></div>
+        <section class="stories-comments">
+          <h4>Comments</h4>
+          <ul id="stories-comments-list" class="stories-comments-list"></ul>
+        </section>
+      </article>
+    </div>
+  </main>
+
   <!-- Mode toggle is a plain script (no imports) so it can run as a
        classic non-module script. chat.js is a module so we can use
        top-level await + scoped imports cleanly. Both are independent
        of the UMD globals above. -->
   <script src="/static/mode.js" defer></script>
+  <script src="/static/shortcut-stories.js" defer></script>
   <script type="module" src="/static/chat.js"></script>
   <script type="module" src="/static/app.js"></script>
 

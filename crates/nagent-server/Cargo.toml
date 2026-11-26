@@ -77,6 +77,7 @@ sha2 = "0.10"
 stt-proto          = { path = "../stt-proto" }
 stt-core           = { path = "../stt-core" }
 nagent-support     = { path = "../nagent-support" }
+nagent-shortcut    = { path = "../nagent-shortcut" }
 nagent-db          = { path = "../nagent-db" }
 nagent-agents      = { path = "../nagent-agents" }
 nagent-tts         = { path = "../nagent-tts" }

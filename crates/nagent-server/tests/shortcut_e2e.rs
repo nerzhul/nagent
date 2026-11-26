@@ -202,6 +202,30 @@ fn route(path: &str) -> (u16, &'static str, String) {
             })),
         );
     }
+    if path.starts_with("/stories/101/comments") {
+        return (
+            200,
+            "OK",
+            json(serde_json::json!([
+                {"id": "c1", "author_id": "u1", "text": "looks **good**", "created_at": "2026-11-20T10:00:00Z"}
+            ])),
+        );
+    }
+    if path.starts_with("/stories/101") {
+        return (
+            200,
+            "OK",
+            json(serde_json::json!({
+                "id": 101,
+                "name": "Add dark mode",
+                "story_type": "feature",
+                "workflow_state_id": 500000001,
+                "labels": [{"id": 9, "name": "ui", "color": "#8ab4ff"}],
+                "description": "As a user I want **dark mode**\n\n- [ ] a\n- [ ] b",
+                "app_url": "https://app.shortcut.com/ws/story/101"
+            })),
+        );
+    }
     if path == "/bad-token" {
         return (
             401,
@@ -257,7 +281,7 @@ fn shortcut_service_def_shape() {
     use nagent_agents::{FieldKind, ServiceRegistry};
     let reg = ServiceRegistry::new(&[SHORTCUT_SERVICE]);
     let svc = reg.get("shortcut").expect("shortcut service registered");
-    assert_eq!(svc.fields.len(), 2);
+    assert_eq!(svc.fields.len(), 3);
     let token = &svc.fields[0];
     assert_eq!(token.key, "api_token");
     assert_eq!(token.kind, FieldKind::Password);
@@ -271,6 +295,16 @@ fn shortcut_service_def_shape() {
     assert_eq!(username.kind, FieldKind::Text);
     assert!(username.required);
     assert!(!username.echo_on_edit, "username is credential-adjacent");
+    // The stories-dashboard toggle: a checkbox, optional, echoed
+    // back on edit (not a secret — wire format "true"/"false").
+    let dashboard = &svc.fields[2];
+    assert_eq!(dashboard.key, "show_dashboard");
+    assert_eq!(dashboard.kind, FieldKind::Checkbox);
+    assert!(!dashboard.required, "the dashboard toggle is optional");
+    assert!(
+        dashboard.echo_on_edit,
+        "the checkbox state must be echoed so the form stays ticked on reopen"
+    );
 }
 
 #[test]
@@ -672,5 +706,476 @@ async fn probe_is_fail_closed_and_redacted() {
     assert!(
         !text.contains(TEST_TOKEN),
         "AGENTS.md §6: even the fail-closed error body must not carry the token; got {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pure-API stories dashboard endpoints (GET /api/integrations/shortcut/stories…)
+// ---------------------------------------------------------------------------
+
+/// Boot a test app with auth + credentials routes + the shortcut API
+/// dashboard routes, all pointed at the loopback fixture, with the
+/// token + username + `show_dashboard` flag already in the vault.
+/// Returns the app, the bearer header and the app state.
+async fn boot_dashboard_app(fx: &Fixture) -> (axum::Router, String, Arc<nagent_server::AppState>) {
+    use nagent_agents::shortcut_service::SHORTCUT_SERVICE;
+    use nagent_agents::ServiceRegistry;
+    use nagent_server::credentials::{CredentialResolver, CredentialsKey};
+
+    let auth_store = temp_store().await;
+    let key = Arc::new(CredentialsKey::from_bytes([0x2bu8; 32]));
+    let resolver = CredentialResolver::new(auth_store.clone(), key.clone(), None, None);
+
+    let user_id = auth_store
+        .admin()
+        .users
+        .create("jane@example.com", "Jane", "local", Some(b"hash"))
+        .await
+        .expect("create user");
+    let session = auth_store
+        .admin()
+        .sessions
+        .create(user_id, Duration::from_secs(3600), None, None)
+        .await
+        .expect("create session");
+    let bearer = format!(
+        "Bearer {}",
+        session.plaintext_token.clone().expect("plaintext token")
+    );
+
+    let mut builder = nagent_server::testing::app_state();
+    Arc::make_mut(&mut builder.config).auth.enabled = true;
+    Arc::make_mut(&mut builder.config).auth.backends =
+        vec![nagent_server::config::AuthBackendKind::Local];
+    Arc::make_mut(&mut builder.config).auth.public_url = "https://example.com".into();
+    Arc::make_mut(&mut builder.config).auth.db = nagent_server::config::AuthDbConfig {
+        backend: "sqlite".into(),
+        url: format!(
+            "sqlite://file:shortcut_e2e_dash_{}?mode=memory&cache=shared",
+            Uuid::new_v4()
+        ),
+        max_connections: 1,
+        auto_migrate: true,
+    };
+    Arc::make_mut(&mut builder.config).agents.shortcut.base_url = fx.base_url();
+    Arc::make_mut(&mut builder.config).agents.shortcut.allowlist = vec!["127.0.0.1".to_string()];
+    let services = Arc::new(ServiceRegistry::new(&[SHORTCUT_SERVICE]));
+    let state = builder
+        .with_auth(auth_store.clone())
+        .with_credential_resolver(Arc::new(resolver), key.clone())
+        .with_services(services)
+        .build();
+
+    let auth_state = state.auth.as_ref().expect("auth wired").clone();
+    let auth_layer = axum::middleware::from_fn_with_state(
+        auth_state,
+        nagent_server::auth::middleware::require_auth_middleware,
+    );
+    let cred_routes =
+        nagent_server::credentials::routes::build_protected_credentials_router(state.clone());
+    let api_routes =
+        nagent_server::credentials::shortcut_api::build_shortcut_api_router(state.clone());
+    let app = cred_routes
+        .merge(api_routes)
+        .layer(auth_layer)
+        .with_state(state.clone());
+
+    // Seed the vault: token + username + the dashboard checkbox ON.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("PUT")
+                .uri("/api/integrations/shortcut/credentials")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "fields": {
+                            "api_token": TEST_TOKEN,
+                            "username": "jane",
+                            "show_dashboard": "true"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "PUT credentials");
+
+    (app, bearer, state)
+}
+
+/// The dashboard endpoints read the vault token and proxy the
+/// Shortcut API directly (never the LLM): list with the default
+/// `owner:<mention_name>` query, list with an explicit query,
+/// story detail with full description + comments, 404 on unknown
+/// id — and no response ever carries the token (AGENTS.md §6).
+/// Plain GET helper for the dashboard test: bearer-authenticated,
+/// empty body, returns the raw response.
+async fn get(app: axum::Router, bearer: &str, uri: &str) -> axum::response::Response {
+    app.oneshot(
+        HttpRequest::builder()
+            .method("GET")
+            .uri(uri)
+            .header(axum::http::header::AUTHORIZATION, bearer)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn stories_dashboard_endpoints_against_loopback() {
+    let fx = Fixture::start().await;
+    let (app, bearer, _state) = boot_dashboard_app(&fx).await;
+    macro_rules! get {
+        ($uri:expr) => {
+            get(app.clone(), &bearer, $uri).await
+        };
+    }
+
+    // 0. The `show_dashboard` checkbox round-trips through
+    //    GET /api/integrations/shortcut (echo_on_edit path).
+    let resp = get!("/api/integrations/shortcut");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let svc: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(svc["configured"], true);
+    let dash = svc["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["key"] == "show_dashboard")
+        .expect("show_dashboard field present");
+    assert_eq!(dash["kind"], "checkbox");
+    assert_eq!(dash["value"], "true", "checkbox state must be echoed");
+    assert_eq!(dash["filled"], true);
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !text.contains(TEST_TOKEN),
+        "GET service must not leak the token"
+    );
+
+    // 0b. `GET /api/integrations/shortcut/me` resolves the vault
+    //     token's member and returns the display identity (mention
+    //     name) — never the token.
+    let resp = get(app.clone(), &bearer, "/api/integrations/shortcut/me").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let me: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(me["data"]["mention_name"], "jane");
+    assert_eq!(me["data"]["name"], "Jane Doe");
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !text.contains(TEST_TOKEN),
+        "AGENTS.md §6: /me response must not contain the token; got {text}"
+    );
+
+    // 0c. A partial PUT (only the checkbox) must KEEP the saved token
+    //     and username — the password field is never echoed to the
+    //     browser, so it is absent from the body on edit and must be
+    //     carried over server-side, never wiped.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("PUT")
+                .uri("/api/integrations/shortcut/credentials")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "fields": { "show_dashboard": "false" } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "partial PUT");
+    let resp = get(app.clone(), &bearer, "/api/integrations/shortcut").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let svc: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let by_key = |k: &str| {
+        svc["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["key"] == k)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        by_key("api_token")["filled"],
+        true,
+        "token must survive a partial PUT"
+    );
+    assert_eq!(
+        by_key("username")["filled"],
+        true,
+        "username must survive a partial PUT"
+    );
+    assert_eq!(
+        by_key("show_dashboard")["value"],
+        "false",
+        "checkbox was updated"
+    );
+    // …and the dashboard still works with the preserved token.
+    let resp = get(app.clone(), &bearer, "/api/integrations/shortcut/stories").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "list must still work after partial PUT"
+    );
+    // An empty-fields PUT is a documented no-op: nothing wiped.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("PUT")
+                .uri("/api/integrations/shortcut/credentials")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "fields": {} }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = get(app.clone(), &bearer, "/api/integrations/shortcut").await;
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let svc: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(
+        svc["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["filled"] == true),
+        "empty PUT must not wipe any field: {svc}"
+    );
+
+    // 1. Default list: the server composes `owner:jane !is:archived
+    //    !is:done` — scoped to the caller, done stories excluded by
+    //    default.
+    let resp = get!("/api/integrations/shortcut/stories");
+    assert_eq!(resp.status(), StatusCode::OK, "list must succeed");
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(list["data"]["count"], 1);
+    assert_eq!(list["data"]["stories"][0]["id"], 101);
+    assert_eq!(list["data"]["stories"][0]["name"], "Add dark mode");
+    assert_eq!(
+        list["data"]["stories"][0]["app_url"], "https://app.shortcut.com/ws/story/101",
+        "list rows must carry app_url so the UI can render the external link"
+    );
+    assert_eq!(list["data"]["query"], "owner:jane !is:archived !is:done");
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !text.contains(TEST_TOKEN),
+        "AGENTS.md §6: list response must not contain the token; got {text}"
+    );
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|(line, token)| line.starts_with("GET /search/stories?")
+                && line.contains("query=owner%3Ajane+%21is%3Aarchived+%21is%3Adone")
+                && line.contains("page_size=30")
+                && token == TEST_TOKEN),
+        "default list must scope to owner:jane and exclude done; got {:?}",
+        fx.requests()
+    );
+
+    // 2. A free-text filter is ANDed with the owner scope — it can
+    //    never list other people's stories.
+    let resp = get!("/api/integrations/shortcut/stories?query=is%3Astory+is%3Astarted&limit=5");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        list["data"]["query"],
+        "owner:jane !is:archived !is:done is:story is:started"
+    );
+    assert!(
+        fx.requests().iter().any(|(line, _)| line
+            .contains("query=owner%3Ajane+%21is%3Aarchived+%21is%3Adone+is%3Astory+is%3Astarted")
+            && line.contains("page_size=5")),
+        "user filter must be ANDed with owner:jane; got {:?}",
+        fx.requests()
+    );
+
+    // 2b. `include_done=true` drops the `!is:done` term.
+    let resp = get!("/api/integrations/shortcut/stories?include_done=true");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(list["data"]["query"], "owner:jane !is:archived");
+    assert!(
+        fx.requests().iter().any(
+            |(line, _)| line.contains("query=owner%3Ajane+%21is%3Aarchived")
+                && !line.contains("is%3Adone")
+        ),
+        "include_done=true must omit !is:done; got {:?}",
+        fx.requests()
+    );
+
+    // 2c. A query that already pins `owner:` is respected (the owner
+    //     scope is not doubled).
+    let resp = get!("/api/integrations/shortcut/stories?query=owner%3Ajohn+is%3Astarted");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        list["data"]["query"],
+        "!is:archived !is:done owner:john is:started"
+    );
+
+    // 3. Story detail: full description + comments, two upstream calls.
+    let resp = get!("/api/integrations/shortcut/stories/101");
+    assert_eq!(resp.status(), StatusCode::OK, "detail must succeed");
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let detail: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(detail["data"]["story"]["id"], 101);
+    assert_eq!(
+        detail["data"]["story"]["app_url"], "https://app.shortcut.com/ws/story/101",
+        "detail must carry app_url for the overlay's external link"
+    );
+    assert_eq!(
+        detail["data"]["story"]["description"],
+        "As a user I want **dark mode**\n\n- [ ] a\n- [ ] b",
+        "the dashboard gets the FULL description (no LLM cap)"
+    );
+    assert_eq!(detail["data"]["story"]["labels"][0]["name"], "ui");
+    assert_eq!(detail["data"]["story"]["labels"][0]["color"], "#8ab4ff");
+    assert_eq!(detail["data"]["comments"][0]["text"], "looks **good**");
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !text.contains(TEST_TOKEN),
+        "AGENTS.md §6: detail response must not contain the token; got {text}"
+    );
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|(line, _)| line.starts_with("GET /stories/101/comments")),
+        "detail must fetch the comments; got {:?}",
+        fx.requests()
+    );
+
+    // 4. Unknown story → 404 with a JSON error, no token.
+    let resp = get!("/api/integrations/shortcut/stories/999999");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(text.contains("error"), "404 body must carry an error field");
+    assert!(!text.contains(TEST_TOKEN));
+}
+
+/// Without a vault token the dashboard endpoints answer 400 with a
+/// "not configured" hint — and never echo a token.
+#[tokio::test]
+async fn stories_dashboard_requires_configured_token() {
+    let fx = Fixture::start().await;
+    let auth_store = temp_store().await;
+    let key = Arc::new(nagent_server::credentials::CredentialsKey::from_bytes(
+        [0x2bu8; 32],
+    ));
+    let resolver = nagent_server::credentials::CredentialResolver::new(
+        auth_store.clone(),
+        key.clone(),
+        None,
+        None,
+    );
+    let user_id = auth_store
+        .admin()
+        .users
+        .create("jane@example.com", "Jane", "local", Some(b"hash"))
+        .await
+        .expect("create user");
+    let session = auth_store
+        .admin()
+        .sessions
+        .create(user_id, Duration::from_secs(3600), None, None)
+        .await
+        .expect("create session");
+    let bearer = format!(
+        "Bearer {}",
+        session.plaintext_token.clone().expect("plaintext token")
+    );
+
+    let mut builder = nagent_server::testing::app_state();
+    Arc::make_mut(&mut builder.config).auth.enabled = true;
+    Arc::make_mut(&mut builder.config).auth.backends =
+        vec![nagent_server::config::AuthBackendKind::Local];
+    Arc::make_mut(&mut builder.config).auth.public_url = "https://example.com".into();
+    Arc::make_mut(&mut builder.config).auth.db = nagent_server::config::AuthDbConfig {
+        backend: "sqlite".into(),
+        url: format!(
+            "sqlite://file:shortcut_e2e_unconf_{}?mode=memory&cache=shared",
+            Uuid::new_v4()
+        ),
+        max_connections: 1,
+        auto_migrate: true,
+    };
+    Arc::make_mut(&mut builder.config).agents.shortcut.base_url = fx.base_url();
+    Arc::make_mut(&mut builder.config).agents.shortcut.allowlist = vec!["127.0.0.1".to_string()];
+    let state = builder
+        .with_auth(auth_store.clone())
+        .with_credential_resolver(Arc::new(resolver), key)
+        .build();
+    let auth_state = state.auth.as_ref().expect("auth wired").clone();
+    let auth_layer = axum::middleware::from_fn_with_state(
+        auth_state,
+        nagent_server::auth::middleware::require_auth_middleware,
+    );
+    let api_routes =
+        nagent_server::credentials::shortcut_api::build_shortcut_api_router(state.clone());
+    let app = api_routes.layer(auth_layer).with_state(state);
+
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("GET")
+                .uri("/api/integrations/shortcut/stories")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        text.contains("not configured"),
+        "hint must point at Settings; got {text}"
+    );
+    assert!(!text.contains(TEST_TOKEN));
+    assert!(
+        fx.requests().is_empty(),
+        "no upstream call may happen without a vault token"
     );
 }

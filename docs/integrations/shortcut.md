@@ -62,6 +62,65 @@ Every probe call writes one `auth_events` row of kind
 `shortcut_probe_<outcome>` (plus a `_host:<host>` companion). The
 token never lands on the audit row.
 
+## Stories dashboard tab (pure API, no LLM)
+
+The integration form has a **Show my stories dashboard** checkbox
+(`show_dashboard` field, wire format `"true"` / `"false"`, optional,
+echoed back on edit). When it is ticked (and the service is
+configured), a **Stories** tab appears in the top menu of the UI.
+
+The tab is backed by two pure-API endpoints — the story list and
+detail never go through the LLM; the server reads the caller's
+`shortcut.api_token` from the vault and proxies the Shortcut API
+through the shared `nagent-shortcut` crate:
+
+```
+GET /api/integrations/shortcut/stories?query=&limit=&include_done=
+→ 200 {"data": {"query": "…", "total": 1, "count": 1,
+                "stories": [{id, name, story_type, labels, …}]}}
+GET /api/integrations/shortcut/stories/{id}
+→ 200 {"data": {"story": {…, "description": "<full markdown>",
+                          "labels": [{name, color}]},
+                "comments": [{id, author_id, text, …}]}}
+GET /api/integrations/shortcut/me
+→ 200 {"data": {"id": "<member-uuid>", "name": "Jane Doe", "mention_name": "jane"}}
+```
+
+The list query is composed **server-side** and always scoped to the
+caller: `owner:<saved mention_name>` is prepended unless `query`
+already pins an `owner:`, `!is:archived` is always applied, and
+`!is:done` is applied unless `include_done=true` (the "Include done"
+checkbox in the dashboard header). A free-text filter like
+`is:started` therefore only ever matches the user's own stories.
+
+`/me` resolves the vault token's member via `GET /members` (matched
+by the saved `username`) so the integrations form can pre-fill the
+mention-name field and show "Connected as @jane" when the service is
+already configured. It never returns the token. Audit kind:
+`shortcut_api_me_<outcome>`.
+
+Saving the edit form never wipes the token: `PUT
+/api/integrations/shortcut/credentials` only overwrites the fields
+present in the body — declared fields absent from the body (the API
+token, which is never echoed to the browser) keep their existing
+encrypted rows, and an empty `fields` map is a no-op.
+
+- Without `query`, the list defaults to `owner:<mention_name>
+  !is:archived !is:done` (the saved `username` field grounds the
+  `owner:` operator; done stories appear only with `include_done=true`);
+  when no `username` is saved, the configured `backlog_query` is the
+  base. `limit` defaults to 30 and is clamped to `[1, max_items]`.
+- The detail returns the **full** description (no `max_body_bytes`
+  cap — that cap only applies to what the LLM sees) and all
+  comments; the UI renders both as sanitized markdown.
+- Every call writes one `auth_events` row of kind
+  `shortcut_api_list_<outcome>` / `shortcut_api_story_<outcome>`.
+  The token never lands on the audit row.
+- Error mapping: missing token → 400 "not configured"; upstream
+  401 → 401 with the reconnect hint; 429 → 429 with the
+  `Retry-After` hint; unknown story → 404; other non-2xx → 502.
+  No error body ever contains the token (AGENTS.md §6).
+
 ## Configuration
 
 ### `[agents.shortcut]` (operator, optional)
@@ -111,7 +170,9 @@ deployment, e.g. to restrict the backlog to one team:
 
 - **Headers** — every request carries `Shortcut-Token: <token>`,
   `Accept: application/json`, `Content-Type: application/json`,
-  and a `User-Agent: nagent-shortcut-agent/<version>`.
+  and a `User-Agent: nagent-shortcut/<version>` (the wire client
+  lives in the `nagent-shortcut` crate, shared with the dashboard
+  endpoints).
 - **Error mapping** — 401 → "reconnect via
   /settings/integrations"; 429 → `RateLimited` with the
   `Retry-After` hint (the Shortcut quota is 200 req/min per

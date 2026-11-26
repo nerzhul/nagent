@@ -40,6 +40,13 @@ pub enum FieldKind {
     /// browser-side validation is a UX hint, the server is the
     /// source of truth.
     Number,
+    /// Checkbox (`<input type="checkbox">`). The wire format is
+    /// the string `"true"` / `"false"`; the UI always submits the
+    /// checkbox explicitly (an unchecked box must persist
+    /// `"false"`, not be skipped like an empty text input).
+    /// Used for feature toggles on an integration (e.g. the
+    /// Shortcut stories dashboard tab). Never required.
+    Checkbox,
 }
 
 /// One option for a [`FieldKind::Select`] field. The `value` is
@@ -70,8 +77,8 @@ pub struct FieldDef {
     pub key: &'static str,
     /// Human-readable label rendered above the input.
     pub label: &'static str,
-    /// `Text` / `Password` / `Url` / `Select` / `Number` — drives
-    /// the HTML input type.
+    /// `Text` / `Password` / `Url` / `Select` / `Number` /
+    /// `Checkbox` — drives the HTML input type.
     pub kind: FieldKind,
     /// Whether the field must be set for the service to count as
     /// "configured" in the UI. Server-side validation enforces this
@@ -539,6 +546,51 @@ mod tests {
         assert_eq!(opts[0].label, "Implicit TLS");
         assert_eq!(opts[1].value, "starttls");
         assert_eq!(opts[1].label, "STARTTLS");
+    }
+
+    /// A `Checkbox` field serialises as `"checkbox"` on the wire
+    /// (the integrations UI renders `<input type="checkbox">`) and,
+    /// like other non-`Password` fields with `echo_on_edit = true`,
+    /// carries its saved `"true"` / `"false"` value back to the
+    /// form so the box stays ticked on reopen.
+    #[test]
+    fn checkbox_field_kind_serializes_and_echoes_value() {
+        const FAKE_SERVICE_CHECKBOX: ServiceDef = ServiceDef {
+            id: "fake-checkbox",
+            display_name: "Fake (checkbox)",
+            icon: "?",
+            fields: &[FieldDef {
+                key: "show_dashboard",
+                label: "Show dashboard",
+                kind: FieldKind::Checkbox,
+                required: false,
+                help: None,
+                placeholder: None,
+                options: &[],
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+            }],
+            docs_url: None,
+        };
+        // Wire format: lowercase "checkbox".
+        assert_eq!(
+            serde_json::to_value(FieldKind::Checkbox).unwrap(),
+            serde_json::json!("checkbox")
+        );
+        // The saved value echoes back for non-Password fields with
+        // `echo_on_edit = true`; an optional checkbox is not part
+        // of the `configured` computation (only required fields are).
+        let mut plaintext = std::collections::HashMap::new();
+        plaintext.insert("show_dashboard".to_string(), "true".to_string());
+        let s = FAKE_SERVICE_CHECKBOX.to_summary(&["show_dashboard".to_string()], &plaintext);
+        let f = &s.fields[0];
+        assert!(f.filled);
+        assert_eq!(f.value.as_deref(), Some("true"));
+        // The checkbox is optional, so it never gates `configured`:
+        // with zero required fields the `all()` over required fields
+        // is vacuously true (existing semantic, unchanged).
+        assert!(s.configured);
+        let s = FAKE_SERVICE_CHECKBOX.to_summary(&[], &std::collections::HashMap::new());
+        assert!(s.fields[0].value.is_none(), "unfilled → no value echoed");
     }
 
     /// A `Number` field must NOT carry an `options` array in the

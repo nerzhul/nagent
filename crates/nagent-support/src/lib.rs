@@ -9,7 +9,11 @@
 //!   in-process rate limiter.
 //! - [`ttl_map`] — bounded `K -> V` map with per-entry TTL.
 //! - [`cpu`] — [`cpu::run_bounded`] helper (semaphore + blocking pool).
+//! - [`egress`] — hardened HTTP egress client (SSRF pre-flight,
+//!   hostname allow-list, timeouts, body-size budget) shared by
+//!   every network agent and wire client.
 
 pub mod cpu;
+pub mod egress;
 pub mod ratelimit;
 pub mod ttl_map;

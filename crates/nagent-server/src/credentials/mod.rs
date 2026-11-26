@@ -37,6 +37,9 @@ pub mod email_probe;
 pub mod github_probe;
 
 #[cfg(feature = "shortcut-agent")]
+pub mod shortcut_api;
+
+#[cfg(feature = "shortcut-agent")]
 pub mod shortcut_probe;
 
 pub use crypto::{decrypt, encrypt, EncryptedSecret};

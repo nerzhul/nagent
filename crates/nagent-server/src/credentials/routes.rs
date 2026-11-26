@@ -11,8 +11,12 @@
 //! - `GET    /api/integrations`              — list every service
 //! with `configured` per service for the caller.
 //! - `GET    /api/integrations/:id`           — same, single service.
-//! - `PUT    /api/integrations/:id/credentials` — atomic replace of
-//! all fields. CSRF-protected.
+//! - `PUT    /api/integrations/:id/credentials` — upsert of the
+//! submitted fields. Declared fields **absent** from the body keep
+//! their existing ciphertext rows (the DB upsert is a full replace,
+//! so the handler re-supplies them), and an empty `fields` map is a
+//! no-op — this is what lets the edit form save without re-typing a
+//! Password (never echoed to the browser). CSRF-protected.
 //! - `DELETE /api/integrations/:id/credentials` — clear all fields.
 //! CSRF-protected.
 
@@ -139,7 +143,13 @@ async fn build_plaintext_values(
 ) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     for f in svc.fields {
-        if !matches!(f.kind, FieldKind::Text | FieldKind::Url) {
+        // `Checkbox` fields are echoed too (wire format
+        // `"true"` / `"false"`) so a feature toggle like the
+        // Shortcut stories dashboard stays ticked on reopen.
+        if !matches!(
+            f.kind,
+            FieldKind::Text | FieldKind::Url | FieldKind::Checkbox
+        ) {
             continue;
         }
         if !f.echo_on_edit {
@@ -234,8 +244,11 @@ pub async fn get_integration(
 #[derive(Debug, Deserialize)]
 pub struct PutCredentialsBody {
     /// Map of `field_key → plaintext`. Unknown keys are rejected
-    /// (400). Empty map is a no-op (returns 204 without touching
-    /// the DB).
+    /// (400). Keys absent from the map are NOT cleared: the handler
+    /// carries their existing ciphertext rows over (see
+    /// [`put_credentials`]), so a partial save never wipes a field
+    /// the form did not submit (e.g. a never-echoed Password).
+    /// Empty map is a no-op (returns 204 without touching the DB).
     #[serde(default)]
     pub fields: std::collections::HashMap<String, String>,
 }
@@ -266,24 +279,38 @@ pub async fn put_credentials(
             )));
         }
     }
-    // Encrypt every field up-front so a single key mismatch
-    // surfaces before any DB write.
-    let mut rows: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::with_capacity(body.fields.len());
-    for (field_key, plaintext) in &body.fields {
-        let sealed = encrypt(&state.key, plaintext).map_err(|e| {
-            AuthError::Internal(format!(
-                "encrypt failed for service={} field={}: {e}",
-                svc.id, field_key
-            ))
-        })?;
-        rows.push((field_key.clone(), sealed.nonce, sealed.ciphertext));
+    // Empty body = no-op (documented contract): the DB upsert is a
+    // full replace of the service's rows, so we must never call it
+    // with an empty row list — that would wipe every saved field.
+    if body.fields.is_empty() {
+        return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    state
-        .store
-        .for_user(user.id)
-        .credentials()
-        .upsert(svc.id, &rows)
-        .await?;
+    // The DB `upsert` deletes every row of the service then re-inserts
+    // the supplied ones, so a partial PUT must re-supply the declared
+    // fields the body omits. Those keep their existing ciphertext
+    // verbatim (no re-encrypt): this is what lets the edit form save
+    // a non-secret change (e.g. the Shortcut `show_dashboard` checkbox)
+    // without re-typing the API token — the password field is never
+    // echoed to the browser, so it is always absent from the body on
+    // edit and must be carried over here, never wiped.
+    let creds = state.store.for_user(user.id).credentials();
+    let mut rows: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::with_capacity(svc.fields.len());
+    for f in svc.fields {
+        if let Some(plaintext) = body.fields.get(f.key) {
+            // Encrypt every submitted field up-front so a single key
+            // mismatch surfaces before any DB write.
+            let sealed = encrypt(&state.key, plaintext).map_err(|e| {
+                AuthError::Internal(format!(
+                    "encrypt failed for service={} field={}: {e}",
+                    svc.id, f.key
+                ))
+            })?;
+            rows.push((f.key.to_string(), sealed.nonce, sealed.ciphertext));
+        } else if let Ok(Some(row)) = creds.fetch(svc.id, f.key).await {
+            rows.push((f.key.to_string(), row.nonce, row.ciphertext));
+        }
+    }
+    creds.upsert(svc.id, &rows).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

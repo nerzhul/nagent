@@ -14,14 +14,23 @@
 //!   live.
 //! - [`services`] — the service catalogue (`ServiceRegistry`,
 //!   `ServiceDef`, `FieldKind`). Plain data types, no I/O.
-//! - [`egress`] — the egress HTTP client used by network agents to
-//!   validate URLs and fetch remote resources.
+//! - [`egress`] — re-export of `nagent_support::egress` (the egress
+//!   HTTP client used by network agents to validate URLs and fetch
+//!   remote resources). The module lives in `nagent-support` so the
+//!   standalone wire-client crates (`nagent-shortcut`, …) can share
+//!   the SSRF policy without depending on this crate.
 
 pub mod agents;
 #[cfg(feature = "caldav-agent")]
 pub mod caldav_service;
 pub mod config;
-pub mod egress;
+/// Re-export of `nagent_support::egress` — kept as a module so every
+/// `crate::egress::…` path in this crate (and every
+/// `nagent_agents::egress::…` path in `nagent-server`) keeps
+/// compiling unchanged.
+pub mod egress {
+    pub use nagent_support::egress::*;
+}
 #[cfg(feature = "email-agent")]
 pub mod email_imap_service;
 #[cfg(feature = "email-agent")]

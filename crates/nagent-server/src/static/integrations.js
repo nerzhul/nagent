@@ -324,9 +324,22 @@ function buildFormField(field) {
   // every form control and reads `dataset.key + value`).
   // Three different DOM elements share that contract: a
   // plain `<input>` (Text / Password / Url / Number), a
-  // `<select>` (Select). We branch on `field.kind` here.
+  // `<select>` (Select), a checkbox (`Checkbox`). We branch
+  // on `field.kind` here.
   let input;
-  if (field.kind === "select") {
+  if (field.kind === "checkbox") {
+    // Wire format is "true" / "false". The submit handler reads
+    // `checked` (not `value`, which is always "on" for a
+    // checkbox) and always submits the box explicitly, so an
+    // unchecked toggle persists "false" instead of being
+    // skipped like an empty text input.
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = field.key;
+    input.dataset.key = field.key;
+    input.checked = field.value === "true";
+    wrap.classList.add("chat-integration-field-checkbox");
+  } else if (field.kind === "select") {
     input = document.createElement("select");
     input.name = field.key;
     input.dataset.key = field.key;
@@ -373,6 +386,14 @@ function buildFormField(field) {
         ? "number"
         : "text";
     if (field.placeholder) input.placeholder = field.placeholder;
+    // A filled Password field is never echoed (`value` is always
+    // absent for secrets, AGENTS.md §6) — show a "saved" placeholder
+    // instead so the user knows leaving it empty keeps the saved
+    // token (the PUT handler carries over fields absent from the
+    // body, it never wipes them).
+    if (field.kind === "password" && field.filled && !field.value) {
+      input.placeholder = "••• already saved — leave empty to keep";
+    }
     // Pre-fill the field when the server echoed back a saved
     // value. The server only populates `field.value` for
     // non-`password` kinds (URL, username, host, …); secret
@@ -939,10 +960,14 @@ async function probeShortcut(apiToken, username) {
   return await resp.json();
 }
 
+// Wires the "Test connection" button for the Shortcut editor and
+// returns a `showStatus(text, state)` handle on the probe panel so
+// the caller can also display the identity loaded from the vault
+// (see `loadShortcutIdentity` below).
 function attachShortcutTestButton(form, actions) {
   const tokenField = form.querySelector('[data-key="api_token"]');
   const usernameField = form.querySelector('[data-key="username"]');
-  if (!tokenField || !usernameField || !actions) return;
+  if (!tokenField || !usernameField || !actions) return null;
 
   const cancelBtn = actions.querySelector('[data-action="cancel"]');
   const testBtn = document.createElement("button");
@@ -1001,6 +1026,41 @@ function attachShortcutTestButton(form, actions) {
       testBtn.disabled = false;
     }
   });
+
+  return {
+    showStatus(text, state) {
+      const el = ensureProbePanel();
+      el.textContent = text;
+      el.dataset.state = state || "";
+    },
+  };
+}
+
+// When the Shortcut integration is already configured, load the
+// saved identity from the vault (`GET /api/integrations/shortcut/me`,
+// a pure-API endpoint that reads the token server-side): pre-fill the
+// mention-name field and show "Connected as @jane". The API token is
+// never echoed — only the mention name, same as the probe response.
+async function loadShortcutIdentity(form, actions, svc, probe) {
+  if (!svc.configured || !probe) return;
+  const usernameField = form.querySelector('[data-key="username"]');
+  try {
+    const resp = await fetch("/api/integrations/shortcut/me", {
+      credentials: "same-origin",
+    });
+    if (!resp.ok) return; // not configured / token rejected — stay quiet
+    const body = await resp.json();
+    const mention = body?.data?.mention_name;
+    if (!mention) return;
+    const name = body.data.name ? ` — ${body.data.name}` : "";
+    probe.showStatus(`Connected as @${mention}${name}.`, "ok");
+    if (usernameField && !usernameField.value) {
+      usernameField.value = mention;
+      usernameField.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  } catch (e) {
+    console.error("shortcut identity load failed:", e);
+  }
 }
 
 function attachGithubTestButton(form, actions) {
@@ -1167,6 +1227,9 @@ function openEditor(svc) {
         await deleteCredentials(svc.id);
         overlay.remove();
         await renderList();
+        document.dispatchEvent(
+          new CustomEvent("integrationsupdated", { detail: { service: svc.id } }),
+        );
       } catch (e) {
         console.error("delete credentials failed:", e);
         alert(`Delete failed: ${e.message}`);
@@ -1222,7 +1285,8 @@ function openEditor(svc) {
     attachGithubTestButton(form, actions);
   }
   if (svc.id === SHORTCUT_SERVICE_ID) {
-    attachShortcutTestButton(form, actions);
+    const probe = attachShortcutTestButton(form, actions);
+    loadShortcutIdentity(form, actions, svc, probe);
   }
 
   form.addEventListener("submit", async (e) => {
@@ -1234,7 +1298,14 @@ function openEditor(svc) {
     // key as "keep the existing ciphertext row untouched",
     // which is the expected behaviour when the user reopens
     // the form and just clicks Save without changing anything.
+    // Checkboxes are the exception: they always submit, as
+    // "true" / "false", because an unchecked box is a real
+    // value to persist (not an empty input to skip).
     for (const ctrl of form.querySelectorAll("input, select")) {
+      if (ctrl.type === "checkbox") {
+        fields[ctrl.dataset.key] = ctrl.checked ? "true" : "false";
+        continue;
+      }
       if (!ctrl.value) continue;
       fields[ctrl.dataset.key] = ctrl.value;
     }
@@ -1242,6 +1313,12 @@ function openEditor(svc) {
       await putCredentials(svc.id, fields);
       overlay.remove();
       await renderList();
+      // Let the top-level UI re-evaluate integration-driven
+      // surfaces (e.g. the Shortcut "Stories" tab visibility)
+      // after a save.
+      document.dispatchEvent(
+        new CustomEvent("integrationsupdated", { detail: { service: svc.id } }),
+      );
     } catch (err) {
       console.error("save credentials failed:", err);
       alert(`Save failed: ${err.message}`);

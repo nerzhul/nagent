@@ -29,6 +29,24 @@ visitors never see the chat/voice controls at all — see §8.
   and history on first entry to Discussion.
 - A read-only handle `globalThis.__nagentMode.current()` is exported for
   tests and debugging.
+- A fourth mode, **Stories** (`#mode-stories-btn` / `#view-stories`), is
+  conditional: it only exists when the Shortcut integration's "Show my
+  stories dashboard" checkbox is ticked
+  (`crates/nagent-server/src/static/shortcut-stories.js` reads
+  `GET /api/integrations/shortcut` and calls
+  `__nagentMode.setStoriesEnabled`). A persisted `stories` mode with
+  the tab hidden falls back to Transcript instead of showing an empty
+  view. The tab's content comes from the pure-API endpoints
+  `/api/integrations/shortcut/stories…` — never through the LLM.
+  Clicking a story opens its detail in a modal overlay (× / backdrop /
+  Esc to close); each list row carries a quiet icon-only "↗" link
+  (tooltip "Open in Shortcut" on hover/focus) and the overlay header
+  a text link — both point at the story's `app_url` (validated
+  https-only before it becomes an `href`, always `target="_blank"`
+  with `rel="noopener noreferrer"`). The list is scoped server-side
+  to the caller (`owner:<mention_name>` ANDed with the free-text
+  filter) and hides done stories unless the "Include done" checkbox
+  is ticked.
 
 ### 1.2 Header and version display
 

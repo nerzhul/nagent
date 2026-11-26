@@ -2427,6 +2427,7 @@ dependencies = [
  "ipnet",
  "mailparse",
  "meval",
+ "nagent-shortcut",
  "nagent-support",
  "oauth2",
  "rand 0.8.8",
@@ -2493,6 +2494,7 @@ dependencies = [
  "nagent-agents",
  "nagent-db",
  "nagent-server",
+ "nagent-shortcut",
  "nagent-support",
  "nagent-tts",
  "oauth2",
@@ -2522,12 +2524,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "nagent-shortcut"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nagent-support",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid 1.29.3",
+]
+
+[[package]]
 name = "nagent-support"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "dashmap",
+ "futures-util",
+ "reqwest",
  "thiserror 1.0.69",
  "tokio",
+ "url",
 ]
 
 [[package]]

@@ -14,16 +14,17 @@ reading"); reviewers must update it whenever the breakdown changes
 
 ## Workspace layout
 
-The workspace has six crates, listed under `Cargo.toml`
+The workspace has seven crates, listed under `Cargo.toml`
 `[workspace.members]` in dependency order:
 
 | Crate | Role | Layer |
 | --- | --- | --- |
 | `crates/stt-proto` | Wire types and `postcard` codec for the WS protocol. | leaf |
 | `crates/stt-core` | `WhisperBackend` trait, `whisper-rs` implementation, inference worker and queue. | infra |
-| `crates/nagent-support` | Shared small types and utilities used by `nagent-server` (TTL-map, bounded-blocking, sweep-clock primitives). | infra |
+| `crates/nagent-support` | Shared small types and utilities (TTL-map, bounded-blocking, sweep-clock) **plus the hardened HTTP egress client** (`egress` module: SSRF pre-flight, hostname allow-list, timeouts, body-size budget) shared by every wire client. | infra |
+| `crates/nagent-shortcut` | Pure Shortcut REST API v3 client (`ShortcutClient`, token as a parameter, response cache, JSON projections). No LLM / agent dependency, so both `nagent-agents` (chat tools) and `nagent-server` (pure-API dashboard endpoints) share it. | domain |
 | `crates/nagent-db` | `Db` wrapper around `sqlx::Pool` plus migrations / row types shared by auth, credentials, and documents. | infra |
-| `crates/nagent-agents` | Chat-agent subsystem (§2). Pure: no dependency on `nagent-server`, `sqlx`, or `whisper-rs`. | domain |
+| `crates/nagent-agents` | Chat-agent subsystem (§2). Pure: no dependency on `nagent-server`, `sqlx`, or `whisper-rs`. Re-exports `nagent_support::egress` as its own `egress` module and `nagent_shortcut::ShortcutConfig` as `ShortcutAgentConfig`. | domain |
 | `crates/nagent-server` | The `axum` HTTP/WebSocket server (§1, §3). The only binary in the workspace. | transport |
 
 Dependency direction is strictly top-down: `nagent-server` is the
@@ -249,6 +250,15 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `shortcut_list_backlog` | `shortcut-agent` | Per-user Shortcut story search with the configured `[agents.shortcut].backlog_query`. Read-only. Confirm-on-read. |
 | `shortcut_get_story` | `shortcut-agent` | Per-user Shortcut `GET /stories/{id}` + `/comments` (description/comments capped). Read-only. Confirm-on-read. |
 | `shortcut_list_labels` | `shortcut-agent` | Per-user Shortcut `GET /labels`. Read-only. Confirm-on-read. |
+
+The Shortcut plugin also ships **two pure-API dashboard endpoints**
+that never go through the LLM (the story list / detail is proxied
+straight from the caller's vault token via `nagent-shortcut`):
+`GET /api/integrations/shortcut/stories?query=&limit=` and
+`GET /api/integrations/shortcut/stories/{id}`. They back the
+"Stories" top-menu tab, which appears when the integration's
+`show_dashboard` checkbox is ticked. See
+`docs/integrations/shortcut.md`.
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:

@@ -21,7 +21,9 @@
 //! `nagent-server` behind the same `shortcut-agent` cargo feature
 //! as the chat agents.
 
-use crate::services::{FieldDef, FieldKind, ServiceDef, ECHO_ON_EDIT_PASSWORD};
+use crate::services::{
+    FieldDef, FieldKind, ServiceDef, ECHO_ON_EDIT_NON_PASSWORD, ECHO_ON_EDIT_PASSWORD,
+};
 
 /// `shortcut` integration entry in the per-user service catalogue.
 ///
@@ -65,6 +67,22 @@ pub const SHORTCUT_SERVICE: ServiceDef = ServiceDef {
             // Credential-adjacent: not echoed back on edit (same
             // posture as the GitHub `username` field).
             echo_on_edit: false,
+        },
+        FieldDef {
+            key: "show_dashboard",
+            label: "Show my stories dashboard",
+            kind: FieldKind::Checkbox,
+            required: false,
+            help: Some(
+                "Adds a \"Stories\" tab to the top menu: a pure-API list of your Shortcut \
+                 stories (never goes through the LLM) with a click-to-read detail view. \
+                 Requires the API token above.",
+            ),
+            placeholder: None,
+            options: &[],
+            // Not a secret: the saved on/off state is echoed back
+            // so the checkbox stays ticked when the form reopens.
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
     ],
     docs_url: Some("https://github.com/nagent/nagent/blob/main/docs/integrations/shortcut.md"),

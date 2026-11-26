@@ -701,3 +701,221 @@ async fn http_get_integration_respects_echo_on_edit_opt_out() {
         "password plaintext leaked into GET /api/integrations response: {body_text}"
     );
 }
+
+/// A partial `PUT /api/integrations/:id/credentials` (a field the
+/// form did not submit — e.g. a Password that is never echoed to the
+/// browser) must KEEP the existing ciphertext row instead of wiping
+/// it: the DB upsert is a full replace of the service's rows, so the
+/// handler re-supplies the declared fields missing from the body.
+/// An empty `fields` map is a no-op.
+#[tokio::test]
+async fn http_partial_put_preserves_unspecified_fields() {
+    use nagent_agents::{
+        FieldDef, FieldKind, ServiceDef, ServiceRegistry, ECHO_ON_EDIT_NON_PASSWORD,
+        ECHO_ON_EDIT_PASSWORD,
+    };
+    use nagent_server::credentials::CredentialResolver;
+    use secrecy::ExposeSecret;
+    use std::time::Duration;
+
+    const TEST_SVC: ServiceDef = ServiceDef {
+        id: "test_svc_partial",
+        display_name: "Test (partial PUT)",
+        icon: "?",
+        fields: &[
+            FieldDef {
+                key: "url",
+                label: "URL",
+                kind: FieldKind::Url,
+                required: true,
+                help: None,
+                placeholder: None,
+                options: &[],
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+            },
+            FieldDef {
+                key: "username",
+                label: "Username",
+                kind: FieldKind::Text,
+                required: true,
+                help: None,
+                placeholder: None,
+                options: &[],
+                echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+            },
+            FieldDef {
+                key: "password",
+                label: "Password",
+                kind: FieldKind::Password,
+                required: true,
+                help: None,
+                placeholder: None,
+                options: &[],
+                echo_on_edit: ECHO_ON_EDIT_PASSWORD,
+            },
+        ],
+        docs_url: None,
+    };
+    let services = Arc::new(ServiceRegistry::new(&[TEST_SVC]));
+
+    let auth_store = temp_store().await;
+    let key = Arc::new(CredentialsKey::from_bytes([0x5au8; 32]));
+    let resolver = CredentialResolver::new(auth_store.clone(), key.clone(), None, None);
+    let user_id = auth_store
+        .admin()
+        .users
+        .create("alice@example.com", "Alice", "local", Some(b"hash"))
+        .await
+        .expect("create_user");
+    let session = auth_store
+        .admin()
+        .sessions
+        .create(user_id, Duration::from_secs(60), None, None)
+        .await
+        .expect("create_session");
+    let session_token = session.plaintext_token.clone().expect("plaintext token");
+
+    let mut builder = nagent_server::testing::app_state();
+    Arc::make_mut(&mut builder.config).auth.enabled = true;
+    Arc::make_mut(&mut builder.config).auth.backends =
+        vec![nagent_server::config::AuthBackendKind::Local];
+    Arc::make_mut(&mut builder.config).auth.public_url = "https://example.com".into();
+    Arc::make_mut(&mut builder.config).auth.db = nagent_server::config::AuthDbConfig {
+        backend: "sqlite".into(),
+        url: format!(
+            "sqlite://file:cred_e2e_partial_{}?mode=memory&cache=shared",
+            Uuid::new_v4()
+        ),
+        max_connections: 1,
+        auto_migrate: true,
+    };
+    let state = builder
+        .with_auth(auth_store.clone())
+        .with_credential_resolver(Arc::new(resolver), key.clone())
+        .with_services(services)
+        .build();
+    let auth_state = state.auth.as_ref().expect("auth wired").clone();
+    let auth_layer = axum::middleware::from_fn_with_state(
+        auth_state,
+        nagent_server::auth::middleware::require_auth_middleware,
+    );
+    let cred_routes =
+        nagent_server::credentials::routes::build_protected_credentials_router(state.clone());
+    // Bearer auth (like the agent e2e tests) so the CSRF check is
+    // skipped for the PUT calls.
+    let bearer = format!("Bearer {session_token}");
+    let app = cred_routes.layer(auth_layer).with_state(state);
+    let put = |app: axum::Router, body: serde_json::Value| {
+        let bearer = bearer.clone();
+        async move {
+            app.oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri("/api/integrations/test_svc_partial/credentials")
+                    .header(axum::http::header::AUTHORIZATION, bearer)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // 1. Full PUT: all three fields.
+    let resp = put(
+        app.clone(),
+        serde_json::json!({"fields": {
+            "url": "https://cloud.example.com/cal/",
+            "username": "alice",
+            "password": "s3cr3t-full"
+        }}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // 2. Partial PUT: only `url` changes (the edit form never sends
+    //    the password — it is not echoed — nor an untouched
+    //    username).
+    let resp = put(
+        app.clone(),
+        serde_json::json!({"fields": {"url": "https://cloud.example.com/cal2/"}}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // 3. The omitted fields kept their rows: username still filled +
+    //    echoed, password still filled, and its ciphertext still
+    //    decrypts to the original secret.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/integrations/test_svc_partial")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let by_key = |k: &str| {
+        body["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["key"] == k)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_key("url")["value"], "https://cloud.example.com/cal2/");
+    assert_eq!(
+        by_key("username")["filled"],
+        true,
+        "username wiped by partial PUT"
+    );
+    assert_eq!(by_key("username")["value"], "alice");
+    assert_eq!(
+        by_key("password")["filled"],
+        true,
+        "password wiped by partial PUT"
+    );
+    assert!(
+        by_key("password").get("value").is_none(),
+        "password must never be echoed"
+    );
+
+    let row = auth_store
+        .for_user(user_id)
+        .credentials()
+        .fetch("test_svc_partial", "password")
+        .await
+        .expect("fetch password row")
+        .expect("password row must still exist after partial PUT");
+    let sealed = nagent_server::credentials::crypto::EncryptedSecret {
+        nonce: row.nonce,
+        ciphertext: row.ciphertext,
+    };
+    let plain = decrypt(&key, &sealed).expect("decrypt preserved password");
+    assert_eq!(
+        plain.expose_secret(),
+        "s3cr3t-full",
+        "partial PUT must preserve the saved secret verbatim"
+    );
+
+    // 4. Empty fields map = documented no-op (nothing wiped).
+    let resp = put(app.clone(), serde_json::json!({"fields": {}})).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let row = auth_store
+        .for_user(user_id)
+        .credentials()
+        .fetch("test_svc_partial", "password")
+        .await
+        .expect("fetch")
+        .expect("empty PUT must not wipe the password row");
+    let _ = row;
+}

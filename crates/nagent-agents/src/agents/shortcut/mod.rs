@@ -52,6 +52,16 @@ pub mod search_stories;
 
 pub use client::ShortcutClient;
 
+// The wire client and the JSON projections live in the
+// `nagent-shortcut` crate so `nagent-server`'s pure-API dashboard
+// endpoints share them without depending on the agent machinery.
+// Re-exported here so the tool implementations keep their
+// `super::…` import paths (`find_member` stays `pub` because the
+// server-side setup probe used it before the extraction; it now
+// calls `nagent_shortcut::find_member` directly).
+pub use nagent_shortcut::find_member;
+pub(crate) use nagent_shortcut::{label_names, mention_name_of, name_of_member, project_story};
+
 use serde_json::Value;
 
 use crate::agents::{AgentError, ConfirmationDecision, UserContext};
@@ -166,99 +176,10 @@ pub(crate) fn cap_text(value: &Value, cap: usize) -> Value {
     }
 }
 
-/// Normalise a handle for comparison: trim, strip a leading `@`,
-/// lowercase.
-fn normalize_handle(s: &str) -> String {
-    s.trim().trim_start_matches('@').to_lowercase()
-}
-
-/// Pick the token's member out of a `GET /members` response. The v3
-/// API has no `/members/me` route — that path falls through to
-/// `/members/{member-public-id}`, whose spec requires a UUID — so the
-/// list route plus a handle match is the supported resolution. With a
-/// `handle`, matches `profile.mention_name` first, then
-/// `profile.name`, then `profile.email_address` (case-insensitive,
-/// `@`-tolerant). Without a handle, only a single-member list is
-/// unambiguous. Accepts either a member array or a single member
-/// object so callers survive minor API drift. Shared by the
-/// `shortcut_me` agent and the server-side setup probe.
-pub fn find_member<'a>(parsed: &'a Value, handle: Option<&str>) -> Option<&'a Value> {
-    let members: Vec<&Value> = match parsed.as_array() {
-        Some(arr) => arr.iter().collect(),
-        None => vec![parsed],
-    };
-    match handle.map(normalize_handle).filter(|h| !h.is_empty()) {
-        Some(h) => members.iter().copied().find(|m| {
-            let profile = m.get("profile").unwrap_or(*m);
-            ["mention_name", "name", "email_address"].iter().any(|f| {
-                profile
-                    .get(*f)
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|v| normalize_handle(v) == h)
-            })
-        }),
-        None => {
-            if members.len() == 1 {
-                members.first().copied()
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// Extract `mention_name` from a Shortcut member object. The v3
-/// member nests it under `profile`; a top-level field is accepted
-/// as a fallback so the projection survives minor API drift.
-pub(crate) fn mention_name_of(v: &Value) -> Value {
-    v.get("profile")
-        .and_then(|p| p.get("mention_name"))
-        .or_else(|| v.get("mention_name"))
-        .cloned()
-        .unwrap_or(Value::Null)
-}
-
-/// Extract `name` from a Shortcut member object (same nesting
-/// as [`mention_name_of`]).
-pub(crate) fn name_of_member(v: &Value) -> Value {
-    v.get("profile")
-        .and_then(|p| p.get("name"))
-        .or_else(|| v.get("name"))
-        .cloned()
-        .unwrap_or(Value::Null)
-}
-
-/// Extract the label names from a Shortcut `labels` array.
-pub(crate) fn label_names(v: &Value) -> Vec<Value> {
-    v.get("labels")
-        .and_then(|l| l.as_array())
-        .map(|arr| arr.iter().filter_map(|l| l.get("name").cloned()).collect())
-        .unwrap_or_default()
-}
-
-/// Project one Shortcut story object into the LLM-facing row.
-/// Used by the list / search tools; `shortcut_get_story` adds the
-/// capped description and comments.
-pub(crate) fn project_story(s: &Value) -> Value {
-    serde_json::json!({
-        "id": s.get("id"),
-        "name": s.get("name"),
-        "story_type": s.get("story_type"),
-        "workflow_state_id": s.get("workflow_state_id"),
-        "project_id": s.get("project_id"),
-        "epic_id": s.get("epic_id"),
-        "iteration_id": s.get("iteration_id"),
-        "estimate": s.get("estimate"),
-        "labels": label_names(s),
-        "owner_ids": s.get("owner_ids"),
-        "requested_by_id": s.get("requested_by_id"),
-        "deadline": s.get("deadline"),
-        "archived": s.get("archived"),
-        "created_at": s.get("created_at"),
-        "updated_at": s.get("updated_at"),
-        "app_url": s.get("app_url"),
-    })
-}
+// `find_member`, `mention_name_of`, `name_of_member`,
+// `label_names` and `project_story` are re-exported from
+// `nagent_shortcut` at the top of this module — see the block
+// right after `pub use client::ShortcutClient;`.
 
 #[cfg(test)]
 mod tests {
@@ -335,39 +256,8 @@ mod tests {
         assert_eq!(cap_text(&json!(42), 100), json!(42));
     }
 
-    #[test]
-    fn mention_name_reads_profile_with_fallback() {
-        assert_eq!(
-            mention_name_of(&json!({"profile": {"mention_name": "jane"}})),
-            json!("jane")
-        );
-        assert_eq!(
-            mention_name_of(&json!({"mention_name": "jane"})),
-            json!("jane")
-        );
-        assert_eq!(mention_name_of(&json!({})), Value::Null);
-    }
-
-    #[test]
-    fn project_story_picks_llm_fields() {
-        let raw = json!({
-            "id": 123,
-            "name": "Fix login",
-            "story_type": "bug",
-            "workflow_state_id": 500000001,
-            "epic_id": 7,
-            "iteration_id": null,
-            "estimate": 3,
-            "labels": [{"name": "backend"}],
-            "description": "long body — dropped from the list projection",
-            "app_url": "https://app.shortcut.com/ws/story/123"
-        });
-        let p = project_story(&raw);
-        assert_eq!(p["id"], 123);
-        assert_eq!(p["story_type"], "bug");
-        assert_eq!(p["labels"], json!(["backend"]));
-        assert!(p.get("description").is_none());
-    }
+    // `mention_name_of` / `project_story` projection tests moved
+    // to the `nagent-shortcut` crate together with the functions.
 }
 
 /// Loopback HTTP fixture + wire-level tests for the Shortcut

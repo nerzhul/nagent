@@ -61,6 +61,13 @@ h1 {
   border-radius: 8px;
 }
 
+/* The Stories tab carries `hidden` until the Shortcut dashboard
+ * checkbox is on; the `display: inline-flex` below would otherwise
+ * beat the user-agent `[hidden]` rule, so re-assert it here (same
+ * specificity trap as the `#view-*[hidden]` rule above). */
+#mode-toggle button[hidden] {
+  display: none;
+}
 #mode-toggle button {
   appearance: none;
   background: transparent;
@@ -581,7 +588,8 @@ select, input[type="checkbox"] {
  *     tab behaviour for every mode. */
 #view-transcript[hidden],
 #view-discussion[hidden],
-#view-settings[hidden]   { display: none; }
+#view-settings[hidden],
+#view-stories[hidden]    { display: none; }
 
 /* Discussion mode needs a wider canvas than the default `.view`
  * cap (920px) — the 260px sidebar eats into that, leaving the chat
@@ -2788,6 +2796,33 @@ select, input[type="checkbox"] {
   flex-direction: column;
   gap: 0.45rem;
 }
+/* Checkbox fields (feature toggles like the Shortcut stories
+ * dashboard) read better as a single row: box first, label
+ * text after, no uppercase label treatment. */
+.chat-integration-field-checkbox {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+.chat-integration-field-checkbox > span {
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  opacity: 1;
+}
+/* The help text drops to its own line under the box+label row. */
+.chat-integration-field-checkbox > small {
+  flex-basis: 100%;
+}
+.chat-integration-field-checkbox input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  accent-color: var(--chat-accent-fg, #8ab4ff);
+  flex: none;
+}
 .chat-integration-field > span {
   /* Field label. Sits well above the input so the two never
    * visually merge; uppercase + smaller tracking gives a
@@ -4982,3 +5017,301 @@ header .subtitle {
  * from both the page background and the assistant surface, so
  * it keeps working unchanged. We just round the corners a touch
  * more (already rounded) and ensure the border stays subtle. */
+
+/* ---- Shortcut stories dashboard (Stories tab) --------------------------
+ * Pure-API view backed by /api/integrations/shortcut/stories… — the
+ * LLM is never involved. List pane = one button per story; detail
+ * pane = sanitized markdown description + comments. */
+.stories-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.stories-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.stories-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+.stories-header-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.stories-include-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  opacity: 0.85;
+  cursor: pointer;
+  user-select: none;
+}
+.stories-include-done input[type="checkbox"] {
+  accent-color: var(--chat-accent-fg, #8ab4ff);
+}
+.stories-header-actions input[type="search"] {
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--chat-input-border, #444);
+  background: var(--chat-input-bg, #2a2c30);
+  color: inherit;
+  font: inherit;
+  min-width: 16rem;
+}
+.stories-status {
+  margin: 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+  min-height: 1.1em;
+}
+.stories-status[data-state="error"] {
+  color: var(--danger-fg, #ff7b72);
+  opacity: 1;
+}
+.stories-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.stories-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border, #333);
+  background: var(--bg, transparent);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.stories-item:hover,
+.stories-item:focus-visible {
+  border-color: var(--chat-accent-fg, #8ab4ff);
+}
+/* Each list row is the overlay-opening button + a quiet icon-only
+ * "↗" link to the story's app_url at the right edge (an <a> cannot
+ * nest inside the <button>, so they sit side by side in the row).
+ * The icon is borderless/ghost until hover or keyboard focus. */
+.stories-item-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.stories-item-row .stories-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.stories-item-ext {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 0.45rem;
+  color: var(--chat-accent-fg, #8ab4ff);
+  text-decoration: none;
+  font-size: 0.95rem;
+  opacity: 0.55;
+}
+.stories-item-ext:hover,
+.stories-item-ext:focus-visible {
+  opacity: 1;
+  background: var(--chat-input-bg, #2a2c30);
+}
+.stories-detail-link {
+  color: var(--chat-accent-fg, #8ab4ff);
+  white-space: nowrap;
+}
+.stories-item-title {
+  font-weight: 600;
+}
+.stories-item-meta {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+.stories-item-labels,
+.stories-detail-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.stories-label {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--chat-accent-fg, #8ab4ff);
+  opacity: 0.9;
+}
+.stories-empty,
+.stories-comment-empty {
+  opacity: 0.7;
+  font-size: 0.9rem;
+  padding: 0.6rem 0;
+}
+/* Story detail opens as a modal overlay on top of the list (same
+ * pattern as `.chat-integration-overlay`): backdrop click, the ×
+ * button, or Esc closes it. `display: flex` on the overlay would
+ * beat the user-agent `[hidden]` rule, so re-assert it here. */
+.stories-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 1000;
+  padding: 4vh 1rem;
+  overflow-y: auto;
+}
+.stories-overlay[hidden] {
+  display: none;
+}
+.stories-overlay-card {
+  position: relative;
+  width: 100%;
+  max-width: 760px;
+  max-height: 88vh;
+  overflow-y: auto;
+  border: 1px solid var(--border, #333);
+  border-radius: 0.6rem;
+  padding: 1rem 1.2rem;
+  background: var(--bg-elev, #1e2023);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+.stories-overlay-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.6rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 0.25rem 0.45rem;
+  border-radius: 0.35rem;
+}
+.stories-overlay-close:hover,
+.stories-overlay-close:focus-visible {
+  opacity: 1;
+  background: var(--chat-input-bg, #2a2c30);
+}
+.stories-detail-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.7rem;
+}
+.stories-detail-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  flex: 1 1 auto;
+}
+.stories-detail-meta {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  word-break: break-all;
+}
+.stories-detail-labels {
+  margin: 0.5rem 0;
+}
+.stories-detail-body {
+  margin-top: 0.6rem;
+  line-height: 1.55;
+  white-space: normal;
+}
+.stories-detail-body h1,
+.stories-detail-body h2,
+.stories-detail-body h3,
+.stories-detail-body h4 {
+  margin: 1em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.stories-detail-body h1 { font-size: 1.4rem; }
+.stories-detail-body h2 { font-size: 1.25rem; }
+.stories-detail-body h3 { font-size: 1.1rem; }
+.stories-detail-body h4 { font-size: 1rem; }
+.stories-detail-body p { margin: 0.6em 0; }
+.stories-detail-body ul,
+.stories-detail-body ol { margin: 0.5em 0; padding-left: 1.6em; }
+.stories-detail-body code {
+  background: var(--chat-input-bg, #2a2c30);
+  border-radius: 0.3rem;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.88em;
+}
+.stories-detail-body pre {
+  background: var(--chat-input-bg, #2a2c30);
+  border-radius: 0.4rem;
+  padding: 0.7rem 0.9rem;
+  overflow-x: auto;
+}
+.stories-detail-body pre code {
+  background: none;
+  padding: 0;
+}
+.stories-detail-body blockquote {
+  margin: 0.6em 0;
+  padding-left: 0.9rem;
+  border-left: 3px solid var(--border, #444);
+  opacity: 0.85;
+}
+.stories-detail-body a {
+  color: var(--chat-accent-fg, #8ab4ff);
+}
+.stories-comments {
+  margin-top: 1.2rem;
+  border-top: 1px solid var(--border, #333);
+  padding-top: 0.8rem;
+}
+.stories-comments h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+.stories-comments-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.stories-comment {
+  border: 1px solid var(--border, #333);
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.8rem;
+}
+.stories-comment-head {
+  font-size: 0.75rem;
+  opacity: 0.65;
+  margin-bottom: 0.25rem;
+}
+.stories-comment-body {
+  line-height: 1.5;
+  white-space: normal;
+}
+.stories-comment-body p { margin: 0.4em 0; }
+.stories-comment-body code {
+  background: var(--chat-input-bg, #2a2c30);
+  border-radius: 0.3rem;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.88em;
+}

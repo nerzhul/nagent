@@ -252,6 +252,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::credentials::shortcut_probe::build_shortcut_probe_router(state.clone());
         #[cfg(not(feature = "shortcut-agent"))]
         let shortcut_probe_routes = axum::Router::new();
+        // Pure-API dashboard endpoints for the "Stories" tab
+        // (`GET /api/integrations/shortcut/stories…`) — same
+        // `shortcut-agent` gate as the probe: they read the
+        // caller's vault token and call the Shortcut API
+        // directly, never through the LLM.
+        #[cfg(feature = "shortcut-agent")]
+        let shortcut_api_routes =
+            crate::credentials::shortcut_api::build_shortcut_api_router(state.clone());
+        #[cfg(not(feature = "shortcut-agent"))]
+        let shortcut_api_routes = axum::Router::new();
         let protected_with_auth = protected
             .merge(identity)
             .merge(credentials_routes)
@@ -259,6 +269,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .merge(email_probe_routes)
             .merge(github_probe_routes)
             .merge(shortcut_probe_routes)
+            .merge(shortcut_api_routes)
             .merge(mount_memories(state.clone()))
             .layer(auth_layer);
         // Layer order is applied bottom-up; the LAST `.layer()`
