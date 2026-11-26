@@ -26,5 +26,4 @@ async-trait = { workspace = true }
 uuid        = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
-anyhow      = { workspace = true }
 whisper-rs  = { workspace = true, optional = true }

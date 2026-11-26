@@ -429,28 +429,29 @@ pub fn app_state() -> AppStateBuilder {
 /// `Config` shape used by every integration test that does not
 /// care about any specific subsystem:
 /// - `bind_addr = 127.0.0.1:0` (ephemeral port for tests that
-/// actually bind),
+///   actually bind),
 /// - `whisper_model_path = /tmp/fake-model.bin` (so the no-TOML
-/// config path does not trip on the required model-path knob),
+///   config path does not trip on the required model-path knob),
 /// - `allowed_origins` populated with both `127.0.0.1` and
-/// `localhost` for every realistic port (plan S-2 — the Origin /
-/// Host guard would otherwise reject the test harness's request
-/// because the ephemeral port does not equal `8080`).
+///   `localhost` for every realistic port (plan S-2 — the Origin /
+///   Host guard would otherwise reject the test harness's request
+///   because the ephemeral port does not equal `8080`).
 /// - everything else defaulted.
 fn default_test_config() -> Config {
-    let mut allowed_origins = AllowedOriginsConfig::default();
     // The integration tests bind `127.0.0.1:0` so the kernel picks
     // an ephemeral port we cannot predict. Rather than threading
     // the resolved port through every helper, the test config
     // whitelists a small set of dev defaults. The Origin guard's
     // Host check matches on the host part of these URLs (with or
     // without the port) so any ephemeral port passes.
-    allowed_origins.origins = vec![
-        "http://127.0.0.1:0".into(),
-        "http://127.0.0.1:8080".into(),
-        "http://localhost:8080".into(),
-        "http://localhost:0".into(),
-    ];
+    let allowed_origins = AllowedOriginsConfig {
+        origins: vec![
+            "http://127.0.0.1:0".into(),
+            "http://127.0.0.1:8080".into(),
+            "http://localhost:8080".into(),
+            "http://localhost:0".into(),
+        ],
+    };
     Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         max_queue: 32,

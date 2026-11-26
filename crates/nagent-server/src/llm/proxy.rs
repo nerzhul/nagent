@@ -1,15 +1,15 @@
 //! `llm::proxy` — the top-level HTTP handlers for `/v1/*`.
 //!
 //! - [`chat_completions`] is the streaming OpenAI-compatible proxy;
-//! it owns the SSE response body and hands the upstream byte
-//! stream to [`crate::llm::tool_loop::run_tool_loop`].
+//!   it owns the SSE response body and hands the upstream byte
+//!   stream to [`crate::llm::tool_loop::run_tool_loop`].
 //! - [`models_list`] proxies the upstream's `/v1/models` list (or
-//! returns a single fallback when the upstream is unreachable).
+//!   returns a single fallback when the upstream is unreachable).
 //! - [`agents_list`] / [`agent_invoke`] are the direct agent HTTP
-//! surface. Both moved into [`crate::agents::routes`] as part of
-//!  the thin wrappers here re-export them under the
-//! historical `llm::agents_list` / `llm::agent_invoke` names so
-//! integration tests keep compiling unchanged.
+//!   surface. Both moved into [`crate::agents::routes`] as part of
+//!   the thin wrappers here re-export them under the
+//!   historical `llm::agents_list` / `llm::agent_invoke` names so
+//!   integration tests keep compiling unchanged.
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -76,6 +76,10 @@ struct ChatRequest {
 /// `Uuid::nil()` when the extension is missing — see
 /// `run_tool_loop` for the user-scoping consequences (per-user
 /// agents surface a clear tool error).
+// Axum handler: each `State`/extractor is its own parameter, so the
+// 10-argument signature is imposed by the framework's extractor
+// stack, not by a design smell.
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_completions(
     State(llm_state): State<ArcLlmState>,
     State(agents): State<OptArcAgentRegistry>,
@@ -507,22 +511,22 @@ pub async fn chat_completions(
         .expect("static response builder is valid"))
 }
 
-/// Fetch the upstream `/v1/models` and return the parsed list of
-/// model ids. Used by [`crate::http::features::Features::from_state`]
-/// to populate the `llm_models` field of `GET /api/features` so the
-/// frontend can paint the Discussion-mode model dropdown without a
-/// dedicated `/v1/models` round-trip.
-///
-/// The fetch is bounded by [`UPSTREAM_MODELS_TIMEOUT`] — `/api/features`
-/// is on every page-load hot path, so we refuse to block the response
-/// on a slow / unreachable upstream. On timeout, network error, non-2xx
-/// upstream status, or any other parse failure we fall back to a
-/// single-entry list built around the operator-configured
-/// `[llm].default_model`. The fallback keeps the dropdown usable; a
-/// user who wants more models just fixes the upstream.
-///
-/// Returning `Vec<String>` (not the raw OpenAI JSON envelope) lets the
-/// features endpoint serialise it directly without re-shaping.
+// Fetch the upstream `/v1/models` and return the parsed list of
+// model ids. Used by `crate::http::features::Features::from_state`
+// to populate the `llm_models` field of `GET /api/features` so the
+// frontend can paint the Discussion-mode model dropdown without a
+// dedicated `/v1/models` round-trip.
+//
+// The fetch is bounded by `UPSTREAM_MODELS_TIMEOUT` — `/api/features`
+// is on every page-load hot path, so we refuse to block the response
+// on a slow / unreachable upstream. On timeout, network error, non-2xx
+// upstream status, or any other parse failure we fall back to a
+// single-entry list built around the operator-configured
+// `[llm].default_model`. The fallback keeps the dropdown usable; a
+// user who wants more models just fixes the upstream.
+//
+// Returning `Vec<String>` (not the raw OpenAI JSON envelope) lets the
+// features endpoint serialise it directly without re-shaping.
 
 /// Build the `tools=[]` array for a single chat-completions
 /// round (plan 1791317253718). Composes three sources:

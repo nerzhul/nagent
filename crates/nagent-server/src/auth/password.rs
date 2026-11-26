@@ -84,7 +84,7 @@ pub async fn hash_password_bounded_with_queue(
         nagent_support::cpu::RunError::QueueTimeout(_) => AuthError::Saturated,
         other => AuthError::Internal(format!("argon2 hash failed: {other}")),
     })?
-    .map_err(|s| AuthError::Internal(s))
+    .map_err(AuthError::Internal)
 }
 
 /// Synchronous argon2id hash. Used directly by tests + by
@@ -156,7 +156,7 @@ pub async fn verify_password_bounded(
     })
     .await
     .map_err(|e| AuthError::Internal(format!("argon2 verify failed: {e}")))?
-    .map_err(|s| AuthError::Internal(s))
+    .map_err(AuthError::Internal)
 }
 
 // ---- HTTP handlers ---------------------------------------------------------

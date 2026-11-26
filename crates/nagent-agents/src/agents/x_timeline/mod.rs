@@ -401,7 +401,7 @@ impl Agent for XTimelineAgent {
 
         let parsed: Value = serde_json::from_str(&body)
             .map_err(|e| AgentError::AgentFailed(format!("X timeline parse: {e}")))?;
-        let posts = project_timeline(&parsed, &x_screen_name.expose_secret(), &req);
+        let posts = project_timeline(&parsed, x_screen_name.expose_secret(), &req);
         let result = json!({
             "mode": req.mode,
             "fetched_at": Utc::now().to_rfc3339(),

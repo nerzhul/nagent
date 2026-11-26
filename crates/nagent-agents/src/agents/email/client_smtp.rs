@@ -115,7 +115,7 @@ impl SmtpClient {
     }
 
     /// Open an SMTP connection, run `EHLO` (and `STARTTLS`
-    /// + `AUTH PLAIN` when applicable), and return a
+    /// and `AUTH PLAIN` when applicable), and return a
     /// `SmtpTransport` ready to send mail.
     pub async fn connect(
         &self,
@@ -178,7 +178,7 @@ impl SmtpClient {
                             "SMTP TLS handshake to {host_owned}:{port_owned}: {e}"
                         ))
                     })?;
-                (SmtpStreamInner::Tls(tls_stream), None)
+                (SmtpStreamInner::Tls(Box::new(tls_stream)), None)
             }
             SmtpTlsMode::StartTls => {
                 // Build the transport over a plain
@@ -229,7 +229,7 @@ impl SmtpClient {
                             "SMTP TLS handshake after STARTTLS to {host_owned}: {e}"
                         ))
                     })?;
-                (SmtpStreamInner::Tls(tls_stream), None)
+                (SmtpStreamInner::Tls(Box::new(tls_stream)), None)
             }
             SmtpTlsMode::None => {
                 return Err(AgentError::AgentFailed(
@@ -284,7 +284,10 @@ pub enum SmtpStreamInner {
     Plain(BufReader<TcpStream>),
     /// rustls TLS stream. Used for SMTPS (port 465) and
     /// for the post-STARTTLS SMTP session (port 587).
-    Tls(tokio_rustls::client::TlsStream<TcpStream>),
+    /// Boxed: the TLS variant is much larger than `Plain`, and an
+    /// unboxed enum would inflate every `SmtpStreamInner` value
+    /// (clippy::large_enum_variant).
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
 }
 
 impl tokio::io::AsyncRead for SmtpStreamInner {
@@ -295,7 +298,7 @@ impl tokio::io::AsyncRead for SmtpStreamInner {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.get_mut() {
             SmtpStreamInner::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-            SmtpStreamInner::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            SmtpStreamInner::Tls(s) => std::pin::Pin::new(&mut **s).poll_read(cx, buf),
         }
     }
 }
@@ -306,13 +309,13 @@ impl tokio::io::AsyncBufRead for SmtpStreamInner {
     ) -> std::task::Poll<std::io::Result<&[u8]>> {
         match self.get_mut() {
             SmtpStreamInner::Plain(s) => std::pin::Pin::new(s).poll_fill_buf(cx),
-            SmtpStreamInner::Tls(s) => std::pin::Pin::new(s).poll_fill_buf(cx),
+            SmtpStreamInner::Tls(s) => std::pin::Pin::new(&mut **s).poll_fill_buf(cx),
         }
     }
     fn consume(self: std::pin::Pin<&mut Self>, amt: usize) {
         match self.get_mut() {
             SmtpStreamInner::Plain(s) => std::pin::Pin::new(s).consume(amt),
-            SmtpStreamInner::Tls(s) => std::pin::Pin::new(s).consume(amt),
+            SmtpStreamInner::Tls(s) => std::pin::Pin::new(&mut **s).consume(amt),
         }
     }
 }
@@ -324,7 +327,7 @@ impl tokio::io::AsyncWrite for SmtpStreamInner {
     ) -> std::task::Poll<std::io::Result<usize>> {
         match self.get_mut() {
             SmtpStreamInner::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-            SmtpStreamInner::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            SmtpStreamInner::Tls(s) => std::pin::Pin::new(&mut **s).poll_write(cx, buf),
         }
     }
     fn poll_flush(
@@ -333,7 +336,7 @@ impl tokio::io::AsyncWrite for SmtpStreamInner {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.get_mut() {
             SmtpStreamInner::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
-            SmtpStreamInner::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
+            SmtpStreamInner::Tls(s) => std::pin::Pin::new(&mut **s).poll_flush(cx),
         }
     }
     fn poll_shutdown(
@@ -342,7 +345,7 @@ impl tokio::io::AsyncWrite for SmtpStreamInner {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.get_mut() {
             SmtpStreamInner::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-            SmtpStreamInner::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            SmtpStreamInner::Tls(s) => std::pin::Pin::new(&mut **s).poll_shutdown(cx),
         }
     }
 }

@@ -507,6 +507,9 @@ async fn lookup_me(state: &XOAuthState, bearer: &str) -> Result<(String, String)
     Ok((user_id, screen_name))
 }
 
+/// One vault-sealed credential field row: (field_key, nonce, ciphertext).
+type FieldRow = (String, Vec<u8>, Vec<u8>);
+
 fn build_field_rows(
     state: &XOAuthState,
     access_token: &str,
@@ -515,7 +518,7 @@ fn build_field_rows(
     x_screen_name: &str,
     x_user_id: &str,
     expires_at: chrono::DateTime<chrono::Utc>,
-) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, AuthError> {
+) -> Result<Vec<FieldRow>, AuthError> {
     let mut rows = Vec::with_capacity(6);
     for (field_key, plaintext) in &[
         ("access_token", access_token.to_string()),

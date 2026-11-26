@@ -3,11 +3,11 @@
 //! ## What this test asserts
 //!
 //! 1. `POST /v1/chat/completions` forwards SSE chunks verbatim, in
-//! order, with the correct content type.
+//!    order, with the correct content type.
 //! 2. `Authorization: Bearer <key>` is forwarded when
-//! `OLLAMA_API_KEY` is set.
+//!    `OLLAMA_API_KEY` is set.
 //! 3. `Authorization` is **not** forwarded when `OLLAMA_API_KEY` is
-//! unset (the server never injects one).
+//!    unset (the server never injects one).
 //! 4. Non-2xx upstream surfaces the original status to the client.
 //! 5. `LLM_ENABLED=false` returns 404 on both `/v1/*` routes.
 
@@ -1577,9 +1577,7 @@ async fn tool_search_round_trip() {
         })
         .collect();
     assert!(
-        round0_names
-            .iter()
-            .any(|n| *n == nagent_agents::SEARCH_TOOLS_NAME),
+        round0_names.contains(&nagent_agents::SEARCH_TOOLS_NAME),
         "round 0 must include `search_tools` in tools=[]; got: {round0_names:?}"
     );
 

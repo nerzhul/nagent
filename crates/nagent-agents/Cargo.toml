@@ -20,7 +20,7 @@ wikipedia-agent = []
 dictionary-agent = []
 web-agent = []
 read-document-agent = []
-caldav-agent = ["dep:icalendar", "dep:chrono-tz"]
+caldav-agent = ["dep:icalendar", "dep:chrono-tz", "dep:rand"]
 x-agent = ["dep:oauth2"]
 email-agent = ["dep:imap", "dep:imap-proto", "dep:async-smtp", "dep:mailparse", "dep:base64", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 # `memory_*` chat tools. The agents only need the existing
@@ -83,8 +83,8 @@ chrono-tz = { version = "0.10", optional = true, features = ["serde"] }
 meval = { version = "0.2", optional = true }
 # iCalendar (RFC 5545) for VEVENT bodies.
 icalendar = { version = "0.7", optional = true }
-# Random hex suffix for VEVENT UIDs.
-rand = { version = "0.8", default-features = false, features = ["std", "getrandom", "std_rng"] }
+# Random hex suffix for VEVENT UIDs (caldav-agent only).
+rand = { version = "0.8", optional = true, default-features = false, features = ["std", "getrandom", "std_rng"] }
 # Base64 for the HTTP Basic Authorization header.
 base64 = { version = "0.22", optional = true }
 # OAuth2 PKCE dance (catalogue candidate #2). `reqwest` backend

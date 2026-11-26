@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::error::Error;
 use crate::pool::AnyPool;
-use crate::types::UserPreferences;
+use crate::types::{UserPreferences, UserPreferencesUpdate};
 
 #[derive(Debug, Clone)]
 pub enum Preferences {
@@ -42,38 +42,11 @@ impl Preferences {
     pub async fn upsert(
         &self,
         user_id: Uuid,
-        share_location_enabled: bool,
-        share_timezone_enabled: bool,
-        reply_language: Option<String>,
-        additional_instructions: Option<String>,
-        temperature: Option<f32>,
-        memory_enabled: bool,
+        update: &UserPreferencesUpdate,
     ) -> Result<UserPreferences, Error> {
         match self {
-            Preferences::Sqlite(s) => {
-                s.upsert(
-                    user_id,
-                    share_location_enabled,
-                    share_timezone_enabled,
-                    reply_language,
-                    additional_instructions,
-                    temperature,
-                    memory_enabled,
-                )
-                .await
-            }
-            Preferences::Postgres(s) => {
-                s.upsert(
-                    user_id,
-                    share_location_enabled,
-                    share_timezone_enabled,
-                    reply_language,
-                    additional_instructions,
-                    temperature,
-                    memory_enabled,
-                )
-                .await
-            }
+            Preferences::Sqlite(s) => s.upsert(user_id, update).await,
+            Preferences::Postgres(s) => s.upsert(user_id, update).await,
         }
     }
 }
@@ -124,12 +97,14 @@ impl ScopedPreferences {
         self.inner
             .upsert(
                 self.user_id,
-                share_location_enabled,
-                share_timezone_enabled,
-                reply_language,
-                additional_instructions,
-                temperature,
-                memory_enabled,
+                &UserPreferencesUpdate {
+                    share_location_enabled,
+                    share_timezone_enabled,
+                    reply_language,
+                    additional_instructions,
+                    temperature,
+                    memory_enabled,
+                },
             )
             .await
     }
@@ -141,7 +116,7 @@ pub(crate) mod sqlite {
     use uuid::Uuid;
 
     use crate::error::Error;
-    use crate::types::UserPreferences;
+    use crate::types::{UserPreferences, UserPreferencesUpdate};
 
     #[derive(Clone, Debug)]
     pub struct SqlitePreferences {
@@ -188,12 +163,7 @@ pub(crate) mod sqlite {
         pub async fn upsert(
             &self,
             user_id: Uuid,
-            share_location_enabled: bool,
-            share_timezone_enabled: bool,
-            reply_language: Option<String>,
-            additional_instructions: Option<String>,
-            temperature: Option<f32>,
-            memory_enabled: bool,
+            update: &UserPreferencesUpdate,
         ) -> Result<UserPreferences, Error> {
             let user_id_str = user_id.to_string();
             sqlx::query(
@@ -212,12 +182,20 @@ pub(crate) mod sqlite {
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(&user_id_str)
-            .bind(if share_location_enabled { 1_i64 } else { 0_i64 })
-            .bind(if share_timezone_enabled { 1_i64 } else { 0_i64 })
-            .bind(reply_language)
-            .bind(additional_instructions)
-            .bind(temperature)
-            .bind(if memory_enabled { 1_i64 } else { 0_i64 })
+            .bind(if update.share_location_enabled {
+                1_i64
+            } else {
+                0_i64
+            })
+            .bind(if update.share_timezone_enabled {
+                1_i64
+            } else {
+                0_i64
+            })
+            .bind(update.reply_language.clone())
+            .bind(update.additional_instructions.clone())
+            .bind(update.temperature)
+            .bind(if update.memory_enabled { 1_i64 } else { 0_i64 })
             .execute(&self.pool)
             .await?;
             self.get(user_id).await
@@ -242,7 +220,7 @@ pub(crate) mod postgres {
     use uuid::Uuid;
 
     use crate::error::Error;
-    use crate::types::UserPreferences;
+    use crate::types::{UserPreferences, UserPreferencesUpdate};
 
     #[derive(Clone, Debug)]
     pub struct PgPreferences {
@@ -289,12 +267,7 @@ pub(crate) mod postgres {
         pub async fn upsert(
             &self,
             user_id: Uuid,
-            share_location_enabled: bool,
-            share_timezone_enabled: bool,
-            reply_language: Option<String>,
-            additional_instructions: Option<String>,
-            temperature: Option<f32>,
-            memory_enabled: bool,
+            update: &UserPreferencesUpdate,
         ) -> Result<UserPreferences, Error> {
             sqlx::query(
                 "INSERT INTO user_preferences \
@@ -312,12 +285,20 @@ pub(crate) mod postgres {
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(user_id)
-            .bind(if share_location_enabled { 1_i64 } else { 0_i64 })
-            .bind(if share_timezone_enabled { 1_i64 } else { 0_i64 })
-            .bind(reply_language)
-            .bind(additional_instructions)
-            .bind(temperature)
-            .bind(if memory_enabled { 1_i64 } else { 0_i64 })
+            .bind(if update.share_location_enabled {
+                1_i64
+            } else {
+                0_i64
+            })
+            .bind(if update.share_timezone_enabled {
+                1_i64
+            } else {
+                0_i64
+            })
+            .bind(update.reply_language.clone())
+            .bind(update.additional_instructions.clone())
+            .bind(update.temperature)
+            .bind(if update.memory_enabled { 1_i64 } else { 0_i64 })
             .execute(&self.pool)
             .await?;
             self.get(user_id).await

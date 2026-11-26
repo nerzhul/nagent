@@ -10,23 +10,23 @@
 //! ## Sub-modules
 //!
 //! - [`mod@boot`] — auto-bootstrap invoked by `main.rs` (migrate +
-//! optional sqlite first-admin creation).
+//!   optional sqlite first-admin creation).
 //! - [`mod@store`] — DB-agnostic data access. The public type is
-//! [`store::AuthStore`] which is a `match`-dispatched enum over
-//! the sqlite / postgres engines; each variant now holds the
-//! per-domain repositories from [`crate::db`] .
+//!   [`store::AuthStore`] which is a `match`-dispatched enum over
+//!   the sqlite / postgres engines; each variant now holds the
+//!   per-domain repositories from [`crate::db`] .
 //! - [`mod@session`] — cookie bearer parsing, session row type,
-//! CSRF token generator, `Set-Cookie` builder.
+//!   CSRF token generator, `Set-Cookie` builder.
 //! - [`mod@middleware`] — `require_auth_middleware` axum middleware
-//! that resolves a session into an [`AuthUser`] extension.
+//!   that resolves a session into an [`AuthUser`] extension.
 //! - [`mod@password`] — argon2id wrapper the `local` backend
-//! (`POST /api/auth/login/password`).
+//!   (`POST /api/auth/login/password`).
 //! - [`mod@oidc`] — OIDC backend (`/api/auth/login/oidc/{start,callback}`).
 //! - [`mod@passkey`] — WebAuthn backend (`/api/auth/login/passkey/{start,finish}`).
 //! - [`mod@routes`] — `/api/me`, `/api/auth/logout`, plus the
-//! registration endpoints guarded by `RequireAuth`.
+//!   registration endpoints guarded by `RequireAuth`.
 //! - [`mod@login_rate_limit`] — login-attempt rate-limit
-//! (DashMap, `(email, ip)` key).
+//!   (DashMap, `(email, ip)` key).
 //!
 //! The `stt-server auth {create-admin,list-users,delete-user}` CLI
 //! subcommand lives in [`crate::cli::auth`].

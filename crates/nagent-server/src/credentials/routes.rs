@@ -9,16 +9,16 @@
 //!
 //! Endpoints:
 //! - `GET    /api/integrations`              — list every service
-//! with `configured` per service for the caller.
+//!   with `configured` per service for the caller.
 //! - `GET    /api/integrations/:id`           — same, single service.
 //! - `PUT    /api/integrations/:id/credentials` — upsert of the
-//! submitted fields. Declared fields **absent** from the body keep
-//! their existing ciphertext rows (the DB upsert is a full replace,
-//! so the handler re-supplies them), and an empty `fields` map is a
-//! no-op — this is what lets the edit form save without re-typing a
-//! Password (never echoed to the browser). CSRF-protected.
+//!   submitted fields. Declared fields **absent** from the body keep
+//!   their existing ciphertext rows (the DB upsert is a full replace,
+//!   so the handler re-supplies them), and an empty `fields` map is a
+//!   no-op — this is what lets the edit form save without re-typing a
+//!   Password (never echoed to the browser). CSRF-protected.
 //! - `DELETE /api/integrations/:id/credentials` — clear all fields.
-//! CSRF-protected.
+//!   CSRF-protected.
 
 use std::sync::Arc;
 

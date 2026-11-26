@@ -1239,6 +1239,11 @@ pub struct AgentSummary {
 /// signature of [`AgentDescriptor::build`] stays readable.
 pub type AgentBuildError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Factory signature for [`AgentDescriptor::build`]. Kept as a type
+/// alias so the field type stays readable (clippy::type_complexity).
+pub type AgentBuildFn =
+    fn(&crate::config::AgentConfigs, &EgressPool) -> Result<Box<dyn Agent>, AgentBuildError>;
+
 /// Factory + identity for one agent. Constructed inline by
 /// [`AGENT_DESCRIPTORS`] so the entry has no allocation cost.
 pub struct AgentDescriptor {
@@ -1257,8 +1262,7 @@ pub struct AgentDescriptor {
     /// agent and log a warning. Today every entry is infallible;
     /// the `Result` exists so a future agent can fail gracefully
     /// without breaking the other descriptors.
-    pub build:
-        fn(&crate::config::AgentConfigs, &EgressPool) -> Result<Box<dyn Agent>, AgentBuildError>,
+    pub build: AgentBuildFn,
 }
 
 /// Static factory table. Walked by

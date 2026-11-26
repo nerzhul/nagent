@@ -8,14 +8,14 @@
 //!
 //! Module layout:
 //! - [`key`]: `CredentialsKey` — zeroized `Secret<[u8; 32]>` parsed from
-//! a hex env var.
+//!   a hex env var.
 //! - [`crypto`]: `seal`/`open` thin wrappers around `aes-gcm`.
 //! - [`resolver`]: `CredentialResolver` — async reader that decrypts
-//! on demand and writes one audit row per call. The per-request
-//! plaintext cache used to live here but moved to
-//! `nagent_agents::credential_cache` (plan 4.C.2 / R2) so it can
-//! share the `TtlMap` infrastructure every other per-user map
-//! uses.
+//!   on demand and writes one audit row per call. The per-request
+//!   plaintext cache used to live here but moved to
+//!   `nagent_agents::credential_cache` (plan 4.C.2 / R2) so it can
+//!   share the `TtlMap` infrastructure every other per-user map
+//!   uses.
 //! - [`routes`]: HTTP handlers for the `/api/integrations*` family.
 //!
 //! The trait evolution lives in [`crate::agents`]: every agent takes

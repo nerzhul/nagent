@@ -10,8 +10,8 @@
 //! ## Section layout
 //!
 //! - [`server`] — `Config`, `ConfigError`, the env/TOML
-//!  merge helpers (`env_opt`, `resolve_primitive`, …) and the
-//!  layered file discovery.
+//!   merge helpers (`env_opt`, `resolve_primitive`, …) and the
+//!   layered file discovery.
 //! - [`allowed_origins`] — `[server].allowed_origins` (plan S-2).
 //! - [`ratelimit`] — per-IP rate-limit knobs (`RateLimitConfig`).
 //! - [`trusted_proxies`] — `[server].trusted_proxies` CIDR list.

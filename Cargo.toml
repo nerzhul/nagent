@@ -18,8 +18,9 @@ edition = "2021"
 # SPDX-License-Identifier: LicenseRef-OpenCore-Source-Available-1.0
 # See the LICENSE file at the root of the repository for the full terms.
 license = "LicenseRef-OpenCore-Source-Available-1.0"
-rust-version = "1.94"
-authors = ["nagent contributors"]
+# MSRV is 1.94 (pinned by the `rust:1.94-bookworm` builder image in the
+# Dockerfile); declared there rather than via `workspace.package` so
+# cargo does not warn about an unused workspace field.
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -746,6 +746,12 @@ Render any overlay locally with `make kustomize-build-<name>` (see `make help`).
 - `make docker-build[-<backend>]` and `make docker-run[-gpu-*]` — image and container entry points per backend.
 - `make kustomize-build-{base,dev,prod}` / `make apply-prod` — Kubernetes workflow.
 
+Every local `cargo build` / `test` / `clippy` run from this repository treats
+warnings as errors: `.cargo/config.toml` sets `[build] rustflags = ["-D",
+"warnings"]`, matching the CI (`RUSTFLAGS: "-D warnings"` in
+`.github/workflows/ci.yml`). An externally exported `RUSTFLAGS` environment
+variable takes precedence over that file.
+
 ## Testing
 
 ```

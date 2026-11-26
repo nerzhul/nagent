@@ -156,7 +156,7 @@ ipnet = "2"
 # Operator CLI: clap derive + humantime power the `auth` / `migrate` /
 # `documents` subcommands and the global `--config PATH` flag.
 clap = { workspace = true }
-humantime = "2"
+humantime = { workspace = true }
 # OAuth2 PKCE dance (catalogue candidate #2). `reqwest` backend
 # so the workspace's `reqwest` connection pool is shared via
 # `request_async(&self.http)`; `rustls-tls` matches the rest of

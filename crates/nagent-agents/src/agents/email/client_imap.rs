@@ -297,7 +297,7 @@ pub fn fetch_to_summary(fetch: &Fetch, folder: &str) -> Result<EmailSummary, Age
         .iter()
         .any(|f| matches!(f, imap::types::Flag::Seen));
     Ok(EmailSummary {
-        uid: uid,
+        uid,
         folder: folder.to_string(),
         from,
         subject,

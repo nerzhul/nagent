@@ -93,7 +93,7 @@ pub async fn ws_upgrade(
             peer_ip = ?peer.as_ref().map(|p| p.0.ip()),
             "ws upgrade rejected by origin / host guard"
         );
-        return resp;
+        return *resp;
     }
 
     let peer_ip = peer.map(|ConnectInfo(addr)| addr.ip());

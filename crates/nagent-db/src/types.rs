@@ -280,6 +280,21 @@ pub struct UserPreferences {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Writable subset of [`UserPreferences`]: every field except
+/// `updated_at`, which the database sets itself on each write.
+/// Bundling the fields keeps `Preferences::upsert` under the
+/// too-many-arguments lint without losing the atomic-replace
+/// contract.
+#[derive(Debug, Clone, Default)]
+pub struct UserPreferencesUpdate {
+    pub share_location_enabled: bool,
+    pub share_timezone_enabled: bool,
+    pub reply_language: Option<String>,
+    pub additional_instructions: Option<String>,
+    pub temperature: Option<f32>,
+    pub memory_enabled: bool,
+}
+
 // ---- Document row -------------------------------------------------------
 
 /// Subset of the `uploaded_documents` row the agent needs. Keeps

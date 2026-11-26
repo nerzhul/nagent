@@ -177,7 +177,7 @@ impl IntoResponse for LlmError {
 /// We support two shapes:
 ///
 /// 1. Ollama (and most OpenAI-compatible forges that mirror the
-/// Ollama error envelope):
+///    Ollama error envelope):
 /// ```json
 /// {"error":{"message":"model 'llama3.1' not found","type":"not_found_error",...}}
 /// ```

@@ -205,9 +205,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "email_list_inbox" => {
-            let body = format!(
-                "The assistant wants to read your uploaded document. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to read your uploaded document. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Lire votre document ?".to_string(),
                 body,
@@ -215,9 +213,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "email_get_message" => {
-            let body = format!(
-                "The assistant wants to read your uploaded document. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to read your uploaded document. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Lire votre document ?".to_string(),
                 body,
@@ -225,9 +221,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "email_search" => {
-            let body = format!(
-                "The assistant wants to search your uploaded documents. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to search your uploaded documents. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Rechercher vos documents ?".to_string(),
                 body,
@@ -235,9 +229,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "email_send" => {
-            let body = format!(
-                "The assistant wants to send a message on your behalf. Please confirm before it is sent."
-            );
+            let body = "The assistant wants to send a message on your behalf. Please confirm before it is sent.".to_string();
             ApprovalPrompt {
                 title: "Envoyer un message ?".to_string(),
                 body,
@@ -245,9 +237,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "x_timeline" => {
-            let body = format!(
-                "The assistant wants to read your X (Twitter) account. Please confirm before it is accessed."
-            );
+            let body = "The assistant wants to read your X (Twitter) account. Please confirm before it is accessed.".to_string();
             ApprovalPrompt {
                 title: "Lire votre compte X ?".to_string(),
                 body,
@@ -255,9 +245,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "read_document" => {
-            let body = format!(
-                "The assistant wants to read your uploaded document. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to read your uploaded document. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Lire le document ?".to_string(),
                 body,
@@ -265,9 +253,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "get_weather" => {
-            let body = format!(
-                "The assistant wants to fetch the weather for your location. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to fetch the weather for your location. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Afficher la météo ?".to_string(),
                 body,
@@ -275,9 +261,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "calculate" => {
-            let body = format!(
-                "The assistant wants to calculate a value for you. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to calculate a value for you. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Calculer ?".to_string(),
                 body,
@@ -285,9 +269,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "wikipedia" => {
-            let body = format!(
-                "The assistant wants to read your Wikipedia page. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to read your Wikipedia page. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Afficher la page Wikipedia ?".to_string(),
                 body,
@@ -295,9 +277,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "unit_convert" => {
-            let body = format!(
-                "The assistant wants to convert a value for you. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to convert a value for you. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Convertir ?".to_string(),
                 body,
@@ -305,9 +285,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "datetime" => {
-            let body = format!(
-                "The assistant wants to convert a date for you. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to convert a date for you. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Convertir la date ?".to_string(),
                 body,
@@ -315,9 +293,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "dictionary" => {
-            let body = format!(
-                "The assistant wants to read your dictionary entry. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to read your dictionary entry. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Lire le dictionnaire ?".to_string(),
                 body,
@@ -325,9 +301,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "stock" => {
-            let body = format!(
-                "The assistant wants to fetch your stock price. Please confirm before it is displayed."
-            );
+            let body = "The assistant wants to fetch your stock price. Please confirm before it is displayed.".to_string();
             ApprovalPrompt {
                 title: "Afficher le cours du stock ?".to_string(),
                 body,
@@ -335,9 +309,9 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "memory_store" => {
-            let body = format!(
+            let body =
                 "The assistant wants to store a durable fact. Please confirm before it is saved."
-            );
+                    .to_string();
             ApprovalPrompt {
                 title: "Stocker un souvenir ?".to_string(),
                 body,
@@ -345,9 +319,9 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "memory_recall" => {
-            let body = format!(
+            let body =
                 "The assistant wants to recall memories. Please confirm before they are displayed."
-            );
+                    .to_string();
             ApprovalPrompt {
                 title: "Rappeler des souvenirs ?".to_string(),
                 body,
@@ -355,9 +329,7 @@ pub(crate) fn approval_prompt(tool_name: &str, args: &serde_json::Value) -> Appr
             }
         }
         "memory_list" => {
-            let body = format!(
-                "The assistant wants to list stored facts. Please confirm before they are displayed."
-            );
+            let body = "The assistant wants to list stored facts. Please confirm before they are displayed.".to_string();
             ApprovalPrompt {
                 title: "Lister les souvenirs ?".to_string(),
                 body,
@@ -656,6 +628,177 @@ fn splice_tool_result(
             "tool_call_id": tool_call_id,
             "content": content,
         }));
+    }
+}
+
+/// Drive the permission intercept on the chat-completion body.
+///
+/// Inspects the last user message for a decision sentinel; on hit:
+/// 1. Emits the matching `tool_call` (if APPROVE) and `tool_result`
+///    SSE frames into the response channel.
+/// 2. Mutates the body so the synthetic tool round reaches the LLM
+///    on the next round.
+///
+/// Returns `Some((new_body, pre_frames))` when a sentinel was found,
+/// or `None` when the last user message was a regular message.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_permission_intercept(
+    body: &serde_json::Value,
+    agents: Option<&nagent_agents::AgentRegistry>,
+    session_id: Option<uuid::Uuid>,
+    user_id: uuid::Uuid,
+    resolver: Option<std::sync::Arc<dyn nagent_agents::SecretSource>>,
+    permission_store: PermissionStore,
+) -> Option<(serde_json::Value, Vec<bytes::Bytes>)> {
+    let messages = body.get("messages")?.as_array()?;
+    let last_user_idx = messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))?;
+    let last_user = &messages[last_user_idx];
+    let text = last_user.get("content").and_then(|v| v.as_str())?;
+    let (decision, remainder) = parse_decision_prefix(text)?;
+
+    let mut frames: Vec<bytes::Bytes> = Vec::new();
+    let mut new_body = body.clone();
+    let new_messages = new_body
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())?;
+
+    let trimmed_remainder = remainder.trim_start();
+    if trimmed_remainder.is_empty() {
+        new_messages.remove(last_user_idx);
+    } else {
+        new_messages[last_user_idx] = json!({
+            "role": "user",
+            "content": trimmed_remainder,
+        });
+    }
+
+    match decision {
+        DecisionPrefix::Approve { tool_call_id } => {
+            let pending = match session_id {
+                Some(sid) => permission_store.take_pending(sid, &tool_call_id),
+                None => None,
+            };
+            let pending = match pending {
+                Some(p) => p,
+                None => {
+                    // Stale / unknown id: surface an error so the
+                    // LLM can re-prompt the user.
+                    splice_tool_result(
+                        new_messages,
+                        &tool_call_id,
+                        None,
+                        json!("[error] approval expired or unknown; please ask the user again"),
+                    );
+                    return Some((new_body, frames));
+                }
+            };
+            let agents = match agents {
+                Some(a) => a,
+                None => {
+                    splice_tool_result(
+                        new_messages,
+                        &tool_call_id,
+                        None,
+                        json!(format!(
+                            "[error] agents not registered; cannot run `{}`",
+                            pending.tool_name
+                        )),
+                    );
+                    return Some((new_body, frames));
+                }
+            };
+            let agent = match agents.get(&pending.tool_name) {
+                Some(a) => a,
+                None => {
+                    splice_tool_result(
+                        new_messages,
+                        &tool_call_id,
+                        None,
+                        json!(format!("[error] unknown agent: `{}`", pending.tool_name)),
+                    );
+                    return Some((new_body, frames));
+                }
+            };
+            // Emit `tool_call` SSE so the chat UI updates the
+            // footer pill to a "running" state for this entry.
+            let args_str = serde_json::to_string(&pending.args).unwrap_or_else(|_| "{}".into());
+            frames.push(bytes::Bytes::from(crate::llm::sse::sse_tool_call_event(
+                &tool_call_id,
+                &pending.tool_name,
+                &args_str,
+                1, // synthetic round index; LLM never sees this
+            )));
+            // Build a per-call `UserContext` exactly like the
+            // tool loop does, then invoke the agent directly —
+            // no `requires_confirmation` check (this IS the
+            // approval).
+            let services = nagent_agents::ServiceRegistry::empty().into_arc();
+            let mut ctx = match session_id {
+                Some(sid) => nagent_agents::UserContext::for_chat_session(
+                    user_id,
+                    services,
+                    resolver.clone(),
+                    None,
+                    sid,
+                ),
+                None => nagent_agents::UserContext::for_tests(user_id, services),
+            };
+            ctx.record_invocation(&pending.tool_name);
+            let (ok, payload) = match agent.invoke(&ctx, pending.args.clone()).await {
+                Ok(s) => (true, s),
+                Err(e) => (false, format!("[error] {e}")),
+            };
+            frames.push(bytes::Bytes::from(crate::llm::sse::sse_tool_result_event(
+                &tool_call_id,
+                &pending.tool_name,
+                ok,
+                &payload,
+            )));
+            splice_tool_result(
+                new_messages,
+                &tool_call_id,
+                Some(json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": pending.tool_name,
+                            "arguments": args_str,
+                        }
+                    }],
+                })),
+                json!(payload),
+            );
+            Some((new_body, frames))
+        }
+        DecisionPrefix::ApproveAlways { tool_name } => {
+            if let Some(sid) = session_id {
+                permission_store.add_override(sid, tool_name.clone());
+            }
+            // No synthetic tool round — the LLM just acks the
+            // override on its next response.
+            Some((new_body, frames))
+        }
+        DecisionPrefix::Deny { tool_call_id } => {
+            // Drop the pending entry if present so a later
+            // re-approval request must come from the LLM again.
+            if let Some(sid) = session_id {
+                let _ = permission_store.take_pending(sid, &tool_call_id);
+            }
+            let deny_msg = "Utilisateur a refusé l'opération.";
+            frames.push(bytes::Bytes::from(crate::llm::sse::sse_tool_result_event(
+                &tool_call_id,
+                "<denied>",
+                false,
+                deny_msg,
+            )));
+            splice_tool_result(new_messages, &tool_call_id, None, json!(deny_msg));
+            Some((new_body, frames))
+        }
     }
 }
 
@@ -972,176 +1115,5 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("refusé"));
-    }
-}
-
-/// Drive the permission intercept on the chat-completion body.
-///
-/// Inspects the last user message for a decision sentinel; on hit:
-/// 1. Emits the matching `tool_call` (if APPROVE) and `tool_result`
-///    SSE frames into the response channel.
-/// 2. Mutates the body so the synthetic tool round reaches the LLM
-///    on the next round.
-///
-/// Returns `Some((new_body, pre_frames))` when a sentinel was found,
-/// or `None` when the last user message was a regular message.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_permission_intercept(
-    body: &serde_json::Value,
-    agents: Option<&nagent_agents::AgentRegistry>,
-    session_id: Option<uuid::Uuid>,
-    user_id: uuid::Uuid,
-    resolver: Option<std::sync::Arc<dyn nagent_agents::SecretSource>>,
-    permission_store: PermissionStore,
-) -> Option<(serde_json::Value, Vec<bytes::Bytes>)> {
-    let messages = body.get("messages")?.as_array()?;
-    let last_user_idx = messages
-        .iter()
-        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))?;
-    let last_user = &messages[last_user_idx];
-    let text = last_user.get("content").and_then(|v| v.as_str())?;
-    let (decision, remainder) = parse_decision_prefix(text)?;
-
-    let mut frames: Vec<bytes::Bytes> = Vec::new();
-    let mut new_body = body.clone();
-    let new_messages = new_body
-        .get_mut("messages")
-        .and_then(|m| m.as_array_mut())?;
-
-    let trimmed_remainder = remainder.trim_start();
-    if trimmed_remainder.is_empty() {
-        new_messages.remove(last_user_idx);
-    } else {
-        new_messages[last_user_idx] = json!({
-            "role": "user",
-            "content": trimmed_remainder,
-        });
-    }
-
-    match decision {
-        DecisionPrefix::Approve { tool_call_id } => {
-            let pending = match session_id {
-                Some(sid) => permission_store.take_pending(sid, &tool_call_id),
-                None => None,
-            };
-            let pending = match pending {
-                Some(p) => p,
-                None => {
-                    // Stale / unknown id: surface an error so the
-                    // LLM can re-prompt the user.
-                    splice_tool_result(
-                        new_messages,
-                        &tool_call_id,
-                        None,
-                        json!("[error] approval expired or unknown; please ask the user again"),
-                    );
-                    return Some((new_body, frames));
-                }
-            };
-            let agents = match agents {
-                Some(a) => a,
-                None => {
-                    splice_tool_result(
-                        new_messages,
-                        &tool_call_id,
-                        None,
-                        json!(format!(
-                            "[error] agents not registered; cannot run `{}`",
-                            pending.tool_name
-                        )),
-                    );
-                    return Some((new_body, frames));
-                }
-            };
-            let agent = match agents.get(&pending.tool_name) {
-                Some(a) => a,
-                None => {
-                    splice_tool_result(
-                        new_messages,
-                        &tool_call_id,
-                        None,
-                        json!(format!("[error] unknown agent: `{}`", pending.tool_name)),
-                    );
-                    return Some((new_body, frames));
-                }
-            };
-            // Emit `tool_call` SSE so the chat UI updates the
-            // footer pill to a "running" state for this entry.
-            let args_str = serde_json::to_string(&pending.args).unwrap_or_else(|_| "{}".into());
-            frames.push(bytes::Bytes::from(crate::llm::sse::sse_tool_call_event(
-                &tool_call_id,
-                &pending.tool_name,
-                &args_str,
-                1, // synthetic round index; LLM never sees this
-            )));
-            // Build a per-call `UserContext` exactly like the
-            // tool loop does, then invoke the agent directly —
-            // no `requires_confirmation` check (this IS the
-            // approval).
-            let services = nagent_agents::ServiceRegistry::empty().into_arc();
-            let mut ctx = match session_id {
-                Some(sid) => nagent_agents::UserContext::for_chat_session(
-                    user_id,
-                    services,
-                    resolver.clone(),
-                    None,
-                    sid,
-                ),
-                None => nagent_agents::UserContext::for_tests(user_id, services),
-            };
-            ctx.record_invocation(&pending.tool_name);
-            let (ok, payload) = match agent.invoke(&ctx, pending.args.clone()).await {
-                Ok(s) => (true, s),
-                Err(e) => (false, format!("[error] {e}")),
-            };
-            frames.push(bytes::Bytes::from(crate::llm::sse::sse_tool_result_event(
-                &tool_call_id,
-                &pending.tool_name,
-                ok,
-                &payload,
-            )));
-            splice_tool_result(
-                new_messages,
-                &tool_call_id,
-                Some(json!({
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": pending.tool_name,
-                            "arguments": args_str,
-                        }
-                    }],
-                })),
-                json!(payload),
-            );
-            Some((new_body, frames))
-        }
-        DecisionPrefix::ApproveAlways { tool_name } => {
-            if let Some(sid) = session_id {
-                permission_store.add_override(sid, tool_name.clone());
-            }
-            // No synthetic tool round — the LLM just acks the
-            // override on its next response.
-            Some((new_body, frames))
-        }
-        DecisionPrefix::Deny { tool_call_id } => {
-            // Drop the pending entry if present so a later
-            // re-approval request must come from the LLM again.
-            if let Some(sid) = session_id {
-                let _ = permission_store.take_pending(sid, &tool_call_id);
-            }
-            let deny_msg = "Utilisateur a refusé l'opération.";
-            frames.push(bytes::Bytes::from(crate::llm::sse::sse_tool_result_event(
-                &tool_call_id,
-                "<denied>",
-                false,
-                deny_msg,
-            )));
-            splice_tool_result(new_messages, &tool_call_id, None, json!(deny_msg));
-            Some((new_body, frames))
-        }
     }
 }

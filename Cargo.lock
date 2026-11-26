@@ -2450,12 +2450,10 @@ dependencies = [
 name = "nagent-db"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "chrono",
  "hex",
  "nagent-db",
- "nagent-support",
  "rand 0.8.8",
  "serde",
  "sha2 0.10.9",
@@ -4252,7 +4250,6 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 name = "stt-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "stt-proto",
  "thiserror 1.0.69",

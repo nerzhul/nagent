@@ -37,20 +37,31 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      # Build whisper-rs without GPU features in CI: GPU toolchains are
-      # not available on ubuntu-latest runners. We still compile the
-      # crate to validate the source via the `cpu` feature path below.
-      - name: cargo check (cpu features)
-        run: |
-          cargo check --workspace \
-            -p stt-proto \
-            -p nagent-server
+      # Default-features check over the whole workspace: a plain
+      # `cargo check` must keep compiling, so feature-gated code cannot
+      # drift out of sync with the no-feature build.
+      - name: cargo check (default features, whole workspace)
+        run: cargo check --workspace --all-targets
 
-      - name: cargo clippy (cpu features)
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
+      # Widest feature set a plain ubuntu-latest runner can compile:
+      # every chat agent plus the CPU whisper backend. Excluded on
+      # purpose: the GPU backends (`whisper-rs-vulkan/cuda/hipblas`,
+      # need Vulkan/CUDA/ROCm toolchains) and `tts` (needs espeak-ng +
+      # libsonic at link time). libclang is required by whisper-rs-sys'
+      # bindgen step.
+      - name: Install libclang (whisper-rs-sys bindgen)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
 
-      - name: cargo test (cpu features)
+      - name: cargo check (all CI-buildable features)
+        run: cargo check --workspace --all-targets --features all-agents,real-backend
+
+      - name: cargo clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo clippy (all CI-buildable features)
+        run: cargo clippy --workspace --all-targets --features all-agents,real-backend -- -D warnings
+
+      - name: cargo test (default features)
         run: cargo test --workspace
 
       - name: Install cargo-audit

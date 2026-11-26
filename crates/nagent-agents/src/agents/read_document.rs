@@ -29,7 +29,7 @@ impl std::fmt::Debug for ReadDocumentAgent {
 impl ReadDocumentAgent {
     /// Build from a [`DocumentSource`] implementation. The server
     /// hands in a wrapper around [`crate::documents::DocumentStore`]
-    /// + [`crate::chat::sessions::ChatSessions`] so the agent sees
+    /// and [`crate::chat::sessions::ChatSessions`] so the agent sees
     /// only the narrow capability surface it needs.
     pub fn new(source: std::sync::Arc<dyn DocumentSource>) -> Self {
         Self { source }

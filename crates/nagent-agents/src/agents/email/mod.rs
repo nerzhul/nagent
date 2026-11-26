@@ -585,7 +585,7 @@ impl EmailImap for EmailImapImpl {
                     let fetch = fetches_zc.first().ok_or_else(|| {
                         AgentError::AgentFailed(format!("IMAP FETCH {uid} returned no message"))
                     })?;
-                    let summary = client_imap::fetch_to_summary(&fetch, &folder_owned)?;
+                    let summary = client_imap::fetch_to_summary(fetch, &folder_owned)?;
                     let body = fetch
                         .text()
                         .map(|b| String::from_utf8_lossy(b).into_owned());

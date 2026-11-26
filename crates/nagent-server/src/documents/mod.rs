@@ -17,7 +17,7 @@
 //! ## Sub-modules
 //!
 //! - [`storage`] — disk layout (UUID + 2-char shard) + the
-//! `DocumentStore` DB wrapper.
+//!   `DocumentStore` DB wrapper.
 //! - [`extract`] — text extraction for `.txt`/`.md`/`.log` files
 //!   (lossy UTF-8 passthrough). The PDF path moved to
 //!   [`pages::extract_pages`] which produces the per-page
@@ -27,7 +27,7 @@
 //! - [`routes`] — `POST/GET/DELETE /v1/documents*` HTTP handlers
 //! + multipart parsing.
 //! - [`purge`] — `purge_older_than(Duration)` helper used by the
-//! background sweep + the `nagent documents purge` CLI.
+//!   background sweep + the `nagent documents purge` CLI.
 //!
 //! ## Feature matrix
 //!
@@ -137,7 +137,7 @@ impl DocumentStore {
             let cores = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1);
-            ((cores + 1) / 2).clamp(1, 16)
+            cores.div_ceil(2).clamp(1, 16)
         } else {
             pdf_extract_concurrency.max(1)
         };

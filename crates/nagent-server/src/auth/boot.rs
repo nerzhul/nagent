@@ -4,13 +4,13 @@
 //!
 //! 1. Connects to the auth DB and runs the migrations.
 //! 2. **SQLite only**: when the `users` table is empty, mints a
-//! random 24-char password for the first local admin and
-//! inserts it. The plaintext is logged once at `WARN` level.
-//! Postgres deployments skip this — admins must be created via
-//! the CLI to avoid silent privilege grants on a shared cluster.
+//!    random 24-char password for the first local admin and
+//!    inserts it. The plaintext is logged once at `WARN` level.
+//!    Postgres deployments skip this — admins must be created via
+//!    the CLI to avoid silent privilege grants on a shared cluster.
 //! 3. Returns the connected `AuthStore` so the rest of the
-//! application (CLI subcommands running in-process; HTTP routes
-//! for in-process CLI subcommands or hand it to the HTTP layer).
+//!    application (CLI subcommands running in-process; HTTP routes
+//!    for in-process CLI subcommands or hand it to the HTTP layer).
 //!
 //! The auto-bootstrap is a deliberate ergonomic for local-dev
 //! sqlite: a fresh `make run` produces a working admin without

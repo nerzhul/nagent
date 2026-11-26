@@ -1,0 +1,7 @@
+# Local builds treat warnings as errors, matching CI (which sets
+# `RUSTFLAGS: "-D warnings"` in .github/workflows/ci.yml). This applies to
+# every `cargo build` / `test` / `clippy` run from the repository root,
+# including the `make build` / `make run*` targets. An externally exported
+# `RUSTFLAGS` environment variable takes precedence over this setting.
+[build]
+rustflags = ["-D", "warnings"]

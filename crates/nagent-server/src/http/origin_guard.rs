@@ -243,7 +243,7 @@ pub fn evaluate_with(
             // the test harness and `curl` keep working without
             // an Origin header.
             None => {
-                if !host.is_some() {
+                if host.is_none() {
                     return Decision::ForbiddenOrigin;
                 }
             }
@@ -341,7 +341,7 @@ pub fn check_ws_upgrade(
     headers: &HeaderMap,
     bind_host: &str,
     cfg: &Config,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     // The WS handler already knows the peer IP, so it can
     // reconstruct the expected host:port. When the operator is
@@ -350,8 +350,8 @@ pub fn check_ws_upgrade(
     // [`build_allowed_hosts`] mirrors that case.
     match evaluate_ws_upgrade(Some(bind_host), origin, cfg) {
         Decision::Allow => Ok(()),
-        Decision::ForbiddenOrigin => Err(forbidden_origin_response()),
-        Decision::MisdirectedHost => Err(misdirected_host_response()),
+        Decision::ForbiddenOrigin => Err(Box::new(forbidden_origin_response())),
+        Decision::MisdirectedHost => Err(Box::new(misdirected_host_response())),
     }
 }
 

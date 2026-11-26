@@ -394,10 +394,10 @@ mod tests {
         }
     }
     /// Mirrors the production `ReadDocumentAgent`'s description
-    /// + keywords so the BM25 walk can be regression-tested
+    /// and keywords so the BM25 walk can be regression-tested
     /// against the exact registry the user typically has on
     /// (`x_timeline` + CalDAV + `read_document`). The keywords
-    /// cover the file extensions + common French/English
+    /// cover the file extensions and common French/English
     /// synonyms for "doc / file" that the LLM actually asks
     /// with in chat.
     fn read_document() -> StubAgent {
@@ -446,10 +446,10 @@ mod tests {
         }
     }
     /// Mirrors the production `email_list_inbox` agent's
-    /// description + keywords so the BM25 walk can be
+    /// description and keywords so the BM25 walk can be
     /// regression-tested against the exact registry the
     /// user typically has on (CalDAV + email + weather
-    /// + memory). The keywords carry the user-facing
+    /// and memory). The keywords carry the user-facing
     /// vocabulary ("emails", "inbox", "messages") that
     /// the description's prose ("IMAP mailbox") is
     /// missing — without them the router returns

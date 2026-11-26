@@ -42,9 +42,9 @@ pub async fn run(pool: &AnyPool) -> Result<(), Error> {
     }
 }
 
-/// Migration status types are re-exported from [`crate::types`]
-/// so there is only one definition shared by the SQL parser and
-/// the migration runner.
+// Migration status types are re-exported from `crate::types`
+// so there is only one definition shared by the SQL parser and
+// the migration runner.
 
 /// Inspect `_sqlx_migrations` and cross-reference it against the
 /// embedded `MIGRATOR` static to surface the applied / pending

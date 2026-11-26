@@ -188,7 +188,7 @@ fn default_hash_concurrency() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let half = (cores + 1) / 2; // ceiling of half
+    let half = cores.div_ceil(2); // ceiling of half
     half.clamp(1, 32)
 }
 

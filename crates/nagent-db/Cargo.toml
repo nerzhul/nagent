@@ -22,8 +22,6 @@ db-postgres = []
 test-util = []
 
 [dependencies]
-nagent-support = { path = "../nagent-support" }
-async-trait = { workspace = true }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 hex = "0.4"

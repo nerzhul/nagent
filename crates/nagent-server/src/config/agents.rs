@@ -722,9 +722,9 @@ pub struct EmailConfig {
     ///     single trusted relay) so the user can only send
     ///     through the corporate gateway, never through an
     ///     arbitrary open relay.
-    /// The reverse posture (locked read, open write) is
-    /// nonsense and the server still respects the per-list
-    /// decision.
+    ///     The reverse posture (locked read, open write) is
+    ///     nonsense and the server still respects the per-list
+    ///     decision.
     pub smtp_allowlist: Vec<String>,
     /// Hard cap on the number of summaries
     /// `email_list_inbox` / `email_search` return per call.

@@ -4,12 +4,12 @@
 //!
 //! 1. Open a fresh upstream `/v1/chat/completions` connection.
 //! 2. Drain the SSE byte stream into the client channel (see
-//! [`sse::drain_upstream_round`]), buffering any `tool_calls` deltas.
+//!    [`sse::drain_upstream_round`]), buffering any `tool_calls` deltas.
 //! 3. If the LLM emitted one or more tool calls, dispatch each one
-//! against the [`crate::agents::AgentRegistry`], append a
-//! `role: "tool"` message with the result, and loop.
+//!    against the [`crate::agents::AgentRegistry`], append a
+//!    `role: "tool"` message with the result, and loop.
 //! 4. When the LLM emits a final `finish_reason: "stop"` (no tool
-//! calls), close the channel with `data: [DONE]\n\n`.
+//!    calls), close the channel with `data: [DONE]\n\n`.
 //!
 //! Plan 4.C: the cross-agent confirmation rule (e.g.
 //! "`read_document` → `web_fetch` requires user confirmation")

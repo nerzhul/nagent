@@ -3,14 +3,14 @@
 //! Implements the two passkey ceremonies:
 //!
 //! - **Login** (`POST /api/auth/login/passkey/start` + `/finish`):
-//! the start handler returns a challenge JSON the browser turns
-//! into an assertion, the finish handler verifies it, looks up
-//! the matching `passkeys.credential_id`, increments the counter,
-//! and writes a session row.
+//!   the start handler returns a challenge JSON the browser turns
+//!   into an assertion, the finish handler verifies it, looks up
+//!   the matching `passkeys.credential_id`, increments the counter,
+//!   and writes a session row.
 //! - **Registration** (`POST /api/auth/login/passkey/register/start`
 //! + `/finish`): logged-in only (gated by `RequireAuth`); the
-//! start handler returns a challenge JSON, the finish handler
-//! validates the attestation and stores the new public key.
+//!   start handler returns a challenge JSON, the finish handler
+//!   validates the attestation and stores the new public key.
 //!
 //! Ceremony state between the two halves is held entirely
 //! server-side: the start response carries an opaque `state_token`

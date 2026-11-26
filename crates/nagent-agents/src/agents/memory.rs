@@ -1,20 +1,20 @@
 //! Four `memory_*` chat agents (plan 1791267136806).
 //!
 //! - `memory_store` — persist one fact the user explicitly stated.
-//! The system prompt tells the LLM when to call this (plan §1.1);
-//! the call is `Allow` because it is idempotent through the
-//! `(subject, predicate)` dedup + reversible through `memory_forget`.
+//!   The system prompt tells the LLM when to call this (plan §1.1);
+//!   the call is `Allow` because it is idempotent through the
+//!   `(subject, predicate)` dedup + reversible through `memory_forget`.
 //! - `memory_recall` — pull the top-K decrypted rows by
-//! subject / predicate / tags, mostly used by the LLM to look
-//! up a single fact when the auto-injected system block did
-//! not contain it.
+//!   subject / predicate / tags, mostly used by the LLM to look
+//!   up a single fact when the auto-injected system block did
+//!   not contain it.
 //! - `memory_list` — metadata listing (Settings-tab shape). The
-//! LLM uses it when asked "list everything you've stored for
-//! me" — the metadata does NOT include the encrypted value, so
-//! the agent surfaces a taxonomy-only summary.
+//!   LLM uses it when asked "list everything you've stored for
+//!   me" — the metadata does NOT include the encrypted value, so
+//!   the agent surfaces a taxonomy-only summary.
 //! - `memory_forget` — destructive: `NeedsConfirmation` (even
-//! though reversible) so the user sees a clear "are you sure?"
-//! bubble before a row disappears.
+//!   though reversible) so the user sees a clear "are you sure?"
+//!   bubble before a row disappears.
 //!
 //! The agents reach the per-user encrypted store through the
 //! [`MemorySource`] capability on [`UserContext`]; the encryption
@@ -37,7 +37,7 @@ const MEMORY_NOT_WIREDATED: &str = "memory is disabled in user preferences";
 
 fn source_unavailable(ctx: &UserContext) -> AgentError {
     if ctx.memories().is_none() {
-        AgentError::AgentFailed(format!("memory: source not wired in this context"))
+        AgentError::AgentFailed("memory: source not wired in this context".to_string())
     } else {
         AgentError::AgentFailed(MEMORY_NOT_WIREDATED.to_string())
     }

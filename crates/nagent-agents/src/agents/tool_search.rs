@@ -285,7 +285,7 @@ mod tests {
     fn name_and_schema_are_stable() {
         let agent = ToolSearchAgent::new();
         assert_eq!(agent.name(), "search_tools");
-        assert_eq!(agent.untrusted_output(), false);
+        assert!(!agent.untrusted_output());
         let schema = agent.parameters_schema();
         assert_eq!(schema["type"], "object");
         let required = schema["required"].as_array().unwrap();

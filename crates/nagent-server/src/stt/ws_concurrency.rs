@@ -142,6 +142,10 @@ impl WsConcurrency {
     /// known. Both counters are floored at `0` so a double-release
     /// (e.g. an explicit `unregister` after the sweep already
     /// removed the entry) is a no-op rather than a wrap-around.
+    // `fetch_update` is deprecated on recent toolchains in favour of
+    // `try_update`, but `try_update` is still unstable on the 1.94
+    // MSRV, so the replacement is not available yet.
+    #[allow(deprecated)]
     pub fn release_with_ip(&self, ip: IpAddr) {
         self.release_global();
         if let Some(entry) = self.inner.per_ip.get(&ip) {
@@ -156,6 +160,9 @@ impl WsConcurrency {
 
     /// Release only the global slot — used by sessions opened
     /// without a peer IP (in-process tests, harnesses).
+    // See `release_with_ip` for why `fetch_update` keeps an
+    // `#[allow(deprecated)]` here.
+    #[allow(deprecated)]
     pub fn release_global(&self) {
         let _ = self.inner.global_count.fetch_update(
             Ordering::AcqRel,
