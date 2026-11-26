@@ -295,9 +295,9 @@ async fn http_get_integration_echoes_plaintext_only_for_non_password_fields() {
                 echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             },
             FieldDef {
-                key: "url",
-                label: "URL",
-                kind: FieldKind::Url,
+                key: "username",
+                label: "Username",
+                kind: FieldKind::Text,
                 required: true,
                 help: None,
                 placeholder: None,

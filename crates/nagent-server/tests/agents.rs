@@ -198,10 +198,19 @@ fn make_app_state(
 // the same default `AgentConfig`, so one shared registry is
 // enough — `OnceLock::get_or_init` runs the closure exactly once
 // even when the multi-threaded tests race on it.
+//
+// The shared registry puts `example.com` on the `web_fetch`
+// allow-list so the tool-loop tests can dispatch `web_fetch` on
+// that host (confirmation = Allow) while the sandbox still blocks
+// the public IP at invoke time.
 fn shared_registry(cfg: &AgentConfig) -> AgentRegistry {
     static REGISTRY: std::sync::OnceLock<AgentRegistry> = std::sync::OnceLock::new();
     REGISTRY
-        .get_or_init(|| nagent_server::agents::build_registry(cfg, None, None, None))
+        .get_or_init(|| {
+            let mut cfg = cfg.clone();
+            cfg.web_fetch.allowlist = vec!["example.com".into()];
+            nagent_server::agents::build_registry(&cfg, None, None, None)
+        })
         .clone()
 }
 
@@ -554,9 +563,13 @@ async fn tool_loop_dispatches_and_completes() {
     let upstream_url = spawn_tool_call_upstream(captured.clone()).await;
 
     let cfg = Arc::new(make_server_cfg(upstream_url));
-    // Disable `web_fetch` from actually doing network: empty
-    // allow-list + public blocked = the call to `example.com` will
-    // be rejected by the sandbox. The proxy still emits the events.
+    // The shared registry allow-lists `example.com`, so
+    // `requires_confirmation` returns `Allow` and the call is
+    // actually dispatched (otherwise the tool loop pauses on the
+    // approval card and never reaches round 2). The sandbox still
+    // blocks the public IP (`allow_public=false`), so the invocation
+    // fails and the proxy emits the tool_call + tool_result events
+    // before round 2.
     let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
@@ -618,8 +631,11 @@ async fn tool_loop_dispatches_and_completes() {
     // tool_calls finish, round 2 with the final reply).
     let captured = captured.lock().await;
     assert_eq!(captured.len(), 2, "expected 2 upstream calls");
-    // Round 1: request must carry the injected `tools` array with
-    // the web_fetch entry.
+    // Round 1: request must carry the injected `tools` array. Since
+    // plan 1791317253718 the round-level builder ships only
+    // `search_tools` plus the BM25 pre-selection plus per-session
+    // discovered tools — `web_fetch` is NOT projected into `tools=[]`
+    // on round 0 anymore (the LLM discovers it via `search_tools`).
     let round1 = &captured[0];
     let tools = round1["tools"].as_array().expect("tools array");
     assert!(!tools.is_empty(), "tools array should not be empty");
@@ -628,8 +644,8 @@ async fn tool_loop_dispatches_and_completes() {
         .filter_map(|t| t["function"]["name"].as_str())
         .collect();
     assert!(
-        names.contains(&"web_fetch"),
-        "web_fetch missing from injected tools: {names:?}"
+        names.contains(&"search_tools"),
+        "search_tools meta-agent missing from injected tools: {names:?}"
     );
     // Round 2: the messages array must include the assistant's
     // tool_calls entry plus a role:tool message with the matching
@@ -671,7 +687,7 @@ async fn tool_loop_aborts_after_max_rounds() {
                 [(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"))],
                 concat!(
                     "event: message\n",
-                    "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_y\",\"type\":\"function\",\"function\":{\"name\":\"web_fetch\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                    "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_y\",\"type\":\"function\",\"function\":{\"name\":\"web_fetch\",\"arguments\":\"{\\\"url\\\":\\\"http://example.com\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                     "data: [DONE]\n\n",
                 ).to_string(),
             )
@@ -682,6 +698,10 @@ async fn tool_loop_aborts_after_max_rounds() {
     let mut server_cfg = make_server_cfg(upstream_url);
     server_cfg.llm.llm_max_tool_rounds = 2;
     let cfg = Arc::new(server_cfg);
+    // The shared registry allow-lists `example.com`, so each
+    // `web_fetch` tool call is dispatched (Allow) and fails in the
+    // sandbox instead of pausing the round on an approval card —
+    // otherwise the loop never reaches `max_tool_rounds`.
     let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
@@ -1156,7 +1176,7 @@ async fn wikipedia_agent_sends_descriptive_user_agent() {
     let base_url = format!("http://{addr}/api/rest_v1");
 
     let agent = WikipediaAgent::new(WikipediaAgentConfig {
-        base_url: format!("{base_url}/api/rest_v1"),
+        base_url: base_url.clone(),
         timeout_ms: 2_000,
         user_agent: "nagent-test/wikipedia/42 (+https://example.test)".into(),
     });
@@ -1167,7 +1187,7 @@ async fn wikipedia_agent_sends_descriptive_user_agent() {
     let sent = captured.lock().unwrap().clone();
     assert_eq!(
         sent.as_deref(),
-        Some("nagent-test-wikipedia/42 (+https://example.test)"),
+        Some("nagent-test/wikipedia/42 (+https://example.test)"),
         "User-Agent header must be sent verbatim from the config"
     );
 }
@@ -1377,7 +1397,11 @@ async fn tool_loop_auto_continues_after_reasoning_truncation() {
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let upstream_url = spawn_reasoning_truncation_upstream(captured.clone()).await;
 
-    let cfg = Arc::new(make_server_cfg(upstream_url));
+    // `make_server_cfg` sets `llm_max_auto_continues = 0`, which disables
+    // the auto-continue path entirely; the production default is 32.
+    let mut server_cfg = make_server_cfg(upstream_url);
+    server_cfg.llm.llm_max_auto_continues = 2;
+    let cfg = Arc::new(server_cfg);
     let agents = shared_registry(&cfg.agents);
     let sessions: SessionMap = Arc::new(dashmap::DashMap::new());
     let llm_cfg = Arc::new(cfg.llm.clone());
