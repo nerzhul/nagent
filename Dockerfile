@@ -37,13 +37,23 @@ ENV CARGO_TERM_COLOR=never \
     CARGO_HOME=/usr/local/cargo \
     RUST_BACKTRACE=1
 
+# whisper-rs-sys runs bindgen on whisper.cpp, and bindgen pipes the
+# generated bindings through `rustfmt` when the component is installed
+# (without it, every build logs a non-fatal "Failed to run rustfmt"
+# error). The rust base image ships rustup but not the component.
+RUN rustup component add rustfmt
+
 # libclang-dev is required by whisper-rs-sys' bindgen step for EVERY
 # backend (cpu included) — the rust base image no longer ships libclang.
-# libvulkan-dev is only needed when BACKEND=vulkan (bindgen against the
-# Vulkan headers). The CUDA/HIP toolchains are not installed in this
-# base image — supply them via a side-car image or an extended base if
-# you pick those backends.
+# cmake + make are required by whisper-rs-sys' cmake step, which compiles
+# whisper.cpp for every backend (the `cmake` crate defaults to the
+# "Unix Makefiles" generator). libvulkan-dev is only needed when
+# BACKEND=vulkan (bindgen against the Vulkan headers). The CUDA/HIP
+# toolchains are not installed in this base image — supply them via a
+# side-car image or an extended base if you pick those backends.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        make \
         libclang-dev \
         libssl-dev \
         pkg-config \

@@ -118,8 +118,10 @@ The CUDA and HIP backends are **not** installed in the `rust:1.94-bookworm`
 base image; supply them via an extended base image if you pick those
 backends. The Vulkan loader (`libvulkan1`) is installed automatically in the
 runtime stage when `BACKEND=vulkan`. The builder stage installs
-`libclang-dev` unconditionally: `whisper-rs-sys` runs bindgen for every
-backend, `cpu` included, and the base image no longer ships libclang.
+`cmake` + `make` (whisper.cpp is compiled through cmake for every backend),
+`libclang-dev` (bindgen, every backend — the base image no longer ships
+libclang), and adds the `rustfmt` rustup component, which bindgen uses to
+format the generated bindings when present.
 
 ### Environment variables
 
