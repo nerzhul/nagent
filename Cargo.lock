@@ -2427,6 +2427,7 @@ dependencies = [
  "ipnet",
  "mailparse",
  "meval",
+ "nagent-github",
  "nagent-shortcut",
  "nagent-support",
  "oauth2",
@@ -2466,6 +2467,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nagent-github"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nagent-support",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid 1.29.3",
+]
+
+[[package]]
 name = "nagent-server"
 version = "0.1.0"
 dependencies = [
@@ -2493,6 +2511,7 @@ dependencies = [
  "mime_guess",
  "nagent-agents",
  "nagent-db",
+ "nagent-github",
  "nagent-server",
  "nagent-shortcut",
  "nagent-support",

@@ -727,13 +727,20 @@ pub fn build_registry(
     // double-installation so a future boot-loop wiring
     // bug surfaces immediately rather than silently
     // overwriting the first server's config.
+    // The `email` module only exists under the `email-agent` cargo
+    // feature, so the impl installation is gated too — otherwise a
+    // default-features `cargo check` of this crate fails to resolve.
+    #[cfg(feature = "email-agent")]
     let imap_impl: Arc<dyn nagent_agents::agents::email::EmailImap> = Arc::new(
         nagent_agents::agents::email::EmailImapImpl::new(Arc::new(cfgs.email.clone())),
     );
+    #[cfg(feature = "email-agent")]
     let smtp_impl: Arc<dyn nagent_agents::agents::email::EmailSmtp> = Arc::new(
         nagent_agents::agents::email::EmailSmtpImpl::new(Arc::new(cfgs.email.clone())),
     );
+    #[cfg(feature = "email-agent")]
     nagent_agents::agents::email::set_email_imap_impl(imap_impl);
+    #[cfg(feature = "email-agent")]
     nagent_agents::agents::email::set_email_smtp_impl(smtp_impl);
     // Plan 4.C (C): one shared `EgressPool` is built per process
     // and passed to every agent. Strict-class agents
@@ -742,6 +749,10 @@ pub fn build_registry(
     // public client. Connection reuse + warm DNS / TLS roots are
     // the gains; per-agent SSRF policy still applies.
     let pool = nagent_agents::egress::EgressPool::new();
+    // `mut` is only used by the `read-document-agent`-gated
+    // `push_agent_boxed` below, so silence `unused_mut` on builds
+    // without that feature.
+    #[cfg_attr(not(feature = "read-document-agent"), allow(unused_mut))]
     let mut registry = AgentRegistry::from_config(&cfgs, cfg.enabled, &pool);
     // The `read_document` agent is auto-registered when both
     // `[agents].enabled = true` and the documents subsystem

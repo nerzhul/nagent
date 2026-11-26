@@ -244,6 +244,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::credentials::github_probe::build_github_probe_router(state.clone());
         #[cfg(not(feature = "github-agent"))]
         let github_probe_routes = axum::Router::new();
+        // Plan 1795686864347: the repo-access probe
+        // (`POST /api/integrations/github/probe-repo`, reads the
+        // vault PAT) and the pure-API PR dashboard
+        // (`GET /api/integrations/github/prs…`) — same
+        // `github-agent` gate as the token probe.
+        #[cfg(feature = "github-agent")]
+        let github_probe_repo_routes =
+            crate::credentials::github_probe_repo::build_github_probe_repo_router(state.clone());
+        #[cfg(not(feature = "github-agent"))]
+        let github_probe_repo_routes = axum::Router::new();
+        #[cfg(feature = "github-agent")]
+        let github_api_routes =
+            crate::credentials::github_api::build_github_api_router(state.clone());
+        #[cfg(not(feature = "github-agent"))]
+        let github_api_routes = axum::Router::new();
         // Plan 1795597719369: the Shortcut setup-only probe endpoint
         // is mounted the same way as the GitHub probe —
         // feature-gated on `shortcut-agent`, empty router otherwise.
@@ -268,6 +283,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .merge(caldav_probe_routes)
             .merge(email_probe_routes)
             .merge(github_probe_routes)
+            .merge(github_probe_repo_routes)
+            .merge(github_api_routes)
             .merge(shortcut_probe_routes)
             .merge(shortcut_api_routes)
             .merge(mount_memories(state.clone()))

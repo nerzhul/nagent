@@ -127,40 +127,29 @@ pub(crate) fn parse_enum(
 }
 
 /// Parse a `repo` argument shaped `"owner/repo"` into its two
-/// parts, validating the GitHub name rules (alphanumeric +
-/// `-` / `_` / `.`, no leading/trailing hyphen, no `..`).
+/// parts, validating the GitHub name rules with the shared
+/// [`nagent_github::valid_repo_full_name`] validator (the same one
+/// the dashboard repo filter and the probe-repo endpoint use, so
+/// a malformed value is rejected identically everywhere).
 pub(crate) fn parse_repo(args: &Value) -> Result<(String, String), AgentError> {
     let raw = args.get("repo").and_then(|v| v.as_str()).ok_or_else(|| {
         AgentError::InvalidArguments("`repo` is required, shaped `\"owner/repo\"`".into())
     })?;
-    let (owner, repo) = raw.split_once('/').ok_or_else(|| {
-        AgentError::InvalidArguments(format!(
-            "`repo` must be shaped `\"owner/repo\"`, got `{raw}`"
-        ))
-    })?;
-    if !valid_github_name(owner)
-        || !valid_github_name(repo)
-        || owner.contains("..")
-        || repo.contains("..")
-    {
-        return Err(AgentError::InvalidArguments(format!(
-            "`repo` has an invalid owner/repo name: `{raw}` (allowed: alphanumeric, `-`, `_`, `.`)"
-        )));
+    match nagent_github::valid_repo_full_name(raw) {
+        Some((owner, repo)) => Ok((owner.to_string(), repo.to_string())),
+        None => {
+            if raw.contains('/') {
+                Err(AgentError::InvalidArguments(format!(
+                    "`repo` has an invalid owner/repo name: `{raw}` (allowed: alphanumeric, \
+                     `-`, `_`, `.`)"
+                )))
+            } else {
+                Err(AgentError::InvalidArguments(format!(
+                    "`repo` must be shaped `\"owner/repo\"`, got `{raw}`"
+                )))
+            }
+        }
     }
-    Ok((owner.to_string(), repo.to_string()))
-}
-
-/// GitHub owner / repo name rules: 1-100 chars, alphanumeric or
-/// `-` / `_` / `.`, no leading or trailing hyphen.
-fn valid_github_name(s: &str) -> bool {
-    if s.is_empty() || s.len() > 100 {
-        return false;
-    }
-    if s.starts_with('-') || s.ends_with('-') {
-        return false;
-    }
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// Parse the `number` argument (issue / PR number): a positive

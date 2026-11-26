@@ -226,7 +226,8 @@ fn github_service_def_shape() {
     use nagent_agents::{FieldKind, ServiceRegistry};
     let reg = ServiceRegistry::new(&[GITHUB_SERVICE]);
     let svc = reg.get("github").expect("github service registered");
-    assert_eq!(svc.fields.len(), 2);
+    // Plan 1795686864347: PAT + username + the two dashboard fields.
+    assert_eq!(svc.fields.len(), 4);
     let pat = &svc.fields[0];
     assert_eq!(pat.key, "personal_access_token");
     assert_eq!(pat.kind, FieldKind::Password);
@@ -237,6 +238,16 @@ fn github_service_def_shape() {
     assert_eq!(username.kind, FieldKind::Text);
     assert!(username.required);
     assert!(!username.echo_on_edit, "username is credential-adjacent");
+    let show_dashboard = &svc.fields[2];
+    assert_eq!(show_dashboard.key, "show_dashboard");
+    assert_eq!(show_dashboard.kind, FieldKind::Checkbox);
+    assert!(!show_dashboard.required, "dashboard toggle is optional");
+    assert!(show_dashboard.echo_on_edit, "checkbox state echoes on edit");
+    let repos = &svc.fields[3];
+    assert_eq!(repos.key, "dashboard_repos");
+    assert_eq!(repos.kind, FieldKind::Text);
+    assert!(!repos.required);
+    assert!(repos.echo_on_edit, "repo list is not a secret; it echoes");
 }
 
 #[test]

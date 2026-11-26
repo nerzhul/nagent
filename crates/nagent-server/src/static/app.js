@@ -31,7 +31,7 @@ import { preselectFromBrowser } from "/static/lang-preselect.js";
 // lifetime of the loaded bundle; a reload that picks up a new build
 // picks up a new value. See `maybeShowUpdateBanner` for the
 // comparison logic.
-const __nagentSelfFrontendVersion = "1bbf5c06b52cc62d";
+const __nagentSelfFrontendVersion = "c45ad8405bb17dd5";
 
 // ---- DOM --------------------------------------------------------------------
 

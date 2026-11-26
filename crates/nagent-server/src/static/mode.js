@@ -1,15 +1,16 @@
-// nagent — mode toggle (Transcript / Discussion / Settings / Stories).
+// nagent — mode toggle (Transcript / Discussion / Settings / Stories / PRs).
 //
-// Four views, only one visible at a time. The active mode is
+// Five views, only one visible at a time. The active mode is
 // persisted in `localStorage` so a reload lands the user where
 // they left off. `applyMode` flips the DOM nodes by-id from the
 // PAIRS table without any per-mode branching.
 //
-// The Stories view is special: its tab only exists when the
-// Shortcut integration has "Show my stories dashboard" checked
-// (shortcut-stories.js calls `setStoriesEnabled`). A persisted
-// "stories" mode with the tab hidden falls back to the default
-// mode instead of stranding the user on an empty view.
+// The Stories and PRs views are special: their tabs only exist
+// when the matching integration has its `show_dashboard`
+// checkbox ticked (shortcut-stories.js calls `setStoriesEnabled`,
+// github-prs.js calls `setPrsEnabled`). A persisted "stories" /
+// "prs" mode with the tab hidden falls back to the default mode
+// instead of stranding the user on an empty view.
 //
 // The Settings view itself is a 2-column shell (llama.cpp style)
 // with a left rail of section tabs and a right pane that shows one
@@ -26,13 +27,14 @@
   "use strict";
 
   const STORAGE_KEY = "nagent.mode";
-  const VALID_MODES = new Set(["transcript", "discussion", "settings", "stories"]);
+  const VALID_MODES = new Set(["transcript", "discussion", "settings", "stories", "prs"]);
   const DEFAULT_MODE = "transcript";
-  // Whether the Stories tab is currently available (driven by the
-  // Shortcut integration's `show_dashboard` checkbox — see
-  // shortcut-stories.js). Read by `applyMode` so a persisted
-  // "stories" mode cannot select a hidden view.
+  // Whether the Stories / PRs tabs are currently available (driven
+  // by the integrations' `show_dashboard` checkboxes — see
+  // shortcut-stories.js / github-prs.js). Read by `applyMode` so a
+  // persisted "stories" / "prs" mode cannot select a hidden view.
   let storiesEnabled = false;
+  let prsEnabled = false;
 
   // Tab-button ↔ view-id mapping. Kept as a single object so the
   // list of modes is the only source of truth — `applyMode` walks
@@ -42,6 +44,7 @@
     discussion: { btn: "mode-discussion-btn", view: "view-discussion" },
     settings:   { btn: "mode-settings-btn",   view: "view-settings"   },
     stories:    { btn: "mode-stories-btn",    view: "view-stories"    },
+    prs:        { btn: "mode-prs-btn",        view: "view-prs"        },
   };
 
   // Settings sub-navigation: rail-button ↔ pane-page mapping. Mirrors
@@ -119,11 +122,13 @@
   }
 
   function applyMode(mode, { dispatch = true } = {}) {
-    // A "stories" mode requested while the tab is hidden (dashboard
-    // checkbox off) falls back to the default mode — the view would
-    // be empty otherwise.
+    // A "stories" / "prs" mode requested while its tab is hidden
+    // (dashboard checkbox off) falls back to the default mode — the
+    // view would be empty otherwise.
     const active =
-      VALID_MODES.has(mode) && (mode !== "stories" || storiesEnabled)
+      VALID_MODES.has(mode) &&
+      (mode !== "stories" || storiesEnabled) &&
+      (mode !== "prs" || prsEnabled)
         ? mode
         : DEFAULT_MODE;
     for (const [m, pair] of Object.entries(PAIRS)) {
@@ -204,6 +209,22 @@
     }
   }
 
+  // Same as `setStoriesEnabled` but for the GitHub "PRs" tab (called
+  // by github-prs.js once it has read the GitHub integration's
+  // `show_dashboard` flag).
+  function setPrsEnabled(on) {
+    prsEnabled = on;
+    const btn = document.getElementById(PAIRS.prs.btn);
+    if (btn) btn.hidden = !on;
+    const stored = readStoredMode();
+    if (on && stored === "prs") {
+      applyMode("prs");
+    } else if (!on && activeMode() === "prs") {
+      writeStoredMode(DEFAULT_MODE);
+      applyMode(DEFAULT_MODE);
+    }
+  }
+
   // Export a tiny read-only handle for chat.js to detect re-entries
   // (the `modechange` event already covers this, but the helper is
   // useful in tests / debugging).
@@ -216,5 +237,7 @@
     },
     setStoriesEnabled,
     storiesEnabled: () => storiesEnabled,
+    setPrsEnabled,
+    prsEnabled: () => prsEnabled,
   };
 })();

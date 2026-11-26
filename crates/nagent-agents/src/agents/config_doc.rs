@@ -398,43 +398,14 @@ impl Default for EmailAgentConfig {
 /// governs the whole family. The per-user personal access token
 /// lives in the vault under the `github` service id — it is not
 /// part of this config.
-#[derive(Debug, Clone)]
-pub struct GithubAgentConfig {
-    /// Per-request connect+read timeout in milliseconds.
-    pub timeout_ms: u64,
-    /// Hard cap on the `limit` argument of every list tool.
-    pub max_items: usize,
-    /// Cap on issue / PR / file bodies the LLM ever sees (bytes).
-    /// Bodies longer than this are truncated with a marker.
-    pub max_body_bytes: usize,
-    /// In-process response cache TTL, keyed by
-    /// `(user_id, tool, args)`. `0` disables the cache. GitHub
-    /// PAT quota is 5 000 req/h, so a short TTL keeps repeated
-    /// "what's open?" questions cheap.
-    pub cache_ttl_secs: u64,
-    /// Hostname allow-list applied by the egress client to every
-    /// GitHub API URL. Default `["api.github.com"]`. A GitHub
-    /// Enterprise Server deployment overrides `base_url` AND
-    /// this list with its own host.
-    pub allowlist: Vec<String>,
-    /// Override the upstream base URL — useful for integration
-    /// tests against a loopback fixture and for GHES. Defaults
-    /// to `https://api.github.com`.
-    pub base_url: String,
-}
-
-impl Default for GithubAgentConfig {
-    fn default() -> Self {
-        Self {
-            timeout_ms: 10_000,
-            max_items: 100,
-            max_body_bytes: 65_536,
-            cache_ttl_secs: 60,
-            allowlist: vec!["api.github.com".to_string()],
-            base_url: "https://api.github.com".to_string(),
-        }
-    }
-}
+///
+/// The struct itself lives in the `nagent-github` crate (the
+/// pure wire client shared with the server's dashboard endpoints
+/// and the repo probe); this alias keeps every
+/// `GithubAgentConfig` path in `nagent-agents` and
+/// `nagent-server` — including struct-literal construction in the
+/// server's `From<config::GithubConfig>` impl — working unchanged.
+pub use nagent_github::GithubConfig as GithubAgentConfig;
 
 /// Knobs for the ten read-only `shortcut_*` agents (plan
 /// 1795597719369).

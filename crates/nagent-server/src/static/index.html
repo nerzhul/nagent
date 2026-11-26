@@ -132,6 +132,17 @@
         </svg>
         <span>Stories</span>
       </button>
+      <!-- GitHub PRs dashboard tab. Hidden by default; github-prs.js
+           unhides it when the GitHub integration has
+           `show_dashboard` checked (GET /api/integrations/github).
+           Backed by pure-API endpoints — never the LLM. -->
+      <button role="tab" id="mode-prs-btn" aria-selected="false"
+              data-mode="prs" hidden>
+        <svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true">
+          <path fill="currentColor" d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354zM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0z"/>
+        </svg>
+        <span>PRs</span>
+      </button>
       <button role="tab" id="mode-settings-btn" aria-selected="false"
               data-mode="settings">
         <svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -864,12 +875,63 @@
     </div>
   </main>
 
+  <!-- GitHub PRs dashboard view. Only reachable when the GitHub
+       integration has "Show my PRs dashboard" checked —
+       github-prs.js hides both the tab and this view otherwise.
+       Content comes from the pure-API endpoint
+       GET /api/integrations/github/prs… (never the LLM). -->
+  <main id="view-prs" class="view" hidden>
+    <div class="prs-dashboard">
+      <header class="prs-header">
+        <h2>My GitHub pull requests</h2>
+        <div class="prs-header-actions">
+          <select id="prs-repo-filter" aria-label="Filter by repository">
+            <option value="">All repositories</option>
+          </select>
+          <select id="prs-state" aria-label="PR state">
+            <option value="open" selected>Open</option>
+            <option value="closed">Closed</option>
+            <option value="all">All</option>
+          </select>
+          <label class="prs-enrich" title="Fetch each PR's CI status (one extra cached API call per PR)">
+            <input id="prs-enrich" type="checkbox">
+            CI status
+          </label>
+          <button id="prs-manage-repos" type="button" class="ghost">Repositories</button>
+          <button id="prs-refresh" type="button" class="ghost">Refresh</button>
+        </div>
+      </header>
+      <p id="prs-status" class="prs-status" role="status" aria-live="polite"></p>
+      <div class="prs-table-wrap">
+        <table id="prs-table" class="prs-table">
+          <thead>
+            <tr>
+              <th data-sort="repo" scope="col">Repo</th>
+              <th data-sort="number" scope="col">#</th>
+              <th data-sort="title" scope="col">Title</th>
+              <th data-sort="author" scope="col">Author</th>
+              <th scope="col">Labels</th>
+              <th scope="col">Branch</th>
+              <th data-sort="state" scope="col">State</th>
+              <th scope="col">CI</th>
+              <th data-sort="created_at" scope="col">Created</th>
+              <th data-sort="updated_at" scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody id="prs-list"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
   <!-- Mode toggle is a plain script (no imports) so it can run as a
        classic non-module script. chat.js is a module so we can use
        top-level await + scoped imports cleanly. Both are independent
        of the UMD globals above. -->
   <script src="/static/mode.js" defer></script>
   <script src="/static/shortcut-stories.js" defer></script>
+  <script src="/static/github-prs.js" defer></script>
+  <script src="/static/github-repo-picker.js" defer></script>
   <script type="module" src="/static/chat.js"></script>
   <script type="module" src="/static/app.js"></script>
 

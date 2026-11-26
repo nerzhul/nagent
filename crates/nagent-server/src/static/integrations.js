@@ -933,6 +933,34 @@ async function probeGithub(personalAccessToken) {
   return await resp.json();
 }
 
+// Plan 1795686864347 — the GitHub `dashboard_repos` field is managed
+// through the dedicated repo picker (github-repo-picker.js): it lists
+// the orgs the saved PAT belongs to and lets the user tick repos.
+// The field itself stays a hidden input holding the JSON array so the
+// generic form submit still picks it up unchanged; the button opens
+// the picker, which saves through its own PUT and syncs this input.
+function attachGithubReposPickerButton(form) {
+  const field = form.querySelector('[data-key="dashboard_repos"]');
+  if (!field) return;
+  field.type = "hidden";
+  const wrap = field.closest(".chat-integration-field");
+  const row = document.createElement("div");
+  row.className = "gh-repo-picker-row";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ghost";
+  btn.textContent = "Choose repositories…";
+  btn.addEventListener("click", () => {
+    window.__nagentGithubRepoPicker?.open();
+  });
+  row.appendChild(btn);
+  if (wrap && wrap.parentNode) {
+    wrap.parentNode.insertBefore(row, wrap.nextSibling);
+  } else {
+    form.appendChild(row);
+  }
+}
+
 async function probeShortcut(apiToken, username) {
   const resp = await fetch(PROBE_PATH_SHORTCUT, {
     method: "POST",
@@ -1283,6 +1311,9 @@ function openEditor(svc) {
   }
   if (svc.id === GITHUB_SERVICE_ID) {
     attachGithubTestButton(form, actions);
+    // Plan 1795686864347: the PRs dashboard repo list is chosen in the
+    // dedicated repo picker (orgs + checkbox list), not typed by hand.
+    attachGithubReposPickerButton(form);
   }
   if (svc.id === SHORTCUT_SERVICE_ID) {
     const probe = attachShortcutTestButton(form, actions);

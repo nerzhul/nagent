@@ -14,7 +14,7 @@ reading"); reviewers must update it whenever the breakdown changes
 
 ## Workspace layout
 
-The workspace has seven crates, listed under `Cargo.toml`
+The workspace has eight crates, listed under `Cargo.toml`
 `[workspace.members]` in dependency order:
 
 | Crate | Role | Layer |
@@ -23,8 +23,9 @@ The workspace has seven crates, listed under `Cargo.toml`
 | `crates/stt-core` | `WhisperBackend` trait, `whisper-rs` implementation, inference worker and queue. | infra |
 | `crates/nagent-support` | Shared small types and utilities (TTL-map, bounded-blocking, sweep-clock) **plus the hardened HTTP egress client** (`egress` module: SSRF pre-flight, hostname allow-list, timeouts, body-size budget) shared by every wire client. | infra |
 | `crates/nagent-shortcut` | Pure Shortcut REST API v3 client (`ShortcutClient`, token as a parameter, response cache, JSON projections). No LLM / agent dependency, so both `nagent-agents` (chat tools) and `nagent-server` (pure-API dashboard endpoints) share it. | domain |
+| `crates/nagent-github` | Pure GitHub REST API client (`GithubClient`, PAT as a parameter, response cache, JSON projections + the PR-dashboard aggregation). Same split as `nagent-shortcut`: shared by the `github_*` chat tools and by `nagent-server`'s pure-API PR dashboard endpoints + repo probe. | domain |
 | `crates/nagent-db` | `Db` wrapper around `sqlx::Pool` plus migrations / row types shared by auth, credentials, and documents. | infra |
-| `crates/nagent-agents` | Chat-agent subsystem (§2). Pure: no dependency on `nagent-server`, `sqlx`, or `whisper-rs`. Re-exports `nagent_support::egress` as its own `egress` module and `nagent_shortcut::ShortcutConfig` as `ShortcutAgentConfig`. | domain |
+| `crates/nagent-agents` | Chat-agent subsystem (§2). Pure: no dependency on `nagent-server`, `sqlx`, or `whisper-rs`. Re-exports `nagent_support::egress` as its own `egress` module, `nagent_shortcut::ShortcutConfig` as `ShortcutAgentConfig`, and `nagent_github::GithubConfig` as `GithubAgentConfig`. | domain |
 | `crates/nagent-server` | The `axum` HTTP/WebSocket server (§1, §3). The only binary in the workspace. | transport |
 
 Dependency direction is strictly top-down: `nagent-server` is the
@@ -352,18 +353,35 @@ an arbitrary envelope sender. See
 `docs/integrations/email.md` for the operator-facing guide.
 
 When the `github-agent` cargo feature is on, the registry also
-contains the `github` `ServiceDef` (id `"github"`, two fields:
-`personal_access_token` (Password) and `username` (Text, filled
-by the probe)). The ten read-only `github_*` agents read the PAT
-through `UserContext::secret("github", "personal_access_token")`
-and call `api.github.com` through the shared egress pool with the
-`[agents.github].allowlist` (default `["api.github.com"]`). One
-setup-only HTTP endpoint — `POST /api/integrations/github/probe` —
-validates the PAT against `GET /user` before the user saves it and
-writes `github_probe_<outcome>` audit rows (the token never lands
+contains the `github` `ServiceDef` (id `"github"`, four fields:
+`personal_access_token` (Password), `username` (Text, filled by
+the probe), `show_dashboard` (Checkbox) and `dashboard_repos`
+(Text, JSON array of `"owner/repo"`, the per-user confidential
+repo list of the PRs dashboard)). The ten read-only `github_*`
+agents read the PAT through
+`UserContext::secret("github", "personal_access_token")` and call
+`api.github.com` through the shared egress pool with the
+`[agents.github].allowlist` (default `["api.github.com"]`). Two
+setup-only HTTP endpoints — `POST /api/integrations/github/probe`
+(validates the PAT against `GET /user` before the user saves it)
+and `POST /api/integrations/github/probe-repo` (reads the vault
+PAT and checks `GET /repos/{owner}/{repo}` before a repo is
+appended to `dashboard_repos`) — write `github_probe_<outcome>` /
+`github_probe_repo_<outcome>` audit rows (the token never lands
 on an audit row). Write tools (create issue / PR / comment) are
-deliberately not registered in v1. See
-`docs/integrations/github.md` for the operator-facing guide.
+deliberately not registered in v1.
+
+The GitHub plugin also ships **pure-API dashboard endpoints**
+that never go through the LLM — the PR list is proxied straight
+from the caller's vault token + `dashboard_repos` via
+`nagent-github`: `GET /api/integrations/github/prs?repo=&state=&limit=`,
+`GET /api/integrations/github/prs/{owner}/{repo}/{number}`, plus the
+repo-picker reads `GET /api/integrations/github/owners` and
+`GET /api/integrations/github/owners/{owner}/repos` (access-scoped
+owner/repo listing used to tick dashboard repos). They back the
+"PRs" top-menu tab, which appears when the integration's
+`show_dashboard` checkbox is ticked (plan 1795686864347). See
+`docs/integrations/github.md`.
 
 When the `shortcut-agent` cargo feature is on, the registry also
 contains the `shortcut` `ServiceDef` (id `"shortcut"`, two fields:

@@ -589,7 +589,8 @@ select, input[type="checkbox"] {
 #view-transcript[hidden],
 #view-discussion[hidden],
 #view-settings[hidden],
-#view-stories[hidden]    { display: none; }
+#view-stories[hidden],
+#view-prs[hidden]        { display: none; }
 
 /* Discussion mode needs a wider canvas than the default `.view`
  * cap (920px) — the 260px sidebar eats into that, leaving the chat
@@ -5314,4 +5315,404 @@ header .subtitle {
   border-radius: 0.3rem;
   padding: 0.1rem 0.35rem;
   font-size: 0.88em;
+}
+
+/* GitHub PRs dashboard (plan 1795686864347) — same visual language
+ * as the Shortcut stories dashboard above. */
+.prs-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.prs-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.prs-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+.prs-header-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.prs-header-actions select {
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--chat-input-border, #444);
+  background: var(--chat-input-bg, #2a2c30);
+  color: inherit;
+  font: inherit;
+}
+.prs-status {
+  margin: 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+  min-height: 1.1em;
+}
+.prs-status[data-state="error"] {
+  color: var(--danger-fg, #ff7b72);
+  opacity: 1;
+}
+.prs-table-wrap {
+  overflow-x: auto;
+}
+.prs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.prs-table th,
+.prs-table td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--chat-input-border, #333);
+  vertical-align: top;
+  white-space: nowrap;
+}
+.prs-table th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  user-select: none;
+}
+.prs-table th[data-sort] {
+  cursor: pointer;
+}
+.prs-table th[data-sort]:hover,
+.prs-table th[data-sort]:focus-visible {
+  opacity: 1;
+}
+.prs-table td:nth-child(3) {
+  white-space: normal;
+  min-width: 14rem;
+}
+.prs-table tbody tr:hover {
+  background: var(--chat-input-bg, #2a2c30);
+}
+.prs-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.prs-label {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--chat-accent-fg, #8ab4ff);
+  opacity: 0.9;
+}
+.prs-state {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.prs-state[data-state="open"] {
+  color: var(--ok-fg, #3fb950);
+}
+.prs-state[data-state="closed"] {
+  color: var(--danger-fg, #ff7b72);
+}
+.prs-state[data-state="draft"] {
+  color: var(--muted-fg, #9aa0a6);
+}
+
+/* PR number rendered as a quiet mono pill instead of a raw blue
+ * link; it gains a border + background on hover/focus. */
+.prs-link {
+  color: var(--chat-accent-fg, #8ab4ff);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.82rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 0.35rem;
+  border: 1px solid transparent;
+  text-decoration: none;
+}
+.prs-link:hover,
+.prs-link:focus-visible {
+  border-color: currentColor;
+  background: var(--chat-input-bg, #2a2c30);
+  text-decoration: none;
+}
+.prs-enrich {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  opacity: 0.85;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* CI badge (only populated when the "CI status" box is ticked and
+ * the PR carries a `ci` object). */
+.prs-ci {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.prs-ci[data-state="success"] {
+  color: var(--ok-fg, #3fb950);
+}
+.prs-ci[data-state="failure"] {
+  color: var(--danger-fg, #ff7b72);
+}
+.prs-ci[data-state="pending"] {
+  color: var(--warn-fg, #d29922);
+}
+.prs-ci[data-state="none"],
+.prs-ci[data-state="unknown"] {
+  color: var(--muted-fg, #9aa0a6);
+}
+.prs-ci-link {
+  text-decoration: none;
+  color: inherit;
+}
+.prs-ci-link:hover .prs-ci,
+.prs-ci-link:focus-visible .prs-ci {
+  background: var(--chat-input-bg, #2a2c30);
+}
+.prs-empty {
+  opacity: 0.7;
+  text-align: center;
+  padding: 1rem 0;
+}
+
+/* GitHub dashboard repo picker (plan 1795686864347) — dedicated
+ * modal listing the orgs the saved PAT belongs to (left pane) and
+ * the selected owner's repos as a checkbox list (right pane);
+ * already-subscribed repos render pre-checked. */
+.gh-picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.gh-picker-overlay[hidden] {
+  display: none;
+}
+.gh-picker-modal {
+  position: relative;
+  width: min(56rem, 94vw);
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--chat-bg, #1e2023);
+  border: 1px solid var(--chat-input-border, #444);
+  border-radius: 0.6rem;
+  padding: 1rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.gh-picker-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.7rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 1.3rem;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.gh-picker-close:hover,
+.gh-picker-close:focus-visible {
+  opacity: 1;
+}
+.gh-picker-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+.gh-picker-sub {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  opacity: 0.8;
+}
+.gh-picker-status {
+  margin: 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+  min-height: 1.1em;
+}
+.gh-picker-status[data-state="error"] {
+  color: var(--danger-fg, #ff7b72);
+  opacity: 1;
+}
+
+/* Reusable inline loader (PRs table, repo-picker panes, and the
+ * pending state of the status lines above). The ring reuses the chat
+ * status pill's `status-spin` keyframes and is `currentColor`, so it
+ * inherits the muted/accent hue of its container. */
+.nagent-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 1.6rem 1rem;
+  color: var(--fg-mute, #9aa0a6);
+  font-size: 0.88rem;
+}
+.nagent-loader::before {
+  content: "";
+  width: 1.05rem;
+  height: 1.05rem;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: status-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+.prs-status[data-state="pending"]::before,
+.gh-picker-status[data-state="pending"]::before {
+  content: "";
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: 0.45em;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.12em;
+  animation: status-spin 0.8s linear infinite;
+}
+.prs-loader-cell {
+  text-align: center;
+}
+.prs-error {
+  color: var(--danger-fg, #ff7b72);
+}
+.gh-picker-loader {
+  list-style: none;
+}
+.gh-picker-body {
+  display: grid;
+  grid-template-columns: 14rem 1fr;
+  gap: 0.8rem;
+  min-height: 16rem;
+}
+.gh-picker-owners h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+.gh-picker-owners-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.gh-picker-owner {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.4rem;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.gh-picker-owner:hover,
+.gh-picker-owner:focus-visible {
+  background: var(--chat-input-bg, #2a2c30);
+}
+.gh-picker-owner.active {
+  border-color: var(--chat-accent-fg, #8ab4ff);
+  background: var(--chat-input-bg, #2a2c30);
+}
+.gh-picker-repos-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.gh-picker-search {
+  flex: 1;
+  min-width: 0;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--chat-input-border, #444);
+  background: var(--chat-input-bg, #2a2c30);
+  color: inherit;
+  font: inherit;
+}
+.gh-picker-archived-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+  font-size: 0.85rem;
+  opacity: 0.85;
+  cursor: pointer;
+}
+.gh-picker-repos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+.gh-picker-repo label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+.gh-picker-repo label:hover {
+  background: var(--chat-input-bg, #2a2c30);
+}
+.gh-picker-repo-name {
+  font-size: 0.88rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gh-picker-badge {
+  font-size: 0.68rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--chat-input-border, #555);
+  opacity: 0.75;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.gh-picker-empty {
+  opacity: 0.7;
+  font-size: 0.88rem;
+  padding: 0.6rem 0;
+}
+.gh-picker-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.gh-picker-count {
+  margin-right: auto;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+.gh-repo-picker-row {
+  margin-top: 0.35rem;
 }

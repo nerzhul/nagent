@@ -78,6 +78,7 @@ stt-proto          = { path = "../stt-proto" }
 stt-core           = { path = "../stt-core" }
 nagent-support     = { path = "../nagent-support" }
 nagent-shortcut    = { path = "../nagent-shortcut" }
+nagent-github      = { path = "../nagent-github" }
 nagent-db          = { path = "../nagent-db" }
 nagent-agents      = { path = "../nagent-agents" }
 nagent-tts         = { path = "../nagent-tts" }

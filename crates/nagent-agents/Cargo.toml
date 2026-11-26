@@ -59,6 +59,7 @@ all-agents = [
 [dependencies]
 nagent-support = { path = "../nagent-support" }
 nagent-shortcut = { path = "../nagent-shortcut" }
+nagent-github = { path = "../nagent-github" }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 serde = { workspace = true }
