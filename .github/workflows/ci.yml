@@ -14,7 +14,7 @@ jobs:
   lint-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -97,7 +97,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -156,7 +156,7 @@ jobs:
       NAGENT_TEST_PG_URL: postgres://nagent:nagent@localhost:5432/nagent_test
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
