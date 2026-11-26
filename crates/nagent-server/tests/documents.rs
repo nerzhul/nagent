@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 use nagent_agents::{Agent, ReadDocumentAgent, ServiceRegistry, UserContext};
-use nagent_server::agents::AgentRegistryNewtype;
 use nagent_server::config::AuthConfig;
 use nagent_server::credentials::key::CredentialsKey;
 use nagent_server::documents::DocumentStore;

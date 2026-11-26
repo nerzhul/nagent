@@ -819,7 +819,6 @@ mod tests {
         // allowlist regardless of whether read_document was invoked earlier in
         // the same turn. This test asserts that a non-allowlisted host is
         // still gated and that the sentinel is returned.
-        let rt = tokio::runtime::Runtime::new().expect("rt");
         let cfg = WebFetchAgentConfig {
             allowlist: vec!["allowed.example".into()],
             ..WebFetchAgentConfig::default()

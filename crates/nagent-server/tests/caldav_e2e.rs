@@ -20,8 +20,6 @@
 
 #![cfg(feature = "caldav-agent")]
 
-use std::sync::Arc;
-
 use nagent_db::NewAuthEvent;
 
 /// A short URL-extraction helper used by the integration

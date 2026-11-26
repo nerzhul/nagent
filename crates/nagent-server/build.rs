@@ -201,12 +201,18 @@ fn rewrite_app_js_version(src: &str, hash: &str) -> Option<String> {
     let value_start = start + PREFIX.len();
     let rest = &src[value_start..];
     let value_end = rest.find('"')?;
+    let value = &rest[..value_end];
+    // Sanity-check the value slot: it must hold either the first-build
+    // placeholder or the 16 hex chars of a previously baked hash, and
+    // the closing token must be `;`. Anything else means the source
+    // has drifted from the expected shape and we should refuse to
+    // rewrite it rather than corrupt the file.
+    let well_formed = value == APP_JS_PLACEHOLDER
+        || (value.len() == 16 && value.bytes().all(|b| b.is_ascii_hexdigit()));
+    if !well_formed {
+        return None;
+    }
     let after_value = value_start + value_end;
-    // Sanity check the closing token is `;` -- the value slot is
-    // exactly the 16 hex chars of the previous build's hash (or the
-    // 36-char placeholder on the very first build). Anything else
-    // means the source has drifted from the expected shape and we
-    // should refuse to rewrite it rather than corrupt the file.
     let closing = rest[value_end + 1..].chars().next();
     if closing != Some(';') {
         return None;

@@ -64,8 +64,7 @@ use nagent_agents::WikipediaAgentConfig;
 use nagent_server::agents::UserContext;
 use nagent_server::agents::{Agent, AgentRegistry};
 use nagent_server::config::{
-    AgentConfig, DictionaryConfig, LlmConfig, LlmProvider, RateLimitConfig, WeatherConfig,
-    WebFetchConfig, WikipediaConfig,
+    AgentConfig, LlmConfig, LlmProvider, RateLimitConfig, WeatherConfig, WebFetchConfig,
 };
 use nagent_server::http::build_router;
 use nagent_server::llm::LlmClient;
@@ -799,7 +798,14 @@ async fn weather_agent_parses_weatherapi_fixture() {
         }]}
     });
     let base_url = spawn_weatherapi_fixture(canned).await;
-    let agent = WeatherAgent::new(WeatherConfig::default().into());
+    let agent = WeatherAgent::new(
+        WeatherConfig {
+            api_key: "test-key".into(),
+            base_url,
+            ..Default::default()
+        }
+        .into(),
+    );
     let result = agent
         .invoke(&test_ctx(), serde_json::json!({"location": "Paris"}))
         .await
@@ -824,7 +830,14 @@ async fn weather_agent_surfaces_upstream_error_message() {
         "error": {"code": 1006, "message": "No matching location found."}
     });
     let base_url = spawn_weatherapi_fixture(canned).await;
-    let agent = WeatherAgent::new(WeatherConfig::default().into());
+    let agent = WeatherAgent::new(
+        WeatherConfig {
+            api_key: "test-key".into(),
+            base_url,
+            ..Default::default()
+        }
+        .into(),
+    );
     let err = agent
         .invoke(&test_ctx(), serde_json::json!({"location": "Atlantis"}))
         .await
