@@ -37,11 +37,14 @@ ENV CARGO_TERM_COLOR=never \
     CARGO_HOME=/usr/local/cargo \
     RUST_BACKTRACE=1
 
-# libvulkan-dev is needed because whisper-rs-sys uses bindgen against the
-# Vulkan headers (only when BACKEND=vulkan). The CUDA/HIP toolchains are
-# not installed in this base image — supply them via a side-car image or
-# an extended base if you pick those backends.
+# libclang-dev is required by whisper-rs-sys' bindgen step for EVERY
+# backend (cpu included) — the rust base image no longer ships libclang.
+# libvulkan-dev is only needed when BACKEND=vulkan (bindgen against the
+# Vulkan headers). The CUDA/HIP toolchains are not installed in this
+# base image — supply them via a side-car image or an extended base if
+# you pick those backends.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        libclang-dev \
         libssl-dev \
         pkg-config \
         ca-certificates \
