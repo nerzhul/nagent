@@ -1,6 +1,6 @@
 # Architecture and security roadmap
 
-Status: living plan, reviewed against the current source on 2026-11-25 (clean tree, HEAD `ddc7fe9`). Feature plans that landed are deleted from `.kilo/plans/`; the Mistral API provider, GitHub agent and Shortcut.com backlog agent plans landed and were removed. The only live feature-plan residuals are in `1791464974103-chat-export-edit-copy.md`. Priorities are in section 6.
+Status: living plan, reviewed against the current source on 2026-11-27 (clean tree, HEAD `ebc0552`). Feature plans that landed are deleted from `.kilo/plans/`; the Mistral API provider, GitHub agent, Shortcut.com backlog agent and GitHub PR dashboard (`1795686864347`) plans landed and were removed. The only live feature-plan residuals are in `1791464974103-chat-export-edit-copy.md`. Priorities are in section 6.
 
 The plan is written from two seats: the **software architect** (is the system cut along the right seams, can it evolve cheaply) and the **security architect** (what can an attacker reach, how far, and how fast would we notice). Items are labelled:
 

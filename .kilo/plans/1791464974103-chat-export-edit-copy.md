@@ -69,13 +69,7 @@ descending, ties broken by effort.
    newest-first so a fresh device sees the same history). Today
    `chat-sessions.js` is localStorage-only. UX gap: 4.
 
-4. **Edit historical turns** — S. Today the pencil is hidden for any
-   user message older than the most recent turn
-   (`chat.js:820-826`). Lift that gate, reuse the existing edit-form +
-   `PATCH + DELETE-after-mid` flow. Optimistic concurrency on
-   `version` already covers the cross-tab race. UX gap: 3.
-
-5. **Multi-session export as a zip** — S. Reuse `chat-export.js`'s
+4. **Multi-session export as a zip** — S. Reuse `chat-export.js`'s
    per-session formatters, zip them with a tiny vendored `jszip`
    (already on the same vendor list — see `static/vendor/`). UI: a
    checkbox column on each sidebar row + an "Export selected ▾" entry
@@ -134,10 +128,10 @@ catalog yet. Listed for visibility, not for commitment.
   server-side, the HTML export should either inline images or link to
   `/v1/documents/:id`. Pick one before P1.1 lands so the export
   shape is stable.
-- **Edit-history visibility**: P1.4 (edit historical turns) opens the
-  door to "restore this version" affordance. The `version` column
-  already supports a stack; decide whether to keep N versions per
-  message or only the latest.
+- **Edit-history visibility**: any user turn is now editable; decide
+  whether the `version` column keeps N versions per message or only
+  the latest, and whether a "restore this version" affordance is
+  wanted.
 - **Optimistic-concurrency UX**: today `409` shows a Reload action
   that re-fetches the row but does **not** resubmit. Consider an
   "Edit & resubmit anyway" path for power users once P1.4 is in.
@@ -179,6 +173,5 @@ P1+ (any new code):
 2. `feat(chat): persist attachments server-side` (P1.1)
 3. `feat(agents): history_search agent + /-search bar` (P1.2 + A6)
 4. `feat(chat): server-side session list for cross-device sync` (P1.3)
-5. `feat(chat): allow editing any user turn` (P1.4)
-6. `feat(chat): multi-session export as a zip` (P1.5)
-7. P2 polish items, one commit each.
+5. `feat(chat): multi-session export as a zip` (P1.4)
+6. P2 polish items, one commit each.

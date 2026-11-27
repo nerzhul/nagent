@@ -1,6 +1,6 @@
 # Replace Stooq backend of `get_stock_quote` with Twelve Data (Finnhub soft-fallback)
 
-Status: **not implemented as of 2026-11-25** — the agent still uses
+Status: **not implemented as of 2026-11-27** — the agent still uses
 Stooq (`crates/nagent-agents/src/agents/stock_agent.rs` calls
 `https://stooq.com/q/l/?…&e=csv`).
 

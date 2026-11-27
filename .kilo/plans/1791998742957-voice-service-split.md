@@ -1,6 +1,6 @@
 # Plan — Extract STT and TTS into an External Voice Service
 
-Status: proposal, not implemented as of 2026-11-25 — the reference
+Status: proposal, not implemented as of 2026-11-27 — the reference
 proposal for the inference-tier half of package G in
 `architecture-restructure.md`.
 
