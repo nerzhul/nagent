@@ -58,16 +58,50 @@ use crate::auth::AuthUser;
 use crate::config::agents::ShortcutConfig;
 use crate::probe::{write_probe_audit, ProbeConfig, ProbeOutcome, ProbeState};
 
-/// Request body for the Shortcut probe.
+/// Request body for the Shortcut probe. Accepts either auth mode:
+/// a classic `api_token` (sent as `Shortcut-Token`) or an OAuth
+/// `access_token` (sent as `Authorization: Bearer`) — exactly one
+/// of the two must be non-empty.
 #[derive(Debug, Deserialize)]
 pub struct ProbeShortcutBody {
     /// The API token to validate. Never logged, never echoed
     /// back, never written to the audit row.
-    pub api_token: String,
+    #[serde(default)]
+    pub api_token: Option<String>,
+    /// An OAuth access token to validate instead (bearer mode).
+    #[serde(default)]
+    pub access_token: Option<String>,
     /// Optional mention name (the form's `username` field) used to
     /// pick the token's member out of the `/members` list.
     #[serde(default)]
     pub username: Option<String>,
+}
+
+impl ProbeShortcutBody {
+    /// Build the wire credential from the body. `None` when both
+    /// fields are empty or both are set.
+    fn auth(&self) -> Option<nagent_shortcut::ShortcutAuth> {
+        use secrecy::SecretString;
+        let api = self
+            .api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let oauth = self
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (api, oauth) {
+            (Some(a), None) => Some(nagent_shortcut::ShortcutAuth::ApiToken(SecretString::from(
+                a.to_string(),
+            ))),
+            (None, Some(o)) => Some(nagent_shortcut::ShortcutAuth::Bearer(SecretString::from(
+                o.to_string(),
+            ))),
+            _ => None,
+        }
+    }
 }
 
 /// JSON shape returned by the probe on success.
@@ -99,13 +133,13 @@ pub async fn probe_shortcut(
     axum::Extension(user): axum::Extension<AuthUser>,
     Json(body): Json<ProbeShortcutBody>,
 ) -> Result<Response, AuthError> {
-    if body.api_token.trim().is_empty() {
+    let Some(auth) = body.auth() else {
         write_probe_audit(&state, user.id, "", ProbeOutcome::BadRequest);
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            "api_token is required".into(),
+            "exactly one of `api_token` or `access_token` is required".into(),
         ));
-    }
+    };
     let base = state.cfg.base_url.trim_end_matches('/').to_string();
     let url_str = format!("{base}/members");
     let url = match Url::parse(&url_str) {
@@ -179,11 +213,13 @@ pub async fn probe_shortcut(
         .timeout(std::time::Duration::from_millis(state.cfg.timeout_ms()))
         .build()
         .map_err(|e| AuthError::Internal(format!("probe client: {e}")))?;
-    // The token is only ever placed in the Shortcut-Token header;
-    // no error path below formats it (AGENTS.md §6).
+    // The credential is only ever placed in its auth header
+    // (`Shortcut-Token` or `Authorization: Bearer`); no error path
+    // below formats it (AGENTS.md §6).
+    let (auth_name, auth_value) = auth.header();
     let resp = http
         .get(validated.url.as_str())
-        .header("Shortcut-Token", body.api_token.trim())
+        .header(auth_name, auth_value)
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(
@@ -209,7 +245,8 @@ pub async fn probe_shortcut(
         return Ok(error_response(
             StatusCode::BAD_GATEWAY,
             format!(
-                "Shortcut rejected the token (HTTP {status}); generate a new token at \
+                "Shortcut rejected the credential (HTTP {status}); use \"Connect with \
+                 Shortcut\" (OAuth) or generate a new API token at \
                  app.shortcut.com/settings/account/api-tokens"
             ),
         ));
@@ -357,10 +394,40 @@ impl ProbeConfig for ShortcutTeamsProbeConfig {
 
 /// Request body for the teams probe: the API token, supplied by
 /// the user in the integrations form (never logged, never echoed,
-/// never written to the audit row — AGENTS.md §6).
+/// never written to the audit row — AGENTS.md §6). Accepts either
+/// `api_token` (Shortcut-Token header) or `access_token` (bearer).
 #[derive(Debug, Deserialize)]
 pub struct ProbeTeamsBody {
-    pub api_token: String,
+    #[serde(default)]
+    pub api_token: Option<String>,
+    #[serde(default)]
+    pub access_token: Option<String>,
+}
+
+impl ProbeTeamsBody {
+    /// Exactly one of the two credentials must be supplied.
+    fn auth(&self) -> Option<nagent_shortcut::ShortcutAuth> {
+        use secrecy::SecretString;
+        let api = self
+            .api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let oauth = self
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (api, oauth) {
+            (Some(a), None) => Some(nagent_shortcut::ShortcutAuth::ApiToken(SecretString::from(
+                a.to_string(),
+            ))),
+            (None, Some(o)) => Some(nagent_shortcut::ShortcutAuth::Bearer(SecretString::from(
+                o.to_string(),
+            ))),
+            _ => None,
+        }
+    }
 }
 
 /// JSON shape returned by the teams probe on success.
@@ -380,32 +447,31 @@ fn base_url_host(cfg: &ShortcutConfig) -> String {
         .unwrap_or_default()
 }
 
-/// Handler: list `GET /teams` with the supplied token. The wire
-/// call goes through the shared `nagent_shortcut::ShortcutClient`
-/// (same egress SSRF pre-flight + `[agents.shortcut].allowlist`
-/// as the chat agents); the token only ever travels in the
-/// `Shortcut-Token` header.
+/// Handler: list `GET /teams` with the supplied credential. The
+/// wire call goes through the shared `nagent_shortcut::ShortcutClient`
+/// (same egress SSRF pre-flight and `[agents.shortcut].allowlist`
+/// as the chat agents); the credential only ever travels in its auth
+/// header (`Shortcut-Token` or `Authorization: Bearer`).
 pub async fn probe_teams(
     State(state): State<ProbeState<ShortcutTeamsProbeConfig>>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Json(body): Json<ProbeTeamsBody>,
 ) -> Result<Response, AuthError> {
     let host = base_url_host(&state.cfg.0);
-    if body.api_token.trim().is_empty() {
+    let Some(auth) = body.auth() else {
         write_probe_audit(&state, user.id, &host, ProbeOutcome::BadRequest);
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            "api_token is required".into(),
+            "exactly one of `api_token` or `access_token` is required".into(),
         ));
-    }
+    };
     let wire_cfg: nagent_shortcut::ShortcutConfig = state.cfg.0.clone().into();
     let http = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| AuthError::Internal(format!("probe client: {e}")))?;
     let client = nagent_shortcut::ShortcutClient::new(wire_cfg, http);
-    let token = secrecy::SecretString::from(body.api_token.trim().to_string());
-    let result = client.get(&token, "/teams", &[]).await;
+    let result = client.get(&auth, "/teams", &[]).await;
     match result {
         Ok(raw) => {
             let teams: Vec<serde_json::Value> = raw

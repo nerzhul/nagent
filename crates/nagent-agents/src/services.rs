@@ -132,6 +132,16 @@ pub struct ServiceDef {
     pub icon: &'static str,
     /// Ordered list of fields. Order is preserved in the UI form.
     pub fields: &'static [FieldDef],
+    /// Keys of fields that are written **out of band** — by an
+    /// OAuth callback redirect, a probe, or another server-side
+    /// flow — and therefore must NOT be rendered as editable
+    /// inputs in the integrations form (the user never types
+    /// them). The UI hides any field whose key appears here and
+    /// shows a read-only status instead; because the form only
+    /// submits the controls it renders, a hidden field is never
+    /// sent on `PUT` and its saved row is preserved. Empty for
+    /// services whose fields are all user-typed.
+    pub managed_fields: &'static [&'static str],
     /// Optional docs URL surfaced in the UI.
     pub docs_url: Option<&'static str>,
 }
@@ -192,6 +202,10 @@ pub struct ServiceSummary {
     pub display_name: &'static str,
     pub icon: &'static str,
     pub fields: Vec<FieldSummary>,
+    /// Keys of the out-of-band-managed fields (see
+    /// [`ServiceDef::managed_fields`]) so the UI can hide their
+    /// inputs and render a status line instead.
+    pub managed_fields: Vec<&'static str>,
     pub configured: bool,
     pub docs_url: Option<&'static str>,
 }
@@ -292,6 +306,7 @@ impl ServiceDef {
             display_name: self.display_name,
             icon: self.icon,
             fields,
+            managed_fields: self.managed_fields.to_vec(),
             configured,
             docs_url: self.docs_url,
         }
@@ -350,6 +365,7 @@ mod tests {
                 echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
+        managed_fields: &[],
         docs_url: None,
     };
 
@@ -391,6 +407,7 @@ mod tests {
                 echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
+        managed_fields: &[],
         docs_url: None,
     };
 
@@ -420,6 +437,43 @@ mod tests {
         assert!(s.configured, "both required fields filled");
         assert_eq!(s.fields.len(), 2);
         assert!(s.fields[0].filled);
+    }
+
+    /// `managed_fields` must reach the JSON summary so the
+    /// integrations UI can hide those inputs (they are written
+    /// out of band, e.g. by an OAuth callback redirect).
+    #[test]
+    fn summary_exposes_managed_fields_in_json() {
+        let empty = std::collections::HashMap::new();
+        let s = FAKE_SERVICE.to_summary(&[], &empty);
+        assert!(s.managed_fields.is_empty());
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["managed_fields"], serde_json::json!([]));
+
+        const FAKE_MANAGED: ServiceDef = ServiceDef {
+            id: "fake_managed",
+            display_name: "Fake managed",
+            icon: "🧪",
+            fields: &[FieldDef {
+                key: "token",
+                label: "Token",
+                kind: FieldKind::Password,
+                required: false,
+                help: None,
+                placeholder: None,
+                options: &[],
+                echo_on_edit: ECHO_ON_EDIT_PASSWORD,
+            }],
+            managed_fields: &["token"],
+            docs_url: None,
+        };
+        let s = FAKE_MANAGED.to_summary(&["token".to_string()], &empty);
+        assert_eq!(s.managed_fields, vec!["token"]);
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["managed_fields"], serde_json::json!(["token"]));
+        // The managed field is still a Password: its value never
+        // serialises even though the key is listed.
+        assert!(json["fields"][0].get("value").is_none());
     }
 
     /// Non-Password fields surface their saved plaintext so the
@@ -526,6 +580,7 @@ mod tests {
                 echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             },
         ],
+        managed_fields: &[],
         docs_url: None,
     };
 
@@ -569,6 +624,7 @@ mod tests {
                 options: &[],
                 echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
             }],
+            managed_fields: &[],
             docs_url: None,
         };
         // Wire format: lowercase "checkbox".

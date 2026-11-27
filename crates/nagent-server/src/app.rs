@@ -420,6 +420,26 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
         tracing::info!("X OAuth backend ready");
     }
 
+    // Shortcut OAuth (agent-app install flow). Same feature gate
+    // as the X flow: `shortcut-agent` cargo feature AND the
+    // operator supplied a `client_id` (`shortcut_oauth.enabled`,
+    // defaulted to `false`). Shares the vault encryption key and
+    // the `shortcut` service id with the classic API-token path.
+    #[cfg(feature = "shortcut-agent")]
+    let auth_shortcut_oauth_opt = match (auth_store.clone(), credentials_key.clone()) {
+        (Some(store), Some(key)) => crate::oauth::shortcut::build_state(
+            Arc::new(cfg.shortcut_oauth.clone()),
+            store,
+            key,
+            cfg.auth.public_url.clone(),
+        ),
+        _ => None,
+    };
+    #[cfg(feature = "shortcut-agent")]
+    if auth_shortcut_oauth_opt.is_some() {
+        tracing::info!("Shortcut OAuth backend ready");
+    }
+
     // Build the per-user credential resolver against the same
     // encryption key. The resolver is mounted even when no
     // per-user agent (CalDAV / X) is enabled because the
@@ -446,6 +466,8 @@ pub async fn build_app(cfg: &Config) -> anyhow::Result<Arc<AppState>> {
             passkey: auth_passkey,
             #[cfg(feature = "x-agent")]
             x: auth_x_opt.map(Arc::new),
+            #[cfg(feature = "shortcut-agent")]
+            shortcut_oauth: auth_shortcut_oauth_opt.map(Arc::new),
             login_rate_limiter: LoginRateLimiter::new(),
             services: services.clone(),
             credential_resolver,

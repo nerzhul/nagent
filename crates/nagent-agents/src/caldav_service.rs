@@ -91,5 +91,6 @@ pub const CALDAV_SERVICE: ServiceDef = ServiceDef {
             echo_on_edit: ECHO_ON_EDIT_PASSWORD,
         },
     ],
+    managed_fields: &[],
     docs_url: Some("https://github.com/nagent/nagent/blob/main/docs/integrations/caldav.md"),
 };

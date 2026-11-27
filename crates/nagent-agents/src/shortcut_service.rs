@@ -9,6 +9,26 @@
 //!   <https://app.shortcut.com/settings/account/api-tokens>.
 //!   Stored AES-256-GCM encrypted at rest; never logged, never
 //!   echoed back, never surfaced in an error string (AGENTS.md §6).
+//!   **Fallback**: when the user connects via OAuth (the
+//!   "Connect with Shortcut" button, `/api/auth/login/shortcut/*`),
+//!   the `access_token` row below takes precedence and `api_token`
+//!   is unused.
+//! - `access_token` / `refresh_token` (Password) — the OAuth 2.0
+//!   token pair written by the `/api/auth/login/shortcut/callback`
+//!   handler and refreshed in place by the `shortcut_*` tools on
+//!   expiry / 401. Sent as `Authorization: Bearer …`. All six OAuth
+//!   rows are listed in `managed_fields`: they are collected by the
+//!   redirect flow, never typed in the form, so the integrations UI
+//!   hides their inputs and shows the connect button + a read-only
+//!   status instead.
+//! - `token_expires_at` (Text, RFC 3339) — wall-clock expiry of the
+//!   current access token; drives the proactive refresh.
+//! - `token_scope` (Text) — granted scopes (informational).
+//! - `permission_id` (Text) — the agent app's member id in the
+//!   workspace, returned by the OAuth token endpoint.
+//! - `auth_mode` (Text) — `"oauth"` when the OAuth rows are set,
+//!   `"api_token"` otherwise; display-only, written at connect /
+//!   save time.
 //! - `username` (Text) — the Shortcut `mention_name`, filled in by
 //!   the setup probe (`POST /api/integrations/shortcut/probe`) so
 //!   the chat UI can say "Connected as @jane". Credential-
@@ -23,9 +43,9 @@
 //!
 //! Per `docs/architecture.md` §2.6, `ServiceDef` is plain data so
 //! the file lives in the `nagent-agents` crate; the runtime
-//! behaviour (probe endpoint, audit rows) is wired in
-//! `nagent-server` behind the same `shortcut-agent` cargo feature
-//! as the chat agents.
+//! behaviour (OAuth routes, probe endpoint, audit rows) is wired
+//! in `nagent-server` behind the same `shortcut-agent` cargo
+//! feature as the chat agents.
 
 use crate::services::{
     FieldDef, FieldKind, ServiceDef, ECHO_ON_EDIT_NON_PASSWORD, ECHO_ON_EDIT_PASSWORD,
@@ -33,8 +53,10 @@ use crate::services::{
 
 /// `shortcut` integration entry in the per-user service catalogue.
 ///
-/// The `api_token` is supplied by the user on the integrations
-/// form and validated by the setup probe
+/// Two auth modes share this service: the OAuth token pair written
+/// by `/api/auth/login/shortcut/callback` (preferred when present),
+/// or the `api_token` supplied by the user on the integrations form
+/// and validated by the setup probe
 /// (`POST /api/integrations/shortcut/probe`), which calls
 /// `GET /members` and matches the `username` handle against the
 /// returned member list; the resolved `mention_name` is stored into
@@ -46,17 +68,97 @@ pub const SHORTCUT_SERVICE: ServiceDef = ServiceDef {
     fields: &[
         FieldDef {
             key: "api_token",
-            label: "API token",
+            label: "API token (fallback)",
             kind: FieldKind::Password,
-            required: true,
+            required: false,
             help: Some(
-                "Shortcut API token, generated at \
-                 app.shortcut.com/settings/account/api-tokens. Validated by the probe before \
-                 saving. Stored AES-256-GCM encrypted at rest; never logged or displayed.",
+                "Classic Shortcut API token, generated at \
+                 app.shortcut.com/settings/account/api-tokens. Used only when no OAuth \
+                 access token is saved (i.e. when you did not use \"Connect with Shortcut\"). \
+                 Validated by the probe before saving. Stored AES-256-GCM encrypted at rest; \
+                 never logged or displayed.",
             ),
             placeholder: Some("token from app.shortcut.com/settings/account/api-tokens"),
             options: &[],
             echo_on_edit: ECHO_ON_EDIT_PASSWORD,
+        },
+        FieldDef {
+            key: "access_token",
+            label: "OAuth access token",
+            kind: FieldKind::Password,
+            required: false,
+            help: Some(
+                "OAuth 2.0 access token written by the \"Connect with Shortcut\" flow \
+                 (/api/auth/login/shortcut/callback). Sent as `Authorization: Bearer …`. \
+                 Refreshed in place by the shortcut_* tools when expired. Stored \
+                 AES-256-GCM encrypted at rest; never logged or displayed.",
+            ),
+            placeholder: None,
+            options: &[],
+            echo_on_edit: ECHO_ON_EDIT_PASSWORD,
+        },
+        FieldDef {
+            key: "refresh_token",
+            label: "OAuth refresh token",
+            kind: FieldKind::Password,
+            required: false,
+            help: Some(
+                "Written by the OAuth callback; used to mint a fresh access token when the \
+                 stored one expires. Stored AES-256-GCM encrypted at rest; never logged or \
+                 displayed.",
+            ),
+            placeholder: None,
+            options: &[],
+            echo_on_edit: ECHO_ON_EDIT_PASSWORD,
+        },
+        FieldDef {
+            key: "token_expires_at",
+            label: "Access token expiry (RFC 3339)",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some(
+                "Wall-clock expiry of the current OAuth access token, written at connect / \
+                 refresh time. Display-only for the user.",
+            ),
+            placeholder: None,
+            options: &[],
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+        },
+        FieldDef {
+            key: "token_scope",
+            label: "Granted scopes",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some("Scopes returned by the OAuth token endpoint (informational)."),
+            placeholder: None,
+            options: &[],
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+        },
+        FieldDef {
+            key: "permission_id",
+            label: "Agent app member id (permission_id)",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some(
+                "The agent app's member id in your workspace, returned by the Shortcut \
+                 OAuth token endpoint at connect time. Informational.",
+            ),
+            placeholder: None,
+            options: &[],
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+        },
+        FieldDef {
+            key: "auth_mode",
+            label: "Auth mode",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some(
+                "`oauth` when the OAuth rows above are set (preferred), `api_token` when \
+                 only the classic token is saved.",
+            ),
+            placeholder: None,
+            options: &[],
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
         FieldDef {
             key: "username",
@@ -127,6 +229,17 @@ pub const SHORTCUT_SERVICE: ServiceDef = ServiceDef {
             // reopens with the templates intact.
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
+    ],
+    // The OAuth rows are written by the `/api/auth/login/shortcut/callback`
+    // redirect (never typed in the form), so the UI hides their inputs and
+    // shows the "Connect with Shortcut" status instead.
+    managed_fields: &[
+        "access_token",
+        "refresh_token",
+        "token_expires_at",
+        "token_scope",
+        "permission_id",
+        "auth_mode",
     ],
     docs_url: Some("https://github.com/nagent/nagent/blob/main/docs/integrations/shortcut.md"),
 };

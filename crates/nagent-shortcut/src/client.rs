@@ -11,21 +11,25 @@
 //! ## Headers
 //!
 //! Every request carries:
-//! - `Shortcut-Token: <api_token>` — the token is a **parameter**
-//!   of [`ShortcutClient::get`], supplied by the caller (the chat
-//!   agents resolve it from the vault via `UserContext::secret`;
-//!   the server dashboard endpoints read the vault directly);
+//! - one credential header, chosen by [`ShortcutAuth`] —
+//!   `Authorization: Bearer <token>` for an OAuth access token
+//!   (per-workspace agent-app install), or `Shortcut-Token:
+//!   <api_token>` for a classic API token. The credential is a
+//!   **parameter** of [`ShortcutClient::get`], supplied by the
+//!   caller (the chat agents resolve it from the vault via
+//!   `UserContext::secret`; the server dashboard endpoints read
+//!   the vault directly);
 //! - `Accept: application/json` + `Content-Type:
 //!   application/json`;
 //! - `User-Agent: nagent-shortcut/<version>`.
 //!
 //! ## Credential redaction (AGENTS.md §6)
 //!
-//! The token only ever travels inside the `Shortcut-Token`
-//! header. No code path formats the header (or the token) into
-//! an error string, a log line, or a `Debug` output —
-//! [`redact_shortcut_token`] is the single helper that knows how
-//! to render a header map safely, and the request builder never
+//! The credential only ever travels inside its auth header. No
+//! code path formats the header (or the token) into an error
+//! string, a log line, or a `Debug` output —
+//! [`redact_auth_headers`] is the single helper that knows how to
+//! render a header map safely, and the request builder never
 //! builds a debug string from the header map at all. The
 //! upstream response body is safe to surface (truncated), same
 //! "server reply is safe, client credential is not" model as
@@ -51,6 +55,53 @@ use serde_json::Value;
 use nagent_support::egress::{EgressClient, EgressConfig, EgressError};
 
 use crate::{ShortcutConfig, ShortcutError};
+
+/// How one request authenticates against the Shortcut REST API v3.
+///
+/// - [`ShortcutAuth::ApiToken`] — a classic per-user API token
+///   (app.shortcut.com/settings/account/api-tokens), sent in the
+///   `Shortcut-Token` header. Kept as a fallback so vaults saved
+///   before the OAuth flow existed keep working.
+/// - [`ShortcutAuth::Bearer`] — an OAuth 2.0 access token from the
+///   per-workspace agent-app install flow, sent as
+///   `Authorization: Bearer <token>`. Preferred whenever the vault
+///   holds an `access_token` row.
+///
+/// The credential stays inside a `SecretString`; the manual
+/// `Debug` impl prints only the variant so a stray `{:?}` can never
+/// leak it (AGENTS.md §6).
+#[derive(Clone)]
+pub enum ShortcutAuth {
+    ApiToken(SecretString),
+    Bearer(SecretString),
+}
+
+impl std::fmt::Debug for ShortcutAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShortcutAuth::ApiToken(_) => f.write_str("ShortcutAuth::ApiToken(<redacted>)"),
+            ShortcutAuth::Bearer(_) => f.write_str("ShortcutAuth::Bearer(<redacted>)"),
+        }
+    }
+}
+
+impl ShortcutAuth {
+    /// The `(name, value)` header pair that carries the credential
+    /// on the request. Factored out of the request builder so the
+    /// mapping is unit-testable without sending a request.
+    pub fn header(&self) -> (reqwest::header::HeaderName, String) {
+        match self {
+            ShortcutAuth::ApiToken(token) => (
+                reqwest::header::HeaderName::from_static("shortcut-token"),
+                token.expose_secret().to_string(),
+            ),
+            ShortcutAuth::Bearer(token) => (
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", token.expose_secret()),
+            ),
+        }
+    }
+}
 
 /// Hard cap on a raw upstream response body (4 MiB). List
 /// endpoints are capped by `limit`, so this only fires on a
@@ -149,18 +200,19 @@ impl ShortcutClient {
     }
 
     /// Perform one authenticated GET against the Shortcut REST
-    /// API v3 and return the parsed JSON body. `token` is the
-    /// caller's API token (never logged, never formatted into an
-    /// error); `path` is the API-relative path starting with `/`
-    /// (e.g. `/members`); `query` is a list of `(key, value)`
-    /// pairs, percent-encoded by [`build_url`].
+    /// API v3 and return the parsed JSON body. `auth` carries the
+    /// caller's credential — OAuth bearer when the user connected
+    /// via OAuth, the classic API token otherwise (never logged,
+    /// never formatted into an error); `path` is the API-relative
+    /// path starting with `/` (e.g. `/members`); `query` is a list
+    /// of `(key, value)` pairs, percent-encoded by [`build_url`].
     pub async fn get(
         &self,
-        token: &SecretString,
+        auth: &ShortcutAuth,
         path: &str,
         query: &[(String, String)],
     ) -> Result<Value, ShortcutError> {
-        self.request(reqwest::Method::GET, token, path, query, None)
+        self.request(reqwest::Method::GET, auth, path, query, None)
             .await
     }
 
@@ -173,11 +225,11 @@ impl ShortcutClient {
     /// never cached — writes bypass the response cache entirely.
     pub async fn post(
         &self,
-        token: &SecretString,
+        auth: &ShortcutAuth,
         path: &str,
         body: &Value,
     ) -> Result<Value, ShortcutError> {
-        self.request(reqwest::Method::POST, token, path, &[], Some(body))
+        self.request(reqwest::Method::POST, auth, path, &[], Some(body))
             .await
     }
 
@@ -186,7 +238,7 @@ impl ShortcutClient {
     async fn request(
         &self,
         method: reqwest::Method,
-        token: &SecretString,
+        auth: &ShortcutAuth,
         path: &str,
         query: &[(String, String)],
         body: Option<&Value>,
@@ -199,11 +251,15 @@ impl ShortcutClient {
         let egress = self.build_egress();
         let validated = egress.validate(&url).await.map_err(map_egress_error)?;
 
+        // The credential header comes from `ShortcutAuth::header`;
+        // it is set once here and never formatted into a log line
+        // or an error string (AGENTS.md §6).
+        let (auth_name, auth_value) = auth.header();
         let mut req = self
             .http
             .request(method, validated.url.as_str())
             .timeout(std::time::Duration::from_millis(self.cfg.timeout_ms))
-            .header("Shortcut-Token", token.expose_secret())
+            .header(auth_name, auth_value)
             .header(reqwest::header::ACCEPT, "application/json")
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(
@@ -239,8 +295,9 @@ impl ShortcutClient {
 
         if status.as_u16() == 401 {
             return Err(ShortcutError::Unauthorized(
-                "Shortcut rejected the API token (HTTP 401); reconnect the Shortcut \
-                 integration via /settings/integrations (generate a new token at \
+                "Shortcut rejected the credential (HTTP 401); reconnect the Shortcut \
+                 integration via /settings/integrations (\"Connect with Shortcut\" when the \
+                 operator enabled OAuth, otherwise a fresh API token from \
                  app.shortcut.com/settings/account/api-tokens)"
                     .into(),
             ));
@@ -338,16 +395,20 @@ pub fn truncate(s: &str, cap: usize) -> String {
     out
 }
 
-/// Render a header map for a debug / log line with the
-/// `Shortcut-Token` value replaced by `<redacted>` (AGENTS.md
-/// §6 — the `redact_command` rule for HTTP). The request builder
-/// itself never formats the header map; this helper exists for
-/// the rare diagnostic path and for the redaction test.
-pub fn redact_shortcut_token(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+/// Render a header map for a debug / log line with both
+/// credential headers — `Shortcut-Token` (API token) and
+/// `Authorization` (OAuth bearer) — replaced by `<redacted>`
+/// (AGENTS.md §6 — the `redact_command` rule for HTTP). The
+/// request builder itself never formats the header map; this
+/// helper exists for the rare diagnostic path and for the
+/// redaction test.
+pub fn redact_auth_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(name, value)| {
-            let v = if name.as_str().eq_ignore_ascii_case("shortcut-token") {
+            let v = if name.as_str().eq_ignore_ascii_case("shortcut-token")
+                || name.as_str().eq_ignore_ascii_case("authorization")
+            {
                 "<redacted>".to_string()
             } else {
                 value.to_str().unwrap_or("<binary>").to_string()
@@ -396,7 +457,7 @@ const API_STORY_TOOL: &str = "api_story_detail";
 /// `(user_id, "api_list_stories", args)`.
 pub async fn list_stories(
     client: &ShortcutClient,
-    token: &SecretString,
+    auth: &ShortcutAuth,
     user_id: uuid::Uuid,
     query: &str,
     limit: usize,
@@ -417,7 +478,7 @@ pub async fn list_stories(
         ("query".to_string(), query.clone()),
         ("page_size".to_string(), limit.to_string()),
     ];
-    let raw = client.get(token, "/search/stories", &q).await?;
+    let raw = client.get(auth, "/search/stories", &q).await?;
     let stories: Vec<Value> = raw
         .get("data")
         .and_then(|v| v.as_array())
@@ -442,7 +503,7 @@ pub async fn list_stories(
 /// `(user_id, "api_story_detail", args)`.
 pub async fn get_story_detail(
     client: &ShortcutClient,
-    token: &SecretString,
+    auth: &ShortcutAuth,
     user_id: uuid::Uuid,
     story_id: u64,
 ) -> Result<Value, ShortcutError> {
@@ -458,10 +519,10 @@ pub async fn get_story_detail(
             .map_err(|e| ShortcutError::Transport(format!("shortcut cache decode: {e}")));
     }
     let story = client
-        .get(token, &format!("/stories/{story_id}"), &[])
+        .get(auth, &format!("/stories/{story_id}"), &[])
         .await?;
     let comments = client
-        .get(token, &format!("/stories/{story_id}/comments"), &[])
+        .get(auth, &format!("/stories/{story_id}/comments"), &[])
         .await?;
     let out = serde_json::json!({
         "story": crate::project::project_story_detail(&story),
@@ -493,7 +554,7 @@ const API_TEAMS_TOOL: &str = "api_teams";
 /// `{"count": n, "teams": [project_team(…)]}`.
 pub async fn list_teams(
     client: &ShortcutClient,
-    token: &SecretString,
+    auth: &ShortcutAuth,
     user_id: uuid::Uuid,
 ) -> Result<Value, ShortcutError> {
     let args = serde_json::json!({});
@@ -502,7 +563,7 @@ pub async fn list_teams(
         return serde_json::from_str(&cached)
             .map_err(|e| ShortcutError::Transport(format!("shortcut cache decode: {e}")));
     }
-    let raw = client.get(token, "/teams", &[]).await?;
+    let raw = client.get(auth, "/teams", &[]).await?;
     let teams: Vec<Value> = raw
         .as_array()
         .map(|arr| arr.iter().map(crate::project::project_team).collect())
@@ -526,10 +587,10 @@ pub async fn list_teams(
 /// story. Never cached — a write must always reach upstream.
 pub async fn create_story(
     client: &ShortcutClient,
-    token: &SecretString,
+    auth: &ShortcutAuth,
     body: &Value,
 ) -> Result<Value, ShortcutError> {
-    let raw = client.post(token, "/stories", body).await?;
+    let raw = client.post(auth, "/stories", body).await?;
     Ok(crate::project::project_story(&raw))
 }
 
@@ -540,7 +601,7 @@ pub async fn create_story(
 /// call. Never cached.
 pub async fn add_story_comment(
     client: &ShortcutClient,
-    token: &SecretString,
+    auth: &ShortcutAuth,
     story_id: u64,
     text: &str,
 ) -> Result<Value, ShortcutError> {
@@ -556,7 +617,7 @@ pub async fn add_story_comment(
     }
     let body = serde_json::json!({ "text": text });
     let raw = client
-        .post(token, &format!("/stories/{story_id}/comments"), &body)
+        .post(auth, &format!("/stories/{story_id}/comments"), &body)
         .await?;
     Ok(crate::project::project_comment(&raw))
 }
@@ -593,25 +654,57 @@ mod tests {
     }
 
     #[test]
-    fn redact_shortcut_token_masks_the_token_header() {
+    fn auth_header_maps_api_token_and_bearer_variants() {
+        let api = ShortcutAuth::ApiToken(SecretString::from("sc_secrettoken123"));
+        let (name, value) = api.header();
+        assert_eq!(name.as_str(), "shortcut-token");
+        assert_eq!(value, "sc_secrettoken123");
+        let bearer = ShortcutAuth::Bearer(SecretString::from("oauth_access_xyz"));
+        let (name, value) = bearer.header();
+        assert_eq!(name, reqwest::header::AUTHORIZATION);
+        assert_eq!(value, "Bearer oauth_access_xyz");
+        // The Debug impl never prints the credential.
+        assert!(!format!("{api:?}").contains("sc_secrettoken123"));
+        assert!(!format!("{bearer:?}").contains("oauth_access_xyz"));
+    }
+
+    #[test]
+    fn redact_auth_headers_masks_both_credential_headers() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "shortcut-token",
             reqwest::header::HeaderValue::from_static("sc_secrettoken123"),
         );
         headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer oauth_access_xyz"),
+        );
+        headers.insert(
             reqwest::header::ACCEPT,
             reqwest::header::HeaderValue::from_static("application/json"),
         );
-        let rendered = redact_shortcut_token(&headers);
+        let rendered = redact_auth_headers(&headers);
         let token = rendered
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("shortcut-token"))
             .map(|(_, v)| v.clone())
             .expect("shortcut-token header present");
         assert_eq!(token, "<redacted>");
+        let authz = rendered
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone())
+            .expect("authorization header present");
+        assert_eq!(authz, "<redacted>");
+        let accept = rendered
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+            .map(|(_, v)| v.clone())
+            .expect("accept header present");
+        assert_eq!(accept, "application/json");
         let joined = format!("{rendered:?}");
         assert!(!joined.contains("sc_secrettoken123"));
+        assert!(!joined.contains("oauth_access_xyz"));
     }
 
     #[test]

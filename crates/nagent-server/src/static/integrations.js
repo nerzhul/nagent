@@ -471,10 +471,109 @@ const MODAL_SUBTITLES = {
   github:
     "Connect your GitHub account with a personal access token so the assistant can read your repos, issues, PRs and notifications. Read-only — the agent never creates or modifies anything on your behalf.",
   shortcut:
-    "Connect your Shortcut (app.shortcut.com) workspace with an API token so the assistant can read your backlog, stories, epics, teams and iterations, and create new stories in your default team when you ask in chat.",
+    "Connect your Shortcut (app.shortcut.com) workspace so the assistant can read your backlog, stories, epics, teams and iterations, and create new stories in your default team when you ask in chat. Use \"Connect with Shortcut\" (OAuth) when offered; an API token also works as a fallback.",
 };
 
 const PROBE_TEAMS_PATH = "/api/integrations/shortcut/probe-teams";
+const SHORTCUT_OAUTH_START = "/api/auth/login/shortcut/start";
+const SHORTCUT_OAUTH_DISCONNECT = "/api/auth/login/shortcut/disconnect";
+
+// Reads `features.shortcut_oauth` from `GET /api/features` (a fresh
+// fetch per editor open is fine — the integrations drawer opens
+// rarely).
+async function shortcutOauthEnabled() {
+  try {
+    const resp = await fetch("/api/features", { credentials: "same-origin" });
+    if (!resp.ok) return false;
+    const body = await resp.json();
+    return !!body?.shortcut_oauth;
+  } catch {
+    return false;
+  }
+}
+
+// "Connect with Shortcut" / "Disconnect" OAuth buttons in the
+// Shortcut editor. The connect button is a plain navigation to the
+// `/start` route (the browser follows the 302 to Shortcut's
+// authorize page and comes back to our `/callback`). The
+// disconnect button POSTs and reloads so the status pill flips
+// back. Only rendered when the operator enabled
+// `[shortcut_oauth]` (`features.shortcut_oauth === true`).
+async function attachShortcutOauthButtons(form, actions, svc) {
+  if (!(await shortcutOauthEnabled())) return;
+  const fieldValue = (key) => (svc.fields || []).find((f) => f.key === key)?.value || "";
+  const oauthOn = fieldValue("auth_mode") === "oauth";
+  const row = document.createElement("div");
+  row.className = "chat-integration-oauth-row";
+  const connect = document.createElement("button");
+  connect.type = "button";
+  connect.className = "ghost";
+  connect.textContent = oauthOn ? "Reconnect with Shortcut" : "Connect with Shortcut";
+  connect.addEventListener("click", () => {
+    location.href = SHORTCUT_OAUTH_START;
+  });
+  row.appendChild(connect);
+  if (oauthOn) {
+    const disconnect = document.createElement("button");
+    disconnect.type = "button";
+    disconnect.className = "danger";
+    disconnect.textContent = "Disconnect";
+    disconnect.addEventListener("click", async () => {
+      disconnect.disabled = true;
+      try {
+        const resp = await fetch(SHORTCUT_OAUTH_DISCONNECT, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { ...(csrfHeaders() || {}) },
+        });
+        if (!resp.ok && resp.status !== 204) throw new Error(`HTTP ${resp.status}`);
+        document.dispatchEvent(
+          new CustomEvent("integrationsupdated", { detail: { service: "shortcut" } }),
+        );
+        location.reload();
+      } catch (e) {
+        disconnect.disabled = false;
+        alert(`Disconnect failed: ${e.message}`);
+      }
+    });
+    row.appendChild(disconnect);
+  }
+  // Read-only status line for the redirect-managed OAuth fields
+  // (access_token / refresh_token / expiry / … are collected by the
+  // callback, never typed here).
+  const status = document.createElement("span");
+  status.className = "chat-integration-oauth-hint";
+  if (oauthOn) {
+    const expiry = fieldValue("token_expires_at");
+    status.textContent = `Connected via OAuth${expiry ? ` — access token expires ${expiry}` : ""}. The API token field below is unused.`;
+  } else {
+    status.textContent = "OAuth is managed by the redirect flow — no token to paste here.";
+  }
+  row.appendChild(status);
+  form.insertBefore(row, actions);
+}
+
+// Surface the OAuth callback redirect (`?shortcut_connected=…` /
+// `?shortcut_error=…`) as a one-shot banner, then clean the URL.
+function showShortcutOauthResultBanner() {
+  const params = new URLSearchParams(location.search);
+  const connected = params.get("shortcut_connected");
+  const error = params.get("shortcut_error");
+  if (!connected && !error) return;
+  params.delete("shortcut_connected");
+  params.delete("shortcut_error");
+  const qs = params.toString();
+  history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : ""));
+  const anchor =
+    document.getElementById(SETTINGS_LIST_ID) || document.getElementById(LIST_ID);
+  if (!anchor || !anchor.parentElement) return;
+  const banner = document.createElement("li");
+  banner.className = "settings-integrations-banner";
+  banner.textContent = connected
+    ? "Shortcut connected via OAuth."
+    : `Shortcut OAuth connection failed (${error || "unknown error"}).`;
+  anchor.parentElement.insertBefore(banner, anchor);
+}
 
 async function fetchShortcutTeamsFromVault() {
   const resp = await fetch("/api/integrations/shortcut/teams", {
@@ -485,7 +584,7 @@ async function fetchShortcutTeamsFromVault() {
   return body?.data?.teams || [];
 }
 
-async function fetchShortcutTeamsWithTypedToken(apiToken) {
+async function fetchShortcutTeamsWithTypedToken(apiToken, accessToken) {
   const resp = await fetch(PROBE_TEAMS_PATH, {
     method: "POST",
     credentials: "same-origin",
@@ -493,7 +592,9 @@ async function fetchShortcutTeamsWithTypedToken(apiToken) {
       "content-type": "application/json",
       ...(csrfHeaders() || {}),
     },
-    body: JSON.stringify({ api_token: apiToken }),
+    body: JSON.stringify(
+      accessToken ? { access_token: accessToken } : { api_token: apiToken },
+    ),
   });
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
@@ -513,9 +614,9 @@ async function loadShortcutTeams(form) {
   try {
     return await fetchShortcutTeamsFromVault();
   } catch {
-    const typed = form.querySelector('[data-key="api_token"]')?.value.trim();
-    if (!typed) throw new Error("no saved or typed API token");
-    return await fetchShortcutTeamsWithTypedToken(typed);
+    const apiToken = form.querySelector('[data-key="api_token"]')?.value.trim();
+    if (apiToken) return await fetchShortcutTeamsWithTypedToken(apiToken, null);
+    throw new Error("no saved or typed API token");
   }
 }
 
@@ -1120,7 +1221,7 @@ function attachGithubReposPickerButton(form) {
   }
 }
 
-async function probeShortcut(apiToken, username) {
+async function probeShortcut(apiToken, username, accessToken) {
   const resp = await fetch(PROBE_PATH_SHORTCUT, {
     method: "POST",
     credentials: "same-origin",
@@ -1128,7 +1229,11 @@ async function probeShortcut(apiToken, username) {
       "content-type": "application/json",
       ...(csrfHeaders() || {}),
     },
-    body: JSON.stringify({ api_token: apiToken, username: username || undefined }),
+    body: JSON.stringify(
+      accessToken
+        ? { access_token: accessToken, username: username || undefined }
+        : { api_token: apiToken, username: username || undefined },
+    ),
   });
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
@@ -1153,6 +1258,7 @@ async function probeShortcut(apiToken, username) {
 // (see `loadShortcutIdentity` below).
 function attachShortcutTestButton(form, actions) {
   const tokenField = form.querySelector('[data-key="api_token"]');
+  const oauthTokenField = form.querySelector('[data-key="access_token"]');
   const usernameField = form.querySelector('[data-key="username"]');
   if (!tokenField || !usernameField || !actions) return null;
 
@@ -1190,14 +1296,15 @@ function attachShortcutTestButton(form, actions) {
     statusEl.textContent = "Testing Shortcut connection…";
     statusEl.dataset.state = "pending";
     const token = tokenField.value.trim();
-    if (!token) {
+    const oauthToken = oauthTokenField?.value.trim() || "";
+    if (!token && !oauthToken) {
       testBtn.disabled = false;
-      statusEl.textContent = "Please fill in the API token first.";
+      statusEl.textContent = "Please fill in the API token (or OAuth access token) first.";
       statusEl.dataset.state = "error";
       return;
     }
     try {
-      const body = await probeShortcut(token, usernameField.value.trim());
+      const body = await probeShortcut(token, usernameField.value.trim(), oauthToken || null);
       statusEl.dataset.state = "ok";
       const name = body.name ? ` — ${body.name}` : "";
       statusEl.textContent = `Connected as @${body.mention_name}${name}.`;
@@ -1380,7 +1487,16 @@ function openEditor(svc) {
 
   const form = document.createElement("form");
   form.className = "chat-integration-form";
-  for (const f of svc.fields) form.appendChild(buildFormField(f));
+  // Fields listed in `managed_fields` are written out of band
+  // (e.g. by the OAuth callback redirect) — they are NOT rendered
+  // as inputs, so the form never submits them and the saved rows
+  // are preserved on PUT. The per-service block below renders a
+  // read-only status for them instead.
+  const managed = new Set(svc.managed_fields || []);
+  for (const f of svc.fields) {
+    if (managed.has(f.key)) continue;
+    form.appendChild(buildFormField(f));
+  }
   modal.appendChild(form);
 
   // Plan 1790963194218: the CalDAV `ServiceDef` ships a
@@ -1479,6 +1595,7 @@ function openEditor(svc) {
     loadShortcutIdentity(form, actions, svc, probe);
     attachShortcutTeamPicker(form);
     attachShortcutTemplatesEditor(form);
+    attachShortcutOauthButtons(form, actions, svc);
   }
 
   form.addEventListener("submit", async (e) => {
@@ -1586,3 +1703,4 @@ function refreshOnAuthChange() {
 
 bindOpenRefresh();
 refreshOnAuthChange();
+showShortcutOauthResultBanner();

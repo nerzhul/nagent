@@ -257,7 +257,8 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 
 The Shortcut plugin also ships **pure-API dashboard endpoints**
 that never go through the LLM (the story list / detail is proxied
-straight from the caller's vault token via `nagent-shortcut`):
+straight from the caller's vault credential — OAuth bearer when
+saved, API token otherwise — via `nagent-shortcut`):
 `GET /api/integrations/shortcut/stories?query=&limit=`,
 `GET /api/integrations/shortcut/stories/{id}`,
 `GET /api/integrations/shortcut/me`, and
@@ -390,22 +391,42 @@ owner/repo listing used to tick dashboard repos). They back the
 `docs/integrations/github.md`.
 
 When the `shortcut-agent` cargo feature is on, the registry also
-contains the `shortcut` `ServiceDef` (id `"shortcut"`, five fields:
-`api_token` (Password), `username` (Text, filled by the probe),
-`show_dashboard` (Checkbox), `default_team` (Text, JSON
-`{"id","name"}` picked from `GET /api/integrations/shortcut/teams`),
-and `story_templates` (Text, JSON array of story shortcuts)).
-The read-only `shortcut_*` agents read the token through
-`UserContext::secret("shortcut", "api_token")` and call
-`api.app.shortcut.com` through the shared egress pool with the
-`[agents.shortcut].allowlist` (default `["api.app.shortcut.com"]`).
-One setup-only HTTP endpoint — `POST /api/integrations/shortcut/probe`
-— validates the token against `GET /members` before the user
-saves it and writes `shortcut_probe_<outcome>` audit rows (the
-token never lands on an audit row). `shortcut_create_story` is the
-first registered **write** tool (`POST /stories`, confirm-on-write,
-session override allowed); the comment wire
-(`nagent_shortcut::add_story_comment`) is ready but no
+contains the `shortcut` `ServiceDef` (id `"shortcut"`, eleven fields).
+Auth is dual-mode: the OAuth rows — `access_token` / `refresh_token`
+(Password), `token_expires_at`, `token_scope`, `permission_id`,
+`auth_mode` (Text) — written by the OAuth flow at
+`/api/auth/login/shortcut/{start,callback,disconnect}` (PKCE +
+state, `[shortcut_oauth]` config, `credential_oauth_shortcut_*`
+audit rows; the callback **merges** its rows so a saved
+`api_token` survives) are preferred when present, and the classic
+`api_token` (Password, fallback) is used otherwise. The remaining
+fields are `username` (Text, filled by the probe), `show_dashboard`
+(Checkbox), `default_team` (Text, JSON `{"id","name"}` picked from
+`GET /api/integrations/shortcut/teams`), and `story_templates` (Text,
+JSON array of story shortcuts). The six OAuth rows are
+`managed_fields` on the `ServiceDef` — written by the callback
+redirect, hidden from the integrations form (the form shows the
+connect button + a read-only status and never submits them, so a
+plain form save cannot clobber the tokens). The `shortcut_*` agents
+resolve the
+credential through `UserContext::secret("shortcut", …)` (OAuth
+bearer → `Authorization: Bearer …`, API token → `Shortcut-Token:
+…`) and call `api.app.shortcut.com` through the shared egress pool
+with the `[agents.shortcut].allowlist` (default
+`["api.app.shortcut.com"]`); on expiry (`token_expires_at` within
+60 s) or a 401 they refresh the token via the token endpoint
+(`SHORTCUT_OAUTH_*` env vars) and write the new set back through
+`UserContext::update_secret(...)` — the same locked
+refresh-in-the-agent pattern as `x_timeline`. Two setup-only HTTP
+endpoints — `POST /api/integrations/shortcut/probe` and
+`POST /api/integrations/shortcut/probe-teams` — accept either
+`api_token` or `access_token` in the body, validate against
+`GET /members` / `GET /teams` before the user saves anything, and
+write `shortcut_probe_<outcome>` / `shortcut_probe_teams_<outcome>`
+audit rows (the credential never lands on an audit row).
+`shortcut_create_story` is the first registered **write** tool
+(`POST /stories`, confirm-on-write, session override allowed); the
+comment wire (`nagent_shortcut::add_story_comment`) is ready but no
 `shortcut_add_comment` agent is registered yet, and move/delete
 stay out of scope. See `docs/integrations/shortcut.md` for the
 operator-facing guide.

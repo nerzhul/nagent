@@ -110,5 +110,6 @@ pub const GITHUB_SERVICE: ServiceDef = ServiceDef {
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
     ],
+    managed_fields: &[],
     docs_url: Some("https://github.com/nagent/nagent/blob/main/docs/integrations/github.md"),
 };

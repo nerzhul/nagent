@@ -117,15 +117,24 @@ impl Fixture {
                     }
                     let text = String::from_utf8_lossy(&buf).into_owned();
                     let request_line = text.lines().next().unwrap_or("").to_string();
+                    // Captured credential: the Authorization header when
+                    // present (OAuth bearer), else the Shortcut-Token
+                    // header (classic API token).
+                    let authz = text
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                        .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+                        .unwrap_or_default();
                     let token = text
                         .lines()
                         .find(|l| l.to_ascii_lowercase().starts_with("shortcut-token:"))
                         .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
                         .unwrap_or_default();
+                    let credential = if authz.is_empty() { token } else { authz };
                     req_clone
                         .lock()
                         .unwrap()
-                        .push((request_line.clone(), token));
+                        .push((request_line.clone(), credential));
                     let path = request_line
                         .split_whitespace()
                         .nth(1)
@@ -315,24 +324,67 @@ fn shortcut_service_def_shape() {
     use nagent_agents::{FieldKind, ServiceRegistry};
     let reg = ServiceRegistry::new(&[SHORTCUT_SERVICE]);
     let svc = reg.get("shortcut").expect("shortcut service registered");
-    assert_eq!(svc.fields.len(), 5);
+    assert_eq!(svc.fields.len(), 11);
+    let keys: Vec<&str> = svc.fields.iter().map(|f| f.key).collect();
+    assert_eq!(
+        keys,
+        [
+            "api_token",
+            "access_token",
+            "refresh_token",
+            "token_expires_at",
+            "token_scope",
+            "permission_id",
+            "auth_mode",
+            "username",
+            "show_dashboard",
+            "default_team",
+            "story_templates",
+        ]
+    );
     let token = &svc.fields[0];
     assert_eq!(token.key, "api_token");
     assert_eq!(token.kind, FieldKind::Password);
-    assert!(token.required);
+    assert!(!token.required, "api_token is the fallback, not required");
     assert!(
         !token.echo_on_edit,
         "API token must never be echoed on edit"
     );
-    let username = &svc.fields[1];
-    assert_eq!(username.key, "username");
+    // The OAuth token pair is masked and never echoed (AGENTS.md §6).
+    for (idx, key) in ["access_token", "refresh_token"].iter().enumerate() {
+        let f = &svc.fields[idx + 1];
+        assert_eq!(f.key, *key);
+        assert_eq!(f.kind, FieldKind::Password);
+        assert!(!f.required);
+        assert!(!f.echo_on_edit, "{key} must never be echoed on edit");
+    }
+    // The informational OAuth rows are plain text, optional, echoed.
+    for key in [
+        "token_expires_at",
+        "token_scope",
+        "permission_id",
+        "auth_mode",
+    ] {
+        let f = svc.fields.iter().find(|f| f.key == key).expect(key);
+        assert_eq!(f.kind, FieldKind::Text);
+        assert!(!f.required);
+        assert!(f.echo_on_edit);
+    }
+    let username = svc
+        .fields
+        .iter()
+        .find(|f| f.key == "username")
+        .expect("username");
     assert_eq!(username.kind, FieldKind::Text);
     assert!(username.required);
     assert!(!username.echo_on_edit, "username is credential-adjacent");
     // The stories-dashboard toggle: a checkbox, optional, echoed
     // back on edit (not a secret — wire format "true"/"false").
-    let dashboard = &svc.fields[2];
-    assert_eq!(dashboard.key, "show_dashboard");
+    let dashboard = svc
+        .fields
+        .iter()
+        .find(|f| f.key == "show_dashboard")
+        .expect("show_dashboard");
     assert_eq!(dashboard.kind, FieldKind::Checkbox);
     assert!(!dashboard.required, "the dashboard toggle is optional");
     assert!(
@@ -342,16 +394,26 @@ fn shortcut_service_def_shape() {
     // The default team (JSON {"id","name"}) and the story
     // templates (JSON array): both optional text fields, echoed
     // back on edit (not secrets — stored encrypted at rest).
-    let default_team = &svc.fields[3];
-    assert_eq!(default_team.key, "default_team");
-    assert_eq!(default_team.kind, FieldKind::Text);
-    assert!(!default_team.required);
-    assert!(default_team.echo_on_edit);
-    let templates = &svc.fields[4];
-    assert_eq!(templates.key, "story_templates");
-    assert_eq!(templates.kind, FieldKind::Text);
-    assert!(!templates.required);
-    assert!(templates.echo_on_edit);
+    for key in ["default_team", "story_templates"] {
+        let f = svc.fields.iter().find(|f| f.key == key).expect(key);
+        assert_eq!(f.kind, FieldKind::Text);
+        assert!(!f.required);
+        assert!(f.echo_on_edit);
+    }
+    // The OAuth rows are managed by the redirect flow, not the
+    // form: the ServiceDef lists them in `managed_fields` so the UI
+    // hides their inputs.
+    assert_eq!(
+        svc.managed_fields,
+        [
+            "access_token",
+            "refresh_token",
+            "token_expires_at",
+            "token_scope",
+            "permission_id",
+            "auth_mode",
+        ]
+    );
 }
 
 #[test]
@@ -770,6 +832,24 @@ async fn probe_is_fail_closed_and_redacted() {
 /// token + username + `show_dashboard` flag already in the vault.
 /// Returns the app, the bearer header and the app state.
 async fn boot_dashboard_app(fx: &Fixture) -> (axum::Router, String, Arc<nagent_server::AppState>) {
+    boot_dashboard_app_with_seed(
+        fx,
+        serde_json::json!({
+            "api_token": TEST_TOKEN,
+            "username": "jane",
+            "show_dashboard": "true"
+        }),
+    )
+    .await
+}
+
+/// Same as [`boot_dashboard_app`] but seeds caller-chosen vault
+/// fields — used to exercise the OAuth bearer path
+/// (`access_token` instead of `api_token`).
+async fn boot_dashboard_app_with_seed(
+    fx: &Fixture,
+    seed_fields: serde_json::Value,
+) -> (axum::Router, String, Arc<nagent_server::AppState>) {
     use nagent_agents::shortcut_service::SHORTCUT_SERVICE;
     use nagent_agents::ServiceRegistry;
     use nagent_server::credentials::{CredentialResolver, CredentialsKey};
@@ -842,14 +922,7 @@ async fn boot_dashboard_app(fx: &Fixture) -> (axum::Router, String, Arc<nagent_s
                 .header(axum::http::header::AUTHORIZATION, &bearer)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({
-                        "fields": {
-                            "api_token": TEST_TOKEN,
-                            "username": "jane",
-                            "show_dashboard": "true"
-                        }
-                    })
-                    .to_string(),
+                    serde_json::json!({ "fields": seed_fields }).to_string(),
                 ))
                 .unwrap(),
         )
@@ -1448,5 +1521,179 @@ async fn probe_teams_lists_workspace_teams_without_vault() {
         fx.requests().len(),
         before,
         "no upstream call on empty token"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OAuth auth mode: a vault `access_token` row must be sent as
+// `Authorization: Bearer …` (not `Shortcut-Token`), and the probes
+// accept `access_token` in the body. The classic `api_token` path
+// above keeps working unchanged (fallback).
+// ---------------------------------------------------------------------------
+
+const TEST_OAUTH_TOKEN: &str = "oauth_access_token_e2e_xyz";
+
+/// With `access_token` (and no `api_token`) in the vault, the
+/// dashboard teams endpoint sends the bearer header upstream.
+#[tokio::test]
+async fn dashboard_uses_bearer_when_oauth_access_token_saved() {
+    let fx = Fixture::start().await;
+    let (app, bearer, _state) = boot_dashboard_app_with_seed(
+        &fx,
+        serde_json::json!({
+            "access_token": TEST_OAUTH_TOKEN,
+            "refresh_token": "oauth_refresh_e2e",
+            "token_expires_at": "2030-01-01T00:00:00Z",
+            "auth_mode": "oauth",
+            "username": "jane",
+            "show_dashboard": "true"
+        }),
+    )
+    .await;
+
+    let resp = get(app, &bearer, "/api/integrations/shortcut/teams").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["data"]["count"], 2);
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !text.contains(TEST_OAUTH_TOKEN),
+        "AGENTS.md §6: response must not carry the access token; got {text}"
+    );
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|(line, cred)| line.starts_with("GET /teams")
+                && cred == &format!("Bearer {TEST_OAUTH_TOKEN}")),
+        "expected a bearer Authorization header upstream; got {:?}",
+        fx.requests()
+    );
+    assert!(
+        !fx.requests()
+            .iter()
+            .any(|(_, cred)| !cred.is_empty() && !cred.starts_with("Bearer ")),
+        "no Shortcut-Token header may be sent when OAuth is configured; got {:?}",
+        fx.requests()
+    );
+}
+
+/// The probe-teams endpoint accepts `access_token` in the body and
+/// sends it as a bearer upstream.
+#[tokio::test]
+async fn probe_teams_accepts_oauth_access_token_in_body() {
+    let fx = Fixture::start().await;
+    let auth_store = temp_store().await;
+    let key = Arc::new(nagent_server::credentials::CredentialsKey::from_bytes(
+        [0x2bu8; 32],
+    ));
+    let resolver = nagent_server::credentials::CredentialResolver::new(
+        auth_store.clone(),
+        key.clone(),
+        None,
+        None,
+    );
+    let user_id = auth_store
+        .admin()
+        .users
+        .create("jane@example.com", "Jane", "local", Some(b"hash"))
+        .await
+        .expect("create user");
+    let session = auth_store
+        .admin()
+        .sessions
+        .create(user_id, Duration::from_secs(3600), None, None)
+        .await
+        .expect("create session");
+    let bearer = format!(
+        "Bearer {}",
+        session.plaintext_token.clone().expect("plaintext token")
+    );
+
+    let mut builder = nagent_server::testing::app_state();
+    Arc::make_mut(&mut builder.config).auth.enabled = true;
+    Arc::make_mut(&mut builder.config).auth.backends =
+        vec![nagent_server::config::AuthBackendKind::Local];
+    Arc::make_mut(&mut builder.config).auth.db = nagent_server::config::AuthDbConfig {
+        backend: "sqlite".into(),
+        url: format!(
+            "sqlite://file:shortcut_e2e_probe_oauth_{}?mode=memory&cache=shared",
+            Uuid::new_v4()
+        ),
+        max_connections: 1,
+        auto_migrate: true,
+    };
+    Arc::make_mut(&mut builder.config).agents.shortcut.base_url = fx.base_url();
+    Arc::make_mut(&mut builder.config).agents.shortcut.allowlist = vec!["127.0.0.1".to_string()];
+    let state = builder
+        .with_auth(auth_store.clone())
+        .with_credential_resolver(Arc::new(resolver), key)
+        .build();
+    let auth_state = state.auth.as_ref().expect("auth wired").clone();
+    let auth_layer = axum::middleware::from_fn_with_state(
+        auth_state,
+        nagent_server::auth::middleware::require_auth_middleware,
+    );
+    let routes = nagent_server::credentials::shortcut_probe::build_shortcut_probe_teams_router(
+        state.clone(),
+    );
+    let app = routes.layer(auth_layer).with_state(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/integrations/shortcut/probe-teams")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"access_token": TEST_OAUTH_TOKEN}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["count"], 2);
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|(line, cred)| line.starts_with("GET /teams")
+                && cred == &format!("Bearer {TEST_OAUTH_TOKEN}")),
+        "probe-teams must send the bearer upstream; got {:?}",
+        fx.requests()
+    );
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(!text.contains(TEST_OAUTH_TOKEN));
+
+    // Both fields at once → 400 (ambiguous), no upstream call.
+    let before = fx.requests().len();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/integrations/shortcut/probe-teams")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_token": TEST_TOKEN, "access_token": TEST_OAUTH_TOKEN})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        fx.requests().len(),
+        before,
+        "no upstream call when ambiguous"
     );
 }

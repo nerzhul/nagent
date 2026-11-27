@@ -315,6 +315,7 @@ async fn http_get_integration_echoes_plaintext_only_for_non_password_fields() {
                 echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
+        managed_fields: &[],
         docs_url: None,
     };
     let services = Arc::new(ServiceRegistry::new(&[TEST_SVC]));
@@ -560,6 +561,7 @@ async fn http_get_integration_respects_echo_on_edit_opt_out() {
                 echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
+        managed_fields: &[],
         docs_url: None,
     };
     let services = Arc::new(ServiceRegistry::new(&[TEST_SVC]));
@@ -754,6 +756,7 @@ async fn http_partial_put_preserves_unspecified_fields() {
                 echo_on_edit: ECHO_ON_EDIT_PASSWORD,
             },
         ],
+        managed_fields: &[],
         docs_url: None,
     };
     let services = Arc::new(ServiceRegistry::new(&[TEST_SVC]));

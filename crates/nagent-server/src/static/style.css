@@ -3069,6 +3069,25 @@ select, input[type="checkbox"] {
   font-size: 0.85rem;
   min-height: 0;
 }
+.chat-integration-oauth-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+.chat-integration-oauth-hint {
+  font-size: 0.8rem;
+  color: var(--chat-help-fg, #a8acb4);
+}
+.settings-integrations-banner {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--chat-input-border, #3a3d42);
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  background: rgba(255, 255, 255, 0.03);
+  list-style: none;
+}
 .chat-integration-probe-empty {
   margin: 0;
   font-size: 0.82rem;

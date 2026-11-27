@@ -21,16 +21,20 @@
 //!   re-exports it as `ShortcutAgentConfig` so the server's config
 //!   layer keeps its existing `From` impl.
 //! - [`ShortcutClient`] — one authenticated GET against the API,
-//!   plus the short-lived in-process response cache.
+//!   plus the short-lived in-process response cache. The
+//!   credential is a [`ShortcutAuth`] parameter: an OAuth bearer
+//!   token when the user connected via the agent-app OAuth flow,
+//!   the classic API token otherwise.
 //! - [`project`] — JSON projections from raw upstream payloads to
 //!   the shapes consumed by the LLM tools and by the dashboard UI.
 //!
 //! ## Credential redaction (AGENTS.md §6)
 //!
-//! The token only ever travels inside the `Shortcut-Token` header.
-//! No code path formats the header (or the token) into an error
-//! string, a log line, or a `Debug` output —
-//! [`redact_shortcut_token`] is the single helper that renders a
+//! The credential only ever travels inside its auth header
+//! (`Authorization: Bearer …` for OAuth, `Shortcut-Token: …` for
+//! an API token). No code path formats the header (or the token)
+//! into an error string, a log line, or a `Debug` output —
+//! [`redact_auth_headers`] is the single helper that renders a
 //! header map safely. The upstream response body is safe to
 //! surface (truncated); the request that carried the credential
 //! is not.
@@ -41,7 +45,7 @@ pub mod rank;
 
 pub use client::{
     add_story_comment, build_url, create_story, get_story_detail, list_stories, list_teams,
-    redact_shortcut_token, truncate, ShortcutClient, MAX_RAW_RESPONSE_BYTES,
+    redact_auth_headers, truncate, ShortcutAuth, ShortcutClient, MAX_RAW_RESPONSE_BYTES,
 };
 pub use project::{
     find_member, find_team, label_names, label_objects, mention_name_of, name_of_member,

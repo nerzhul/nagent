@@ -47,6 +47,8 @@ use crate::{agents, llm, tts};
 use nagent_agents::ServiceRegistry;
 use nagent_agents::ToolsRouter;
 
+#[cfg(feature = "shortcut-agent")]
+use crate::oauth::shortcut::ShortcutOAuthState;
 #[cfg(feature = "x-agent")]
 use crate::oauth::x::XOAuthState;
 
@@ -136,6 +138,8 @@ pub struct AuthState {
     pub passkey: Option<PasskeyState>,
     #[cfg(feature = "x-agent")]
     pub x: Option<Arc<XOAuthState>>,
+    #[cfg(feature = "shortcut-agent")]
+    pub shortcut_oauth: Option<Arc<ShortcutOAuthState>>,
     pub login_rate_limiter: LoginRateLimiter,
     pub services: Arc<ServiceRegistry>,
     pub credential_resolver: Option<Arc<CredentialResolver>>,
@@ -160,6 +164,13 @@ impl std::fmt::Debug for AuthState {
                 &self.x.as_ref().map(|_| "<XOAuthState>"),
                 #[cfg(not(feature = "x-agent"))]
                 &"<x-agent off>",
+            )
+            .field(
+                "shortcut_oauth",
+                #[cfg(feature = "shortcut-agent")]
+                &self.shortcut_oauth.as_ref().map(|_| "<ShortcutOAuthState>"),
+                #[cfg(not(feature = "shortcut-agent"))]
+                &"<shortcut-agent off>",
             )
             .field("login_rate_limiter", &self.login_rate_limiter)
             .field("services", &self.services)
@@ -190,6 +201,8 @@ impl AuthState {
             passkey: None,
             #[cfg(feature = "x-agent")]
             x: None,
+            #[cfg(feature = "shortcut-agent")]
+            shortcut_oauth: None,
             login_rate_limiter: LoginRateLimiter::new(),
             services: ServiceRegistry::empty().into_arc(),
             credential_resolver: None,

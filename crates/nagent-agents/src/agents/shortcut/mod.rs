@@ -463,6 +463,20 @@ mod loopback {
                         }
                         let text = String::from_utf8_lossy(&buf).into_owned();
                         let request_line = text.lines().next().unwrap_or("").to_string();
+                        // The captured "credential" is the Authorization
+                        // header when present (OAuth bearer), else the
+                        // Shortcut-Token header (classic API token) — so
+                        // existing assertions keep their meaning and the
+                        // OAuth tests can assert on the bearer value.
+                        let authz = text
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                            .map(|l| {
+                                l.split_once(':')
+                                    .map(|(_, v)| v.trim().to_string())
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
                         let token = text
                             .lines()
                             .find(|l| l.to_ascii_lowercase().starts_with("shortcut-token:"))
@@ -472,10 +486,11 @@ mod loopback {
                                     .unwrap_or_default()
                             })
                             .unwrap_or_default();
+                        let credential = if authz.is_empty() { token } else { authz };
                         req_clone
                             .lock()
                             .unwrap()
-                            .push((request_line.clone(), token));
+                            .push((request_line.clone(), credential.clone()));
                         let method = request_line
                             .split_whitespace()
                             .next()
@@ -494,7 +509,8 @@ mod loopback {
                         if method == "POST" {
                             bodies_clone.lock().unwrap().push(body_text.clone());
                         }
-                        let (status, reason, extra, body) = route(&method, &path, &body_text);
+                        let (status, reason, extra, body) =
+                            route(&method, &path, &body_text, &credential);
                         let mut resp = format!(
                             "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
                             body.len()
@@ -531,13 +547,44 @@ mod loopback {
     }
 
     /// Route table for the fixture. `method` + `target` (path +
-    /// query) are matched exactly; `body` is the raw POST payload.
+    /// query) are matched exactly; `body` is the raw POST payload;
+    /// `credential` is the Authorization / Shortcut-Token header
+    /// value the request carried (used to simulate a revoked
+    /// OAuth token).
     fn route(
         method: &str,
         path: &str,
         body: &str,
+        credential: &str,
     ) -> (u16, &'static str, Vec<(&'static str, String)>, String) {
         let json = |v: Value| v.to_string();
+        // OAuth token endpoint (refresh grant). `refresh_token=bad`
+        // is rejected so tests can pin the error path.
+        if method == "POST" && path == "/oauth/token" {
+            if body.contains("refresh_token=bad") {
+                return (
+                    400,
+                    "Bad Request",
+                    vec![],
+                    json(
+                        json!({"error": "invalid_grant", "error_description": "refresh token revoked"}),
+                    ),
+                );
+            }
+            return (
+                200,
+                "OK",
+                vec![],
+                json(json!({
+                    "access_token": "new_access_token_xyz",
+                    "refresh_token": "new_refresh_token_abc",
+                    "token_type": "bearer",
+                    "expires_in": 3600,
+                    "scope": "agent",
+                    "permission_id": "perm-member-1"
+                })),
+            );
+        }
         if method == "POST" && path == "/stories" {
             // Echo the create payload back as the created story so
             // tests can assert exactly what was sent upstream.
@@ -592,6 +639,16 @@ mod loopback {
             );
         }
         if path == "/members" {
+            // Simulate a revoked OAuth access token: the old bearer
+            // gets a 401 so the 401→refresh→retry path is exercised.
+            if credential == "Bearer old_access_token" {
+                return (
+                    401,
+                    "Unauthorized",
+                    vec![],
+                    json(json!({"message": "token expired"})),
+                );
+            }
             return (
                 200,
                 "OK",
@@ -1077,5 +1134,245 @@ mod loopback {
         let sent: Value = serde_json::from_str(&fx.bodies()[0]).unwrap();
         assert_eq!(sent["group_id"], "team-uuid-2");
         assert!(sent.get("epic_id").is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // OAuth auth-mode tests: bearer selection, proactive refresh on a
+    // stale expiry, one-shot 401→refresh→retry, and refresh rejection.
+    // The refresh endpoint URL comes from SHORTCUT_OAUTH_TOKEN_URL,
+    // so these tests serialize on a lock to avoid env races.
+    // ------------------------------------------------------------------
+
+    // tokio Mutex so the guard can be held across `.await` without
+    // tripping clippy::await_holding_lock.
+    static OAUTH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// `SecretSource` returning an OAuth token set (plus the classic
+    /// `api_token`, to prove the OAuth row wins).
+    struct OauthSecrets {
+        access_token: &'static str,
+        refresh_token: &'static str,
+        expires_at: String,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretSource for OauthSecrets {
+        async fn fetch(
+            &self,
+            _user_id: uuid::Uuid,
+            service: &str,
+            field: &str,
+        ) -> Result<Option<secrecy::SecretString>, AgentError> {
+            if service != "shortcut" {
+                return Ok(None);
+            }
+            let v = match field {
+                "access_token" => Some(self.access_token),
+                "refresh_token" => Some(self.refresh_token),
+                "token_expires_at" => Some(self.expires_at.as_str()),
+                "api_token" => Some(TEST_TOKEN),
+                "username" => Some("jane"),
+                _ => None,
+            };
+            Ok(v.map(secrecy::SecretString::from))
+        }
+    }
+
+    type Updates = Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
+
+    /// `SecretSink` recording every `update_secret` call (plaintext
+    /// values stay in the test process only).
+    struct RecordingSink {
+        updates: Updates,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::SecretSink for RecordingSink {
+        async fn update(
+            &self,
+            _user_id: uuid::Uuid,
+            service: &str,
+            fields: &[(&str, secrecy::SecretString)],
+        ) -> Result<(), AgentError> {
+            use secrecy::ExposeSecret;
+            self.updates.lock().unwrap().push((
+                service.to_string(),
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.expose_secret().to_string()))
+                    .collect(),
+            ));
+            Ok(())
+        }
+    }
+
+    fn oauth_ctx(secrets: OauthSecrets, sink: Option<Arc<RecordingSink>>) -> UserContext {
+        let resolver: Arc<dyn SecretSource> = Arc::new(secrets);
+        let sink: Option<Arc<dyn crate::agents::SecretSink>> =
+            sink.map(|s| s as Arc<dyn crate::agents::SecretSink>);
+        UserContext::for_chat_session(
+            uuid::Uuid::new_v4(),
+            Arc::new(ServiceRegistry::empty()),
+            Some(resolver),
+            sink,
+            uuid::Uuid::new_v4(),
+        )
+    }
+
+    fn set_oauth_env(token_url: &str) {
+        std::env::set_var("SHORTCUT_OAUTH_CLIENT_ID", "test-client-id");
+        std::env::set_var("SHORTCUT_OAUTH_TOKEN_URL", token_url);
+    }
+
+    fn clear_oauth_env() {
+        std::env::remove_var("SHORTCUT_OAUTH_CLIENT_ID");
+        std::env::remove_var("SHORTCUT_OAUTH_TOKEN_URL");
+    }
+
+    #[tokio::test]
+    async fn auth_prefers_oauth_bearer_over_api_token() {
+        let _g = OAUTH_ENV_LOCK.lock().await;
+        let fx = Fixture::start().await;
+        set_oauth_env(&format!("{}/oauth/token", fx.base_url()));
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let fresh = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let ctx = oauth_ctx(
+            OauthSecrets {
+                access_token: "fresh_access_token",
+                refresh_token: "some_refresh",
+                expires_at: fresh,
+            },
+            None,
+        );
+        let v = client.get(&ctx, "/members", &[]).await.expect("GET");
+        assert!(find_member(&v, Some("jane")).is_some());
+        let reqs = fx.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].1, "Bearer fresh_access_token",
+            "OAuth access token must be sent as a bearer, not as Shortcut-Token"
+        );
+        // No refresh happened (token is fresh).
+        assert!(!reqs.iter().any(|(l, _)| l.starts_with("POST /oauth/token")));
+        clear_oauth_env();
+    }
+
+    #[tokio::test]
+    async fn stale_expiry_triggers_proactive_refresh_and_sink_write() {
+        let _g = OAUTH_ENV_LOCK.lock().await;
+        let fx = Fixture::start().await;
+        set_oauth_env(&format!("{}/oauth/token", fx.base_url()));
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let sink = Arc::new(RecordingSink {
+            updates: Arc::new(Mutex::new(Vec::new())),
+        });
+        let ctx = oauth_ctx(
+            OauthSecrets {
+                access_token: "old_access_token",
+                refresh_token: "good_refresh",
+                expires_at: past,
+            },
+            Some(sink.clone()),
+        );
+        let v = client.get(&ctx, "/members", &[]).await.expect("GET");
+        assert!(find_member(&v, Some("jane")).is_some());
+        let reqs = fx.requests();
+        assert!(
+            reqs.iter().any(|(l, _)| l.starts_with("POST /oauth/token")),
+            "stale token must hit the refresh endpoint first; got {reqs:?}"
+        );
+        let member_reqs: Vec<_> = reqs
+            .iter()
+            .filter(|(l, _)| l.starts_with("GET /members"))
+            .collect();
+        assert_eq!(member_reqs.len(), 1);
+        assert_eq!(member_reqs[0].1, "Bearer new_access_token_xyz");
+        let updates = sink.updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, "shortcut");
+        let fields: std::collections::HashMap<_, _> = updates[0].1.iter().cloned().collect();
+        assert_eq!(fields["access_token"], "new_access_token_xyz");
+        assert_eq!(fields["refresh_token"], "new_refresh_token_abc");
+        assert!(fields.contains_key("token_expires_at"));
+        clear_oauth_env();
+    }
+
+    #[tokio::test]
+    async fn unauthorized_triggers_one_refresh_and_retry() {
+        let _g = OAUTH_ENV_LOCK.lock().await;
+        let fx = Fixture::start().await;
+        set_oauth_env(&format!("{}/oauth/token", fx.base_url()));
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        // Fresh expiry → no proactive refresh; the fixture 401s the
+        // old bearer, so the retry path must kick in.
+        let fresh = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let sink = Arc::new(RecordingSink {
+            updates: Arc::new(Mutex::new(Vec::new())),
+        });
+        let ctx = oauth_ctx(
+            OauthSecrets {
+                access_token: "old_access_token",
+                refresh_token: "good_refresh",
+                expires_at: fresh,
+            },
+            Some(sink.clone()),
+        );
+        let v = client
+            .get(&ctx, "/members", &[])
+            .await
+            .expect("GET after retry");
+        assert!(find_member(&v, Some("jane")).is_some());
+        let reqs = fx.requests();
+        let member_reqs: Vec<_> = reqs
+            .iter()
+            .filter(|(l, _)| l.starts_with("GET /members"))
+            .map(|(_, c)| c.clone())
+            .collect();
+        assert_eq!(
+            member_reqs,
+            vec![
+                "Bearer old_access_token".to_string(),
+                "Bearer new_access_token_xyz".to_string()
+            ],
+            "expected 401 → refresh → retry with the new bearer; got {reqs:?}"
+        );
+        assert_eq!(
+            reqs.iter()
+                .filter(|(l, _)| l.starts_with("POST /oauth/token"))
+                .count(),
+            1,
+            "exactly one refresh"
+        );
+        assert_eq!(sink.updates.lock().unwrap().len(), 1);
+        clear_oauth_env();
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_surfaces_error_without_leaking_token() {
+        let _g = OAUTH_ENV_LOCK.lock().await;
+        let fx = Fixture::start().await;
+        set_oauth_env(&format!("{}/oauth/token", fx.base_url()));
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let fresh = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let ctx = oauth_ctx(
+            OauthSecrets {
+                access_token: "old_access_token",
+                refresh_token: "bad",
+                expires_at: fresh,
+            },
+            None,
+        );
+        let err = client.get(&ctx, "/members", &[]).await.unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("400") || msg.contains("invalid_grant"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("bad"),
+            "the refresh token must never appear in an error path (AGENTS.md §6); got: {msg}"
+        );
+        clear_oauth_env();
     }
 }

@@ -922,6 +922,122 @@ mod credentials {
             .expect("fetch")
             .is_none());
     }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn merge_fields_updates_only_listed_fields() {
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("carol@example.com", "Carol", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let creds = db.for_user(user).credentials();
+        let n1 = vec![0x11; 12];
+        creds
+            .upsert(
+                "shortcut",
+                &[
+                    ("api_token".to_string(), n1.clone(), vec![1]),
+                    ("username".to_string(), vec![0x22; 12], vec![2]),
+                ],
+            )
+            .await
+            .expect("upsert");
+        // merge_fields inserts the OAuth rows and leaves the
+        // pre-existing rows untouched (unlike `upsert`, which
+        // would have deleted them).
+        creds
+            .merge_fields(
+                "shortcut",
+                &[
+                    ("access_token".to_string(), vec![0x33; 12], vec![3]),
+                    ("refresh_token".to_string(), vec![0x44; 12], vec![4]),
+                ],
+            )
+            .await
+            .expect("merge");
+        let mut keys = creds.list_field_keys("shortcut").await.expect("list");
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "access_token".to_string(),
+                "api_token".to_string(),
+                "refresh_token".to_string(),
+                "username".to_string()
+            ]
+        );
+        let row = creds
+            .fetch("shortcut", "api_token")
+            .await
+            .expect("fetch")
+            .expect("row survives");
+        assert_eq!(row.ciphertext, vec![1]);
+        // Merging an existing key updates it in place.
+        creds
+            .merge_fields(
+                "shortcut",
+                &[("access_token".to_string(), vec![0x55; 12], vec![5])],
+            )
+            .await
+            .expect("merge 2");
+        let row = creds
+            .fetch("shortcut", "access_token")
+            .await
+            .expect("fetch 2")
+            .expect("row");
+        assert_eq!(row.ciphertext, vec![5]);
+        assert_eq!(row.nonce, vec![0x55; 12]);
+        assert_eq!(creds.list_field_keys("shortcut").await.expect("l").len(), 4);
+        // A bad nonce length is rejected before any write.
+        let err = creds
+            .merge_fields("shortcut", &[("x".to_string(), vec![0x00; 3], vec![9])])
+            .await;
+        assert!(matches!(err, Err(crate::Error::BadRequest(_))));
+    }
+
+    #[cfg(feature = "db-sqlite")]
+    #[tokio::test]
+    async fn delete_fields_removes_only_listed_keys() {
+        let db = sqlite_db().await;
+        let user = db
+            .admin()
+            .users
+            .create("dave@example.com", "Dave", "local", Some(b"h"))
+            .await
+            .unwrap();
+        let creds = db.for_user(user).credentials();
+        creds
+            .upsert(
+                "shortcut",
+                &[
+                    ("api_token".to_string(), vec![0x11; 12], vec![1]),
+                    ("access_token".to_string(), vec![0x22; 12], vec![2]),
+                    ("refresh_token".to_string(), vec![0x33; 12], vec![3]),
+                ],
+            )
+            .await
+            .expect("upsert");
+        let removed = creds
+            .delete_fields(
+                "shortcut",
+                &["access_token".to_string(), "refresh_token".to_string()],
+            )
+            .await
+            .expect("delete_fields");
+        assert_eq!(removed, 2);
+        let mut keys = creds.list_field_keys("shortcut").await.expect("list");
+        keys.sort();
+        assert_eq!(keys, vec!["api_token".to_string()]);
+        // Deleting a key that is absent is a no-op, not an error.
+        let removed = creds
+            .delete_fields("shortcut", &["nope".to_string()])
+            .await
+            .expect("delete_fields 2");
+        assert_eq!(removed, 0);
+    }
 }
 
 // ---- Postgres parity -----------------------------------------------------

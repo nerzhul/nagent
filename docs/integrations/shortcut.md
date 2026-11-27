@@ -99,7 +99,59 @@ Comment creation (`POST /stories/{id}/comments`) is wired in
 `nagent-shortcut` (`add_story_comment`) but **no chat tool is
 registered for it yet**; move / delete stay out of scope.
 
-## Setup (per user)
+## Authentication (per user)
+
+Two auth modes share the `shortcut` service in the vault. **OAuth is
+the preferred mode** when the operator enabled `[shortcut_oauth]`
+(see Configuration below); the classic API token stays as a
+fallback so existing vaults keep working.
+
+### OAuth — "Connect with Shortcut" (preferred)
+
+This is the standard authorization-code flow: the user clicks
+**Connect with Shortcut** in Settings → Integrations, is redirected
+to Shortcut's authorize page
+(`https://app.shortcut.com/oauth/authorize?client_id=…&redirect_uri=…&code_challenge=…`,
+PKCE S256), signs in to Shortcut and approves the app, and
+Shortcut redirects back to nagent's
+`/api/auth/login/shortcut/callback?code=…&state=…`. nagent exchanges
+the code at the token endpoint (`https://app.shortcut.com/oauth/token`),
+validates the fresh bearer against `GET {api_base_url}/members`, and
+stores the token pair in the vault. API calls then carry
+`Authorization: Bearer <access_token>` instead of
+`Shortcut-Token: <api_token>`.
+
+The token response's non-standard `permission_id` field (the agent
+app's member id in the workspace) is stored too, as is the expiry
+(`token_expires_at`, RFC 3339) and the granted `token_scope`.
+
+Wire surface (all behind `RequireAuth`, bound to the calling user
+via the one-shot `state` store):
+
+```
+GET  /api/auth/login/shortcut/start       → 302 to the authorize URL
+GET  /api/auth/login/shortcut/callback    → exchange code, validate, merge vault rows,
+                                            302 to /settings/integrations?shortcut_connected=connected
+POST /api/auth/login/shortcut/disconnect  → delete the OAuth vault rows only
+                                            (the api_token fallback survives), 204
+```
+
+Audit rows: `credential_oauth_shortcut_connected` /
+`credential_oauth_shortcut_disconnected` (provider `oauth_shortcut`,
+target service `shortcut`). No token ever lands on an audit row.
+
+**Refresh** — the `shortcut_*` chat tools refresh the access token
+themselves: proactively when `token_expires_at` is within 60 s, and
+once as a retry when the API answers 401. The refreshed
+`access_token` / `refresh_token` / `token_expires_at` are written
+back to the vault through the `SecretSink` (same locked pattern as
+the X integration). The refresh call reads
+`SHORTCUT_OAUTH_CLIENT_ID` / `SHORTCUT_OAUTH_CLIENT_SECRET` /
+`SHORTCUT_OAUTH_TOKEN_URL` from the server environment. The
+dashboard endpoints (pure API) do **not** refresh — a 401 there just
+surfaces the reconnect hint.
+
+### API token (fallback)
 
 1. Generate an API token at
    <https://app.shortcut.com/settings/account/api-tokens>.
@@ -117,23 +169,55 @@ registered for it yet**; move / delete stay out of scope.
    logged, never echoed back on edit, and never surfaced in an
    error string or audit row (AGENTS.md §6).
 
-Setup-only HTTP endpoint (not an LLM tool):
+When both are saved, the OAuth `access_token` wins everywhere
+(chat tools, dashboard endpoints, probes).
+
+### Vault fields of the `shortcut` service
+
+| Field | Kind | Written by |
+| --- | --- | --- |
+| `access_token` | Password | OAuth callback + agent refresh |
+| `refresh_token` | Password | OAuth callback + agent refresh |
+| `token_expires_at` | Text (RFC 3339) | OAuth callback + agent refresh |
+| `token_scope` | Text | OAuth callback |
+| `permission_id` | Text | OAuth callback (token response) |
+| `auth_mode` | Text (`oauth` / `api_token`) | OAuth callback |
+| `api_token` | Password (fallback) | user, via the form |
+| `username` | Text | probe (mention name) |
+| `show_dashboard` | Checkbox | user |
+| `default_team` | Text (JSON `{"id","name"}`) | team picker |
+| `story_templates` | Text (JSON array) | user |
+
+The OAuth callback writes its rows with a **merge** (not the
+atomic full-service replace), so connecting via OAuth never erases
+a saved `api_token` / `username` / `default_team`.
+
+The six OAuth rows are `managed_fields` on the `ServiceDef`: the
+integrations form does **not** render them as inputs (they are
+collected by the redirect flow, not typed). The form shows the
+**Connect with Shortcut** button plus a read-only status (auth mode,
+token expiry) instead; because the form only submits the controls
+it renders, the saved OAuth rows are never overwritten by a plain
+form save.
+
+Setup-only HTTP endpoints (not LLM tools) — both probes accept
+either `{"api_token": "…"}` or `{"access_token": "…"}` (exactly one):
 
 ```
 POST /api/integrations/shortcut/probe
-{"api_token": "…", "username": "jane"}
+{"api_token": "…", "username": "jane"}        // or {"access_token": "…", …}
 → 200 {"ok": true, "id": "<member-uuid>", "name": "Jane Doe", "mention_name": "jane"}
 
 POST /api/integrations/shortcut/probe-teams
-{"api_token": "…"}
+{"api_token": "…"}                              // or {"access_token": "…"}
 → 200 {"ok": true, "count": 2, "teams": [{id, name, mention_name, workflow_ids, …}]}
 ```
 
 `username` is optional on the member probe: without it the probe
 only succeeds when the workspace lists a single member. The
-`probe-teams` endpoint never reads the vault — the body token drives
-the `GET /teams` call — so the "Default team" dropdown works before
-the credentials are saved.
+`probe-teams` endpoint never reads the vault — the body credential
+drives the `GET /teams` call — so the "Default team" dropdown works
+before anything is saved.
 
 Every probe call writes one `auth_events` row of kind
 `shortcut_probe_<outcome>` (plus a `_host:<host>` companion). The
@@ -171,9 +255,10 @@ The integration form has a **Show my stories dashboard** checkbox
 echoed back on edit). When it is ticked (and the service is
 configured), a **Stories** tab appears in the top menu of the UI.
 
-The tab is backed by two pure-API endpoints — the story list and
+The tab is backed by pure-API endpoints — the story list and
 detail never go through the LLM; the server reads the caller's
-`shortcut.api_token` from the vault and proxies the Shortcut API
+credential from the vault (the OAuth `access_token` when present,
+else `shortcut.api_token`) and proxies the Shortcut API
 through the shared `nagent-shortcut` crate:
 
 ```
@@ -227,6 +312,50 @@ encrypted rows, and an empty `fields` map is a no-op.
 
 ## Configuration
 
+### `[shortcut_oauth]` (operator — enables "Connect with Shortcut")
+
+Top-level section (not under `[auth.*]`): the Shortcut OAuth flow is
+a per-user integration, not a nagent login backend — same posture as
+`[x_oauth]`. The operator registers one Shortcut **agent app** in
+the workspace settings (app.shortcut.com → Settings → Apps), adds
+`<NAGENT_AUTH_PUBLIC_URL><redirect_path>` as the app's OAuth redirect
+URL under Connection, and fills the section:
+
+```toml
+[shortcut_oauth]
+enabled       = true            # master switch; default false
+client_id     = "…"             # the agent app's client id; empty disables the flow
+client_secret = ""              # optional (confidential client)
+redirect_path = "/api/auth/login/shortcut/callback"
+scopes        = []              # empty by default — the agent-app flow grants workspace API access
+authorize_url = "https://app.shortcut.com/oauth/authorize"
+token_url     = "https://app.shortcut.com/oauth/token"
+api_base_url  = "https://api.app.shortcut.com/api/v3"   # used to validate the fresh token at callback time
+timeout_ms    = 8_000
+```
+
+Env equivalents (`env > TOML > default`):
+
+| TOML field                | Env var                       |
+| ---                       | ---                           |
+| `shortcut_oauth.enabled`  | `SHORTCUT_OAUTH_ENABLED`      |
+| `shortcut_oauth.client_id`| `SHORTCUT_OAUTH_CLIENT_ID`    |
+| `shortcut_oauth.client_secret` | `SHORTCUT_OAUTH_CLIENT_SECRET` |
+| `shortcut_oauth.redirect_path` | `SHORTCUT_OAUTH_REDIRECT_PATH` |
+| `shortcut_oauth.scopes`   | `SHORTCUT_OAUTH_SCOPES`       |
+| `shortcut_oauth.authorize_url` | `SHORTCUT_OAUTH_AUTHORIZE_URL` |
+| `shortcut_oauth.token_url`| `SHORTCUT_OAUTH_TOKEN_URL`    |
+| `shortcut_oauth.api_base_url` | `SHORTCUT_OAUTH_API_BASE_URL` |
+| `shortcut_oauth.timeout_ms` | `SHORTCUT_OAUTH_TIMEOUT_MS` |
+
+When the section is enabled, the routes
+`/api/auth/login/shortcut/{start,callback,disconnect}` mount (behind
+`RequireAuth`), `GET /api/features` reports `"shortcut_oauth": true`,
+and the integrations UI shows the **Connect with Shortcut** button.
+`SHORTCUT_OAUTH_CLIENT_ID` / `SHORTCUT_OAUTH_CLIENT_SECRET` /
+`SHORTCUT_OAUTH_TOKEN_URL` are also read by the `shortcut_*` chat
+agents to refresh expired tokens in place.
+
 ### `[agents.shortcut]` (operator, optional)
 
 ```toml
@@ -272,13 +401,17 @@ deployment, e.g. to restrict the backlog to one team:
 
 ## Behaviour notes
 
-- **Headers** — every request carries `Shortcut-Token: <token>`,
+- **Headers** — every request carries one credential header chosen
+  by the auth mode: `Authorization: Bearer <access_token>` for OAuth,
+  `Shortcut-Token: <api_token>` for the classic token — plus
   `Accept: application/json`, `Content-Type: application/json`,
   and a `User-Agent: nagent-shortcut/<version>` (the wire client
   lives in the `nagent-shortcut` crate, shared with the dashboard
   endpoints).
 - **Error mapping** — 401 → "reconnect via
-  /settings/integrations"; 429 → `RateLimited` with the
+  /settings/integrations (Connect with Shortcut when OAuth is
+  enabled, else a fresh API token)"; chat tools refresh the OAuth
+  token once before surfacing the 401; 429 → `RateLimited` with the
   `Retry-After` hint (the Shortcut quota is 200 req/min per
   token); 404 → upstream 404; any other non-2xx → upstream error
   with the body truncated to 2 KiB.

@@ -188,6 +188,13 @@ pub struct TomlConfig {
     /// typos in the section.
     #[serde(default)]
     pub x_oauth: Option<TomlXOAuthConfig>,
+    /// Shortcut OAuth 2.0 (agent-app install) flow config. Same
+    /// top-level posture as `[x_oauth]`: a per-user integration, not
+    /// a nagent login backend. Always parsed so a build without the
+    /// `shortcut-agent` cargo feature still surfaces typos in the
+    /// section.
+    #[serde(default)]
+    pub shortcut_oauth: Option<TomlShortcutOAuthConfig>,
 }
 
 /// Server-side knobs grouped under `[server]`.
@@ -518,6 +525,25 @@ pub struct TomlXOAuthConfig {
     pub client_secret: Option<String>,
     pub redirect_path: Option<String>,
     pub scopes: Option<Vec<String>>,
+    pub timeout_ms: Option<u64>,
+}
+
+/// Knobs for the Shortcut OAuth 2.0 agent-app install flow. Mirrors
+/// [`crate::config::shortcut_oauth::ShortcutOAuthConfig`]. Always
+/// parsed so a TOML typo surfaces at boot; the routes are only
+/// registered when the `shortcut-agent` cargo feature is on AND
+/// `client_id` is non-empty AND `enabled = true`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlShortcutOAuthConfig {
+    pub enabled: Option<bool>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub redirect_path: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub authorize_url: Option<String>,
+    pub token_url: Option<String>,
+    pub api_base_url: Option<String>,
     pub timeout_ms: Option<u64>,
 }
 
@@ -901,6 +927,10 @@ pub fn merge_toml_configs(earlier: &TomlConfig, later: &TomlConfig) -> TomlConfi
         auth: merge_toml_auth(earlier.auth.as_ref(), later.auth.as_ref()),
         documents: merge_toml_documents(earlier.documents.as_ref(), later.documents.as_ref()),
         x_oauth: merge_toml_x_oauth(earlier.x_oauth.as_ref(), later.x_oauth.as_ref()),
+        shortcut_oauth: merge_toml_shortcut_oauth(
+            earlier.shortcut_oauth.as_ref(),
+            later.shortcut_oauth.as_ref(),
+        ),
     }
 }
 
@@ -1345,6 +1375,28 @@ fn merge_toml_x_oauth(
             client_secret: l.client_secret.clone().or_else(|| e.client_secret.clone()),
             redirect_path: l.redirect_path.clone().or_else(|| e.redirect_path.clone()),
             scopes: l.scopes.clone().or_else(|| e.scopes.clone()),
+            timeout_ms: l.timeout_ms.or(e.timeout_ms),
+        }),
+    }
+}
+
+fn merge_toml_shortcut_oauth(
+    earlier: Option<&TomlShortcutOAuthConfig>,
+    later: Option<&TomlShortcutOAuthConfig>,
+) -> Option<TomlShortcutOAuthConfig> {
+    match (earlier, later) {
+        (None, None) => None,
+        (Some(e), None) => Some(e.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        (Some(e), Some(l)) => Some(TomlShortcutOAuthConfig {
+            enabled: l.enabled.or(e.enabled),
+            client_id: l.client_id.clone().or_else(|| e.client_id.clone()),
+            client_secret: l.client_secret.clone().or_else(|| e.client_secret.clone()),
+            redirect_path: l.redirect_path.clone().or_else(|| e.redirect_path.clone()),
+            scopes: l.scopes.clone().or_else(|| e.scopes.clone()),
+            authorize_url: l.authorize_url.clone().or_else(|| e.authorize_url.clone()),
+            token_url: l.token_url.clone().or_else(|| e.token_url.clone()),
+            api_base_url: l.api_base_url.clone().or_else(|| e.api_base_url.clone()),
             timeout_ms: l.timeout_ms.or(e.timeout_ms),
         }),
     }

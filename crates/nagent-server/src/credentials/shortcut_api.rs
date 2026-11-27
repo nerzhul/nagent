@@ -52,8 +52,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use nagent_db::NewAuthEvent;
-use nagent_shortcut::{ShortcutClient, ShortcutError};
-use secrecy::SecretString;
+use nagent_shortcut::{ShortcutAuth, ShortcutClient, ShortcutError};
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::auth::error::AuthError;
 use crate::auth::AuthUser;
@@ -125,37 +125,35 @@ fn write_api_audit(store: &nagent_db::Db, user_id: Uuid, call: &str, outcome: Pr
     });
 }
 
-/// Read + decrypt the caller's `shortcut.api_token` vault row.
-/// The plaintext only lives in the returned `SecretString` and is
-/// handed to `ShortcutClient::get`, which puts it in the
-/// `Shortcut-Token` header — never in an error path (AGENTS.md §6).
+/// Read + decrypt one vault row of the `shortcut` service.
+/// The plaintext only lives in the returned `SecretString` — never
+/// in an error path (AGENTS.md §6).
 // `Response` is axum's error carrier and is large by design; boxing would
 // ripple through every handler's `Ok(resp)` arm for no runtime gain on a
 // cold error path.
 #[allow(clippy::result_large_err)]
-async fn vault_token(state: &ShortcutApiState, user_id: Uuid) -> Result<SecretString, Response> {
+async fn vault_field(
+    state: &ShortcutApiState,
+    user_id: Uuid,
+    field: &str,
+) -> Result<Option<SecretString>, Response> {
     let row = state
         .store
         .for_user(user_id)
         .credentials()
-        .fetch("shortcut", "api_token")
+        .fetch("shortcut", field)
         .await
         .map_err(|e| {
-            tracing::warn!(user = %user_id, error = %e, "shortcut api: vault read failed");
+            tracing::warn!(user = %user_id, field, error = %e, "shortcut api: vault read failed");
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to read the Shortcut credentials from the vault".into(),
             )
-        })?
-        .ok_or_else(|| {
-            error_response(
-                StatusCode::BAD_REQUEST,
-                "the Shortcut integration is not configured; save an API token in \
-                 Settings → Integrations → Shortcut first"
-                    .into(),
-            )
         })?;
-    decrypt(
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let plaintext = decrypt(
         &state.key,
         &EncryptedSecret {
             nonce: row.nonce,
@@ -163,38 +161,56 @@ async fn vault_token(state: &ShortcutApiState, user_id: Uuid) -> Result<SecretSt
         },
     )
     .map_err(|e| {
-        tracing::warn!(user = %user_id, error = %e, "shortcut api: vault decrypt failed");
+        tracing::warn!(user = %user_id, field, error = %e, "shortcut api: vault decrypt failed");
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to decrypt the Shortcut API token (the credentials key may have been \
-             rotated); re-save the token in Settings → Integrations"
-                .into(),
+            format!(
+                "failed to decrypt the Shortcut `{field}` field (the credentials key may have \
+                 been rotated); reconnect the integration in Settings → Integrations"
+            ),
         )
-    })
+    })?;
+    Ok(Some(plaintext))
+}
+
+/// Resolve the caller's credential: the OAuth `access_token` when
+/// the user connected via "Connect with Shortcut" (sent as
+/// `Authorization: Bearer …`), else the classic `api_token` (sent
+/// as `Shortcut-Token: …`). Server-side there is no refresh — a 401
+/// on the dashboard just surfaces the reconnect hint; the refresh
+/// itself is the chat agents' job (they own the `SecretSink`).
+// `Response` is axum's error carrier and is large by design; boxing would
+// ripple through every handler's `Ok(resp)` arm for no runtime gain on a
+// cold error path.
+#[allow(clippy::result_large_err)]
+async fn vault_auth(state: &ShortcutApiState, user_id: Uuid) -> Result<ShortcutAuth, Response> {
+    if let Some(access) = vault_field(state, user_id, "access_token").await? {
+        if !access.expose_secret().trim().is_empty() {
+            return Ok(ShortcutAuth::Bearer(access));
+        }
+    }
+    let api_token = vault_field(state, user_id, "api_token")
+        .await?
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "the Shortcut integration is not configured; use \"Connect with Shortcut\" or \
+                 save an API token in Settings → Integrations → Shortcut first"
+                    .into(),
+            )
+        })?;
+    Ok(ShortcutAuth::ApiToken(api_token))
 }
 
 /// Read the saved `shortcut.username` (mention name) — used to
 /// ground the default `owner:` query. Empty when not saved.
 async fn vault_username(state: &ShortcutApiState, user_id: Uuid) -> String {
-    let Ok(Some(row)) = state
-        .store
-        .for_user(user_id)
-        .credentials()
-        .fetch("shortcut", "username")
+    vault_field(state, user_id, "username")
         .await
-    else {
-        return String::new();
-    };
-    decrypt(
-        &state.key,
-        &EncryptedSecret {
-            nonce: row.nonce,
-            ciphertext: row.ciphertext,
-        },
-    )
-    .ok()
-    .map(|s| secrecy::ExposeSecret::expose_secret(&s).to_string())
-    .unwrap_or_default()
+        .ok()
+        .flatten()
+        .map(|s| s.expose_secret().to_string())
+        .unwrap_or_default()
 }
 
 /// Map a wire-client error onto an HTTP response. The messages
@@ -230,7 +246,7 @@ pub async fn list_stories(
     axum::Extension(user): axum::Extension<AuthUser>,
     Query(q): Query<ListStoriesQuery>,
 ) -> Result<Response, AuthError> {
-    let token = match vault_token(&state, user.id).await {
+    let auth = match vault_auth(&state, user.id).await {
         Ok(t) => t,
         Err(resp) => {
             write_api_audit(&state.store, user.id, "list", ProbeOutcome::BadRequest);
@@ -265,7 +281,7 @@ pub async fn list_stories(
     }
     let query = parts.join(" ");
     let limit = q.limit.unwrap_or(30);
-    match nagent_shortcut::list_stories(&state.client, &token, user.id, &query, limit).await {
+    match nagent_shortcut::list_stories(&state.client, &auth, user.id, &query, limit).await {
         Ok(data) => {
             write_api_audit(&state.store, user.id, "list", ProbeOutcome::Ok);
             Ok(Json(serde_json::json!({ "data": data })).into_response())
@@ -295,7 +311,7 @@ pub async fn whoami(
     State(state): State<ShortcutApiState>,
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Result<Response, AuthError> {
-    let token = match vault_token(&state, user.id).await {
+    let auth = match vault_auth(&state, user.id).await {
         Ok(t) => t,
         Err(resp) => {
             write_api_audit(&state.store, user.id, "me", ProbeOutcome::BadRequest);
@@ -304,7 +320,7 @@ pub async fn whoami(
     };
     let username = vault_username(&state, user.id).await;
     let result = async {
-        let raw = state.client.get(&token, "/members", &[]).await?;
+        let raw = state.client.get(&auth, "/members", &[]).await?;
         let handle = if username.is_empty() {
             None
         } else {
@@ -349,14 +365,14 @@ pub async fn list_teams(
     State(state): State<ShortcutApiState>,
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Result<Response, AuthError> {
-    let token = match vault_token(&state, user.id).await {
+    let auth = match vault_auth(&state, user.id).await {
         Ok(t) => t,
         Err(resp) => {
             write_api_audit(&state.store, user.id, "teams", ProbeOutcome::BadRequest);
             return Ok(resp);
         }
     };
-    match nagent_shortcut::list_teams(&state.client, &token, user.id).await {
+    match nagent_shortcut::list_teams(&state.client, &auth, user.id).await {
         Ok(data) => {
             write_api_audit(&state.store, user.id, "teams", ProbeOutcome::Ok);
             Ok(Json(serde_json::json!({ "data": data })).into_response())
@@ -380,14 +396,14 @@ pub async fn get_story(
     axum::Extension(user): axum::Extension<AuthUser>,
     Path(story_id): Path<u64>,
 ) -> Result<Response, AuthError> {
-    let token = match vault_token(&state, user.id).await {
+    let auth = match vault_auth(&state, user.id).await {
         Ok(t) => t,
         Err(resp) => {
             write_api_audit(&state.store, user.id, "story", ProbeOutcome::BadRequest);
             return Ok(resp);
         }
     };
-    match nagent_shortcut::get_story_detail(&state.client, &token, user.id, story_id).await {
+    match nagent_shortcut::get_story_detail(&state.client, &auth, user.id, story_id).await {
         Ok(data) => {
             write_api_audit(&state.store, user.id, "story", ProbeOutcome::Ok);
             Ok(Json(serde_json::json!({ "data": data })).into_response())

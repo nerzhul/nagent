@@ -30,6 +30,12 @@ use crate::oauth::x::{
     callback_handler as x_callback, disconnect_handler as x_disconnect, start_handler as x_start,
 };
 
+#[cfg(feature = "shortcut-agent")]
+use crate::oauth::shortcut::{
+    callback_handler as shortcut_callback, disconnect_handler as shortcut_disconnect,
+    start_handler as shortcut_start,
+};
+
 /// Build the public (anonymous) half of the auth subtree. These
 /// routes accept an unauthenticated request — the OIDC callback
 /// arrives without a session cookie because the user just came back
@@ -107,6 +113,20 @@ pub fn build_protected_auth_router(state: Arc<AppState>) -> Router<Arc<AppState>
             .route("/api/auth/login/x/start", get(x_start))
             .route("/api/auth/login/x/callback", get(x_callback))
             .route("/api/auth/login/x/disconnect", post(x_disconnect));
+    }
+    // Shortcut OAuth (agent-app install flow). Same posture as X:
+    // all three endpoints live under `RequireAuth` so the tokens
+    // bind to the calling user; the URL surface keeps the
+    // `/api/auth/login/shortcut/...` prefix.
+    #[cfg(feature = "shortcut-agent")]
+    if auth_state.shortcut_oauth.is_some() {
+        protected = protected
+            .route("/api/auth/login/shortcut/start", get(shortcut_start))
+            .route("/api/auth/login/shortcut/callback", get(shortcut_callback))
+            .route(
+                "/api/auth/login/shortcut/disconnect",
+                post(shortcut_disconnect),
+            );
     }
     protected.with_state(state)
 }

@@ -13,6 +13,7 @@ use crate::config::file::{merge_toml_configs, TomlConfig};
 use crate::config::limits::LimitsConfig;
 use crate::config::llm::LlmConfig;
 use crate::config::ratelimit::RateLimitConfig;
+use crate::config::shortcut_oauth::ShortcutOAuthConfig;
 use crate::config::stt::SttConfig;
 use crate::config::trusted_proxies::TrustedProxiesConfig;
 use crate::config::tts::TtsConfig;
@@ -100,6 +101,14 @@ pub struct Config {
     /// `x_oauth.enabled = true` AND `x_oauth.client_id` is
     /// non-empty AND the `x-agent` cargo feature is on.
     pub x_oauth: XOAuthConfig,
+    /// `[shortcut_oauth]` — Shortcut OAuth 2.0 (agent-app
+    /// install) flow config. Same top-level posture as
+    /// `[x_oauth]`: a per-user integration, not a nagent login
+    /// backend. The routes are mounted only when
+    /// `shortcut_oauth.enabled = true` AND
+    /// `shortcut_oauth.client_id` is non-empty AND the
+    /// `shortcut-agent` cargo feature is on.
+    pub shortcut_oauth: ShortcutOAuthConfig,
 }
 
 impl Config {
@@ -183,6 +192,8 @@ impl Config {
             server.and_then(|s| s.allowed_origins.as_ref()),
         )?;
         let x_oauth = XOAuthConfig::from_env_with_toml(toml.and_then(|t| t.x_oauth.as_ref()))?;
+        let shortcut_oauth =
+            ShortcutOAuthConfig::from_env_with_toml(toml.and_then(|t| t.shortcut_oauth.as_ref()))?;
 
         Ok(Self {
             bind_addr,
@@ -201,6 +212,7 @@ impl Config {
             documents,
             allowed_origins,
             x_oauth,
+            shortcut_oauth,
         })
     }
 

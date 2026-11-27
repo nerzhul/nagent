@@ -147,6 +147,13 @@ pub struct Features {
     /// advertise in the OpenAI `tools` array.
     #[serde(rename = "tools")]
     pub tools: Vec<String>,
+    /// The Shortcut OAuth flow ("Connect with Shortcut" button in
+    /// the integrations UI) is wired — i.e. the `shortcut-agent`
+    /// cargo feature is on AND `[shortcut_oauth].enabled = true`
+    /// AND a `client_id` is configured. When false the user falls
+    /// back to the classic API-token field.
+    #[serde(rename = "shortcut_oauth")]
+    pub shortcut_oauth_enabled: bool,
 }
 
 impl Features {
@@ -200,6 +207,15 @@ impl Features {
             None => (false, Vec::new(), Vec::new()),
         };
 
+        #[cfg(feature = "shortcut-agent")]
+        let shortcut_oauth_enabled = state
+            .auth
+            .as_ref()
+            .and_then(|a| a.shortcut_oauth.as_ref())
+            .is_some();
+        #[cfg(not(feature = "shortcut-agent"))]
+        let shortcut_oauth_enabled = false;
+
         Self {
             documents_enabled,
             llm_enabled,
@@ -212,6 +228,7 @@ impl Features {
             chat_sessions_enabled,
             chat_messages_enabled,
             tools,
+            shortcut_oauth_enabled,
         }
     }
 }

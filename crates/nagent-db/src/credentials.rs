@@ -56,6 +56,42 @@ impl Credentials {
         }
     }
 
+    /// Insert-or-update the supplied fields **without** touching
+    /// the service's other rows. Unlike [`Self::upsert`] (an
+    /// atomic replace of every field), this is the write path for
+    /// subsystems that own only a subset of a service's fields —
+    /// e.g. the Shortcut OAuth callback writes `access_token` /
+    /// `refresh_token` / … into the shared `shortcut` service
+    /// without erasing the user's `api_token` / `username` /
+    /// `default_team` rows.
+    pub async fn merge_fields(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        fields: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), Error> {
+        match self {
+            Credentials::Sqlite(s) => s.merge_fields(user_id, service_id, fields).await,
+            Credentials::Postgres(s) => s.merge_fields(user_id, service_id, fields).await,
+        }
+    }
+
+    /// Delete only the listed `field_key`s of one `(user, service)`;
+    /// the service's other rows survive. Used by the Shortcut OAuth
+    /// disconnect handler, which clears the OAuth token rows but
+    /// keeps the API-token fallback the user may still rely on.
+    pub async fn delete_fields(
+        &self,
+        user_id: Uuid,
+        service_id: &str,
+        field_keys: &[String],
+    ) -> Result<u64, Error> {
+        match self {
+            Credentials::Sqlite(s) => s.delete_fields(user_id, service_id, field_keys).await,
+            Credentials::Postgres(s) => s.delete_fields(user_id, service_id, field_keys).await,
+        }
+    }
+
     pub async fn list_field_keys(
         &self,
         user_id: Uuid,
@@ -108,6 +144,30 @@ impl ScopedCredentials {
         self.inner.delete_service(self.user_id, service_id).await
     }
 
+    /// Insert-or-update the supplied fields without touching the
+    /// service's other rows — see [`Credentials::merge_fields`].
+    pub async fn merge_fields(
+        &self,
+        service_id: &str,
+        fields: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), Error> {
+        self.inner
+            .merge_fields(self.user_id, service_id, fields)
+            .await
+    }
+
+    /// Delete only the listed fields of one `(user, service)` —
+    /// see [`Credentials::delete_fields`].
+    pub async fn delete_fields(
+        &self,
+        service_id: &str,
+        field_keys: &[String],
+    ) -> Result<u64, Error> {
+        self.inner
+            .delete_fields(self.user_id, service_id, field_keys)
+            .await
+    }
+
     /// List every `field_key` currently configured for
     /// `(user, service)`. Used by `GET /api/integrations/:id`.
     pub async fn list_field_keys(&self, service_id: &str) -> Result<Vec<String>, Error> {
@@ -126,7 +186,7 @@ impl ScopedCredentials {
 }
 
 pub(crate) mod sqlite {
-    use sqlx::{Row, SqlitePool};
+    use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
     use uuid::Uuid;
 
     use crate::error::Error;
@@ -191,6 +251,65 @@ pub(crate) mod sqlite {
             Ok(res.rows_affected())
         }
 
+        pub async fn merge_fields(
+            &self,
+            user_id: Uuid,
+            service_id: &str,
+            fields: &[(String, Vec<u8>, Vec<u8>)],
+        ) -> Result<(), Error> {
+            let user_id_str = user_id.to_string();
+            let mut tx = self.pool.begin().await?;
+            for (field_key, nonce, ciphertext) in fields {
+                if nonce.len() != 12 {
+                    return Err(Error::BadRequest(format!(
+                        "nonce for field {field_key:?} must be 12 bytes, got {}",
+                        nonce.len()
+                    )));
+                }
+                let id = Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO user_credentials \
+                     (id, user_id, service_id, field_key, nonce, ciphertext, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
+                     ON CONFLICT (user_id, service_id, field_key) DO UPDATE SET \
+                       nonce = excluded.nonce, \
+                       ciphertext = excluded.ciphertext, \
+                       updated_at = CURRENT_TIMESTAMP",
+                )
+                .bind(&id)
+                .bind(&user_id_str)
+                .bind(service_id)
+                .bind(field_key)
+                .bind(nonce)
+                .bind(ciphertext)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+
+        pub async fn delete_fields(
+            &self,
+            user_id: Uuid,
+            service_id: &str,
+            field_keys: &[String],
+        ) -> Result<u64, Error> {
+            let mut qb: QueryBuilder<Sqlite> =
+                QueryBuilder::new("DELETE FROM user_credentials WHERE user_id = ");
+            qb.push_bind(user_id.to_string());
+            qb.push(" AND service_id = ");
+            qb.push_bind(service_id);
+            qb.push(" AND field_key IN (");
+            let mut sep = qb.separated(", ");
+            for key in field_keys {
+                sep.push_bind(key);
+            }
+            qb.push(")");
+            let res = qb.build().execute(&self.pool).await?;
+            Ok(res.rows_affected())
+        }
+
         pub async fn list_field_keys(
             &self,
             user_id: Uuid,
@@ -235,7 +354,7 @@ pub(crate) mod sqlite {
 }
 
 pub(crate) mod postgres {
-    use sqlx::{PgPool, Row};
+    use sqlx::{PgPool, Postgres, QueryBuilder, Row};
     use uuid::Uuid;
 
     use crate::error::Error;
@@ -296,6 +415,64 @@ pub(crate) mod postgres {
                     .bind(service_id)
                     .execute(&self.pool)
                     .await?;
+            Ok(res.rows_affected())
+        }
+
+        pub async fn merge_fields(
+            &self,
+            user_id: Uuid,
+            service_id: &str,
+            fields: &[(String, Vec<u8>, Vec<u8>)],
+        ) -> Result<(), Error> {
+            let mut tx = self.pool.begin().await?;
+            for (field_key, nonce, ciphertext) in fields {
+                if nonce.len() != 12 {
+                    return Err(Error::BadRequest(format!(
+                        "nonce for field {field_key:?} must be 12 bytes, got {}",
+                        nonce.len()
+                    )));
+                }
+                let id = Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO user_credentials \
+                     (id, user_id, service_id, field_key, nonce, ciphertext, created_at, updated_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
+                     ON CONFLICT (user_id, service_id, field_key) DO UPDATE SET \
+                       nonce = excluded.nonce, \
+                       ciphertext = excluded.ciphertext, \
+                       updated_at = CURRENT_TIMESTAMP",
+                )
+                .bind(&id)
+                .bind(user_id)
+                .bind(service_id)
+                .bind(field_key)
+                .bind(nonce)
+                .bind(ciphertext)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+
+        pub async fn delete_fields(
+            &self,
+            user_id: Uuid,
+            service_id: &str,
+            field_keys: &[String],
+        ) -> Result<u64, Error> {
+            let mut qb: QueryBuilder<Postgres> =
+                QueryBuilder::new("DELETE FROM user_credentials WHERE user_id = ");
+            qb.push_bind(user_id);
+            qb.push(" AND service_id = ");
+            qb.push_bind(service_id);
+            qb.push(" AND field_key IN (");
+            let mut sep = qb.separated(", ");
+            for key in field_keys {
+                sep.push_bind(key);
+            }
+            qb.push(")");
+            let res = qb.build().execute(&self.pool).await?;
             Ok(res.rows_affected())
         }
 

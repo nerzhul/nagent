@@ -533,8 +533,9 @@ impl Agent for CreateStoryAgent {
                 .into();
         }
 
-        let token = self.client.token(ctx).await?;
-        let story = nagent_shortcut::create_story(&self.client, &token, &body).await?;
+        // Goes through the wrapper so the OAuth token is resolved
+        // (and refreshed once on 401) before the POST ships.
+        let story = self.client.create_story(ctx, &body).await?;
 
         // 9. Writes invalidate the cached story lists so the next
         // `shortcut_list_backlog` / dashboard poll re-fetches.

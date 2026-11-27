@@ -146,6 +146,7 @@ fn make_server_cfg(upstream_url: String) -> nagent_server::Config {
         documents: nagent_server::config::DocumentsConfig::default(),
         allowed_origins: nagent_server::config::AllowedOriginsConfig::default(),
         x_oauth: nagent_server::config::XOAuthConfig::default(),
+        shortcut_oauth: nagent_server::config::ShortcutOAuthConfig::default(),
     }
 }
 

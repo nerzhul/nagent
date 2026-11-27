@@ -349,6 +349,8 @@ impl AppStateBuilder {
                 passkey: self.auth_passkey,
                 #[cfg(feature = "x-agent")]
                 x: None,
+                #[cfg(feature = "shortcut-agent")]
+                shortcut_oauth: None,
                 login_rate_limiter: LoginRateLimiter::new(),
                 services: self
                     .services
@@ -497,5 +499,6 @@ fn default_test_config() -> Config {
         documents: DocumentsConfig::default(),
         allowed_origins,
         x_oauth: crate::config::XOAuthConfig::default(),
+        shortcut_oauth: crate::config::ShortcutOAuthConfig::default(),
     }
 }

@@ -215,17 +215,20 @@
 # allowlist = ["api.github.com"]
 # base_url = "https://api.github.com"
 
-# `shortcut_*` agents — ten read-only Shortcut (app.shortcut.com)
-# tools (plan 1795597719369) over the REST API v3 with the per-user
-# API token stored in the credentials vault under the `shortcut`
-# service id. The agents are only registered when the
+# `shortcut_*` agents — thirteen Shortcut (app.shortcut.com) tools
+# (twelve read-only + the `shortcut_create_story` write) over the
+# REST API v3. Auth is dual-mode: the OAuth access token stored in
+# the credentials vault under the `shortcut` service id (preferred,
+# written by the `/api/auth/login/shortcut/*` flow — see
+# `[shortcut_oauth]` below) or the classic per-user API token
+# (fallback). The agents are only registered when the
 # `shortcut-agent` cargo feature is on. See
 # `docs/integrations/shortcut.md`.
 #
 # `allowlist` defaults to ["api.app.shortcut.com"] and also gates
-# the setup-only probe endpoint
-# (`POST /api/integrations/shortcut/probe`). An explicitly empty
-# allowlist fails closed.
+# the setup-only probe endpoints
+# (`POST /api/integrations/shortcut/probe{,-teams}`). An explicitly
+# empty allowlist fails closed.
 # [agents.shortcut]
 # timeout_ms = 10_000
 # max_items = 200                           # hard cap on `limit` for every list tool
@@ -234,6 +237,27 @@
 # allowlist = ["api.app.shortcut.com"]
 # base_url = "https://api.app.shortcut.com/api/v3"
 # backlog_query = "is:story is:backlog !is:archived"   # default query of shortcut_list_backlog
+
+# Per-user Shortcut OAuth ("Connect with Shortcut" button). Top-level
+# section (not under `[auth.*]`): it is a per-user integration, not a
+# nagent login backend — same posture as `[x_oauth]`. Register a
+# Shortcut agent app in the workspace settings, add
+# <NAGENT_AUTH_PUBLIC_URL><redirect_path> as its OAuth redirect URL,
+# and fill in the client id/secret. The routes mount only when the
+# `shortcut-agent` cargo feature is on AND `enabled = true` AND
+# `client_id` is non-empty; the chat agents also read
+# SHORTCUT_OAUTH_CLIENT_ID / _CLIENT_SECRET / _TOKEN_URL to refresh
+# expired tokens. See `docs/integrations/shortcut.md`.
+# [shortcut_oauth]
+# enabled = true
+# client_id = "…"
+# client_secret = ""
+# redirect_path = "/api/auth/login/shortcut/callback"
+# scopes = []                              # empty: agent-app flow grants workspace API access
+# authorize_url = "https://app.shortcut.com/oauth/authorize"
+# token_url = "https://app.shortcut.com/oauth/token"
+# api_base_url = "https://api.app.shortcut.com/api/v3"
+# timeout_ms = 8_000
 
 # ---------------------------------------------------------------------------
 # Text-to-speech (Piper ONNX, local)

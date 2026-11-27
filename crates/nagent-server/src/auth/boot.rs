@@ -351,6 +351,7 @@ mod tests {
             tts: Default::default(),
             allowed_origins: Default::default(),
             x_oauth: Default::default(),
+            shortcut_oauth: Default::default(),
             auth: AuthConfig {
                 enabled: true,
                 backends: vec![AuthBackendKind::Local],

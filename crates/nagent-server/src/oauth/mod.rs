@@ -28,6 +28,9 @@ pub mod state;
 #[cfg(feature = "x-agent")]
 pub mod x;
 
+#[cfg(feature = "shortcut-agent")]
+pub mod shortcut;
+
 pub use pkce::{PkcePair, PkceVerifier};
 pub use refresh::{RefreshTokenClient, RefreshTokenError, TokenSet};
 pub use state::{StateStore, StateStoreEntry};
