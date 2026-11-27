@@ -471,8 +471,167 @@ const MODAL_SUBTITLES = {
   github:
     "Connect your GitHub account with a personal access token so the assistant can read your repos, issues, PRs and notifications. Read-only — the agent never creates or modifies anything on your behalf.",
   shortcut:
-    "Connect your Shortcut (app.shortcut.com) workspace with an API token so the assistant can read your backlog, stories, epics and iterations and help you plan the next one. Read-only — the agent never creates or modifies anything on your behalf.",
+    "Connect your Shortcut (app.shortcut.com) workspace with an API token so the assistant can read your backlog, stories, epics, teams and iterations, and create new stories in your default team when you ask in chat.",
 };
+
+const PROBE_TEAMS_PATH = "/api/integrations/shortcut/probe-teams";
+
+async function fetchShortcutTeamsFromVault() {
+  const resp = await fetch("/api/integrations/shortcut/teams", {
+    credentials: "same-origin",
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const body = await resp.json();
+  return body?.data?.teams || [];
+}
+
+async function fetchShortcutTeamsWithTypedToken(apiToken) {
+  const resp = await fetch(PROBE_TEAMS_PATH, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "content-type": "application/json",
+      ...(csrfHeaders() || {}),
+    },
+    body: JSON.stringify({ api_token: apiToken }),
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const body = await resp.json();
+      if (body && typeof body.error === "string") msg = body.error;
+    } catch {
+      /* keep the status code message */
+    }
+    throw new Error(msg);
+  }
+  const body = await resp.json();
+  return body?.teams || [];
+}
+
+async function loadShortcutTeams(form) {
+  try {
+    return await fetchShortcutTeamsFromVault();
+  } catch {
+    const typed = form.querySelector('[data-key="api_token"]')?.value.trim();
+    if (!typed) throw new Error("no saved or typed API token");
+    return await fetchShortcutTeamsWithTypedToken(typed);
+  }
+}
+
+function savedTeamId(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed.id === "string" ? parsed.id : "";
+  } catch {
+    return "";
+  }
+}
+
+function renderShortcutTeamSelect(form, teams) {
+  const field = form.querySelector('[data-key="default_team"]');
+  if (!field) return;
+  const currentValue = field.value || "";
+  const select =
+    field.tagName === "SELECT"
+      ? field
+      : (() => {
+          const s = document.createElement("select");
+          s.name = field.name;
+          s.dataset.key = field.dataset.key;
+          s.autocomplete = "off";
+          field.replaceWith(s);
+          return s;
+        })();
+  select.disabled = false;
+  select.innerHTML = "";
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "— no default team —";
+  select.appendChild(blank);
+  for (const t of teams) {
+    const o = document.createElement("option");
+    o.value = JSON.stringify({ id: t.id, name: t.name });
+    o.textContent = t.mention_name
+      ? `${t.name} (@${t.mention_name})`
+      : String(t.name ?? t.id);
+    select.appendChild(o);
+  }
+  const id = savedTeamId(currentValue);
+  const match = teams.find((t) => t.id === id);
+  if (match) {
+    select.value = JSON.stringify({ id: match.id, name: match.name });
+    blank.remove();
+  } else {
+    select.value = "";
+  }
+}
+
+function renderShortcutTeamSelectDisabled(form, hint) {
+  const field = form.querySelector('[data-key="default_team"]');
+  if (!field) return;
+  let select = field.tagName === "SELECT" ? field : null;
+  if (!select) {
+    select = document.createElement("select");
+    select.name = field.name;
+    select.dataset.key = field.dataset.key;
+    select.autocomplete = "off";
+    field.replaceWith(select);
+  }
+  select.disabled = true;
+  select.innerHTML = "";
+  const o = document.createElement("option");
+  o.value = "";
+  o.textContent = hint;
+  select.appendChild(o);
+  select.value = "";
+}
+
+function attachShortcutTeamPicker(form) {
+  const field = form.querySelector('[data-key="default_team"]');
+  if (!field) return;
+  loadShortcutTeams(form)
+    .then((teams) => {
+      if (teams.length) renderShortcutTeamSelect(form, teams);
+      else
+        renderShortcutTeamSelectDisabled(
+          form,
+          "— no teams returned by the workspace —",
+        );
+    })
+    .catch(() => {
+      renderShortcutTeamSelectDisabled(
+        form,
+        "— save the API token first to list teams —",
+      );
+    });
+  const tokenField = form.querySelector('[data-key="api_token"]');
+  let timer = null;
+  tokenField?.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      loadShortcutTeams(form)
+        .then((teams) => {
+          if (teams.length) renderShortcutTeamSelect(form, teams);
+        })
+        .catch(() => {});
+    }, 500);
+  });
+}
+
+function attachShortcutTemplatesEditor(form) {
+  const field = form.querySelector('[data-key="story_templates"]');
+  if (!field || field.tagName !== "INPUT") return;
+  const ta = document.createElement("textarea");
+  ta.name = field.name;
+  ta.dataset.key = field.dataset.key;
+  ta.value = field.value || "";
+  ta.rows = 6;
+  ta.spellcheck = false;
+  ta.autocomplete = "off";
+  ta.className = "chat-integration-templates";
+  field.replaceWith(ta);
+}
 
 async function probeCalendars(principalUrl, username, password) {
   const resp = await fetch(PROBE_PATH, {
@@ -1318,6 +1477,8 @@ function openEditor(svc) {
   if (svc.id === SHORTCUT_SERVICE_ID) {
     const probe = attachShortcutTestButton(form, actions);
     loadShortcutIdentity(form, actions, svc, probe);
+    attachShortcutTeamPicker(form);
+    attachShortcutTemplatesEditor(form);
   }
 
   form.addEventListener("submit", async (e) => {
@@ -1332,7 +1493,7 @@ function openEditor(svc) {
     // Checkboxes are the exception: they always submit, as
     // "true" / "false", because an unchecked box is a real
     // value to persist (not an empty input to skip).
-    for (const ctrl of form.querySelectorAll("input, select")) {
+    for (const ctrl of form.querySelectorAll("input, select, textarea")) {
       if (ctrl.type === "checkbox") {
         fields[ctrl.dataset.key] = ctrl.checked ? "true" : "false";
         continue;

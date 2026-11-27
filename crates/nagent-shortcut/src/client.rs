@@ -160,6 +160,37 @@ impl ShortcutClient {
         path: &str,
         query: &[(String, String)],
     ) -> Result<Value, ShortcutError> {
+        self.request(reqwest::Method::GET, token, path, query, None)
+            .await
+    }
+
+    /// Perform one authenticated POST with a JSON body against the
+    /// Shortcut REST API v3 (write operations: create story, add
+    /// comment, …) and return the parsed JSON body. Same egress
+    /// pre-flight, allow-list, timeout, and error mapping as
+    /// [`Self::get`]. The request body is serialised from `body`
+    /// and never logged, never formatted into an error string, and
+    /// never cached — writes bypass the response cache entirely.
+    pub async fn post(
+        &self,
+        token: &SecretString,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, ShortcutError> {
+        self.request(reqwest::Method::POST, token, path, &[], Some(body))
+            .await
+    }
+
+    /// Shared request path for [`Self::get`] / [`Self::post`].
+    /// `body` is only sent for non-GET methods.
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        token: &SecretString,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, ShortcutError> {
         let url = build_url(&self.cfg.base_url, path, query);
 
         // SSRF pre-flight + hostname allow-list, same posture as
@@ -168,9 +199,9 @@ impl ShortcutClient {
         let egress = self.build_egress();
         let validated = egress.validate(&url).await.map_err(map_egress_error)?;
 
-        let resp = self
+        let mut req = self
             .http
-            .get(validated.url.as_str())
+            .request(method, validated.url.as_str())
             .timeout(std::time::Duration::from_millis(self.cfg.timeout_ms))
             .header("Shortcut-Token", token.expose_secret())
             .header(reqwest::header::ACCEPT, "application/json")
@@ -178,11 +209,19 @@ impl ShortcutClient {
             .header(
                 reqwest::header::USER_AGENT,
                 format!("nagent-shortcut/{}", env!("CARGO_PKG_VERSION")),
-            )
+            );
+        if let Some(b) = body {
+            // The serialised body is handed to reqwest as JSON;
+            // it is never formatted into a log line or an error
+            // (AGENTS.md §6 — same redaction posture as the token).
+            req = req.json(b);
+        }
+        let resp = req
             .send()
             .await
             // reqwest's error Display carries the URL but never
-            // the request headers, so the token cannot leak here.
+            // the request headers or body, so the token cannot
+            // leak here.
             .map_err(|e| ShortcutError::Transport(e.to_string()))?;
 
         let status = resp.status();
@@ -219,6 +258,16 @@ impl ShortcutClient {
         }
         serde_json::from_str(&body)
             .map_err(|e| ShortcutError::Transport(format!("shortcut parse (HTTP {status}): {e}")))
+    }
+
+    /// Drop every cached entry for `user_id` whose tool name
+    /// starts with `tool_prefix`. Used after a write (story
+    /// creation) so the next list/search call re-fetches from
+    /// upstream instead of serving a stale list.
+    pub fn cache_invalidate_prefix(&self, user_id: uuid::Uuid, tool_prefix: &str) {
+        if let Ok(mut g) = self.cache.lock() {
+            g.retain(|(uid, tool, _), _| !(uid == &user_id && tool.starts_with(tool_prefix)));
+        }
     }
 }
 
@@ -426,6 +475,90 @@ pub async fn get_story_detail(
     client.cache_put(user_id, API_STORY_TOOL, &args, encoded.clone());
     serde_json::from_str(&encoded)
         .map_err(|e| ShortcutError::Transport(format!("shortcut encode: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Teams / writes — used by the `shortcut_list_teams` chat tool, the
+// `GET /api/integrations/shortcut/teams` setup endpoint, and the
+// `shortcut_create_story` chat tool. Writes never touch the cache.
+// ---------------------------------------------------------------------------
+
+/// Tool name used for the team-list cache entries.
+const API_TEAMS_TOOL: &str = "api_teams";
+
+/// `GET /teams` projected for the integrations UI team picker and
+/// the `shortcut_list_teams` chat tool. Cached under
+/// `(user_id, "api_teams", {})` — the team list changes rarely, so
+/// the short TTL is enough. Returns
+/// `{"count": n, "teams": [project_team(…)]}`.
+pub async fn list_teams(
+    client: &ShortcutClient,
+    token: &SecretString,
+    user_id: uuid::Uuid,
+) -> Result<Value, ShortcutError> {
+    let args = serde_json::json!({});
+    if let Some(cached) = client.cache_get(user_id, API_TEAMS_TOOL, &args) {
+        tracing::debug!(user_id = %user_id, "shortcut api cache hit");
+        return serde_json::from_str(&cached)
+            .map_err(|e| ShortcutError::Transport(format!("shortcut cache decode: {e}")));
+    }
+    let raw = client.get(token, "/teams", &[]).await?;
+    let teams: Vec<Value> = raw
+        .as_array()
+        .map(|arr| arr.iter().map(crate::project::project_team).collect())
+        .unwrap_or_default();
+    let out = serde_json::json!({
+        "count": teams.len(),
+        "teams": teams,
+    });
+    let encoded = serde_json::to_string(&out)
+        .map_err(|e| ShortcutError::Transport(format!("shortcut encode: {e}")))?;
+    client.cache_put(user_id, API_TEAMS_TOOL, &args, encoded.clone());
+    serde_json::from_str(&encoded)
+        .map_err(|e| ShortcutError::Transport(format!("shortcut encode: {e}")))
+}
+
+/// `POST /stories` — create one story. `body` is the v3 create
+/// payload (`name`, `story_type`, optional `description`,
+/// `group_id`, `owner_ids`, `epic_id`, `project_id`,
+/// `workflow_state_id`, `labels`, …) already assembled by the
+/// caller; this helper only ships it and projects the created
+/// story. Never cached — a write must always reach upstream.
+pub async fn create_story(
+    client: &ShortcutClient,
+    token: &SecretString,
+    body: &Value,
+) -> Result<Value, ShortcutError> {
+    let raw = client.post(token, "/stories", body).await?;
+    Ok(crate::project::project_story(&raw))
+}
+
+/// `POST /stories/{story_id}/comments` — add one comment to a
+/// story. Wired for v2 (`shortcut_add_comment` chat tool); no agent
+/// is registered in v1, but the wire path is ready and shares the
+/// same egress / allow-list / redaction posture as every other
+/// call. Never cached.
+pub async fn add_story_comment(
+    client: &ShortcutClient,
+    token: &SecretString,
+    story_id: u64,
+    text: &str,
+) -> Result<Value, ShortcutError> {
+    if story_id == 0 {
+        return Err(ShortcutError::InvalidArguments(
+            "story id must be a positive integer".into(),
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err(ShortcutError::InvalidArguments(
+            "comment text must be a non-empty string".into(),
+        ));
+    }
+    let body = serde_json::json!({ "text": text });
+    let raw = client
+        .post(token, &format!("/stories/{story_id}/comments"), &body)
+        .await?;
+    Ok(crate::project::project_comment(&raw))
 }
 
 #[cfg(test)]

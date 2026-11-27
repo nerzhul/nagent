@@ -37,15 +37,17 @@
 
 pub mod client;
 pub mod project;
+pub mod rank;
 
 pub use client::{
-    build_url, get_story_detail, list_stories, redact_shortcut_token, truncate, ShortcutClient,
-    MAX_RAW_RESPONSE_BYTES,
+    add_story_comment, build_url, create_story, get_story_detail, list_stories, list_teams,
+    redact_shortcut_token, truncate, ShortcutClient, MAX_RAW_RESPONSE_BYTES,
 };
 pub use project::{
-    find_member, label_names, label_objects, mention_name_of, name_of_member, project_comment,
-    project_story, project_story_detail,
+    find_member, find_team, label_names, label_objects, mention_name_of, name_of_member,
+    project_comment, project_story, project_story_detail, project_team,
 };
+pub use rank::{rank_open_epics, EpicCandidate};
 
 /// Errors surfaced by [`ShortcutClient`]. `nagent-agents` maps
 /// these onto `AgentError`; `nagent-server` maps them onto HTTP

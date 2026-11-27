@@ -267,6 +267,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::credentials::shortcut_probe::build_shortcut_probe_router(state.clone());
         #[cfg(not(feature = "shortcut-agent"))]
         let shortcut_probe_routes = axum::Router::new();
+        // Teams probe (`POST /api/integrations/shortcut/probe-teams`,
+        // token in the request body) — feeds the integrations UI's
+        // "Default team" dropdown before the token is saved to the
+        // vault. Same `shortcut-agent` gate as the token probe.
+        #[cfg(feature = "shortcut-agent")]
+        let shortcut_probe_teams_routes =
+            crate::credentials::shortcut_probe::build_shortcut_probe_teams_router(state.clone());
+        #[cfg(not(feature = "shortcut-agent"))]
+        let shortcut_probe_teams_routes = axum::Router::new();
         // Pure-API dashboard endpoints for the "Stories" tab
         // (`GET /api/integrations/shortcut/stories…`) — same
         // `shortcut-agent` gate as the probe: they read the
@@ -286,6 +295,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .merge(github_probe_repo_routes)
             .merge(github_api_routes)
             .merge(shortcut_probe_routes)
+            .merge(shortcut_probe_teams_routes)
             .merge(shortcut_api_routes)
             .merge(mount_memories(state.clone()))
             .layer(auth_layer);

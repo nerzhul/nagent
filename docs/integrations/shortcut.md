@@ -1,8 +1,9 @@
-# Shortcut integration (read-only)
+# Shortcut integration (read + story creation)
 
 The `shortcut-agent` cargo feature adds a per-user **Shortcut**
-(<https://app.shortcut.com>, ex-Clubhouse) integration and ten
-**read-only** chat tools over the Shortcut REST API v3:
+(<https://app.shortcut.com>, ex-Clubhouse) integration and
+thirteen chat tools over the Shortcut REST API v3 — twelve
+read-only plus one write (`shortcut_create_story`):
 
 | Tool | Shortcut endpoint | Args |
 | --- | --- | --- |
@@ -16,18 +17,87 @@ The `shortcut-agent` cargo feature adds a per-user **Shortcut**
 | `shortcut_list_backlog` | `GET /search/stories` with the configured `backlog_query` | `limit?` (default 50, cap 200) |
 | `shortcut_get_story` | `GET /stories/{id}` + `GET /stories/{id}/comments` | `story_id` (description/comments capped) |
 | `shortcut_list_labels` | `GET /labels` | `limit?` (default 100, cap 200) |
+| `shortcut_list_teams` | `GET /teams` | — (UUID / name / mention name per team) |
+| `shortcut_list_templates` | local read of the `story_templates` vault field | — (no API call, no confirmation) |
+| `shortcut_create_story` | `POST /stories` | see below — **write**, confirm-on-write |
 
-The intended workflow: the user asks "read my Shortcut backlog
+The intended read workflow: the user asks "read my Shortcut backlog
 and propose a plan for the next iteration" — the LLM chains
 `shortcut_me` → `shortcut_list_workflows` →
 `shortcut_list_backlog` / `shortcut_search_stories` →
 `shortcut_get_story` / `shortcut_get_epic` on the relevant items
 → answers with a prioritised plan.
 
-Write operations (create story / comment / move story) are
-deliberately **out of scope for v1**: they are not registered in
-`AGENT_DESCRIPTORS`, so the tool loop returns "unknown tool" if a
-model tries to call them.
+## Creating stories from the chat
+
+`shortcut_create_story` is the first **write** tool of the family.
+The user asks e.g. *"crée une story raccourci bug : crash au login
+sur mobile"* and the LLM calls it with the resolved arguments; the
+inline approval card fires on every call and the session-wide
+"Toujours pour cette session" override is allowed (same posture as
+`caldav_create_event`).
+
+```
+args: {
+  name: string (required),
+  template?: string,             // a saved story shortcut (story_templates)
+  story_type?: "feature"|"bug"|"chore",
+  description?: string,
+  details?: string,              // substituted into the template's {details}
+  labels?: string[],
+  epic_id?: int, project_id?: int, workflow_state_id?: int,
+  team?: string,                 // UUID, name or mention name; default = saved default_team
+  auto_epic?: bool (default true)
+}
+→ {"ok": true, "data": {"story": {…}, "template": "bug",
+   "team": {"id": "…", "source": "default_team"}, "owner_id": "…",
+   "epic_match": {"epic_id": 7, "auto": true}            // or "epic_candidates": […]}}
+```
+
+Resolution order (explicit args always win):
+
+1. **`template`** — matched by name (case-insensitive) in the
+   per-user `story_templates` vault field (listed by
+   `shortcut_list_templates`). The template's `story_type`,
+   `labels` and `description_template` become defaults;
+   `{name}` / `{details}` placeholders are substituted.
+2. **`story_type`** — arg, else template. When neither provides
+   one, the tool fails with an `InvalidArguments` error telling the
+   LLM to ask the user whether the story is a feature, a bug or a
+   chore — the model never guesses.
+3. **`team`** — matched against `GET /teams` by UUID / name /
+   mention name, else the saved `default_team` field; the UUID is
+   sent as `group_id`.
+4. **`owner_ids`** — the caller's own member, resolved from the
+   saved `username` against `GET /members`, so the story is
+   created in their name.
+5. **`epic_id`** — explicit arg, else (with `auto_epic`, default
+   true) a local BM25 ranking of the open epics against the
+   story's name + description (see below).
+
+After a successful create, the cached story lists
+(`api_list_stories`, `shortcut_list_backlog`,
+`shortcut_search_stories`) are invalidated so the next poll
+re-fetches. Writes are never cached.
+
+### Automatic epic classification
+
+With `auto_epic: true` (default) and no explicit `epic_id`, the
+agent ranks the workspace's **open** epics (`GET /epics`, filtered
+to `!archived` and `state != done`) against the story text using the
+shared BM25 ranker (`nagent_support::bm25`, same recipe as the
+tools router — no embeddings, no extra LLM call). The document for
+each epic is `name + label names + description` (capped at
+`max_body_bytes`). The top candidate is attached automatically
+when its score is at least `1.0` **and** at least `1.5×` the
+runner-up's score; otherwise the story is created without an epic
+and the response carries `epic_candidates` (top 3 with scores) so
+the LLM can tell the user which epics were close. Thresholds live in
+`create_story.rs` (`AUTO_EPIC_MIN_SCORE` / `AUTO_EPIC_MIN_RATIO`).
+
+Comment creation (`POST /stories/{id}/comments`) is wired in
+`nagent-shortcut` (`add_story_comment`) but **no chat tool is
+registered for it yet**; move / delete stay out of scope.
 
 ## Setup (per user)
 
@@ -53,14 +123,46 @@ Setup-only HTTP endpoint (not an LLM tool):
 POST /api/integrations/shortcut/probe
 {"api_token": "…", "username": "jane"}
 → 200 {"ok": true, "id": "<member-uuid>", "name": "Jane Doe", "mention_name": "jane"}
+
+POST /api/integrations/shortcut/probe-teams
+{"api_token": "…"}
+→ 200 {"ok": true, "count": 2, "teams": [{id, name, mention_name, workflow_ids, …}]}
 ```
 
-`username` is optional: without it the probe only succeeds when the
-workspace lists a single member.
+`username` is optional on the member probe: without it the probe
+only succeeds when the workspace lists a single member. The
+`probe-teams` endpoint never reads the vault — the body token drives
+the `GET /teams` call — so the "Default team" dropdown works before
+the credentials are saved.
 
 Every probe call writes one `auth_events` row of kind
 `shortcut_probe_<outcome>` (plus a `_host:<host>` companion). The
 token never lands on the audit row.
+
+### Default team + story shortcuts (per-user fields)
+
+Two optional fields on the same form feed the write path:
+
+- **`default_team`** — stored as `{"id": "<team-uuid>", "name":
+  "Engineering"}` and picked from a dropdown (never typed by hand).
+  The dropdown is fed by `GET /api/integrations/shortcut/teams`
+  (proxies `GET /teams` with the saved vault token) and, before the
+  token is saved, by the setup-only `POST
+  /api/integrations/shortcut/probe-teams` with the token typed in
+  the form (same pattern as the CalDAV `probe-calendars` picker and
+  the GitHub repo picker). `shortcut_create_story` sends the UUID as
+  `group_id` when the chat request does not name a team. Audit
+  kinds: `shortcut_api_teams_<outcome>` /
+  `shortcut_probe_teams_<outcome>`.
+- **`story_templates`** — a JSON array of story shortcuts, edited as
+  text in the form, e.g.
+  `[{"name":"bug","story_type":"bug","labels":["bug"],"description_template":"## Steps\n{details}"}]`.
+  `shortcut_list_templates` lists them (local vault read, no API
+  call, no confirmation) and `shortcut_create_story`'s `template`
+  argument applies one.
+
+Both fields are `echo_on_edit` (not secrets; rows still encrypted at
+rest) and round-trip through `GET /api/integrations/shortcut`.
 
 ## Stories dashboard tab (pure API, no LLM)
 
@@ -84,6 +186,8 @@ GET /api/integrations/shortcut/stories/{id}
                 "comments": [{id, author_id, text, …}]}}
 GET /api/integrations/shortcut/me
 → 200 {"data": {"id": "<member-uuid>", "name": "Jane Doe", "mention_name": "jane"}}
+GET /api/integrations/shortcut/teams
+→ 200 {"data": {"count": 2, "teams": [{id, name, mention_name, workflow_ids, …}]}}
 ```
 
 The list query is composed **server-side** and always scoped to the
@@ -192,7 +296,10 @@ deployment, e.g. to restrict the backlog to one team:
   `["api.app.shortcut.com"]`, so the hosted API works out of the
   box and any other host is refused until the operator widens
   the list; an explicitly empty allowlist fails closed.
-- **Confirmation** — every tool is read-only but still hits a
-  third-party with the user's credentials, so every call fires
-  the inline approval card (strict per-call; the session-wide
-  "Toujours pour cette session" override is allowed).
+- **Confirmation** — every read tool still hits a third-party with
+  the user's credentials, so every read call fires the inline
+  approval card (strict per-call; the session-wide "Toujours pour
+  cette session" override is allowed). `shortcut_create_story` is a
+  write: same card, and the session override is allowed too.
+  `shortcut_list_templates` is a local vault read and needs no
+  confirmation.

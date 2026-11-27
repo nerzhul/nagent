@@ -2,7 +2,7 @@
 //!
 //! `ServiceRegistry` is the catalogue the chat UI iterates to
 //! render the "Add integration" form (`/api/integrations`); the
-//! `ServiceDef` below describes the two fields the Shortcut
+//! `ServiceDef` below describes the fields the Shortcut
 //! connector stores under the `shortcut` service id.
 //!
 //! - `api_token` (Password) — a Shortcut API token generated at
@@ -14,6 +14,12 @@
 //!   the chat UI can say "Connected as @jane". Credential-
 //!   adjacent: `echo_on_edit = false` so the saved value is
 //!   not re-displayed on every form open.
+//! - `show_dashboard` (Checkbox) — gates the "Stories" dashboard tab.
+//! - `default_team` (Text, JSON `{"id","name"}`) — the team
+//!   `shortcut_create_story` targets by default (`group_id`).
+//! - `story_templates` (Text, JSON array) — the per-user story
+//!   shortcuts applied through `shortcut_create_story`'s
+//!   `template` argument.
 //!
 //! Per `docs/architecture.md` §2.6, `ServiceDef` is plain data so
 //! the file lives in the `nagent-agents` crate; the runtime
@@ -82,6 +88,43 @@ pub const SHORTCUT_SERVICE: ServiceDef = ServiceDef {
             options: &[],
             // Not a secret: the saved on/off state is echoed back
             // so the checkbox stays ticked when the form reopens.
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+        },
+        FieldDef {
+            key: "default_team",
+            label: "Default team for new stories",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some(
+                "Team that `shortcut_create_story` targets when the chat request does not \
+                 name one. Pick it in the dropdown below (loaded live from your workspace \
+                 via `GET /teams`); the form stores the team UUID and the chat tool sends \
+                 it as `group_id` when the story is created.",
+            ),
+            placeholder: Some("— picked from the team list —"),
+            options: &[],
+            // Not a secret: the saved team echoes back so the
+            // dropdown re-selects it when the form reopens. The row
+            // is still AES-256-GCM encrypted at rest in the vault.
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+        },
+        FieldDef {
+            key: "story_templates",
+            label: "Story shortcuts (templates)",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some(
+                "JSON array of story templates the chat can apply through \
+                 `shortcut_create_story`'s `template` argument, e.g. \
+                 `[{\"name\":\"bug\",\"story_type\":\"bug\",\"labels\":[\"bug\"],\
+                 \"description_template\":\"## Steps\\n{details}\"}]`. `name` is the \
+                 shortcut key, `story_type` is feature|bug|chore, `labels` a string array, \
+                 and `description_template` may use `{name}` / `{details}` placeholders.",
+            ),
+            placeholder: Some("[{\"name\":\"bug\",\"story_type\":\"bug\",\"labels\":[\"bug\"]}]"),
+            options: &[],
+            // Not a secret: the saved JSON echoes back so the editor
+            // reopens with the templates intact.
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
         },
     ],

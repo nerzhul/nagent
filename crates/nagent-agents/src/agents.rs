@@ -1673,12 +1673,15 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] =
                 )))
             },
         },
-        // Plan 1795597719369: ten read-only Shortcut tools. All share
-        // the `ShortcutAgentConfig` and drain the shared
-        // `pool.public()` client; each descriptor builds its own
-        // `ShortcutClient` (own cache, same reqwest pool). Write
-        // tools (create story / comment / move story) are deliberately
-        // NOT registered — the tool loop returns "unknown tool".
+        // Plan 1795597719369: the read-only Shortcut tools plus
+        // `shortcut_list_teams` / `shortcut_list_templates` (local
+        // vault read) / `shortcut_create_story` (the first write
+        // tool). All share the `ShortcutAgentConfig` and drain the
+        // shared `pool.public()` client; each descriptor builds its
+        // own `ShortcutClient` (own cache, same reqwest pool). The
+        // comment-creation wire (`add_story_comment`) is ready in
+        // `nagent-shortcut` but no `shortcut_add_comment` agent is
+        // registered yet — the tool loop returns "unknown tool".
         #[cfg(feature = "shortcut-agent")]
         AgentDescriptor {
             id: "shortcut_me",
@@ -1777,6 +1780,38 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] =
             feature: "shortcut-agent",
             build: |cfgs, pool| {
                 Ok(Box::new(shortcut::list_labels::ListLabelsAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_teams",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::list_teams::ListTeamsAgent::new(
+                    shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
+                )))
+            },
+        },
+        // Local read of the per-user `story_templates` vault field —
+        // no Shortcut API call, so no client is needed.
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_list_templates",
+            feature: "shortcut-agent",
+            build: |_cfgs, _pool| Ok(Box::new(shortcut::list_templates::ListTemplatesAgent::new())),
+        },
+        // First Shortcut WRITE tool: POST /stories with template /
+        // default_team / owner / auto-epic resolution. Strict
+        // per-call confirmation; the session-wide override is
+        // allowed (trait default).
+        #[cfg(feature = "shortcut-agent")]
+        AgentDescriptor {
+            id: "shortcut_create_story",
+            feature: "shortcut-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(shortcut::create_story::CreateStoryAgent::new(
                     shortcut::ShortcutClient::new(cfgs.shortcut.clone(), pool.public()),
                 )))
             },

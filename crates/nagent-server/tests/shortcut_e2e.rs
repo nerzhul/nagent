@@ -28,7 +28,9 @@ use uuid::Uuid;
 
 const TEST_TOKEN: &str = "sc_e2e_token_0123456789abcdef";
 
-/// The ten tool names registered by the `shortcut-agent` feature.
+/// The thirteen tool names registered by the `shortcut-agent`
+/// feature (ten read-only + `shortcut_list_teams` +
+/// `shortcut_list_templates` + the `shortcut_create_story` write).
 const SHORTCUT_TOOLS: &[&str] = &[
     "shortcut_me",
     "shortcut_list_workflows",
@@ -40,6 +42,9 @@ const SHORTCUT_TOOLS: &[&str] = &[
     "shortcut_list_backlog",
     "shortcut_get_story",
     "shortcut_list_labels",
+    "shortcut_list_teams",
+    "shortcut_list_templates",
+    "shortcut_create_story",
 ];
 
 async fn connect_db(cfg: &nagent_server::config::AuthConfig) -> nagent_db::Db {
@@ -226,6 +231,30 @@ fn route(path: &str) -> (u16, &'static str, String) {
             })),
         );
     }
+    if path == "/teams" {
+        return (
+            200,
+            "OK",
+            json(serde_json::json!([
+                {
+                    "id": "team-uuid-1",
+                    "name": "Engineering",
+                    "mention_name": "eng",
+                    "description": "Platform and backend",
+                    "archived": false,
+                    "workflow_ids": [500000001],
+                    "app_url": "https://app.shortcut.com/ws/eng"
+                },
+                {
+                    "id": "team-uuid-2",
+                    "name": "Design",
+                    "mention_name": "design",
+                    "archived": false,
+                    "workflow_ids": [500000002]
+                }
+            ])),
+        );
+    }
     if path == "/bad-token" {
         return (
             401,
@@ -245,7 +274,7 @@ fn route(path: &str) -> (u16, &'static str, String) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn agent_registry_contains_exactly_ten_shortcut_tools() {
+fn agent_registry_contains_exactly_thirteen_shortcut_tools() {
     use nagent_agents::config::AgentConfigs;
     use nagent_agents::egress::EgressPool;
     use nagent_agents::AgentRegistry;
@@ -255,22 +284,27 @@ fn agent_registry_contains_exactly_ten_shortcut_tools() {
         .iter()
         .filter(|n| n.starts_with("shortcut_"))
         .collect();
-    assert_eq!(shortcut.len(), 10, "expected exactly ten shortcut_* tools");
+    assert_eq!(
+        shortcut.len(),
+        13,
+        "expected exactly thirteen shortcut_* tools"
+    );
     for tool in SHORTCUT_TOOLS {
         assert!(
             names.iter().any(|n| n == tool),
             "missing tool `{tool}` in registry"
         );
     }
-    // Write tools are deliberately out of scope for v1.
+    // Comment / move stay unregistered in v1 (the comment wire is
+    // ready in nagent-shortcut, but no agent exposes it yet).
     for forbidden in [
-        "shortcut_create_story",
+        "shortcut_add_comment",
         "shortcut_comment",
         "shortcut_move_story",
     ] {
         assert!(
             !names.iter().any(|n| n == forbidden),
-            "`{forbidden}` must NOT be registered in v1 (read-only)"
+            "`{forbidden}` must NOT be registered in v1"
         );
     }
 }
@@ -281,7 +315,7 @@ fn shortcut_service_def_shape() {
     use nagent_agents::{FieldKind, ServiceRegistry};
     let reg = ServiceRegistry::new(&[SHORTCUT_SERVICE]);
     let svc = reg.get("shortcut").expect("shortcut service registered");
-    assert_eq!(svc.fields.len(), 3);
+    assert_eq!(svc.fields.len(), 5);
     let token = &svc.fields[0];
     assert_eq!(token.key, "api_token");
     assert_eq!(token.kind, FieldKind::Password);
@@ -305,6 +339,19 @@ fn shortcut_service_def_shape() {
         dashboard.echo_on_edit,
         "the checkbox state must be echoed so the form stays ticked on reopen"
     );
+    // The default team (JSON {"id","name"}) and the story
+    // templates (JSON array): both optional text fields, echoed
+    // back on edit (not secrets — stored encrypted at rest).
+    let default_team = &svc.fields[3];
+    assert_eq!(default_team.key, "default_team");
+    assert_eq!(default_team.kind, FieldKind::Text);
+    assert!(!default_team.required);
+    assert!(default_team.echo_on_edit);
+    let templates = &svc.fields[4];
+    assert_eq!(templates.key, "story_templates");
+    assert_eq!(templates.kind, FieldKind::Text);
+    assert!(!templates.required);
+    assert!(templates.echo_on_edit);
 }
 
 #[test]
@@ -320,10 +367,15 @@ fn descriptor_build_matches_ids() {
             .get(tool)
             .unwrap_or_else(|| panic!("`{tool}` not in registry"));
         assert_eq!(agent.name(), *tool);
-        assert!(
-            agent.untrusted_output(),
-            "shortcut tools return remote content → untrusted_output must be true"
-        );
+        if *tool == "shortcut_list_templates" {
+            // Local read of the user's own vault field: trusted output.
+            assert!(!agent.untrusted_output());
+        } else {
+            assert!(
+                agent.untrusted_output(),
+                "shortcut tools return remote content → untrusted_output must be true"
+            );
+        }
     }
 }
 
@@ -611,8 +663,8 @@ async fn put_probe_invoke_list_flow_against_loopback() {
         .collect();
     assert_eq!(
         names.len(),
-        10,
-        "GET /v1/agents must list the ten shortcut tools"
+        13,
+        "GET /v1/agents must list the thirteen shortcut tools"
     );
     for tool in SHORTCUT_TOOLS {
         assert!(names.contains(tool), "missing `{tool}` in /v1/agents");
@@ -956,14 +1008,23 @@ async fn stories_dashboard_endpoints_against_loopback() {
         .await
         .unwrap();
     let svc: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert!(
-        svc["fields"]
-            .as_array()
-            .unwrap()
+    let fields = svc["fields"].as_array().unwrap();
+    for key in ["api_token", "username", "show_dashboard"] {
+        let f = fields
             .iter()
-            .all(|f| f["filled"] == true),
-        "empty PUT must not wipe any field: {svc}"
-    );
+            .find(|f| f["key"] == key)
+            .unwrap_or_else(|| panic!("field {key} present"));
+        assert_eq!(f["filled"], true, "empty PUT must not wipe {key}");
+    }
+    // The optional write-path fields ship empty until the user sets
+    // them; an empty PUT must not invent values either.
+    for key in ["default_team", "story_templates"] {
+        let f = fields
+            .iter()
+            .find(|f| f["key"] == key)
+            .unwrap_or_else(|| panic!("field {key} present"));
+        assert_eq!(f["filled"], false, "optional field {key} starts empty");
+    }
 
     // 1. Default list: the server composes `owner:jane !is:archived
     //    !is:done` — scoped to the caller, done stories excluded by
@@ -1177,5 +1238,215 @@ async fn stories_dashboard_requires_configured_token() {
     assert!(
         fx.requests().is_empty(),
         "no upstream call may happen without a vault token"
+    );
+}
+
+/// `GET /api/integrations/shortcut/teams` proxies `GET /teams` with
+/// the caller's vault token and returns the projected team list —
+/// this backs the integrations UI's "Default team" picker (the
+/// chosen UUID is saved into the `default_team` vault field and
+/// later sent as `group_id` by `shortcut_create_story`). The
+/// response never carries the token (AGENTS.md §6).
+#[tokio::test]
+async fn teams_endpoint_against_loopback() {
+    let fx = Fixture::start().await;
+    let (app, bearer, _state) = boot_dashboard_app(&fx).await;
+
+    let resp = get(app.clone(), &bearer, "/api/integrations/shortcut/teams").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["data"]["count"], 2);
+    assert_eq!(body["data"]["teams"][0]["id"], "team-uuid-1");
+    assert_eq!(body["data"]["teams"][0]["name"], "Engineering");
+    assert_eq!(body["data"]["teams"][0]["mention_name"], "eng");
+    assert_eq!(body["data"]["teams"][1]["id"], "team-uuid-2");
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !text.contains(TEST_TOKEN),
+        "AGENTS.md §6: teams response must not contain the token; got {text}"
+    );
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|(line, token)| line.starts_with("GET /teams") && token == TEST_TOKEN),
+        "the endpoint must call GET /teams with the vault token; got {:?}",
+        fx.requests()
+    );
+
+    // The ServiceDef round-trips the two new fields through
+    // GET /api/integrations/shortcut (echo_on_edit path): the saved
+    // `default_team` / `story_templates` JSON comes back so the
+    // form reopens with the picker pre-selected.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("PUT")
+                .uri("/api/integrations/shortcut/credentials")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "fields": {
+                            "default_team": r#"{"id":"team-uuid-1","name":"Engineering"}"#,
+                            "story_templates": r#"[{"name":"bug","story_type":"bug","labels":["bug"]}]"#
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "PUT new fields");
+    let resp = get(app, &bearer, "/api/integrations/shortcut").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let svc: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let fields = svc["fields"].as_array().unwrap();
+    let dt = fields
+        .iter()
+        .find(|f| f["key"] == "default_team")
+        .expect("default_team field");
+    assert_eq!(dt["value"], r#"{"id":"team-uuid-1","name":"Engineering"}"#);
+    let tpl = fields
+        .iter()
+        .find(|f| f["key"] == "story_templates")
+        .expect("story_templates field");
+    assert!(tpl["value"].as_str().unwrap().contains("\"bug\""));
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(!text.contains(TEST_TOKEN));
+}
+
+/// `POST /api/integrations/shortcut/probe-teams` lists the workspace
+/// teams with a token supplied in the request body — this is what
+/// populates the integrations UI's "Default team" dropdown before
+/// the token is saved to the vault. The response carries the
+/// projected teams and never the token (AGENTS.md §6).
+#[tokio::test]
+async fn probe_teams_lists_workspace_teams_without_vault() {
+    let fx = Fixture::start().await;
+    let auth_store = temp_store().await;
+    let key = Arc::new(nagent_server::credentials::CredentialsKey::from_bytes(
+        [0x2bu8; 32],
+    ));
+    let resolver = nagent_server::credentials::CredentialResolver::new(
+        auth_store.clone(),
+        key.clone(),
+        None,
+        None,
+    );
+    let user_id = auth_store
+        .admin()
+        .users
+        .create("jane@example.com", "Jane", "local", Some(b"hash"))
+        .await
+        .expect("create user");
+    let session = auth_store
+        .admin()
+        .sessions
+        .create(user_id, Duration::from_secs(3600), None, None)
+        .await
+        .expect("create session");
+    let bearer = format!(
+        "Bearer {}",
+        session.plaintext_token.clone().expect("plaintext token")
+    );
+
+    let mut builder = nagent_server::testing::app_state();
+    Arc::make_mut(&mut builder.config).auth.enabled = true;
+    Arc::make_mut(&mut builder.config).auth.backends =
+        vec![nagent_server::config::AuthBackendKind::Local];
+    Arc::make_mut(&mut builder.config).auth.public_url = "https://example.com".into();
+    Arc::make_mut(&mut builder.config).auth.db = nagent_server::config::AuthDbConfig {
+        backend: "sqlite".into(),
+        url: format!(
+            "sqlite://file:shortcut_e2e_teams_{}?mode=memory&cache=shared",
+            Uuid::new_v4()
+        ),
+        max_connections: 1,
+        auto_migrate: true,
+    };
+    Arc::make_mut(&mut builder.config).agents.shortcut.base_url = fx.base_url();
+    Arc::make_mut(&mut builder.config).agents.shortcut.allowlist = vec!["127.0.0.1".to_string()];
+    let state = builder
+        .with_auth(auth_store.clone())
+        .with_credential_resolver(Arc::new(resolver), key)
+        .build();
+    let auth_state = state.auth.as_ref().expect("auth wired").clone();
+    let auth_layer = axum::middleware::from_fn_with_state(
+        auth_state,
+        nagent_server::auth::middleware::require_auth_middleware,
+    );
+    let probe_teams_routes =
+        nagent_server::credentials::shortcut_probe::build_shortcut_probe_teams_router(
+            state.clone(),
+        );
+    let app = probe_teams_routes.layer(auth_layer).with_state(state);
+
+    // No vault token is saved at all: the body token drives the call.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/integrations/shortcut/probe-teams")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_token": TEST_TOKEN}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["count"], 2);
+    assert_eq!(body["teams"][0]["id"], "team-uuid-1");
+    assert_eq!(body["teams"][0]["mention_name"], "eng");
+    let text = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !text.contains(TEST_TOKEN),
+        "AGENTS.md §6: probe-teams response must not contain the token; got {text}"
+    );
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|(line, token)| line.starts_with("GET /teams") && token == TEST_TOKEN),
+        "probe-teams must call GET /teams with the body token; got {:?}",
+        fx.requests()
+    );
+
+    // Empty token → 400, and no upstream call happens.
+    let before = fx.requests().len();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/integrations/shortcut/probe-teams")
+                .header(axum::http::header::AUTHORIZATION, &bearer)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_token": "  "}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        fx.requests().len(),
+        before,
+        "no upstream call on empty token"
     );
 }

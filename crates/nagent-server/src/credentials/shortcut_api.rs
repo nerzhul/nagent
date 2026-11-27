@@ -23,6 +23,10 @@
 //! - `GET /api/integrations/shortcut/stories/:id` —
 //!   `GET /stories/{id}` + `/comments`, with the **full**
 //!   description (no LLM body cap) projected for the detail view.
+//! - `GET /api/integrations/shortcut/teams` — `GET /teams`
+//!   projected for the integrations UI's "Default team" picker
+//!   (feeds the `default_team` vault field used as `group_id` by
+//!   `shortcut_create_story`).
 //!
 //! ## Hardening
 //!
@@ -335,6 +339,41 @@ pub async fn whoami(
     }
 }
 
+/// `GET /api/integrations/shortcut/teams` — list the workspace's
+/// Shortcut teams (`GET /teams`) using the caller's vault token.
+/// Backs the "Default team" picker in the integrations form: the
+/// chosen team's UUID is saved into the `default_team` vault field
+/// and later sent as `group_id` by `shortcut_create_story`. Pure
+/// API, never the LLM. Audit kind: `shortcut_api_teams_<outcome>`.
+pub async fn list_teams(
+    State(state): State<ShortcutApiState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+) -> Result<Response, AuthError> {
+    let token = match vault_token(&state, user.id).await {
+        Ok(t) => t,
+        Err(resp) => {
+            write_api_audit(&state.store, user.id, "teams", ProbeOutcome::BadRequest);
+            return Ok(resp);
+        }
+    };
+    match nagent_shortcut::list_teams(&state.client, &token, user.id).await {
+        Ok(data) => {
+            write_api_audit(&state.store, user.id, "teams", ProbeOutcome::Ok);
+            Ok(Json(serde_json::json!({ "data": data })).into_response())
+        }
+        Err(e) => {
+            let outcome = match &e {
+                ShortcutError::Unauthorized(_) => ProbeOutcome::AuthRejected,
+                ShortcutError::RateLimited { .. } => ProbeOutcome::UpstreamError,
+                ShortcutError::SandboxDenied(_) => ProbeOutcome::ValidationFailed,
+                _ => ProbeOutcome::UpstreamError,
+            };
+            write_api_audit(&state.store, user.id, "teams", outcome);
+            Ok(map_shortcut_error(e))
+        }
+    }
+}
+
 /// `GET /api/integrations/shortcut/stories/:id`
 pub async fn get_story(
     State(state): State<ShortcutApiState>,
@@ -396,6 +435,10 @@ pub fn build_shortcut_api_router(
     };
     axum::Router::new()
         .route("/api/integrations/shortcut/me", axum::routing::get(whoami))
+        .route(
+            "/api/integrations/shortcut/teams",
+            axum::routing::get(list_teams),
+        )
         .route(
             "/api/integrations/shortcut/stories",
             axum::routing::get(list_stories),

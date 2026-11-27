@@ -39,6 +39,7 @@
 //! (the trait default).
 
 pub mod client;
+pub mod create_story;
 pub mod get_epic;
 pub mod get_story;
 pub mod list_backlog;
@@ -46,6 +47,8 @@ pub mod list_epics;
 pub mod list_iterations;
 pub mod list_labels;
 pub mod list_projects;
+pub mod list_teams;
+pub mod list_templates;
 pub mod list_workflows;
 pub mod me;
 pub mod search_stories;
@@ -60,7 +63,10 @@ pub use client::ShortcutClient;
 // server-side setup probe used it before the extraction; it now
 // calls `nagent_shortcut::find_member` directly).
 pub use nagent_shortcut::find_member;
-pub(crate) use nagent_shortcut::{label_names, mention_name_of, name_of_member, project_story};
+pub(crate) use nagent_shortcut::{
+    find_team, label_names, mention_name_of, name_of_member, project_story, project_team,
+    rank_open_epics,
+};
 
 use serde_json::Value;
 
@@ -107,6 +113,93 @@ pub(crate) fn confirm_reason(tool: &str) -> ConfirmationDecision {
              then.",
         ),
     }
+}
+
+/// Confirmation reason for write tools (`shortcut_create_story`).
+/// Names the story being created so the approval card is specific.
+pub(crate) fn confirm_reason_write(tool: &str, summary: &str) -> ConfirmationDecision {
+    ConfirmationDecision::NeedsConfirmation {
+        reason: format!(
+            "`{tool}` WRITES to the user's Shortcut (app.shortcut.com) workspace through the \
+             Shortcut API with their API token: {summary}. The user must explicitly confirm \
+             in chat before this call runs. Wait for the user to click \"Autoriser\" (or \
+             \"Toujours pour cette session\") in the chat UI; the tool will execute on their \
+             next message and you will see its result then.",
+        ),
+    }
+}
+
+/// `UserContext::secret` maps a missing vault row to
+/// `Err(CredentialsMissing)`; optional fields treat that as
+/// "absent" rather than a hard error.
+pub(crate) fn optional_secret(
+    res: Result<Option<secrecy::SecretString>, AgentError>,
+) -> Result<Option<secrecy::SecretString>, AgentError> {
+    match res {
+        Err(AgentError::CredentialsMissing { .. }) => Ok(None),
+        other => other,
+    }
+}
+
+/// Load + parse the per-user `story_templates` vault field (a JSON
+/// array of `{name, story_type?, labels?, description_template?}`
+/// objects). Empty / absent field yields an empty list; malformed
+/// JSON is an `InvalidArguments` error (the raw value is never
+/// included in the message).
+pub(crate) async fn load_templates(ctx: &UserContext) -> Result<Vec<Value>, AgentError> {
+    use secrecy::ExposeSecret;
+    let Some(secret) = optional_secret(ctx.secret("shortcut", "story_templates").await)? else {
+        return Ok(Vec::new());
+    };
+    let text = secret.expose_secret();
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let parsed: Value = serde_json::from_str(text).map_err(|e| {
+        AgentError::InvalidArguments(format!(
+            "the saved `story_templates` field is not valid JSON ({e}); fix it in \
+             Settings → Integrations → Shortcut"
+        ))
+    })?;
+    match parsed.as_array() {
+        Some(arr) => Ok(arr.clone()),
+        None => Err(AgentError::InvalidArguments(
+            "the saved `story_templates` field must be a JSON array of template objects".into(),
+        )),
+    }
+}
+
+/// Look up one template by name (case-insensitive) in the parsed
+/// `story_templates` array.
+pub(crate) fn find_template<'a>(templates: &'a [Value], name: &str) -> Option<&'a Value> {
+    let q = name.trim().to_lowercase();
+    templates.iter().find(|t| {
+        t.get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n.to_lowercase() == q)
+    })
+}
+
+/// Cached GET helper for the intermediate lookups inside
+/// `shortcut_create_story` (teams / members / epics). Uses a fixed
+/// empty-args cache key under `tool` so repeated creations in one
+/// session share the upstream response within `cache_ttl_secs`.
+pub(crate) async fn cached_get(
+    client: &ShortcutClient,
+    ctx: &UserContext,
+    tool: &str,
+    path: &str,
+) -> Result<Value, AgentError> {
+    let args = serde_json::json!({});
+    if let Some(cached) = client.cache_get(ctx.user_id(), tool, &args) {
+        return serde_json::from_str(&cached)
+            .map_err(|e| AgentError::AgentFailed(format!("shortcut cache decode: {e}")));
+    }
+    let raw = client.get(ctx, path, &[]).await?;
+    let encoded = serde_json::to_string(&raw)
+        .map_err(|e| AgentError::AgentFailed(format!("shortcut encode: {e}")))?;
+    client.cache_put(ctx.user_id(), tool, &args, encoded);
+    Ok(raw)
 }
 
 /// Parse the `limit` argument: default `default`, clamped to
@@ -276,7 +369,9 @@ mod loopback {
 
     const TEST_TOKEN: &str = "sc_test_token_0123456789abcdef";
 
-    /// Static in-memory `SecretSource` returning the test token.
+    /// Static in-memory `SecretSource` returning the test token
+    /// plus the optional vault fields the write path reads
+    /// (`username`, `default_team`, `story_templates`).
     struct StaticSecrets;
 
     #[async_trait::async_trait]
@@ -291,6 +386,15 @@ mod loopback {
                 Ok(Some(secrecy::SecretString::from(TEST_TOKEN)))
             } else if service == "shortcut" && field == "username" {
                 Ok(Some(secrecy::SecretString::from("jane")))
+            } else if service == "shortcut" && field == "default_team" {
+                Ok(Some(secrecy::SecretString::from(
+                    r#"{"id":"team-uuid-1","name":"Engineering"}"#,
+                )))
+            } else if service == "shortcut" && field == "story_templates" {
+                Ok(Some(secrecy::SecretString::from(concat!(
+                    r###"[{"name":"bug","story_type":"bug","labels":["bug"],"###,
+                    r###""description_template":"## Steps: {details} (story: {name})"}]"###
+                ))))
             } else {
                 Ok(None)
             }
@@ -302,6 +406,8 @@ mod loopback {
         /// Captured request lines (`GET /path?query HTTP/1.1`)
         /// plus the `Shortcut-Token` header value of each request.
         requests: Arc<Mutex<Vec<(String, String)>>>,
+        /// Captured request bodies (POST), in request order.
+        bodies: Arc<Mutex<Vec<String>>>,
         _task: tokio::task::JoinHandle<()>,
     }
 
@@ -310,25 +416,48 @@ mod loopback {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let requests: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             let req_clone = requests.clone();
+            let bodies_clone = bodies.clone();
             let task = tokio::spawn(async move {
                 loop {
                     let Ok((mut sock, _)) = listener.accept().await else {
                         break;
                     };
                     let req_clone = req_clone.clone();
+                    let bodies_clone = bodies_clone.clone();
                     tokio::spawn(async move {
                         let mut buf = Vec::new();
                         let mut chunk = [0u8; 4096];
-                        loop {
+                        // Read headers, then exactly `content-length`
+                        // body bytes so POST payloads are captured too.
+                        let header_end = loop {
                             match sock.read(&mut chunk).await {
-                                Ok(0) => break,
+                                Ok(0) => break None,
                                 Ok(n) => {
                                     buf.extend_from_slice(&chunk[..n]);
-                                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                                        break;
+                                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+                                    {
+                                        break Some(pos + 4);
                                     }
                                 }
+                                Err(_) => break None,
+                            }
+                        };
+                        let Some(header_end) = header_end else {
+                            return;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                        let content_length = head
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        while buf.len() < header_end + content_length {
+                            match sock.read(&mut chunk).await {
+                                Ok(0) => break,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
                                 Err(_) => break,
                             }
                         }
@@ -347,12 +476,25 @@ mod loopback {
                             .lock()
                             .unwrap()
                             .push((request_line.clone(), token));
+                        let method = request_line
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
                         let path = request_line
                             .split_whitespace()
                             .nth(1)
                             .unwrap_or("/")
                             .to_string();
-                        let (status, reason, extra, body) = route(&path);
+                        let body_text = if content_length > 0 {
+                            text[header_end..].to_string()
+                        } else {
+                            String::new()
+                        };
+                        if method == "POST" {
+                            bodies_clone.lock().unwrap().push(body_text.clone());
+                        }
+                        let (status, reason, extra, body) = route(&method, &path, &body_text);
                         let mut resp = format!(
                             "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
                             body.len()
@@ -370,6 +512,7 @@ mod loopback {
             Self {
                 addr,
                 requests,
+                bodies,
                 _task: task,
             }
         }
@@ -381,12 +524,73 @@ mod loopback {
         fn requests(&self) -> Vec<(String, String)> {
             self.requests.lock().unwrap().clone()
         }
+
+        fn bodies(&self) -> Vec<String> {
+            self.bodies.lock().unwrap().clone()
+        }
     }
 
-    /// Route table for the fixture. Paths are matched on the
-    /// exact request target (path + query).
-    fn route(path: &str) -> (u16, &'static str, Vec<(&'static str, String)>, String) {
+    /// Route table for the fixture. `method` + `target` (path +
+    /// query) are matched exactly; `body` is the raw POST payload.
+    fn route(
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (u16, &'static str, Vec<(&'static str, String)>, String) {
         let json = |v: Value| v.to_string();
+        if method == "POST" && path == "/stories" {
+            // Echo the create payload back as the created story so
+            // tests can assert exactly what was sent upstream.
+            let sent: Value = serde_json::from_str(body).unwrap_or(json!({}));
+            return (
+                201,
+                "Created",
+                vec![],
+                json(json!({
+                    "id": 555,
+                    "name": sent.get("name"),
+                    "story_type": sent.get("story_type"),
+                    "description": sent.get("description"),
+                    "group_id": sent.get("group_id"),
+                    "owner_ids": sent.get("owner_ids"),
+                    "epic_id": sent.get("epic_id"),
+                    "project_id": sent.get("project_id"),
+                    "labels": sent.get("labels"),
+                    "workflow_state_id": 500000001,
+                    "app_url": "https://app.shortcut.com/ws/story/555"
+                })),
+            );
+        }
+        if method == "GET" && path == "/teams" {
+            return (
+                200,
+                "OK",
+                vec![],
+                json(json!([
+                    {"id": "team-uuid-1", "name": "Engineering", "mention_name": "eng",
+                     "workflow_ids": [500000001], "archived": false,
+                     "app_url": "https://app.shortcut.com/ws/eng"},
+                    {"id": "team-uuid-2", "name": "Design", "mention_name": "design",
+                     "workflow_ids": [500000002], "archived": false}
+                ])),
+            );
+        }
+        if method == "GET" && path == "/epics" {
+            return (
+                200,
+                "OK",
+                vec![],
+                json(json!([
+                    {"id": 7, "name": "Mobile app", "state": "started", "archived": false,
+                     "description": "iOS and Android apps, offline sync, push notifications, mobile crash reports",
+                     "labels": [{"name": "mobile"}]},
+                    {"id": 8, "name": "Auth", "state": "started", "archived": false,
+                     "description": "Login, SSO, OAuth, session handling, password reset"},
+                    {"id": 9, "name": "Legacy migration", "state": "done", "archived": false,
+                     "description": "old auth mobile cleanup"}
+                ])),
+            );
+        }
         if path == "/members" {
             return (
                 200,
@@ -726,5 +930,152 @@ mod loopback {
         assert_eq!(parsed["data"]["comments"][0]["text"], "looks good");
         // Two upstream calls: the story + its comments.
         assert_eq!(fx.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_teams_agent_returns_projected_teams() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = test_ctx();
+        let agent = super::list_teams::ListTeamsAgent::new(client);
+        let out = agent.invoke(&ctx, json!({})).await.unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["data"]["count"], 2);
+        assert_eq!(v["data"]["teams"][0]["id"], "team-uuid-1");
+        assert_eq!(v["data"]["teams"][0]["mention_name"], "eng");
+        assert_eq!(fx.requests()[0].0, "GET /teams HTTP/1.1");
+    }
+
+    #[tokio::test]
+    async fn create_story_applies_template_default_team_owner_and_auto_epic() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = test_ctx();
+        let agent = super::create_story::CreateStoryAgent::new(client);
+        let out = agent
+            .invoke(
+                &ctx,
+                json!({
+                    "name": "Crash at login on the mobile app",
+                    "template": "bug",
+                    "details": "open the app then log in",
+                }),
+            )
+            .await
+            .expect("invoke");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["data"]["story"]["id"], 555);
+        assert_eq!(v["data"]["template"], "bug");
+        assert_eq!(v["data"]["team"]["id"], "team-uuid-1");
+        assert_eq!(v["data"]["team"]["source"], "default_team");
+        assert_eq!(
+            v["data"]["owner_id"],
+            "12345678-9012-3456-7890-123456789012"
+        );
+        let m = &v["data"]["epic_match"];
+        assert_eq!(m["auto"], true);
+        assert_eq!(m["epic_id"], 7, "BM25 must pick the Mobile app epic");
+
+        // Exactly one POST reached upstream, carrying the token,
+        // and its body has the resolved group/owner/epic/labels.
+        let reqs = fx.requests();
+        let posts: Vec<_> = reqs
+            .iter()
+            .filter(|(l, _)| l.starts_with("POST /stories"))
+            .collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].1, TEST_TOKEN, "POST must carry the token header");
+        let bodies = fx.bodies();
+        assert_eq!(bodies.len(), 1);
+        let sent: Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(sent["name"], "Crash at login on the mobile app");
+        assert_eq!(sent["story_type"], "bug", "type comes from the template");
+        assert_eq!(sent["group_id"], "team-uuid-1", "default_team → group_id");
+        assert_eq!(
+            sent["owner_ids"][0], "12345678-9012-3456-7890-123456789012",
+            "owner = caller's member resolved from saved username"
+        );
+        assert_eq!(sent["epic_id"], 7);
+        assert_eq!(sent["labels"][0]["name"], "bug");
+        let desc = sent["description"].as_str().unwrap();
+        assert!(
+            desc.contains("open the app then log in"),
+            "{{details}} substituted: {desc}"
+        );
+        assert!(
+            desc.contains("Crash at login on the mobile app"),
+            "{{name}} substituted: {desc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_story_with_unclear_type_asks_the_user_and_posts_nothing() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = test_ctx();
+        let agent = super::create_story::CreateStoryAgent::new(client);
+        let err = agent
+            .invoke(&ctx, json!({"name": "Something vague"}))
+            .await
+            .unwrap_err();
+        match err {
+            AgentError::InvalidArguments(m) => {
+                assert!(m.contains("feature, a bug or a chore"), "got: {m}");
+            }
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+        assert!(
+            fx.bodies().is_empty(),
+            "no POST may reach upstream when the type is unclear"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_story_unknown_template_lists_available_names() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = test_ctx();
+        let agent = super::create_story::CreateStoryAgent::new(client);
+        let err = agent
+            .invoke(
+                &ctx,
+                json!({"name": "X", "template": "nope", "story_type": "feature"}),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            AgentError::InvalidArguments(m) => assert!(m.contains("bug"), "got: {m}"),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+        assert!(fx.bodies().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_story_explicit_team_arg_wins_over_default_team() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = test_ctx();
+        let agent = super::create_story::CreateStoryAgent::new(client);
+        let out = agent
+            .invoke(
+                &ctx,
+                json!({
+                    "name": "New onboarding flow",
+                    "story_type": "feature",
+                    "team": "design",          // mention name of team-uuid-2
+                    "auto_epic": false,
+                }),
+            )
+            .await
+            .expect("invoke");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["data"]["team"]["id"], "team-uuid-2");
+        assert_eq!(v["data"]["team"]["source"], "arg");
+        assert!(v["data"].get("epic_match").is_none());
+        let sent: Value = serde_json::from_str(&fx.bodies()[0]).unwrap();
+        assert_eq!(sent["group_id"], "team-uuid-2");
+        assert!(sent.get("epic_id").is_none());
     }
 }

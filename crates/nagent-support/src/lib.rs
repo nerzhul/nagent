@@ -12,7 +12,11 @@
 //! - [`egress`] — hardened HTTP egress client (SSRF pre-flight,
 //!   hostname allow-list, timeouts, body-size budget) shared by
 //!   every network agent and wire client.
+//! - [`bm25`] — tiny dependency-free BM25 ranker shared by the
+//!   tools router and local document-ranking callers (e.g.
+//!   Shortcut epic auto-classification).
 
+pub mod bm25;
 pub mod cpu;
 pub mod egress;
 pub mod ratelimit;

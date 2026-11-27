@@ -251,15 +251,21 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `shortcut_list_backlog` | `shortcut-agent` | Per-user Shortcut story search with the configured `[agents.shortcut].backlog_query`. Read-only. Confirm-on-read. |
 | `shortcut_get_story` | `shortcut-agent` | Per-user Shortcut `GET /stories/{id}` + `/comments` (description/comments capped). Read-only. Confirm-on-read. |
 | `shortcut_list_labels` | `shortcut-agent` | Per-user Shortcut `GET /labels`. Read-only. Confirm-on-read. |
+| `shortcut_list_teams` | `shortcut-agent` | Per-user Shortcut `GET /teams` (UUID / name / mention name per team). Read-only. Confirm-on-read. |
+| `shortcut_list_templates` | `shortcut-agent` | Local read of the per-user `story_templates` vault field (the saved story shortcuts). No network call: no confirmation, trusted output (like `get_datetime`). |
+| `shortcut_create_story` | `shortcut-agent` | Per-user Shortcut `POST /stories` — the first Shortcut **write** tool. Resolves `template` (per-user `story_templates`), `team` (arg or saved `default_team` → `group_id`), `owner_ids` (caller's member from the saved `username`), and auto-classifies the epic with a local BM25 over open epics (`auto_epic`, default true). Confirm-on-write; session override allowed. |
 
-The Shortcut plugin also ships **two pure-API dashboard endpoints**
+The Shortcut plugin also ships **pure-API dashboard endpoints**
 that never go through the LLM (the story list / detail is proxied
 straight from the caller's vault token via `nagent-shortcut`):
-`GET /api/integrations/shortcut/stories?query=&limit=` and
-`GET /api/integrations/shortcut/stories/{id}`. They back the
-"Stories" top-menu tab, which appears when the integration's
-`show_dashboard` checkbox is ticked. See
-`docs/integrations/shortcut.md`.
+`GET /api/integrations/shortcut/stories?query=&limit=`,
+`GET /api/integrations/shortcut/stories/{id}`,
+`GET /api/integrations/shortcut/me`, and
+`GET /api/integrations/shortcut/teams` (backs the integrations UI's
+"Default team" picker, saved into the `default_team` vault field).
+The stories endpoints back the "Stories" top-menu tab, which
+appears when the integration's `show_dashboard` checkbox is ticked.
+See `docs/integrations/shortcut.md`.
 | `config_doc` | `web-agent` (same as `web_fetch`) | Returns the LLM-facing description of the per-user service catalogue. |
 
 Each agent declares its `untrusted_output` impl at the type level:
@@ -384,18 +390,25 @@ owner/repo listing used to tick dashboard repos). They back the
 `docs/integrations/github.md`.
 
 When the `shortcut-agent` cargo feature is on, the registry also
-contains the `shortcut` `ServiceDef` (id `"shortcut"`, two fields:
-`api_token` (Password) and `username` (Text, filled by the probe)).
-The ten read-only `shortcut_*` agents read the token through
+contains the `shortcut` `ServiceDef` (id `"shortcut"`, five fields:
+`api_token` (Password), `username` (Text, filled by the probe),
+`show_dashboard` (Checkbox), `default_team` (Text, JSON
+`{"id","name"}` picked from `GET /api/integrations/shortcut/teams`),
+and `story_templates` (Text, JSON array of story shortcuts)).
+The read-only `shortcut_*` agents read the token through
 `UserContext::secret("shortcut", "api_token")` and call
 `api.app.shortcut.com` through the shared egress pool with the
 `[agents.shortcut].allowlist` (default `["api.app.shortcut.com"]`).
 One setup-only HTTP endpoint — `POST /api/integrations/shortcut/probe`
 — validates the token against `GET /members` before the user
 saves it and writes `shortcut_probe_<outcome>` audit rows (the
-token never lands on an audit row). Write tools (create story /
-comment / move story) are deliberately not registered in v1. See
-`docs/integrations/shortcut.md` for the operator-facing guide.
+token never lands on an audit row). `shortcut_create_story` is the
+first registered **write** tool (`POST /stories`, confirm-on-write,
+session override allowed); the comment wire
+(`nagent_shortcut::add_story_comment`) is ready but no
+`shortcut_add_comment` agent is registered yet, and move/delete
+stay out of scope. See `docs/integrations/shortcut.md` for the
+operator-facing guide.
 
 #### 2.7 Setup-only helpers
 

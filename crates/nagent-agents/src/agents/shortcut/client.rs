@@ -89,6 +89,23 @@ impl ShortcutClient {
             .await
             .map_err(AgentError::from)
     }
+
+    /// Authenticated POST with a JSON body, token resolved from
+    /// `ctx` (write operations: `shortcut_create_story`). The body
+    /// is never logged or formatted into an error path (AGENTS.md
+    /// §6).
+    pub async fn post(
+        &self,
+        ctx: &UserContext,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, AgentError> {
+        let token = self.token(ctx).await?;
+        self.inner
+            .post(&token, path, body)
+            .await
+            .map_err(AgentError::from)
+    }
 }
 
 impl From<nagent_shortcut::ShortcutError> for AgentError {

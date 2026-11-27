@@ -319,6 +319,177 @@ pub fn build_shortcut_probe_router(
         .with_state(probe_state)
 }
 
+// ---------------------------------------------------------------------------
+// `POST /api/integrations/shortcut/probe-teams` — setup-only helper
+// listing the workspace's teams (`GET /teams`) with a token supplied
+// in the request body, so the integrations UI can populate the
+// "Default team" dropdown BEFORE the token is saved to the vault
+// (same pattern as the CalDAV `probe-calendars` picker). Once the
+// token is saved, the pure-API `GET /api/integrations/shortcut/teams`
+// (vault-token variant) takes over. Not an LLM tool.
+// ---------------------------------------------------------------------------
+
+/// Newtype so the teams probe gets its own audit prefix
+/// `shortcut_probe_teams` while sharing the `[agents.shortcut]`
+/// allow-list, timeout and service id with the token probe.
+#[derive(Debug, Clone)]
+pub struct ShortcutTeamsProbeConfig(pub ShortcutConfig);
+
+impl ProbeConfig for ShortcutTeamsProbeConfig {
+    fn service_id(&self) -> &'static str {
+        "shortcut"
+    }
+    fn audit_kind_prefix(&self) -> &'static str {
+        "shortcut_probe_teams"
+    }
+    fn allowlist(&self) -> &[String] {
+        &self.0.allowlist
+    }
+    fn timeout_ms(&self) -> u64 {
+        self.0.timeout_ms
+    }
+    fn max_body_bytes(&self) -> usize {
+        // The `/teams` response is a JSON array of team objects
+        // (a few KiB each); 256 KiB is a generous cap.
+        256 * 1024
+    }
+}
+
+/// Request body for the teams probe: the API token, supplied by
+/// the user in the integrations form (never logged, never echoed,
+/// never written to the audit row — AGENTS.md §6).
+#[derive(Debug, Deserialize)]
+pub struct ProbeTeamsBody {
+    pub api_token: String,
+}
+
+/// JSON shape returned by the teams probe on success.
+#[derive(Debug, Serialize)]
+pub struct ProbeTeamsResponse {
+    pub ok: bool,
+    pub count: usize,
+    pub teams: Vec<serde_json::Value>,
+}
+
+/// Host of the configured `base_url`, for the `_host:<host>`
+/// audit companion row.
+fn base_url_host(cfg: &ShortcutConfig) -> String {
+    Url::parse(&cfg.base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_default()
+}
+
+/// Handler: list `GET /teams` with the supplied token. The wire
+/// call goes through the shared `nagent_shortcut::ShortcutClient`
+/// (same egress SSRF pre-flight + `[agents.shortcut].allowlist`
+/// as the chat agents); the token only ever travels in the
+/// `Shortcut-Token` header.
+pub async fn probe_teams(
+    State(state): State<ProbeState<ShortcutTeamsProbeConfig>>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Json(body): Json<ProbeTeamsBody>,
+) -> Result<Response, AuthError> {
+    let host = base_url_host(&state.cfg.0);
+    if body.api_token.trim().is_empty() {
+        write_probe_audit(&state, user.id, &host, ProbeOutcome::BadRequest);
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            "api_token is required".into(),
+        ));
+    }
+    let wire_cfg: nagent_shortcut::ShortcutConfig = state.cfg.0.clone().into();
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| AuthError::Internal(format!("probe client: {e}")))?;
+    let client = nagent_shortcut::ShortcutClient::new(wire_cfg, http);
+    let token = secrecy::SecretString::from(body.api_token.trim().to_string());
+    let result = client.get(&token, "/teams", &[]).await;
+    match result {
+        Ok(raw) => {
+            let teams: Vec<serde_json::Value> = raw
+                .as_array()
+                .map(|arr| arr.iter().map(nagent_shortcut::project_team).collect())
+                .unwrap_or_default();
+            write_probe_audit(&state, user.id, &host, ProbeOutcome::Ok);
+            Ok((
+                StatusCode::OK,
+                Json(ProbeTeamsResponse {
+                    ok: true,
+                    count: teams.len(),
+                    teams,
+                }),
+            )
+                .into_response())
+        }
+        Err(e) => {
+            let (outcome, resp) = match &e {
+                nagent_shortcut::ShortcutError::Unauthorized(msg) => (
+                    ProbeOutcome::AuthRejected,
+                    error_response(StatusCode::BAD_GATEWAY, msg.clone()),
+                ),
+                nagent_shortcut::ShortcutError::RateLimited { hint } => (
+                    ProbeOutcome::UpstreamError,
+                    error_response(StatusCode::TOO_MANY_REQUESTS, hint.clone()),
+                ),
+                nagent_shortcut::ShortcutError::SandboxDenied(msg) => (
+                    ProbeOutcome::NotInAllowlist,
+                    error_response(StatusCode::FORBIDDEN, msg.clone()),
+                ),
+                nagent_shortcut::ShortcutError::InvalidArguments(msg) => (
+                    ProbeOutcome::BadRequest,
+                    error_response(StatusCode::BAD_REQUEST, msg.clone()),
+                ),
+                nagent_shortcut::ShortcutError::Upstream { status, body } => (
+                    ProbeOutcome::UpstreamError,
+                    error_response(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Shortcut returned HTTP {status}: {body}"),
+                    ),
+                ),
+                nagent_shortcut::ShortcutError::ResponseExceeded { budget } => (
+                    ProbeOutcome::UpstreamError,
+                    error_response(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Shortcut response exceeded the {budget}-byte budget"),
+                    ),
+                ),
+                nagent_shortcut::ShortcutError::Transport(msg) => (
+                    ProbeOutcome::TransportError,
+                    error_response(StatusCode::BAD_GATEWAY, msg.clone()),
+                ),
+            };
+            write_probe_audit(&state, user.id, &host, outcome);
+            Ok(resp)
+        }
+    }
+}
+
+/// Build the teams-probe router subtree. Same feature gate and
+/// mounting as `build_shortcut_probe_router`.
+pub fn build_shortcut_probe_teams_router(
+    state: Arc<crate::AppState>,
+) -> axum::Router<Arc<crate::AppState>> {
+    let probe_state = ProbeState::<ShortcutTeamsProbeConfig> {
+        cfg: Arc::new(ShortcutTeamsProbeConfig(
+            state.config.agents.shortcut.clone(),
+        )),
+        store: state
+            .auth
+            .as_ref()
+            .expect("shortcut probe-teams requires auth to be enabled")
+            .store
+            .clone(),
+    };
+    axum::Router::new()
+        .route(
+            "/api/integrations/shortcut/probe-teams",
+            axum::routing::post(probe_teams),
+        )
+        .with_state(probe_state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -149,6 +149,45 @@ pub fn name_of_member(v: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Project one Shortcut team object (`GET /teams`, formerly
+/// `/groups`) into the LLM / UI-facing row. The `id` is the UUID
+/// used as `group_id` when creating a story; `mention_name` is the
+/// handle used in `team:<mention>` search operators.
+pub fn project_team(t: &Value) -> Value {
+    json!({
+        "id": t.get("id"),
+        "name": t.get("name"),
+        "mention_name": t.get("mention_name"),
+        "description": t.get("description"),
+        "archived": t.get("archived"),
+        "workflow_ids": t.get("workflow_ids"),
+        "app_url": t.get("app_url"),
+    })
+}
+
+/// Match a team by UUID, `name`, or `mention_name`
+/// (case-insensitive, `@`-tolerant for the mention name). Returns
+/// the raw team object when found.
+pub fn find_team<'a>(teams: &'a Value, query: &str) -> Option<&'a Value> {
+    let q = normalize_handle(query);
+    if q.is_empty() {
+        return None;
+    }
+    let arr = teams.as_array()?;
+    arr.iter().find(|t| {
+        t.get("id").and_then(|v| v.as_str()).is_some_and(|id| {
+            // UUIDs are case-insensitive hex+dash; compare lowered.
+            id.to_lowercase() == q
+        }) || t
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n.to_lowercase() == q)
+            || t.get("mention_name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|m| normalize_handle(m) == q)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

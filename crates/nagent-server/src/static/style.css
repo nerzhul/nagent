@@ -2837,7 +2837,8 @@ select, input[type="checkbox"] {
   opacity: 0.85;
 }
 .chat-integration-field input,
-.chat-integration-field select {
+.chat-integration-field select,
+.chat-integration-field textarea {
   /* Generous vertical padding keeps the field easy to scan
    * and gives the user enough room to type / verify long
    * URLs and tokens without crowding. The same shape is
@@ -2856,14 +2857,22 @@ select, input[type="checkbox"] {
   opacity: 0.5;
 }
 .chat-integration-field input:hover,
-.chat-integration-field select:hover {
+.chat-integration-field select:hover,
+.chat-integration-field textarea:hover {
   border-color: var(--chat-input-border-hover, #5a5e64);
 }
 .chat-integration-field input:focus,
-.chat-integration-field select:focus {
+.chat-integration-field select:focus,
+.chat-integration-field textarea:focus {
   outline: none;
   border-color: var(--chat-accent-fg, #8ab4ff);
   box-shadow: 0 0 0 3px rgba(138, 180, 255, 0.18);
+}
+.chat-integration-field textarea.chat-integration-templates {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  min-height: 7rem;
+  resize: vertical;
 }
 
 /* `<select>` dropdown chevron + native-chrome strip (plan
