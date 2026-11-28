@@ -17,7 +17,7 @@ read-only plus one write (`shortcut_create_story`):
 | `shortcut_list_backlog` | `GET /search/stories` with the configured `backlog_query` | `limit?` (default 50, cap 200) |
 | `shortcut_get_story` | `GET /stories/{id}` + `GET /stories/{id}/comments` | `story_id` (description/comments capped) |
 | `shortcut_list_labels` | `GET /labels` | `limit?` (default 100, cap 200) |
-| `shortcut_list_teams` | `GET /teams` | — (UUID / name / mention name per team) |
+| `shortcut_list_teams` | `GET /groups` | — (UUID / name / mention name per group) |
 | `shortcut_list_templates` | local read of the `story_templates` vault field | — (no API call, no confirmation) |
 | `shortcut_create_story` | `POST /stories` | see below — **write**, confirm-on-write |
 
@@ -45,12 +45,15 @@ args: {
   description?: string,
   details?: string,              // substituted into the template's {details}
   labels?: string[],
-  epic_id?: int, project_id?: int, workflow_state_id?: int,
+  epic_id?: int, project_id?: int,  // optional; no saved default
+  workflow_state_id?: int,           // default = saved default_workflow_state, else first unstarted state of default_workflow
   team?: string,                 // UUID, name or mention name; default = saved default_team
   auto_epic?: bool (default true)
 }
 → {"ok": true, "data": {"story": {…}, "template": "bug",
-   "team": {"id": "…", "source": "default_team"}, "owner_id": "…",
+   "team": {"id": "…", "source": "default_team"},
+   "workflow_state": {"id": 500000002, "source": "default_workflow_state"},
+   "owner_id": "…",
    "epic_match": {"epic_id": 7, "auto": true}            // or "epic_candidates": […]}}
 ```
 
@@ -65,15 +68,29 @@ Resolution order (explicit args always win):
    one, the tool fails with an `InvalidArguments` error telling the
    LLM to ask the user whether the story is a feature, a bug or a
    chore — the model never guesses.
-3. **`team`** — matched against `GET /teams` by UUID / name /
+3. **`team`** — matched against `GET /groups` by UUID / name /
    mention name, else the saved `default_team` field; the UUID is
    sent as `group_id`.
-4. **`owner_ids`** — the caller's own member, resolved from the
+4. **`project_id`** — explicit arg only (optional numeric project
+   id; there is no saved default project).
+5. **`owner_ids`** — the caller's own member, resolved from the
    saved `username` against `GET /members`, so the story is
    created in their name.
-5. **`epic_id`** — explicit arg, else (with `auto_epic`, default
+6. **`epic_id`** — explicit arg, else (with `auto_epic`, default
    true) a local BM25 ranking of the open epics against the
    story's name + description (see below).
+7. **`workflow_state_id`** — explicit arg, else the saved
+   `default_workflow_state` field, else the first `unstarted` state
+   (by position) of the saved `default_workflow` field; when none is
+   set the key is omitted and Shortcut uses the team's default
+   initial state.
+
+The saved per-user defaults (`default_team`, `default_workflow` /
+`default_workflow_state`, owner = the caller) apply silently — the
+tool description tells the LLM NOT to ask the user for fields that
+have a saved default, only to ask about `story_type` when unclear or
+about an explicit `project_id` / `epic_id` / `team` /
+`workflow_state_id` the user actually mentions.
 
 After a successful create, the cached story lists
 (`api_list_stories`, `shortcut_list_backlog`,
@@ -185,12 +202,15 @@ When both are saved, the OAuth `access_token` wins everywhere
 | `api_token` | Password (fallback) | user, via the form |
 | `username` | Text | probe (mention name) |
 | `show_dashboard` | Checkbox | user |
-| `default_team` | Text (JSON `{"id","name"}`) | team picker |
+| `default_team` | Text (JSON `{"id","name"}` — group UUID) | group dropdown |
+| `default_workflow` | Text (JSON `{"id","name"}` — numeric workflow id) | workflow dropdown |
+| `default_workflow_state` | Text (JSON `{"id","name","category"}` — numeric state id) | state dropdown (scoped to `default_workflow`) |
 | `story_templates` | Text (JSON array) | user |
 
 The OAuth callback writes its rows with a **merge** (not the
 atomic full-service replace), so connecting via OAuth never erases
-a saved `api_token` / `username` / `default_team`.
+a saved `api_token` / `username` / `default_team` /
+`default_workflow` / `default_workflow_state`.
 
 The six OAuth rows are `managed_fields` on the `ServiceDef`: the
 integrations form does **not** render them as inputs (they are
@@ -211,33 +231,85 @@ POST /api/integrations/shortcut/probe
 POST /api/integrations/shortcut/probe-teams
 {"api_token": "…"}                              // or {"access_token": "…"}
 → 200 {"ok": true, "count": 2, "teams": [{id, name, mention_name, workflow_ids, …}]}
+
+POST /api/integrations/shortcut/probe-workflows
+{"api_token": "…"}                              // or {"access_token": "…"}
+→ 200 {"ok": true, "count": 5, "states": [{id, name, category, workflow_id, workflow_name, …}],
+       "workflows": [{id, name, state_count, …}]}
 ```
 
 `username` is optional on the member probe: without it the probe
 only succeeds when the workspace lists a single member. The
-`probe-teams` endpoint never reads the vault — the body credential
-drives the `GET /teams` call — so the "Default team" dropdown works
-before anything is saved.
+`probe-teams` / `probe-workflows` endpoints never read the vault —
+the body credential drives the `GET /groups` / `GET /workflows`
+call — so the group and state dropdowns work before anything is
+saved.
 
 Every probe call writes one `auth_events` row of kind
 `shortcut_probe_<outcome>` (plus a `_host:<host>` companion). The
 token never lands on the audit row.
 
-### Default team + story shortcuts (per-user fields)
+### Default group + story shortcuts (per-user fields)
 
 Two optional fields on the same form feed the write path:
 
-- **`default_team`** — stored as `{"id": "<team-uuid>", "name":
-  "Engineering"}` and picked from a dropdown (never typed by hand).
-  The dropdown is fed by `GET /api/integrations/shortcut/teams`
-  (proxies `GET /teams` with the saved vault token) and, before the
-  token is saved, by the setup-only `POST
-  /api/integrations/shortcut/probe-teams` with the token typed in
-  the form (same pattern as the CalDAV `probe-calendars` picker and
-  the GitHub repo picker). `shortcut_create_story` sends the UUID as
-  `group_id` when the chat request does not name a team. Audit
+- **`default_team`** — the default **group**, stored as
+  `{"id": "<group-uuid>", "name": "Vultures"}` and picked in a custom
+  dropdown listing the workspace groups with their icon
+  (`display_icon.url` → `icon_url` in the projection) and
+  `@mention_name` (never typed by hand; the key keeps its historical
+  name `default_team`). The group list is fed by
+  `GET /api/integrations/shortcut/teams` (proxies `GET /groups` with
+  the saved vault token) and, before the token is saved, by the
+  setup-only `POST /api/integrations/shortcut/probe-teams` with the
+  token typed in the form. `shortcut_create_story` sends the UUID as
+  `group_id` when the chat request does not name a group. Audit
   kinds: `shortcut_api_teams_<outcome>` /
   `shortcut_probe_teams_<outcome>`.
+
+Terminology note — groups vs teams: stories are filed into a
+**group**, and `POST /stories` takes the group UUID as `group_id`
+(see <https://developer.shortcut.com/api/rest/v3#Body-Parameters-33387>;
+a created story echoes it back as `group_id`). The public REST API v3
+serves those UUID-id groups at
+**`GET /api/v3/groups`** (<https://developer.shortcut.com/api/rest/v3#Groups>)
+— that is the only endpoint nagent calls. (In the web app's private
+browser API the same entities appear at
+`app.shortcut.com/backend/api/private/groups`; the private
+`…/private/teams` endpoint returns a different internal record with
+a numeric `id`, which is not a valid `group_id`. The private API
+needs the browser session cookie and is never used server-side.)
+So the UUID picked from `GET /groups` in the dropdown — stored in
+`default_team` — is exactly the `group_id` sent on story creation.
+Projects are a separate optional attribute of a story
+(`project_id`, numeric); there is no saved default project, the
+chat tool accepts an explicit `project_id` argument.
+
+- **`default_workflow`** — the default **workflow**, stored as
+  `{"id": 500000001, "name": "Engineering"}` and picked in a
+  dropdown listing the workspace workflows (`GET /workflows`).
+  When no `default_workflow_state` is saved,
+  `shortcut_create_story` derives the state: the first `unstarted`
+  state of this workflow by `position` (read from a cached
+  `GET /workflows`) is sent as `workflow_state_id`. The state
+  dropdown below is scoped to this workflow.
+
+- **`default_workflow_state`** — the default **workflow state**,
+  stored as `{"id": 500000002, "name": "Ready for Dev", "category": "unstarted"}`
+  and picked in a dropdown listing the workflow's states
+  (`GET /workflows`, flattened; the numeric state id is what
+  `POST /stories` expects as `workflow_state_id`). The list is fed
+  by `GET /api/integrations/shortcut/workflows` (proxies
+  `GET /workflows` with the saved vault token) and, before the token
+  is saved, by the setup-only
+  `POST /api/integrations/shortcut/probe-workflows` with the token
+  typed in the form. `shortcut_create_story` sends the id as
+  `workflow_state_id` when the chat request does not pass an
+  explicit `workflow_state_id` and no state is saved; when neither
+  applies the key is omitted and Shortcut uses the team's default
+  initial state. Audit kinds: `shortcut_api_workflows_<outcome>` /
+  `shortcut_probe_workflows_<outcome>`.
+
 - **`story_templates`** — a JSON array of story shortcuts, edited as
   text in the form, e.g.
   `[{"name":"bug","story_type":"bug","labels":["bug"],"description_template":"## Steps\n{details}"}]`.
@@ -271,8 +343,11 @@ GET /api/integrations/shortcut/stories/{id}
                 "comments": [{id, author_id, text, …}]}}
 GET /api/integrations/shortcut/me
 → 200 {"data": {"id": "<member-uuid>", "name": "Jane Doe", "mention_name": "jane"}}
-GET /api/integrations/shortcut/teams
+GET /api/integrations/shortcut/teams        (proxies `GET /groups`)
 → 200 {"data": {"count": 2, "teams": [{id, name, mention_name, workflow_ids, …}]}}
+GET /api/integrations/shortcut/workflows    (proxies `GET /workflows`)
+→ 200 {"data": {"count": 5, "states": [{id, name, category, workflow_id, workflow_name, …}],
+                "workflows": [{id, name, state_count, …}]}}
 ```
 
 The list query is composed **server-side** and always scoped to the

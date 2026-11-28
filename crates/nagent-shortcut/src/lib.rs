@@ -44,12 +44,14 @@ pub mod project;
 pub mod rank;
 
 pub use client::{
-    add_story_comment, build_url, create_story, get_story_detail, list_stories, list_teams,
-    redact_auth_headers, truncate, ShortcutAuth, ShortcutClient, MAX_RAW_RESPONSE_BYTES,
+    add_story_comment, build_url, create_story, fetch_groups, fetch_workflows, get_story_detail,
+    list_stories, list_teams, list_workflows, redact_auth_headers, truncate, ShortcutAuth,
+    ShortcutClient, MAX_RAW_RESPONSE_BYTES,
 };
 pub use project::{
     find_member, find_team, label_names, label_objects, mention_name_of, name_of_member,
-    project_comment, project_story, project_story_detail, project_team,
+    project_comment, project_project, project_story, project_story_detail, project_team,
+    project_workflow, project_workflow_state,
 };
 pub use rank::{rank_open_epics, EpicCandidate};
 

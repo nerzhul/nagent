@@ -35,8 +35,19 @@
 //!   adjacent: `echo_on_edit = false` so the saved value is
 //!   not re-displayed on every form open.
 //! - `show_dashboard` (Checkbox) — gates the "Stories" dashboard tab.
-//! - `default_team` (Text, JSON `{"id","name"}`) — the team
-//!   `shortcut_create_story` targets by default (`group_id`).
+//! - `default_team` (Text, JSON `{"id","name"}`) — the **group**
+//!   (Shortcut UI "team", UUID id) `shortcut_create_story` targets by
+//!   default (`group_id`). The key keeps its historical name
+//!   `default_team`; the value is the group UUID from `GET /groups`.
+//! - `default_workflow` (Text, JSON `{"id","name"}`) — the workflow
+//!   `shortcut_create_story` defaults to; when no `default_workflow_state`
+//!   is saved, the first `unstarted` state of this workflow (by
+//!   position) is used as `workflow_state_id`.
+//! - `default_workflow_state` (Text, JSON `{"id","name","category"}`)
+//!   — the workflow **state** `shortcut_create_story` sets by default
+//!   (`workflow_state_id`, numeric state id). The value is picked
+//!   from `GET /workflows` states (scoped to `default_workflow` in
+//!   the UI).
 //! - `story_templates` (Text, JSON array) — the per-user story
 //!   shortcuts applied through `shortcut_create_story`'s
 //!   `template` argument.
@@ -194,18 +205,58 @@ pub const SHORTCUT_SERVICE: ServiceDef = ServiceDef {
         },
         FieldDef {
             key: "default_team",
-            label: "Default team for new stories",
+            label: "Default group for new stories",
             kind: FieldKind::Text,
             required: false,
             help: Some(
-                "Team that `shortcut_create_story` targets when the chat request does not \
+                "Group that `shortcut_create_story` targets when the chat request does not \
                  name one. Pick it in the dropdown below (loaded live from your workspace \
-                 via `GET /teams`); the form stores the team UUID and the chat tool sends \
-                 it as `group_id` when the story is created.",
+                 via `GET /groups` — the UUID-id entities; their UUID is what \
+                 `POST /stories` expects as `group_id`); the form stores the group UUID \
+                 and the chat tool sends it as `group_id` when the story is created.",
             ),
-            placeholder: Some("— picked from the team list —"),
+            placeholder: Some("— picked from the group list —"),
             options: &[],
-            // Not a secret: the saved team echoes back so the
+            // Not a secret: the saved group echoes back so the
+            // dropdown re-selects it when the form reopens. The row
+            // is still AES-256-GCM encrypted at rest in the vault.
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+        },
+        FieldDef {
+            key: "default_workflow",
+            label: "Default workflow for new stories",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some(
+                "Workflow that `shortcut_create_story` defaults to. Pick it in the dropdown \
+                 below (loaded live from your workspace via `GET /workflows`). When no \
+                 explicit state is chosen below, the first `unstarted` state of this \
+                 workflow (by position) is sent as `workflow_state_id`. The state dropdown \
+                 is scoped to this workflow.",
+            ),
+            placeholder: Some("— picked from the workflow list —"),
+            options: &[],
+            // Not a secret: the saved workflow echoes back so the
+            // dropdown re-selects it when the form reopens. The row
+            // is still AES-256-GCM encrypted at rest in the vault.
+            echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,
+        },
+        FieldDef {
+            key: "default_workflow_state",
+            label: "Default state for new stories",
+            kind: FieldKind::Text,
+            required: false,
+            help: Some(
+                "Workflow state that `shortcut_create_story` sets when the chat request does \
+                 not name one. Pick it in the dropdown below (loaded live from your workspace \
+                 via `GET /workflows`; the numeric state id is what `POST /stories` expects as \
+                 `workflow_state_id`). The list is scoped to the default workflow chosen above. \
+                 When left empty, the first `unstarted` state of the default workflow is used, \
+                 else Shortcut uses the team's default initial state.",
+            ),
+            placeholder: Some("— picked from the workflow state list —"),
+            options: &[],
+            // Not a secret: the saved state echoes back so the
             // dropdown re-selects it when the form reopens. The row
             // is still AES-256-GCM encrypted at rest in the vault.
             echo_on_edit: ECHO_ON_EDIT_NON_PASSWORD,

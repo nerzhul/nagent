@@ -1,16 +1,16 @@
-//! `shortcut_list_teams` — `GET /teams`: the workspace's teams
-//! (formerly "groups"), projected for the chat. Each team carries
+//! `shortcut_list_teams` — `GET /groups`:
+//! the workspace's groups, projected for the chat. Each group carries
 //! its UUID `id` (sent as `group_id` when creating a story), its
 //! `name`, and its `mention_name` (the handle used in `team:<…>`
 //! search operators). Pairs with `shortcut_create_story`'s `team`
-//! argument to resolve a team name to its UUID, and with the
-//! integrations UI's "default team" picker.
+//! argument to resolve a group name to its UUID, and with the
+//! integrations UI's "default group" picker.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::client::ShortcutClient;
-use super::{confirm_reason, project_team, run};
+use super::{cached_get_groups, confirm_reason, project_team};
 use crate::agents::{Agent, AgentError, UserContext};
 
 pub struct ListTeamsAgent {
@@ -30,8 +30,8 @@ impl Agent for ListTeamsAgent {
     }
 
     fn description(&self) -> &str {
-        "List the Shortcut teams of the workspace (`GET /teams`) with their UUID `id`, \
-         `name`, `mention_name`, and `workflow_ids`. Use it to resolve a team name to the \
+        "List the Shortcut groups of the workspace (`GET /groups`) with their UUID `id`, \
+         `name`, `mention_name`, and `workflow_ids`. Use it to resolve a group name to the \
          UUID that `shortcut_create_story`'s `team` / `group_id` expects, or to pick the \
          `default_team` saved in the integrations UI. No args. Read-only."
     }
@@ -68,29 +68,21 @@ impl Agent for ListTeamsAgent {
         true
     }
 
-    async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError> {
-        run(
-            &self.client,
-            ctx,
-            self.name(),
-            &args,
-            "/teams",
-            Vec::new(),
-            |raw, _cfg| {
-                let teams: Vec<Value> = raw
-                    .as_array()
-                    .map(|arr| arr.iter().map(project_team).collect())
-                    .unwrap_or_default();
-                json!({
-                    "ok": true,
-                    "data": {
-                        "count": teams.len(),
-                        "teams": teams,
-                    }
-                })
-            },
-        )
-        .await
+    async fn invoke(&self, ctx: &UserContext, _args: Value) -> Result<String, AgentError> {
+        let raw = cached_get_groups(&self.client, ctx, self.name()).await?;
+        let teams: Vec<Value> = raw
+            .as_array()
+            .map(|arr| arr.iter().map(project_team).collect())
+            .unwrap_or_default();
+        let out = json!({
+            "ok": true,
+            "data": {
+                "count": teams.len(),
+                "teams": teams,
+            }
+        });
+        serde_json::to_string(&out)
+            .map_err(|e| AgentError::AgentFailed(format!("shortcut encode: {e}")))
     }
 }
 

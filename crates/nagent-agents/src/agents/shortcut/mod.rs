@@ -202,6 +202,26 @@ pub(crate) async fn cached_get(
     Ok(raw)
 }
 
+/// Cached `GET /groups` (legacy-alias fallback included) for the
+/// group-list lookups inside `shortcut_create_story` and
+/// `shortcut_list_teams`. Same cache discipline as [`cached_get`].
+pub(crate) async fn cached_get_groups(
+    client: &ShortcutClient,
+    ctx: &UserContext,
+    tool: &str,
+) -> Result<Value, AgentError> {
+    let args = serde_json::json!({});
+    if let Some(cached) = client.cache_get(ctx.user_id(), tool, &args) {
+        return serde_json::from_str(&cached)
+            .map_err(|e| AgentError::AgentFailed(format!("shortcut cache decode: {e}")));
+    }
+    let raw = client.get_groups(ctx).await?;
+    let encoded = serde_json::to_string(&raw)
+        .map_err(|e| AgentError::AgentFailed(format!("shortcut encode: {e}")))?;
+    client.cache_put(ctx.user_id(), tool, &args, encoded);
+    Ok(raw)
+}
+
 /// Parse the `limit` argument: default `default`, clamped to
 /// `[1, cfg.max_items]`.
 pub(crate) fn parse_limit(args: &Value, cfg: &ShortcutAgentConfig, default: usize) -> usize {
@@ -389,6 +409,10 @@ mod loopback {
             } else if service == "shortcut" && field == "default_team" {
                 Ok(Some(secrecy::SecretString::from(
                     r#"{"id":"team-uuid-1","name":"Engineering"}"#,
+                )))
+            } else if service == "shortcut" && field == "default_workflow_state" {
+                Ok(Some(secrecy::SecretString::from(
+                    r#"{"id":500000002,"name":"Ready for Dev","category":"unstarted"}"#,
                 )))
             } else if service == "shortcut" && field == "story_templates" {
                 Ok(Some(secrecy::SecretString::from(concat!(
@@ -608,7 +632,7 @@ mod loopback {
                 })),
             );
         }
-        if method == "GET" && path == "/teams" {
+        if method == "GET" && path == "/groups" {
             return (
                 200,
                 "OK",
@@ -619,6 +643,24 @@ mod loopback {
                      "app_url": "https://app.shortcut.com/ws/eng"},
                     {"id": "team-uuid-2", "name": "Design", "mention_name": "design",
                      "workflow_ids": [500000002], "archived": false}
+                ])),
+            );
+        }
+        if method == "GET" && path == "/workflows" {
+            return (
+                200,
+                "OK",
+                vec![],
+                json(json!([
+                    {"id": 500000001, "name": "Engineering", "states": [
+                        {"id": 500000001, "name": "Unscheduled", "category": "unstarted", "type": "unstarted", "position": 1},
+                        {"id": 500000002, "name": "Ready for Dev", "category": "unstarted", "type": "unstarted", "position": 2},
+                        {"id": 500000003, "name": "In Development", "category": "started", "type": "started", "position": 3}
+                    ]},
+                    {"id": 500000002, "name": "Design", "states": [
+                        {"id": 500000011, "name": "Backlog", "category": "unstarted", "type": "unstarted", "position": 1},
+                        {"id": 500000012, "name": "In Review", "category": "started", "type": "started", "position": 2}
+                    ]}
                 ])),
             );
         }
@@ -1001,7 +1043,7 @@ mod loopback {
         assert_eq!(v["data"]["count"], 2);
         assert_eq!(v["data"]["teams"][0]["id"], "team-uuid-1");
         assert_eq!(v["data"]["teams"][0]["mention_name"], "eng");
-        assert_eq!(fx.requests()[0].0, "GET /teams HTTP/1.1");
+        assert_eq!(fx.requests()[0].0, "GET /groups HTTP/1.1");
     }
 
     #[tokio::test]
@@ -1055,6 +1097,15 @@ mod loopback {
             "owner = caller's member resolved from saved username"
         );
         assert_eq!(sent["epic_id"], 7);
+        assert_eq!(
+            sent["workflow_state_id"], 500000002,
+            "saved default_workflow_state → workflow_state_id"
+        );
+        assert_eq!(
+            v["data"]["workflow_state"]["source"],
+            "default_workflow_state"
+        );
+        assert_eq!(v["data"]["workflow_state"]["id"], 500000002);
         assert_eq!(sent["labels"][0]["name"], "bug");
         let desc = sent["description"].as_str().unwrap();
         assert!(
@@ -1134,6 +1185,96 @@ mod loopback {
         let sent: Value = serde_json::from_str(&fx.bodies()[0]).unwrap();
         assert_eq!(sent["group_id"], "team-uuid-2");
         assert!(sent.get("epic_id").is_none());
+    }
+
+    /// `SecretSource` with a saved `default_workflow` but NO saved
+    /// `default_workflow_state` — exercises the state derivation
+    /// from the default workflow's first `unstarted` state.
+    struct WorkflowOnlySecrets;
+
+    #[async_trait::async_trait]
+    impl SecretSource for WorkflowOnlySecrets {
+        async fn fetch(
+            &self,
+            _user_id: uuid::Uuid,
+            service: &str,
+            field: &str,
+        ) -> Result<Option<secrecy::SecretString>, AgentError> {
+            if service == "shortcut" && field == "api_token" {
+                Ok(Some(secrecy::SecretString::from(TEST_TOKEN)))
+            } else if service == "shortcut" && field == "username" {
+                Ok(Some(secrecy::SecretString::from("jane")))
+            } else if service == "shortcut" && field == "default_workflow" {
+                Ok(Some(secrecy::SecretString::from(
+                    r#"{"id":500000002,"name":"Design"}"#,
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_story_derives_state_from_default_workflow() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = UserContext::new(
+            uuid::Uuid::new_v4(),
+            Arc::new(ServiceRegistry::empty()),
+            Arc::new(WorkflowOnlySecrets),
+        );
+        let agent = super::create_story::CreateStoryAgent::new(client);
+        let out = agent
+            .invoke(
+                &ctx,
+                json!({
+                    "name": "New icon set",
+                    "story_type": "feature",
+                    "auto_epic": false,
+                }),
+            )
+            .await
+            .expect("invoke");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["data"]["workflow"]["id"], 500000002);
+        assert_eq!(v["data"]["workflow"]["source"], "default_workflow");
+        // First unstarted state of workflow 500000002 by position.
+        assert_eq!(v["data"]["workflow_state"]["id"], 500000011);
+        assert_eq!(v["data"]["workflow_state"]["source"], "default_workflow");
+        let sent: Value = serde_json::from_str(&fx.bodies()[0]).unwrap();
+        assert_eq!(sent["workflow_state_id"], 500000011);
+        assert!(
+            fx.requests()
+                .iter()
+                .any(|(l, _)| l.starts_with("GET /workflows")),
+            "the derivation must read GET /workflows; got {:?}",
+            fx.requests()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_story_explicit_workflow_state_arg_wins_over_saved_default() {
+        let fx = Fixture::start().await;
+        let client = ShortcutClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = test_ctx();
+        let agent = super::create_story::CreateStoryAgent::new(client);
+        let out = agent
+            .invoke(
+                &ctx,
+                json!({
+                    "name": "Ship it",
+                    "story_type": "chore",
+                    "workflow_state_id": 500000009,
+                    "auto_epic": false,
+                }),
+            )
+            .await
+            .expect("invoke");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["data"]["workflow_state"]["id"], 500000009);
+        assert_eq!(v["data"]["workflow_state"]["source"], "arg");
+        let sent: Value = serde_json::from_str(&fx.bodies()[0]).unwrap();
+        assert_eq!(sent["workflow_state_id"], 500000009);
     }
 
     // ------------------------------------------------------------------

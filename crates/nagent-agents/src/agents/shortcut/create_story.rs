@@ -13,16 +13,29 @@
 //!    `InvalidArguments` telling the LLM to ask the user whether the
 //!    story is a feature, a bug or a chore (never guess).
 //! 3. `team` — arg (UUID, name or mention name, matched against
-//!    `GET /teams`), else the saved `default_team` vault field; the
+//!    `GET /groups`), else the saved `default_team` vault field; the
 //!    resolved UUID is sent as `group_id`.
-//! 4. `owner_ids` — the caller's own member, resolved from the saved
+//! 4. `project_id` — explicit arg only (optional numeric project id;
+//!    no saved default).
+//! 5. `owner_ids` — the caller's own member, resolved from the saved
 //!    `username` against `GET /members`, so the story is created in
 //!    their name.
-//! 5. `epic_id` — arg, else (with `auto_epic`, default true) a local
+//! 6. `epic_id` — arg, else (with `auto_epic`, default true) a local
 //!    BM25 ranking of the open epics against the story's
 //!    name + description; a confident top-1 is attached
 //!    automatically (`epic_match` in the response), otherwise the
 //!    top-3 are returned as `epic_candidates` and no epic is set.
+//! 7. `workflow_state_id` — arg, else the saved `default_workflow_state`
+//!    vault field, else the first `unstarted` state (by position) of the
+//!    saved `default_workflow` vault field; when none is set the key is
+//!    omitted and Shortcut uses the team's default initial state.
+//!
+//! The saved per-user defaults (`default_team`, `default_workflow` /
+//! `default_workflow_state`, owner = the caller) apply silently: the
+//! LLM must NOT ask the user for those fields when they are configured —
+//! only `story_type` (when unclear) and an explicit `project_id` /
+//! `epic_id` / `team` / `workflow_state_id` the user actually mentions
+//! are worth a question.
 //!
 //! Confirmation: strict per-call inline approval card; the
 //! session-wide "Toujours pour cette session" override is allowed
@@ -34,8 +47,8 @@ use serde_json::{json, Value};
 
 use super::client::ShortcutClient;
 use super::{
-    cached_get, confirm_reason_write, find_team, find_template, load_templates, optional_secret,
-    parse_enum, parse_required_str, project_story,
+    cached_get, cached_get_groups, confirm_reason_write, find_team, find_template, load_templates,
+    optional_secret, parse_enum, parse_required_str, project_story,
 };
 use crate::agents::{Agent, AgentError, ConfirmationDecision, UserContext};
 
@@ -52,12 +65,15 @@ const AUTO_EPIC_MIN_RATIO: f64 = 1.5;
 /// Cap on the number of labels sent with the story.
 const MAX_LABELS: usize = 20;
 
-/// Cache tool name for the `GET /teams` list used to resolve `team`.
+/// Cache tool name for the `GET /groups` list used to resolve `team`.
 const TEAMS_CACHE_TOOL: &str = "api_teams";
 /// Cache tool name for the `GET /members` list used to resolve the owner.
 const MEMBERS_CACHE_TOOL: &str = "shortcut_me";
 /// Cache tool name for the `GET /epics` list used by `auto_epic`.
 const EPICS_CACHE_TOOL: &str = "shortcut_auto_epic";
+/// Cache tool name for the `GET /workflows` list used to derive the
+/// default state from the saved `default_workflow`.
+const WORKFLOWS_CACHE_TOOL: &str = "shortcut_default_workflow";
 
 pub struct CreateStoryAgent {
     client: ShortcutClient,
@@ -174,8 +190,138 @@ async fn load_default_team(ctx: &UserContext) -> Result<Option<(String, String)>
     }
 }
 
+/// Parse the saved `default_workflow_state` vault field:
+/// `{"id": <state-id>, "name": "…", "category": "…"}` →
+/// `(id, name, category)`. `id` must be a positive integer (the
+/// numeric workflow state id sent as `workflow_state_id`).
+async fn load_default_workflow_state(
+    ctx: &UserContext,
+) -> Result<Option<(u64, String, String)>, AgentError> {
+    let Some(secret) = optional_secret(ctx.secret("shortcut", "default_workflow_state").await)?
+    else {
+        return Ok(None);
+    };
+    let text = secret.expose_secret();
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let parsed: Value = serde_json::from_str(text).map_err(|e| {
+        AgentError::InvalidArguments(format!(
+            "the saved `default_workflow_state` field is not valid JSON ({e}); fix it in \
+             Settings → Integrations → Shortcut"
+        ))
+    })?;
+    let id = parsed
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            AgentError::InvalidArguments(
+                "the saved `default_workflow_state` field must be a JSON object with a \
+                 positive-integer `id` (the numeric workflow state id); pick a state in \
+                 Settings → Integrations → Shortcut"
+                    .into(),
+            )
+        })?;
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let category = parsed
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(Some((id, name, category)))
+}
+
+/// Parse the saved `default_workflow` vault field:
+/// `{"id": <workflow-id>, "name": "…"}` → `(id, name)`. `id` must
+/// be a positive integer (the numeric workflow id from
+/// `GET /workflows`).
+async fn load_default_workflow(ctx: &UserContext) -> Result<Option<(u64, String)>, AgentError> {
+    let Some(secret) = optional_secret(ctx.secret("shortcut", "default_workflow").await)? else {
+        return Ok(None);
+    };
+    let text = secret.expose_secret();
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let parsed: Value = serde_json::from_str(text).map_err(|e| {
+        AgentError::InvalidArguments(format!(
+            "the saved `default_workflow` field is not valid JSON ({e}); fix it in \
+             Settings → Integrations → Shortcut"
+        ))
+    })?;
+    let id = parsed
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            AgentError::InvalidArguments(
+                "the saved `default_workflow` field must be a JSON object with a \
+                 positive-integer `id` (the numeric workflow id); pick a workflow in \
+                 Settings → Integrations → Shortcut"
+                    .into(),
+            )
+        })?;
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(Some((id, name)))
+}
+
+/// Derive the default workflow state of a workflow: the first
+/// `unstarted` state by `position` (what the Shortcut UI treats as
+/// the initial column). Best-effort — `None` when the workflow is
+/// unknown or the `/workflows` call fails (creation must not be
+/// blocked by it).
+async fn derive_state_from_workflow(
+    client: &ShortcutClient,
+    ctx: &UserContext,
+    workflow_id: u64,
+) -> Option<(u64, String, String)> {
+    let raw = cached_get(client, ctx, WORKFLOWS_CACHE_TOOL, "/workflows")
+        .await
+        .ok()?;
+    let workflow = raw
+        .as_array()?
+        .iter()
+        .find(|w| w.get("id").and_then(|v| v.as_u64()) == Some(workflow_id))?;
+    let mut states: Vec<&Value> = workflow
+        .get("states")
+        .and_then(|s| s.as_array())?
+        .iter()
+        .filter(|s| {
+            s.get("category").and_then(|v| v.as_str()) == Some("unstarted")
+                || s.get("type").and_then(|v| v.as_str()) == Some("unstarted")
+        })
+        .collect();
+    states.sort_by_key(|s| {
+        s.get("position")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::MAX)
+    });
+    let first = states.first()?;
+    let id = first.get("id").and_then(|v| v.as_u64())?;
+    let name = first
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let category = first
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((id, name, category))
+}
+
 /// Resolve the `group_id` for the story: explicit `team` arg
-/// (matched against `GET /teams` by UUID / name / mention name),
+/// (matched against `GET /groups` by UUID / name / mention name),
 /// else the saved `default_team`. Returns `(group_id, team_info)`.
 async fn resolve_team(
     client: &ShortcutClient,
@@ -183,7 +329,7 @@ async fn resolve_team(
     team_arg: Option<&str>,
 ) -> Result<(Option<String>, Option<Value>), AgentError> {
     if let Some(q) = team_arg.map(str::trim).filter(|s| !s.is_empty()) {
-        let teams_raw = cached_get(client, ctx, TEAMS_CACHE_TOOL, "/teams").await?;
+        let teams_raw = cached_get_groups(client, ctx, TEAMS_CACHE_TOOL).await?;
         let team = find_team(&teams_raw, q).ok_or_else(|| {
             let names: Vec<String> = teams_raw
                 .as_array()
@@ -301,16 +447,24 @@ impl Agent for CreateStoryAgent {
          placeholders are substituted), `story_type` (feature|bug|chore — when it is NOT \
          clear from the request, ASK the user first whether this is a feature, a bug or a \
          chore; never guess), `description`, `details`, `labels` (array of strings), \
-         `epic_id`, `project_id`, `workflow_state_id`, `team` (team UUID, name or mention \
-         name; defaults to the saved `default_team`), `auto_epic` (default true: when \
+         `epic_id`, `project_id` (optional numeric project id), `workflow_state_id` \
+         (numeric state id; defaults to the saved `default_workflow_state`, else the first \
+         `unstarted` state of the saved `default_workflow`, else omitted and Shortcut uses \
+         the team's default initial state), \
+         `team` (group UUID, name or mention name; defaults to the saved `default_team`), \
+         `auto_epic` (default true: when \
          `epic_id` is absent, rank the open epics with a local BM25 against name + \
          description and attach the top epic when confident — the response then carries \
          `epic_match`; otherwise it carries `epic_candidates` and no epic is set). The \
-         story is created with `group_id` = the resolved team and `owner_ids` = the user's \
-         own member (resolved from the saved mention name), so it lands in their default \
-         team and is assigned to them. Returns the created story plus the \
-         template / team / epic resolution details. WRITE operation — always wait for the \
-         user's approval card before this runs."
+         story is created with `group_id` = the resolved group and `owner_ids` = the \
+         user's own member (resolved from the saved mention name), so it lands in their \
+         default group and is assigned to them. IMPORTANT — do not ask the user for fields \
+         that have saved defaults (`team`, `workflow_state_id`, owner): they are applied \
+         automatically; only ask when the user explicitly requests something different, \
+         or about `story_type` when it is unclear, or about `project_id` / `epic_id` when the \
+         request genuinely needs one. Returns the created story plus the \
+         template / team / workflow / epic resolution details. WRITE operation — always \
+         wait for the user's approval card before this runs."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -348,9 +502,13 @@ impl Agent for CreateStoryAgent {
                     "minimum": 1,
                     "description": "Epic to attach the story to. When absent and auto_epic is true, one may be picked automatically."
                 },
-                "project_id": { "type": "integer", "minimum": 1 },
+                "project_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Project to file the story under (optional; no saved default — pass the numeric project id)."
+                },
                 "workflow_state_id": { "type": "integer", "minimum": 1,
-                    "description": "Workflow state; when omitted, Shortcut uses the team's default initial state." },
+                    "description": "Workflow state (numeric state id from shortcut_list_workflows). Defaults to the saved `default_workflow_state`, else the first unstarted state of the saved `default_workflow`; when none is set, Shortcut uses the team's default initial state. Do not ask the user for this — the saved defaults apply automatically." },
                 "team": {
                     "type": "string",
                     "description": "Team UUID, name or mention name. Defaults to the saved `default_team`."
@@ -475,10 +633,13 @@ impl Agent for CreateStoryAgent {
         let team_arg = args.get("team").and_then(|v| v.as_str());
         let (group_id, team_info) = resolve_team(&self.client, ctx, team_arg).await?;
 
-        // 6. Owner → owner_ids (the caller's own member).
+        // 6. Project → project_id (explicit arg only; no saved default).
+        let project_id = parse_optional_id(&args, "project_id")?;
+
+        // 7. Owner → owner_ids (the caller's own member).
         let owner_id = resolve_owner_id(&self.client, ctx).await;
 
-        // 7. Epic: explicit arg, else BM25 auto-classification.
+        // 8. Epic: explicit arg, else BM25 auto-classification.
         let epic_id_arg = parse_optional_id(&args, "epic_id")?;
         let auto_epic = args
             .get("auto_epic")
@@ -500,9 +661,41 @@ impl Agent for CreateStoryAgent {
         };
         let epic_id = epic_id_arg.or(auto_epic_id);
 
-        // 8. Assemble + POST the create payload.
-        let project_id = parse_optional_id(&args, "project_id")?;
-        let workflow_state_id = parse_optional_id(&args, "workflow_state_id")?;
+        // 9. Workflow state: explicit arg > saved
+        //    `default_workflow_state` > first `unstarted` state of
+        //    the saved `default_workflow` (by position) > omitted
+        //    entirely (Shortcut then uses the team's default initial
+        //    state).
+        let workflow_state_arg = parse_optional_id(&args, "workflow_state_id")?;
+        let default_workflow = load_default_workflow(ctx).await?;
+        let (workflow_state_id, workflow_state_info) = if let Some(id) = workflow_state_arg {
+            (Some(id), Some(json!({ "id": id, "source": "arg" })))
+        } else if let Some((id, name, category)) = load_default_workflow_state(ctx).await? {
+            (
+                Some(id),
+                Some(json!({
+                    "id": id,
+                    "name": name,
+                    "category": category,
+                    "source": "default_workflow_state",
+                })),
+            )
+        } else if let Some((wf_id, _)) = &default_workflow {
+            match derive_state_from_workflow(&self.client, ctx, *wf_id).await {
+                Some((id, name, category)) => (
+                    Some(id),
+                    Some(json!({
+                        "id": id,
+                        "name": name,
+                        "category": category,
+                        "source": "default_workflow",
+                    })),
+                ),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
         let mut body = json!({
             "name": name,
             "story_type": story_type,
@@ -537,7 +730,7 @@ impl Agent for CreateStoryAgent {
         // (and refreshed once on 401) before the POST ships.
         let story = self.client.create_story(ctx, &body).await?;
 
-        // 9. Writes invalidate the cached story lists so the next
+        // 10. Writes invalidate the cached story lists so the next
         // `shortcut_list_backlog` / dashboard poll re-fetches.
         self.client
             .cache_invalidate_prefix(ctx.user_id(), "api_list_stories");
@@ -552,6 +745,16 @@ impl Agent for CreateStoryAgent {
             "team": team_info,
             "owner_id": owner_id,
         });
+        if let Some(w) = workflow_state_info {
+            data["workflow_state"] = w;
+        }
+        if let Some((wf_id, wf_name)) = &default_workflow {
+            data["workflow"] = json!({
+                "id": wf_id,
+                "name": wf_name,
+                "source": "default_workflow",
+            });
+        }
         if let Some(m) = epic_match {
             data["epic_match"] = m;
         }
@@ -628,6 +831,112 @@ mod tests {
         ) -> Result<Option<secrecy::SecretString>, AgentError> {
             Ok(None)
         }
+    }
+
+    /// `SecretSource` serving one saved `default_workflow_state` row.
+    struct WorkflowStateSecrets(&'static str);
+
+    #[async_trait::async_trait]
+    impl crate::agents::SecretSource for WorkflowStateSecrets {
+        async fn fetch(
+            &self,
+            _user_id: uuid::Uuid,
+            service: &str,
+            field: &str,
+        ) -> Result<Option<secrecy::SecretString>, AgentError> {
+            if service == "shortcut" && field == "default_workflow_state" {
+                Ok(Some(secrecy::SecretString::from(self.0)))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    fn ctx_with_secrets(secrets: std::sync::Arc<dyn crate::agents::SecretSource>) -> UserContext {
+        UserContext::new(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(crate::ServiceRegistry::empty()),
+            secrets,
+        )
+    }
+
+    #[tokio::test]
+    async fn load_default_workflow_state_parses_id_name_category() {
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowStateSecrets(
+            r#"{"id": 500000002, "name": "Ready for Dev", "category": "unstarted"}"#,
+        )));
+        let (id, name, category) = load_default_workflow_state(&ctx)
+            .await
+            .unwrap()
+            .expect("saved state present");
+        assert_eq!(id, 500000002);
+        assert_eq!(name, "Ready for Dev");
+        assert_eq!(category, "unstarted");
+    }
+
+    #[tokio::test]
+    async fn load_default_workflow_state_absent_or_blank_is_none() {
+        let ctx = ctx_with_secrets(std::sync::Arc::new(NoSecrets));
+        assert!(load_default_workflow_state(&ctx).await.unwrap().is_none());
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowStateSecrets("   ")));
+        assert!(load_default_workflow_state(&ctx).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn load_default_workflow_state_rejects_bad_json_and_bad_id() {
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowStateSecrets("not json")));
+        let err = load_default_workflow_state(&ctx).await.unwrap_err();
+        assert!(matches!(err, AgentError::InvalidArguments(_)));
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowStateSecrets(r#"{"id": 0}"#)));
+        assert!(load_default_workflow_state(&ctx).await.is_err());
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowStateSecrets(
+            r#"{"name": "No id"}"#,
+        )));
+        assert!(load_default_workflow_state(&ctx).await.is_err());
+    }
+
+    /// `SecretSource` serving one saved `default_workflow` row.
+    struct WorkflowSecrets(&'static str);
+
+    #[async_trait::async_trait]
+    impl crate::agents::SecretSource for WorkflowSecrets {
+        async fn fetch(
+            &self,
+            _user_id: uuid::Uuid,
+            service: &str,
+            field: &str,
+        ) -> Result<Option<secrecy::SecretString>, AgentError> {
+            if service == "shortcut" && field == "default_workflow" {
+                Ok(Some(secrecy::SecretString::from(self.0)))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn load_default_workflow_parses_id_and_name() {
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowSecrets(
+            r#"{"id": 500000002, "name": "Design"}"#,
+        )));
+        let (id, name) = load_default_workflow(&ctx)
+            .await
+            .unwrap()
+            .expect("saved workflow present");
+        assert_eq!(id, 500000002);
+        assert_eq!(name, "Design");
+    }
+
+    #[tokio::test]
+    async fn load_default_workflow_absent_blank_or_invalid_is_none_or_err() {
+        let ctx = ctx_with_secrets(std::sync::Arc::new(NoSecrets));
+        assert!(load_default_workflow(&ctx).await.unwrap().is_none());
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowSecrets("  ")));
+        assert!(load_default_workflow(&ctx).await.unwrap().is_none());
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowSecrets("nope")));
+        assert!(load_default_workflow(&ctx).await.is_err());
+        let ctx = ctx_with_secrets(std::sync::Arc::new(WorkflowSecrets(r#"{"id": -3}"#)));
+        assert!(load_default_workflow(&ctx).await.is_err());
     }
 
     #[test]

@@ -385,6 +385,14 @@ impl ShortcutClient {
             .await
     }
 
+    /// `GET /groups` — the workspace's groups (each `id` is the UUID
+    /// sent as `group_id` on `POST /stories`). The v3 API has no
+    /// usable `GET /teams` for this (numeric internal ids, not valid
+    /// `group_id` values), so groups are the only source.
+    pub async fn get_groups(&self, ctx: &UserContext) -> Result<Value, AgentError> {
+        self.get(ctx, "/groups", &[]).await
+    }
+
     /// Authenticated POST with a JSON body, credential resolved from
     /// `ctx` (write operations: `shortcut_create_story`). The body
     /// is never logged or formatted into an error path (AGENTS.md

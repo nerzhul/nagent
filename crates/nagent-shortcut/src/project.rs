@@ -149,10 +149,12 @@ pub fn name_of_member(v: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Project one Shortcut team object (`GET /teams`, formerly
-/// `/groups`) into the LLM / UI-facing row. The `id` is the UUID
-/// used as `group_id` when creating a story; `mention_name` is the
-/// handle used in `team:<mention>` search operators.
+/// Project one Shortcut group object (`GET /groups`) into the LLM /
+/// UI-facing row. The `id` is the UUID used as `group_id` when
+/// creating a story; `mention_name` is the handle used in
+/// `team:<mention>` search operators. `icon_url` (from
+/// `display_icon.url`) and `color_key` feed the group dropdown's
+/// icon in the integrations UI.
 pub fn project_team(t: &Value) -> Value {
     json!({
         "id": t.get("id"),
@@ -162,6 +164,58 @@ pub fn project_team(t: &Value) -> Value {
         "archived": t.get("archived"),
         "workflow_ids": t.get("workflow_ids"),
         "app_url": t.get("app_url"),
+        "icon_url": t.get("display_icon").and_then(|d| d.get("url")),
+        "color_key": t.get("color_key"),
+    })
+}
+
+/// Project one workflow (`GET /workflows`) into the UI-facing row
+/// for the "Default workflow" picker: numeric `id` + `name` +
+/// how many states it has.
+pub fn project_workflow(w: &Value) -> Value {
+    let state_count = w
+        .get("states")
+        .and_then(|s| s.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    json!({
+        "id": w.get("id"),
+        "name": w.get("name"),
+        "state_count": state_count,
+    })
+}
+
+/// Project one state of a workflow (`GET /workflows` → `states[]`)
+/// into the UI-facing row for the "Default workflow state" picker.
+/// `workflow_id` / `workflow_name` say which workflow the state
+/// belongs to; the numeric `id` is what `POST /stories` expects as
+/// `workflow_state_id`. `category` is `unstarted` / `started` /
+/// `done`.
+pub fn project_workflow_state(workflow: &Value, s: &Value) -> Value {
+    json!({
+        "id": s.get("id"),
+        "name": s.get("name"),
+        "category": s.get("category"),
+        "type": s.get("type"),
+        "position": s.get("position"),
+        "workflow_id": workflow.get("id"),
+        "workflow_name": workflow.get("name"),
+    })
+}
+
+/// Project one Shortcut project object (`GET /projects`) into the
+/// UI-facing row for the "Default project" picker. `team_id` is the
+/// owning team (space) UUID — older API revisions named the field
+/// `group_id`, so both keys are read. Numeric `id` is what
+/// `POST /stories` expects as `project_id`.
+pub fn project_project(p: &Value) -> Value {
+    json!({
+        "id": p.get("id"),
+        "name": p.get("name"),
+        "team_id": p.get("team_id").or_else(|| p.get("group_id")),
+        "description": p.get("description"),
+        "archived": p.get("archived"),
+        "app_url": p.get("app_url"),
     })
 }
 

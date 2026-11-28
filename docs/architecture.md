@@ -263,9 +263,9 @@ accounts in order. The response cache key includes the account name.
 | `shortcut_list_backlog` | `shortcut-agent` | Per-user Shortcut story search with the configured `[agents.shortcut].backlog_query`. Read-only. Confirm-on-read. |
 | `shortcut_get_story` | `shortcut-agent` | Per-user Shortcut `GET /stories/{id}` + `/comments` (description/comments capped). Read-only. Confirm-on-read. |
 | `shortcut_list_labels` | `shortcut-agent` | Per-user Shortcut `GET /labels`. Read-only. Confirm-on-read. |
-| `shortcut_list_teams` | `shortcut-agent` | Per-user Shortcut `GET /groups` (fallback `GET /teams`; UUID / name / mention name per group). Read-only. Confirm-on-read. |
+| `shortcut_list_teams` | `shortcut-agent` | Per-user Shortcut `GET /groups` (UUID / name / mention name per group). Read-only. Confirm-on-read. |
 | `shortcut_list_templates` | `shortcut-agent` | Local read of the per-user `story_templates` vault field (the saved story shortcuts). No network call: no confirmation, trusted output (like `get_datetime`). |
-| `shortcut_create_story` | `shortcut-agent` | Per-user Shortcut `POST /stories` — the first Shortcut **write** tool. Resolves `template` (per-user `story_templates`), `team` (arg or saved `default_team` → `group_id`), `project_id` (arg or saved `default_project`), `owner_ids` (caller's member from the saved `username`), and auto-classifies the epic with a local BM25 over open epics (`auto_epic`, default true). Confirm-on-write; session override allowed. |
+| `shortcut_create_story` | `shortcut-agent` | Per-user Shortcut `POST /stories` — the first Shortcut **write** tool. Resolves `template` (per-user `story_templates`), `team` (arg or saved `default_team` → `group_id`), optional `project_id` (arg), `owner_ids` (caller's member from the saved `username`), and auto-classifies the epic with a local BM25 over open epics (`auto_epic`, default true). Confirm-on-write; session override allowed. |
 
 The Shortcut plugin also ships **pure-API dashboard endpoints**
 that never go through the LLM (the story list / detail is proxied
@@ -274,13 +274,10 @@ saved, API token otherwise — via `nagent-shortcut`):
 `GET /api/integrations/shortcut/stories?query=&limit=`,
 `GET /api/integrations/shortcut/stories/{id}`,
 `GET /api/integrations/shortcut/me`, and
-`GET /api/integrations/shortcut/teams` (proxies `GET /groups`) and
-`GET /api/integrations/shortcut/projects?team_id=` (they back the
-integrations UI's "Choose group & project…" modal — groups pane +
-projects radio pane, on the GitHub repo-picker pattern — saved into
-the `default_team` / `default_project` vault fields; the group UUID
-is sent as `group_id` and the project id as `project_id` by
-`shortcut_create_story`).
+`GET /api/integrations/shortcut/teams` (proxies `GET /groups`; it
+backs the integrations UI's "Default group" dropdown — the chosen
+group UUID is saved into the `default_team` vault field and sent as
+`group_id` by `shortcut_create_story`).
 The stories endpoints back the "Stories" top-menu tab, which
 appears when the integration's `show_dashboard` checkbox is ticked.
 See `docs/integrations/shortcut.md`.
@@ -435,14 +432,10 @@ audit rows; the callback **merges** its rows so a saved
 `api_token` survives) are preferred when present, and the classic
 `api_token` (Password, fallback) is used otherwise. The remaining
 fields are `username` (Text, filled by the probe), `show_dashboard`
-(Checkbox), `default_team` (Text, JSON `{"id","name"}`) and
-`default_project` (Text, JSON `{"id","name","team_id"}`) — both
-picked through the "Choose group & project…" modal fed by
-`GET /api/integrations/shortcut/teams` (proxies `GET /groups`) +
-`GET /api/integrations/shortcut/projects?team_id=` (the modal's left
-pane lists the groups, the right pane the chosen group's open
-projects as radio buttons), and `story_templates` (Text,
-JSON array of story shortcuts). The six OAuth rows are
+(Checkbox), `default_team` (Text, JSON `{"id","name"}` — the default
+group, picked in a dropdown fed by
+`GET /api/integrations/shortcut/teams` (proxies `GET /groups`)), and
+`story_templates` (Text, JSON array of story shortcuts). The six OAuth rows are
 `managed_fields` on the `ServiceDef` — written by the callback
 redirect, hidden from the integrations form (the form shows the
 connect button + a read-only status and never submits them, so a

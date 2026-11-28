@@ -574,72 +574,542 @@ function showShortcutOauthResultBanner() {
   anchor.parentElement.insertBefore(banner, anchor);
 }
 
-function savedJson(value) {
-  try {
-    const parsed = JSON.parse(value || "{}");
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
+// "Default group" dropdown: the rendered `default_team` text input
+// becomes a hidden input (still submitted by the generic PUT as the
+// raw `{"id","name"}` JSON), and a custom button + popover list the
+// workspace groups with their icon (`display_icon.url`, projected
+// as `icon_url`). Data comes from `GET /api/integrations/shortcut/teams`
+// (vault token) or, before the token is saved, from
+// `POST /api/integrations/shortcut/probe-teams` with the token typed
+// in the form. A native <select> is not used because it cannot render
+// images inside its options.
+function attachShortcutGroupSelect(form) {
+  const input = form.querySelector('[data-key="default_team"]');
+  if (!input || input.tagName !== "INPUT") return;
+  input.type = "hidden";
+  const saved = input.value;
 
-// "Default group & project" picker: a single "Choose group & project…"
-// button opening a two-pane modal on the GitHub "Choose repositories…"
-// pattern — groups (Shortcut "teams", UUID ids used as `group_id`) in
-// the left pane, the selected group's open projects as a radio list
-// in the right pane (shortcut-project-picker.js).
-// Both `default_team` and `default_project` stay hidden inputs in
-// the form so the generic submit persists them through the normal PUT.
-function attachShortcutTeamProjectPicker(form) {
-  const teamField = form.querySelector('[data-key="default_team"]');
-  const projectField = form.querySelector('[data-key="default_project"]');
-  if (!teamField || !projectField) return;
-  teamField.type = "hidden";
-  projectField.type = "hidden";
+  const wrap = input.closest(".chat-integration-field") || input.parentElement;
+  wrap.classList.add("sc-group-select-wrap");
 
-  const wrap = projectField.closest(".chat-integration-field") || projectField.parentElement;
-  const row = document.createElement("div");
-  row.className = "sc-project-picker-row";
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.className = "ghost";
-  btn.textContent = "Choose group & project…";
-  const label = document.createElement("span");
-  label.className = "sc-project-picker-label";
-  row.appendChild(btn);
-  row.appendChild(label);
-  if (wrap && wrap.parentElement) wrap.after(row);
-  else form.appendChild(row);
+  btn.className = "sc-group-select-btn ghost";
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+  const list = document.createElement("div");
+  list.className = "sc-group-select-list";
+  list.setAttribute("role", "listbox");
+  list.hidden = true;
+  wrap.appendChild(btn);
+  wrap.appendChild(list);
 
-  const renderLabel = () => {
-    const team = savedJson(teamField.value);
-    const proj = savedJson(projectField.value);
-    if (team && typeof team.id === "string" && team.name) {
-      const projOk = proj && typeof proj.id === "number" && proj.team_id === team.id;
-      label.textContent = projOk
-        ? `${team.name} · ${proj.name || `#${proj.id}`}`
-        : `${team.name} · no default project`;
-      // `team` here is the saved group object {id: <uuid>, name: …}.
+  const iconEl = (g) => {
+    if (g.icon_url) {
+      const img = document.createElement("img");
+      img.className = "sc-group-icon";
+      img.src = g.icon_url;
+      img.alt = "";
+      img.loading = "lazy";
+      return img;
+    }
+    const dot = document.createElement("span");
+    dot.className = "sc-group-icon sc-group-icon-fallback";
+    dot.textContent = (g.name || "?").trim().charAt(0).toUpperCase() || "?";
+    return dot;
+  };
+
+  const renderBtn = (g) => {
+    btn.replaceChildren();
+    if (g) {
+      btn.appendChild(iconEl(g));
+      const label = document.createElement("span");
+      label.textContent = g.name || String(g.id);
+      btn.appendChild(label);
     } else {
-      label.textContent = "— no default group —";
+      const label = document.createElement("span");
+      label.textContent = "— choose a group —";
+      btn.appendChild(label);
     }
   };
 
+  let groups = [];
+  const renderList = () => {
+    list.replaceChildren();
+    if (!groups.length) {
+      const empty = document.createElement("div");
+      empty.className = "sc-group-select-empty";
+      empty.textContent = "No groups loaded — check the API token above.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const g of groups) {
+      if (!g || g.id == null) continue;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "sc-group-select-item";
+      item.setAttribute("role", "option");
+      item.appendChild(iconEl(g));
+      const label = document.createElement("span");
+      label.className = "sc-group-select-name";
+      label.textContent = g.name || String(g.id);
+      item.appendChild(label);
+      if (g.mention_name) {
+        const mention = document.createElement("span");
+        mention.className = "sc-group-select-mention";
+        mention.textContent = `@${g.mention_name}`;
+        item.appendChild(mention);
+      }
+      item.addEventListener("click", () => {
+        input.value = JSON.stringify({ id: g.id, name: g.name || "" });
+        renderBtn(g);
+        close();
+      });
+      list.appendChild(item);
+    }
+  };
+
+  const open = () => {
+    list.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+  };
+  const close = () => {
+    list.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  };
   btn.addEventListener("click", () => {
-    globalThis.__nagentShortcutProjectPicker?.open({
-      currentTeam: teamField.value,
-      currentProject: projectField.value,
-      getTypedToken: () => form.querySelector('[data-key="api_token"]')?.value.trim() || "",
-      onPick: (picked) => {
-        teamField.value = picked.team || "";
-        projectField.value = picked.project || "";
-        renderLabel();
-      },
-    });
+    if (list.hidden) {
+      renderList();
+      open();
+    } else {
+      close();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (!list.hidden && !wrap.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !list.hidden) close();
   });
 
-  renderLabel();
+  const getTypedToken = () =>
+    form.querySelector('[data-key="api_token"]')?.value.trim() || "";
+
+  const load = async () => {
+    renderBtn(null);
+    btn.disabled = true;
+    try {
+      let loaded = null;
+      try {
+        const resp = await fetch("/api/integrations/shortcut/teams", {
+          credentials: "same-origin",
+        });
+        if (resp.ok) {
+          const body = await resp.json();
+          loaded = (body && body.data && body.data.teams) || [];
+        }
+      } catch {
+        // fall through to the typed-token probe
+      }
+      if (!loaded || !loaded.length) {
+        const token = getTypedToken();
+        if (token) {
+          const resp = await fetch("/api/integrations/shortcut/probe-teams", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "content-type": "application/json",
+              ...(csrfHeaders() || {}),
+            },
+            body: JSON.stringify({ api_token: token }),
+          });
+          if (resp.ok) {
+            const body = await resp.json();
+            loaded = (body && body.teams) || [];
+          }
+        }
+      }
+      groups = loaded || [];
+      // Re-select the saved group on the button label.
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          const match = groups.find((g) => g && g.id === parsed.id);
+          renderBtn(match || parsed);
+        } catch {
+          renderBtn(null);
+        }
+      } else {
+        renderBtn(null);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  load();
 }
+
+
+
+// "Default workflow" dropdown: the rendered `default_workflow` text
+// input becomes a hidden input (still submitted by the generic PUT as
+// the raw `{"id","name"}` JSON), and a custom button + popover lists the
+// workspace workflows. Data comes from
+// `GET /api/integrations/shortcut/workflows` (vault token, `data.workflows`)
+// or, before the token is saved, from
+// `POST /api/integrations/shortcut/probe-workflows` (`body.workflows`).
+// The state dropdown below is scoped to the workflow chosen here.
+function attachShortcutWorkflowSelect(form) {
+  const input = form.querySelector('[data-key="default_workflow"]');
+  if (!input || input.tagName !== "INPUT") return;
+  input.type = "hidden";
+  const saved = input.value;
+
+  const wrap = input.closest(".chat-integration-field") || input.parentElement;
+  wrap.classList.add("sc-group-select-wrap");
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "sc-group-select-btn ghost";
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+  const list = document.createElement("div");
+  list.className = "sc-group-select-list";
+  list.setAttribute("role", "listbox");
+  list.hidden = true;
+  wrap.appendChild(btn);
+  wrap.appendChild(list);
+
+  const dotEl = (w) => {
+    const dot = document.createElement("span");
+    dot.className = "sc-group-icon sc-group-icon-fallback";
+    dot.textContent = (w.name || "?").trim().charAt(0).toUpperCase() || "?";
+    return dot;
+  };
+
+  const renderBtn = (w) => {
+    btn.replaceChildren();
+    if (w) {
+      btn.appendChild(dotEl(w));
+      const label = document.createElement("span");
+      label.textContent = w.name || String(w.id);
+      btn.appendChild(label);
+    } else {
+      const label = document.createElement("span");
+      label.textContent = "— team default workflow —";
+      btn.appendChild(label);
+    }
+  };
+
+  let workflows = [];
+  const renderList = () => {
+    list.replaceChildren();
+    if (!workflows.length) {
+      const empty = document.createElement("div");
+      empty.className = "sc-group-select-empty";
+      empty.textContent = "No workflows loaded — check the API token above.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const w of workflows) {
+      if (!w || w.id == null) continue;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "sc-group-select-item";
+      item.setAttribute("role", "option");
+      item.appendChild(dotEl(w));
+      const label = document.createElement("span");
+      label.className = "sc-group-select-name";
+      label.textContent = w.name || String(w.id);
+      item.appendChild(label);
+      if (w.state_count != null) {
+        const count = document.createElement("span");
+        count.className = "sc-group-select-mention";
+        count.textContent = `${w.state_count} states`;
+        item.appendChild(count);
+      }
+      item.addEventListener("click", () => {
+        input.value = JSON.stringify({ id: w.id, name: w.name || "" });
+        renderBtn(w);
+        close();
+      });
+      list.appendChild(item);
+    }
+  };
+
+  const open = () => {
+    list.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+  };
+  const close = () => {
+    list.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  };
+  btn.addEventListener("click", () => {
+    if (list.hidden) {
+      renderList();
+      open();
+    } else {
+      close();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (!list.hidden && !wrap.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !list.hidden) close();
+  });
+
+  const getTypedToken = () =>
+    form.querySelector('[data-key="api_token"]')?.value.trim() || "";
+
+  const load = async () => {
+    renderBtn(null);
+    btn.disabled = true;
+    try {
+      let loaded = null;
+      try {
+        const resp = await fetch("/api/integrations/shortcut/workflows", {
+          credentials: "same-origin",
+        });
+        if (resp.ok) {
+          const body = await resp.json();
+          loaded = (body && body.data && body.data.workflows) || [];
+        }
+      } catch {
+        // fall through to the typed-token probe
+      }
+      if (!loaded || !loaded.length) {
+        const token = getTypedToken();
+        if (token) {
+          const resp = await fetch("/api/integrations/shortcut/probe-workflows", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "content-type": "application/json",
+              ...(csrfHeaders() || {}),
+            },
+            body: JSON.stringify({ api_token: token }),
+          });
+          if (resp.ok) {
+            const body = await resp.json();
+            loaded = (body && body.workflows) || [];
+          }
+        }
+      }
+      workflows = loaded || [];
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          const match = workflows.find((w) => w && w.id === parsed.id);
+          renderBtn(match || parsed);
+        } catch {
+          renderBtn(null);
+        }
+      } else {
+        renderBtn(null);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  load();
+}
+
+
+// "Default workflow state" dropdown: the rendered
+// `default_workflow_state` text input becomes a hidden input (still
+// submitted by the generic PUT as the raw `{"id","name","category"}`
+// JSON), and a custom button + popover lists the workspace workflow
+// states. Data comes from `GET /api/integrations/shortcut/workflows`
+// (vault token) or, before the token is saved, from
+// `POST /api/integrations/shortcut/probe-workflows` with the token
+// typed in the form. Reuses the `sc-group-select-*` styles.
+function attachShortcutWorkflowStateSelect(form) {
+  const input = form.querySelector('[data-key="default_workflow_state"]');
+  if (!input || input.tagName !== "INPUT") return;
+  input.type = "hidden";
+  const saved = input.value;
+
+  const wrap = input.closest(".chat-integration-field") || input.parentElement;
+  wrap.classList.add("sc-group-select-wrap");
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "sc-group-select-btn ghost";
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+  const list = document.createElement("div");
+  list.className = "sc-group-select-list";
+  list.setAttribute("role", "listbox");
+  list.hidden = true;
+  wrap.appendChild(btn);
+  wrap.appendChild(list);
+
+  const dotEl = (s) => {
+    const dot = document.createElement("span");
+    dot.className = "sc-group-icon sc-group-icon-fallback";
+    dot.textContent = (s.category || "?").trim().charAt(0).toUpperCase() || "?";
+    dot.title = s.category || "";
+    return dot;
+  };
+
+  const labelOf = (s) => {
+    const wf = s.workflow_name ? ` (${s.workflow_name})` : "";
+    return `${s.name || String(s.id)}${wf}`;
+  };
+
+  const renderBtn = (s) => {
+    btn.replaceChildren();
+    if (s) {
+      btn.appendChild(dotEl(s));
+      const label = document.createElement("span");
+      label.textContent = labelOf(s);
+      btn.appendChild(label);
+    } else {
+      const label = document.createElement("span");
+      label.textContent = "— team default initial state —";
+      btn.appendChild(label);
+    }
+  };
+
+  let states = [];
+  // Scope the list to the workflow picked in the `default_workflow`
+  // dropdown above (each flattened state carries `workflow_id`).
+  const selectedWorkflowId = () => {
+    const wfInput = form.querySelector('[data-key="default_workflow"]');
+    if (!wfInput || !wfInput.value) return null;
+    try {
+      const parsed = JSON.parse(wfInput.value);
+      return parsed && parsed.id != null ? parsed.id : null;
+    } catch {
+      return null;
+    }
+  };
+  const renderList = () => {
+    list.replaceChildren();
+    const wfId = selectedWorkflowId();
+    const visible =
+      wfId == null ? states : states.filter((s) => s && s.workflow_id === wfId);
+    if (!visible.length) {
+      const empty = document.createElement("div");
+      empty.className = "sc-group-select-empty";
+      empty.textContent = wfId == null
+        ? "No workflow states loaded — check the API token above."
+        : "No states in the selected workflow.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const s of visible) {
+      if (!s || s.id == null) continue;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "sc-group-select-item";
+      item.setAttribute("role", "option");
+      item.appendChild(dotEl(s));
+      const label = document.createElement("span");
+      label.className = "sc-group-select-name";
+      label.textContent = labelOf(s);
+      item.appendChild(label);
+      if (s.category) {
+        const cat = document.createElement("span");
+        cat.className = "sc-group-select-mention";
+        cat.textContent = s.category;
+        item.appendChild(cat);
+      }
+      item.addEventListener("click", () => {
+        input.value = JSON.stringify({
+          id: s.id,
+          name: s.name || "",
+          category: s.category || "",
+        });
+        renderBtn(s);
+        close();
+      });
+      list.appendChild(item);
+    }
+  };
+
+  const open = () => {
+    list.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+  };
+  const close = () => {
+    list.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  };
+  btn.addEventListener("click", () => {
+    if (list.hidden) {
+      renderList();
+      open();
+    } else {
+      close();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (!list.hidden && !wrap.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !list.hidden) close();
+  });
+
+  const getTypedToken = () =>
+    form.querySelector('[data-key="api_token"]')?.value.trim() || "";
+
+  const load = async () => {
+    renderBtn(null);
+    btn.disabled = true;
+    try {
+      let loaded = null;
+      try {
+        const resp = await fetch("/api/integrations/shortcut/workflows", {
+          credentials: "same-origin",
+        });
+        if (resp.ok) {
+          const body = await resp.json();
+          loaded = (body && body.data && body.data.states) || [];
+        }
+      } catch {
+        // fall through to the typed-token probe
+      }
+      if (!loaded || !loaded.length) {
+        const token = getTypedToken();
+        if (token) {
+          const resp = await fetch("/api/integrations/shortcut/probe-workflows", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "content-type": "application/json",
+              ...(csrfHeaders() || {}),
+            },
+            body: JSON.stringify({ api_token: token }),
+          });
+          if (resp.ok) {
+            const body = await resp.json();
+            loaded = (body && body.states) || [];
+          }
+        }
+      }
+      states = loaded || [];
+      // Re-select the saved state on the button label.
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          const match = states.find((s) => s && s.id === parsed.id);
+          renderBtn(match || parsed);
+        } catch {
+          renderBtn(null);
+        }
+      } else {
+        renderBtn(null);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  load();
+}
+
 
 function attachShortcutTemplatesEditor(form) {
   const field = form.querySelector('[data-key="story_templates"]');
@@ -1792,7 +2262,9 @@ function openEditor(svc) {
   if (svc.id === SHORTCUT_SERVICE_ID) {
     const probe = attachShortcutTestButton(form, actions);
     loadShortcutIdentity(form, actions, svc, probe);
-    attachShortcutTeamProjectPicker(form);
+    attachShortcutGroupSelect(form);
+    attachShortcutWorkflowSelect(form);
+    attachShortcutWorkflowStateSelect(form);
     attachShortcutTemplatesEditor(form);
     attachShortcutOauthButtons(form, actions, svc);
   }

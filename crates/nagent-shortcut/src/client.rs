@@ -539,18 +539,31 @@ pub async fn get_story_detail(
 }
 
 // ---------------------------------------------------------------------------
-// Teams / writes — used by the `shortcut_list_teams` chat tool, the
+// Groups / writes — used by the `shortcut_list_teams` chat tool, the
 // `GET /api/integrations/shortcut/teams` setup endpoint, and the
 // `shortcut_create_story` chat tool. Writes never touch the cache.
 // ---------------------------------------------------------------------------
 
-/// Tool name used for the team-list cache entries.
+/// `GET /groups` — the workspace's **groups**, the entities stories
+/// are filed into; each `id` is the UUID sent as `group_id` on
+/// `POST /stories` (see
+/// <https://developer.shortcut.com/api/rest/v3#Groups>). The v3 API
+/// has no usable `GET /teams` for this — that path returns internal
+/// records with numeric ids, which are not valid `group_id` values.
+pub async fn fetch_groups(
+    client: &ShortcutClient,
+    auth: &ShortcutAuth,
+) -> Result<Value, ShortcutError> {
+    client.get(auth, "/groups", &[]).await
+}
+
+/// Tool name used for the group-list cache entries.
 const API_TEAMS_TOOL: &str = "api_teams";
 
-/// `GET /teams` projected for the integrations UI team picker and
-/// the `shortcut_list_teams` chat tool. Cached under
-/// `(user_id, "api_teams", {})` — the team list changes rarely, so
-/// the short TTL is enough. Returns
+/// `GET /groups` projected for the integrations
+/// UI group picker and the `shortcut_list_teams` chat tool. Cached
+/// under `(user_id, "api_teams", {})` — the group list changes rarely,
+/// so the short TTL is enough. Returns
 /// `{"count": n, "teams": [project_team(…)]}`.
 pub async fn list_teams(
     client: &ShortcutClient,
@@ -563,7 +576,7 @@ pub async fn list_teams(
         return serde_json::from_str(&cached)
             .map_err(|e| ShortcutError::Transport(format!("shortcut cache decode: {e}")));
     }
-    let raw = client.get(auth, "/teams", &[]).await?;
+    let raw = fetch_groups(client, auth).await?;
     let teams: Vec<Value> = raw
         .as_array()
         .map(|arr| arr.iter().map(crate::project::project_team).collect())
@@ -575,6 +588,74 @@ pub async fn list_teams(
     let encoded = serde_json::to_string(&out)
         .map_err(|e| ShortcutError::Transport(format!("shortcut encode: {e}")))?;
     client.cache_put(user_id, API_TEAMS_TOOL, &args, encoded.clone());
+    serde_json::from_str(&encoded)
+        .map_err(|e| ShortcutError::Transport(format!("shortcut encode: {e}")))
+}
+
+/// `GET /workflows` — every workflow of the workspace with its
+/// `states[]` (each state carries a numeric `id`, used as
+/// `workflow_state_id` on `POST /stories`). Used by the
+/// `shortcut_list_workflows` chat tool and by the
+/// `GET /api/integrations/shortcut/workflows` setup endpoint.
+pub async fn fetch_workflows(
+    client: &ShortcutClient,
+    auth: &ShortcutAuth,
+) -> Result<Value, ShortcutError> {
+    client.get(auth, "/workflows", &[]).await
+}
+
+/// Tool name used for the workflow-list cache entries.
+const API_WORKFLOWS_TOOL: &str = "api_workflows";
+
+/// `GET /workflows` projected for the integrations UI pickers: the
+/// workflow list (`project_workflow`) plus every state flattened
+/// (`project_workflow_state`, each tagged with `workflow_id` /
+/// `workflow_name` so the UI can scope the state picker to the
+/// selected default workflow). Cached under
+/// `(user_id, "api_workflows", {})` — workflows change rarely.
+/// Returns `{"count": n, "states": […], "workflows": […]}`.
+pub async fn list_workflows(
+    client: &ShortcutClient,
+    auth: &ShortcutAuth,
+    user_id: uuid::Uuid,
+) -> Result<Value, ShortcutError> {
+    let args = serde_json::json!({});
+    if let Some(cached) = client.cache_get(user_id, API_WORKFLOWS_TOOL, &args) {
+        tracing::debug!(user_id = %user_id, "shortcut api cache hit");
+        return serde_json::from_str(&cached)
+            .map_err(|e| ShortcutError::Transport(format!("shortcut cache decode: {e}")));
+    }
+    let raw = fetch_workflows(client, auth).await?;
+    let workflows: Vec<Value> = raw
+        .as_array()
+        .map(|arr| arr.iter().map(crate::project::project_workflow).collect())
+        .unwrap_or_default();
+    let states: Vec<Value> = raw
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .flat_map(|w| {
+                    w.get("states")
+                        .and_then(|s| s.as_array())
+                        .map(|states| {
+                            states
+                                .iter()
+                                .map(|s| crate::project::project_workflow_state(w, s))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let out = serde_json::json!({
+        "count": states.len(),
+        "states": states,
+        "workflows": workflows,
+    });
+    let encoded = serde_json::to_string(&out)
+        .map_err(|e| ShortcutError::Transport(format!("shortcut encode: {e}")))?;
+    client.cache_put(user_id, API_WORKFLOWS_TOOL, &args, encoded.clone());
     serde_json::from_str(&encoded)
         .map_err(|e| ShortcutError::Transport(format!("shortcut encode: {e}")))
 }

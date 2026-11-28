@@ -259,6 +259,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::credentials::github_api::build_github_api_router(state.clone());
         #[cfg(not(feature = "github-agent"))]
         let github_api_routes = axum::Router::new();
+        // Plan 1795793328177: named GitHub accounts CRUD
+        // (`GET/POST /api/integrations/github/accounts`,
+        // `DELETE …/accounts/:name`) — the `github.accounts`
+        // multi-token vault blob is managed only through these
+        // endpoints, never echoed back (AGENTS.md §6).
+        #[cfg(feature = "github-agent")]
+        let github_accounts_routes =
+            crate::credentials::github_accounts::build_github_accounts_router(state.clone());
+        #[cfg(not(feature = "github-agent"))]
+        let github_accounts_routes = axum::Router::new();
         // Plan 1795597719369: the Shortcut setup-only probe endpoint
         // is mounted the same way as the GitHub probe —
         // feature-gated on `shortcut-agent`, empty router otherwise.
@@ -276,6 +286,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::credentials::shortcut_probe::build_shortcut_probe_teams_router(state.clone());
         #[cfg(not(feature = "shortcut-agent"))]
         let shortcut_probe_teams_routes = axum::Router::new();
+        // Workflows probe (`POST /api/integrations/shortcut/probe-workflows`,
+        // token in the request body) — feeds the integrations UI's
+        // "Default workflow state" dropdown before the token is saved
+        // to the vault. Same `shortcut-agent` gate as the token probe.
+        #[cfg(feature = "shortcut-agent")]
+        let shortcut_probe_workflows_routes =
+            crate::credentials::shortcut_probe::build_shortcut_probe_workflows_router(
+                state.clone(),
+            );
+        #[cfg(not(feature = "shortcut-agent"))]
+        let shortcut_probe_workflows_routes = axum::Router::new();
         // Pure-API dashboard endpoints for the "Stories" tab
         // (`GET /api/integrations/shortcut/stories…`) — same
         // `shortcut-agent` gate as the probe: they read the
@@ -294,8 +315,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .merge(github_probe_routes)
             .merge(github_probe_repo_routes)
             .merge(github_api_routes)
+            .merge(github_accounts_routes)
             .merge(shortcut_probe_routes)
             .merge(shortcut_probe_teams_routes)
+            .merge(shortcut_probe_workflows_routes)
             .merge(shortcut_api_routes)
             .merge(mount_memories(state.clone()))
             .layer(auth_layer);

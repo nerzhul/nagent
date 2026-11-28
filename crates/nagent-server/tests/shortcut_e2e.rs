@@ -240,7 +240,7 @@ fn route(path: &str) -> (u16, &'static str, String) {
             })),
         );
     }
-    if path == "/teams" {
+    if path == "/groups" {
         return (
             200,
             "OK",
@@ -252,7 +252,9 @@ fn route(path: &str) -> (u16, &'static str, String) {
                     "description": "Platform and backend",
                     "archived": false,
                     "workflow_ids": [500000001],
-                    "app_url": "https://app.shortcut.com/ws/eng"
+                    "app_url": "https://app.shortcut.com/ws/eng",
+                    "display_icon": {"url": "https://media.app.shortcut.com/attachments/eng.png"},
+                    "color_key": "blue"
                 },
                 {
                     "id": "team-uuid-2",
@@ -391,9 +393,9 @@ fn shortcut_service_def_shape() {
         dashboard.echo_on_edit,
         "the checkbox state must be echoed so the form stays ticked on reopen"
     );
-    // The default team (JSON {"id","name"}) and the story
-    // templates (JSON array): both optional text fields, echoed
-    // back on edit (not secrets — stored encrypted at rest).
+    // The default group (JSON {"id","name"}) and the story templates
+    // (JSON array): optional text fields, echoed back on edit (not
+    // secrets — stored encrypted at rest).
     for key in ["default_team", "story_templates"] {
         let f = svc.fields.iter().find(|f| f.key == key).expect(key);
         assert_eq!(f.kind, FieldKind::Text);
@@ -1314,9 +1316,10 @@ async fn stories_dashboard_requires_configured_token() {
     );
 }
 
-/// `GET /api/integrations/shortcut/teams` proxies `GET /teams` with
-/// the caller's vault token and returns the projected team list —
-/// this backs the integrations UI's "Default team" picker (the
+/// `GET /api/integrations/shortcut/teams` proxies `GET /groups` (the
+/// UUID-id groups) with the
+/// caller's vault token and returns the projected group list —
+/// this backs the integrations UI's "Default group" picker (the
 /// chosen UUID is saved into the `default_team` vault field and
 /// later sent as `group_id` by `shortcut_create_story`). The
 /// response never carries the token (AGENTS.md §6).
@@ -1335,6 +1338,11 @@ async fn teams_endpoint_against_loopback() {
     assert_eq!(body["data"]["teams"][0]["id"], "team-uuid-1");
     assert_eq!(body["data"]["teams"][0]["name"], "Engineering");
     assert_eq!(body["data"]["teams"][0]["mention_name"], "eng");
+    assert_eq!(
+        body["data"]["teams"][0]["icon_url"],
+        "https://media.app.shortcut.com/attachments/eng.png"
+    );
+    assert_eq!(body["data"]["teams"][0]["color_key"], "blue");
     assert_eq!(body["data"]["teams"][1]["id"], "team-uuid-2");
     let text = String::from_utf8_lossy(&body_bytes);
     assert!(
@@ -1344,8 +1352,8 @@ async fn teams_endpoint_against_loopback() {
     assert!(
         fx.requests()
             .iter()
-            .any(|(line, token)| line.starts_with("GET /teams") && token == TEST_TOKEN),
-        "the endpoint must call GET /teams with the vault token; got {:?}",
+            .any(|(line, token)| line.starts_with("GET /groups") && token == TEST_TOKEN),
+        "the endpoint must call GET /groups with the vault token; got {:?}",
         fx.requests()
     );
 
@@ -1397,10 +1405,10 @@ async fn teams_endpoint_against_loopback() {
 }
 
 /// `POST /api/integrations/shortcut/probe-teams` lists the workspace
-/// teams with a token supplied in the request body — this is what
-/// populates the integrations UI's "Default team" dropdown before
+/// groups with a token supplied in the request body — this is what
+/// populates the integrations UI's "Default group" picker before
 /// the token is saved to the vault. The response carries the
-/// projected teams and never the token (AGENTS.md §6).
+/// projected groups and never the token (AGENTS.md §6).
 #[tokio::test]
 async fn probe_teams_lists_workspace_teams_without_vault() {
     let fx = Fixture::start().await;
@@ -1487,6 +1495,10 @@ async fn probe_teams_lists_workspace_teams_without_vault() {
     assert_eq!(body["count"], 2);
     assert_eq!(body["teams"][0]["id"], "team-uuid-1");
     assert_eq!(body["teams"][0]["mention_name"], "eng");
+    assert_eq!(
+        body["teams"][0]["icon_url"],
+        "https://media.app.shortcut.com/attachments/eng.png"
+    );
     let text = String::from_utf8_lossy(&body_bytes);
     assert!(
         !text.contains(TEST_TOKEN),
@@ -1495,8 +1507,8 @@ async fn probe_teams_lists_workspace_teams_without_vault() {
     assert!(
         fx.requests()
             .iter()
-            .any(|(line, token)| line.starts_with("GET /teams") && token == TEST_TOKEN),
-        "probe-teams must call GET /teams with the body token; got {:?}",
+            .any(|(line, token)| line.starts_with("GET /groups") && token == TEST_TOKEN),
+        "probe-teams must call GET /groups with the body token; got {:?}",
         fx.requests()
     );
 
@@ -1566,7 +1578,7 @@ async fn dashboard_uses_bearer_when_oauth_access_token_saved() {
     assert!(
         fx.requests()
             .iter()
-            .any(|(line, cred)| line.starts_with("GET /teams")
+            .any(|(line, cred)| line.starts_with("GET /groups")
                 && cred == &format!("Bearer {TEST_OAUTH_TOKEN}")),
         "expected a bearer Authorization header upstream; got {:?}",
         fx.requests()
@@ -1665,7 +1677,7 @@ async fn probe_teams_accepts_oauth_access_token_in_body() {
     assert!(
         fx.requests()
             .iter()
-            .any(|(line, cred)| line.starts_with("GET /teams")
+            .any(|(line, cred)| line.starts_with("GET /groups")
                 && cred == &format!("Bearer {TEST_OAUTH_TOKEN}")),
         "probe-teams must send the bearer upstream; got {:?}",
         fx.requests()
