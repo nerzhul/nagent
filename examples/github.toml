@@ -1,0 +1,41 @@
+# Example `[agents.github]` section (plan 1795793328177).
+#
+# Copy into your main config file under `[agents.github]` (or point
+# the server at this file with `--config examples/github.toml` for a
+# GitHub-only test rig). Env vars win over the TOML values; the
+# defaults below are what a build uses with no config at all.
+
+[agents.github]
+# Per-request connect+read timeout for every GitHub API call.
+timeout_ms = 10_000
+# Hard cap on the `limit` argument of every `github_*` list tool.
+max_items = 100
+# Cap on issue / PR / file bodies the LLM ever sees (bytes).
+max_body_bytes = 65_536
+# In-process response cache TTL, keyed by
+# (user_id, account, tool, args). 0 disables the cache.
+cache_ttl_secs = 60
+# Hostname allow-list applied to every GitHub API URL (SSRF
+# fail-closed). Set together with base_url for GitHub Enterprise
+# Server.
+allowlist = ["api.github.com"]
+# Upstream base URL — `https://api.github.com`, or your GHES
+# `https://ghes.example.com/api/v3`.
+base_url = "https://api.github.com"
+# Multi-account (plan 1795793328177): cap on the named accounts
+# stored in the per-user `github.accounts` vault field. The
+# `"default"` account (the `personal_access_token`) is not counted.
+max_accounts = 8
+# Bound on the concurrent `account: "all"` fan-out across accounts
+# (chat tools + PR dashboard aggregation).
+aggregate_concurrency = 4
+
+# Env equivalents (env > TOML > default):
+#   GITHUB_AGENT_TIMEOUT_MS
+#   GITHUB_AGENT_MAX_ITEMS
+#   GITHUB_AGENT_MAX_BODY_BYTES
+#   GITHUB_AGENT_CACHE_TTL_SECS
+#   GITHUB_AGENT_ALLOWLIST            (comma-separated)
+#   GITHUB_AGENT_BASE_URL
+#   GITHUB_AGENT_MAX_ACCOUNTS
+#   GITHUB_AGENT_AGGREGATE_CONCURRENCY

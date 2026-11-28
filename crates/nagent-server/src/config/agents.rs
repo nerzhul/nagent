@@ -877,6 +877,11 @@ pub struct GithubConfig {
     /// tests against a loopback fixture and for GHES. Defaults
     /// to `https://api.github.com`.
     pub base_url: String,
+    /// Cap on the named accounts in the per-user `github.accounts`
+    /// vault field (plan 1795793328177). Default 8.
+    pub max_accounts: usize,
+    /// Bound on the concurrent `account: "all"` fan-out. Default 4.
+    pub aggregate_concurrency: usize,
 }
 
 impl Default for GithubConfig {
@@ -888,6 +893,8 @@ impl Default for GithubConfig {
             cache_ttl_secs: 60,
             allowlist: vec!["api.github.com".to_string()],
             base_url: "https://api.github.com".to_string(),
+            max_accounts: 8,
+            aggregate_concurrency: 4,
         }
     }
 }
@@ -933,6 +940,18 @@ impl GithubConfig {
                 toml.base_url.as_deref(),
             )
             .unwrap_or_else(|| defaults.base_url.clone()),
+            max_accounts: resolve_primitive(
+                env_opt("GITHUB_AGENT_MAX_ACCOUNTS").as_deref(),
+                toml.max_accounts,
+                defaults.max_accounts,
+                "GITHUB_AGENT_MAX_ACCOUNTS",
+            )?,
+            aggregate_concurrency: resolve_primitive(
+                env_opt("GITHUB_AGENT_AGGREGATE_CONCURRENCY").as_deref(),
+                toml.aggregate_concurrency,
+                defaults.aggregate_concurrency,
+                "GITHUB_AGENT_AGGREGATE_CONCURRENCY",
+            )?,
         })
     }
 }
@@ -952,6 +971,8 @@ mod github_config_tests {
         assert_eq!(cfg.cache_ttl_secs, 60);
         assert_eq!(cfg.allowlist, vec!["api.github.com".to_string()]);
         assert_eq!(cfg.base_url, "https://api.github.com");
+        assert_eq!(cfg.max_accounts, 8);
+        assert_eq!(cfg.aggregate_concurrency, 4);
     }
 
     #[test]
@@ -967,6 +988,8 @@ mod github_config_tests {
             cache_ttl_secs: Some(0),
             allowlist: Some(vec!["ghes.example.com".to_string()]),
             base_url: Some("https://ghes.example.com/api/v3".to_string()),
+            max_accounts: Some(3),
+            aggregate_concurrency: Some(2),
         };
         let cfg = GithubConfig::from_env_with_toml(Some(&toml)).expect("parses");
         assert_eq!(cfg.timeout_ms, 7_000);
@@ -975,6 +998,8 @@ mod github_config_tests {
         assert_eq!(cfg.cache_ttl_secs, 0);
         assert_eq!(cfg.allowlist, vec!["ghes.example.com".to_string()]);
         assert_eq!(cfg.base_url, "https://ghes.example.com/api/v3");
+        assert_eq!(cfg.max_accounts, 3);
+        assert_eq!(cfg.aggregate_concurrency, 2);
     }
 
     #[test]

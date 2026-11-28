@@ -1673,6 +1673,20 @@ pub static AGENT_DESCRIPTORS: &[AgentDescriptor] =
                 )))
             },
         },
+        // Plan 1795793328177: `github_list_accounts` — vault-only
+        // account discovery (name / username / scopes / is_default,
+        // never tokens) so the LLM can pick an `account` argument
+        // for the other `github_*` tools.
+        #[cfg(feature = "github-agent")]
+        AgentDescriptor {
+            id: "github_list_accounts",
+            feature: "github-agent",
+            build: |cfgs, pool| {
+                Ok(Box::new(github::list_accounts::ListAccountsAgent::new(
+                    github::GithubClient::new(cfgs.github.clone(), pool.public()),
+                )))
+            },
+        },
         // Plan 1795597719369: the read-only Shortcut tools plus
         // `shortcut_list_teams` / `shortcut_list_templates` (local
         // vault read) / `shortcut_create_story` (the first write

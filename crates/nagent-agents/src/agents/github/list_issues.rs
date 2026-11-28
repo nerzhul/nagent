@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 
 use super::client::GithubClient;
 use super::{
-    cap_text, confirm_reason, label_names, login_of, parse_enum, parse_limit, parse_repo, run,
+    account_prop, cap_text, confirm_reason_for, label_names, login_of, parse_account_arg,
+    parse_enum, parse_limit, parse_repo, resolve_repo_account, run,
 };
 use crate::agents::{Agent, AgentError, UserContext};
 
@@ -52,8 +53,10 @@ impl Agent for ListIssuesAgent {
         "List issues in a GitHub repository (`GET /repos/{owner}/{repo}/issues`). Pull \
          requests are filtered out. Args: `repo` (`\"owner/repo\"`), `state?` \
          (open/closed/all, default open), `labels?` (comma-separated label names to \
-         filter on), `limit?` (default 30, server cap 100). Returns number, title, \
-         state, author, labels, comment count, dates, and the capped body. Read-only."
+         filter on), `limit?` (default 30, server cap 100), `account?` (a name from \
+         `github_list_accounts` or `\"default\"`; omit to auto-resolve the account that \
+         can read the repo). Returns number, title, state, author, labels, comment \
+         count, dates, and the capped body. Read-only."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -79,6 +82,7 @@ impl Agent for ListIssuesAgent {
                     "maximum": 100,
                     "default": 30,
                 },
+                "account": account_prop(false),
             },
             "required": ["repo"],
             "additionalProperties": false,
@@ -94,9 +98,9 @@ impl Agent for ListIssuesAgent {
     fn requires_confirmation(
         &self,
         _ctx: &UserContext,
-        _args: &Value,
+        args: &Value,
     ) -> crate::agents::ConfirmationDecision {
-        confirm_reason(self.name())
+        confirm_reason_for(self.name(), parse_account_arg(args).as_deref())
     }
 
     fn untrusted_output(&self) -> bool {
@@ -105,6 +109,15 @@ impl Agent for ListIssuesAgent {
 
     async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError> {
         let (owner, repo) = parse_repo(&args)?;
+        let full = format!("{owner}/{repo}");
+        let account = resolve_repo_account(
+            &self.client,
+            ctx,
+            &full,
+            parse_account_arg(&args).as_deref(),
+        )
+        .await?;
+        let account_name = account.name.clone();
         let limit = parse_limit(&args, &self.client.cfg, 30);
         let state = parse_enum(&args, "state", STATES, "open")?;
         let labels = args
@@ -124,10 +137,10 @@ impl Agent for ListIssuesAgent {
         run(
             &self.client,
             ctx,
+            &account,
             self.name(),
             &args,
-            &path,
-            query,
+            (path.as_str(), query),
             move |raw, cfg| {
                 let issues: Vec<Value> = raw
                     .as_array()
@@ -141,7 +154,8 @@ impl Agent for ListIssuesAgent {
                 json!({
                     "ok": true,
                     "data": {
-                        "repo": format!("{owner}/{repo}"),
+                        "account": account_name,
+                        "repo": full,
                         "count": issues.len(),
                         "issues": issues,
                     }

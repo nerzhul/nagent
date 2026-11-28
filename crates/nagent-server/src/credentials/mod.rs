@@ -34,6 +34,9 @@ pub mod caldav_probe;
 pub mod email_probe;
 
 #[cfg(feature = "github-agent")]
+pub mod github_accounts;
+
+#[cfg(feature = "github-agent")]
 pub mod github_api;
 
 #[cfg(feature = "github-agent")]

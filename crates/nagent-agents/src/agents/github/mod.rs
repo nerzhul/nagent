@@ -1,6 +1,6 @@
-//! GitHub agent family (plan 1795597719368) — ten **read-only**
+//! GitHub agent family (plan 1795597719368) — eleven **read-only**
 //! chat tools over the GitHub REST API with the calling user's
-//! personal access token:
+//! personal access token(s):
 //!
 //! | Tool | Endpoint |
 //! | --- | --- |
@@ -14,13 +14,29 @@
 //! | `github_list_notifications` | `GET /notifications` |
 //! | `github_search_issues` | `GET /search/issues` |
 //! | `github_read_file` | `GET /repos/{owner}/{repo}/contents/{path}` |
+//! | `github_list_accounts` | — (vault metadata, no network) |
+//!
+//! ## Multi-account (plan 1795793328177)
+//!
+//! Every tool gains an optional **`account`** argument: a name from
+//! `github.accounts`, `"default"` (the `personal_access_token`), or
+//! `"all"` on the four account-scoped tools (`github_me`,
+//! `github_list_repos`, `github_list_notifications`,
+//! `github_search_issues`) to fan out across every configured
+//! account and merge the results (items tagged `"account"`, deduped
+//! by upstream `id`, per-account failures collected in
+//! `account_errors`). Repo-scoped tools resolve repo → account via
+//! the `github.repo_accounts` map, then live probing (first non-404
+//! account wins, cached). `github_list_accounts` lists the
+//! token-free account metadata so the LLM can discover accounts.
 //!
 //! All tools share one [`client::GithubClient`] shape (per-tool
 //! instance built by the descriptor table, all draining the
 //! shared `EgressPool::public()` client) and one short-lived
-//! in-process cache keyed by `(user_id, tool, args)` — GitHub
-//! PAT quota is 5 000 req/h, so the `cache_ttl_secs` default of
-//! 60 s keeps repeated questions cheap.
+//! in-process cache keyed by `(user_id, account, tool, args)` —
+//! the account is part of the key so two tokens never share an
+//! entry. GitHub PAT quota is 5 000 req/h per token, so the
+//! `cache_ttl_secs` default of 60 s keeps repeated questions cheap.
 //!
 //! Write tools (`github_create_issue`, `github_create_pr`,
 //! `github_comment`) are deliberately out of scope for v1; the
@@ -34,12 +50,15 @@
 //! inline approval card (strict per-call, plan 1791834996882 —
 //! no same-turn re-call shortcut). The session-wide "Toujours
 //! pour cette session" override is allowed for all of them
-//! (the trait default).
+//! (the trait default). The confirmation card names the resolved
+//! account(s) — never the token.
 
+pub mod accounts;
 pub mod client;
 pub mod get_issue;
 pub mod get_pr;
 pub mod get_repo;
+pub mod list_accounts;
 pub mod list_issues;
 pub mod list_notifications;
 pub mod list_prs;
@@ -48,50 +67,251 @@ pub mod me;
 pub mod read_file;
 pub mod search_issues;
 
+pub use accounts::Account;
 pub use client::GithubClient;
+
+use std::future::Future;
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::agents::{AgentError, ConfirmationDecision, UserContext};
 use crate::GithubAgentConfig;
 
-/// Run one tool end-to-end: cache lookup → authenticated GET →
-/// projection → JSON encode → cache store. `project` receives
-/// the raw upstream JSON and the agent config and returns the
-/// LLM-facing envelope.
+/// Run one tool end-to-end for one resolved account: cache lookup
+/// → authenticated GET → projection → JSON encode → cache store.
+/// `project` receives the raw upstream JSON and the agent config
+/// and returns the LLM-facing envelope. The cache key is
+/// `(user_id, account_name, tool, args)` (plan §1.3).
 pub(crate) async fn run<F>(
     client: &GithubClient,
     ctx: &UserContext,
+    account: &Account,
     tool: &str,
     args: &Value,
-    path: &str,
-    query: Vec<(String, String)>,
+    endpoint: (&str, Vec<(String, String)>),
     project: F,
 ) -> Result<String, AgentError>
 where
     F: FnOnce(&Value, &GithubAgentConfig) -> Value,
 {
-    if let Some(cached) = client.cache_get(ctx.user_id(), tool, args) {
-        tracing::debug!(agent = tool, user_id = %ctx.user_id(), "github cache hit");
+    let (path, query) = endpoint;
+    if let Some(cached) = client.cache_get(ctx.user_id(), &account.name, tool, args) {
+        tracing::debug!(agent = tool, account = %account.name, user_id = %ctx.user_id(), "github cache hit");
         return Ok(cached);
     }
-    let raw = client.get(ctx, path, &query).await?;
+    let raw = client.get_with_account(account, path, &query).await?;
     let out = project(&raw, &client.cfg);
     let encoded = serde_json::to_string(&out)
         .map_err(|e| AgentError::AgentFailed(format!("github encode: {e}")))?;
-    client.cache_put(ctx.user_id(), tool, args, encoded.clone());
+    client.cache_put(ctx.user_id(), &account.name, tool, args, encoded.clone());
     Ok(encoded)
 }
 
+/// Parse the optional `account` argument: `None`, a name, or
+/// `"all"`. Whitespace-trimmed; empty string counts as absent.
+pub(crate) fn parse_account_arg(args: &Value) -> Option<String> {
+    args.get("account")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The shared `account` schema property added to every tool
+/// (plan §2). `aggregates` enables the `"all"` fan-out value in the
+/// description (only the four account-scoped tools aggregate).
+pub(crate) fn account_prop(aggregates: bool) -> Value {
+    let mut desc = "Which configured GitHub account to use: a name from `github_list_accounts`, or `\"default\"` (the personal access token). Omit for the default account.".to_string();
+    if aggregates {
+        desc.push_str(" `\"all\"` fans out across every configured account and merges the results (items tagged with their account).");
+    }
+    serde_json::json!({
+        "type": "string",
+        "description": desc,
+    })
+}
+
+/// Resolve the account for a **repo-scoped** tool (plan §2.3):
+///
+/// 1. explicit `account` arg (not `"all"` — repo-scoped tools do
+///    not fan out) → resolve by name;
+/// 2. the persisted `github.repo_accounts` vault map, else the
+///    in-memory map, else live probing of every account (first
+///    non-404 wins; positives and negatives cached in memory for
+///    `cache_ttl_secs`).
+///
+/// All-404 surfaces as an `Upstream 404` whose body lists the
+/// account **names** tried — never tokens.
+pub(crate) async fn resolve_repo_account(
+    client: &GithubClient,
+    ctx: &UserContext,
+    repo: &str,
+    account_arg: Option<&str>,
+) -> Result<Account, AgentError> {
+    if let Some(name) = account_arg.filter(|s| *s != nagent_github::ALL_ACCOUNTS) {
+        return client.resolve_account(ctx, Some(name)).await;
+    }
+    let persisted: Option<std::collections::HashMap<String, String>> = match ctx
+        .secret("github", "repo_accounts")
+        .await
+    {
+        Ok(Some(blob)) => {
+            use secrecy::ExposeSecret;
+            serde_json::from_str::<std::collections::HashMap<String, String>>(blob.expose_secret())
+                .ok()
+        }
+        _ => None,
+    };
+    let accounts = client.all_accounts(ctx).await?;
+    let refs: Vec<nagent_github::AccountToken<'_>> = accounts
+        .iter()
+        .map(|a| nagent_github::AccountToken {
+            name: &a.name,
+            token: &a.token,
+        })
+        .collect();
+    let (name, token) =
+        nagent_github::resolve_repo_account(client, &refs, ctx.user_id(), repo, persisted.as_ref())
+            .await
+            .map_err(AgentError::from)?;
+    Ok(Account { name, token })
+}
+
+/// `account: "all"` fan-out for the four account-scoped tools (plan
+/// §2.2): run `call` concurrently (bounded by
+/// `aggregate_concurrency`) across every configured account, merge
+/// the per-account item lists with [`nagent_github::merge_tagged`]
+/// (tagged `"account"`, deduped by upstream `id`, sorted by
+/// `sort_key` desc), truncate to `limit`, and collect per-account
+/// failures into an `account_errors` object. The call fails only
+/// when **every** account fails. The merged envelope is cached
+/// under the synthetic account name `"all"`.
+///
+/// `call` receives the resolved account and returns that account's
+/// item list (already projected per-item by the caller's closure)
+/// plus a per-account metadata value (e.g. search `total_count`).
+/// Per-account item lists are cached under
+/// `(user, account, "<tool>#items", args)`.
+pub(crate) async fn run_all<Call, Fut>(
+    client: &GithubClient,
+    ctx: &UserContext,
+    tool: &str,
+    args: &Value,
+    limit: usize,
+    sort_key: &str,
+    call: Call,
+) -> Result<
+    (
+        Vec<Value>,
+        serde_json::Map<String, Value>,
+        serde_json::Map<String, Value>,
+    ),
+    AgentError,
+>
+where
+    Call: Fn(Account) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(Vec<Value>, Value), AgentError>> + Send + 'static,
+{
+    let accounts = client.all_accounts(ctx).await?;
+    let sem = Arc::new(tokio::sync::Semaphore::new(
+        client.cfg.aggregate_concurrency.max(1),
+    ));
+    let client = client.clone();
+    let call = Arc::new(call);
+    let user_id = ctx.user_id();
+    let mut set = tokio::task::JoinSet::new();
+    for acc in accounts {
+        let sem = sem.clone();
+        let client = client.clone();
+        let call = call.clone();
+        let items_tool = format!("{tool}#items");
+        let args = args.clone();
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            // Per-account item cache (distinct namespace from the
+            // single-account envelope cache).
+            if let Some(cached) = client.cache_get(user_id, &acc.name, &items_tool, &args) {
+                return match serde_json::from_str::<Vec<Value>>(&cached) {
+                    Ok(items) => Ok((acc.name.clone(), items, Value::Null)),
+                    Err(e) => Err((
+                        acc.name.clone(),
+                        AgentError::AgentFailed(format!("github cache decode: {e}")),
+                    )),
+                };
+            }
+            match call(acc.clone()).await {
+                Ok((items, meta)) => {
+                    if let Ok(encoded) = serde_json::to_string(&items) {
+                        client.cache_put(user_id, &acc.name, &items_tool, &args, encoded);
+                    }
+                    Ok((acc.name, items, meta))
+                }
+                Err(e) => Err((acc.name, e)),
+            }
+        });
+    }
+    let mut per_account: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut account_errors = serde_json::Map::new();
+    let mut account_meta = serde_json::Map::new();
+    let mut first_err: Option<AgentError> = None;
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok((name, items, meta))) => {
+                if !meta.is_null() {
+                    account_meta.insert(name.clone(), meta);
+                }
+                per_account.push((name, items))
+            }
+            Ok(Err((name, e))) => {
+                // AgentError's Display never carries a token
+                // (AGENTS.md §6): Upstream bodies are server
+                // replies, all other variants are static hints.
+                account_errors.insert(name, Value::String(e.to_string()));
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            Err(join_err) => {
+                let msg = format!("github fan-out task failed: {join_err}");
+                account_errors.insert("<internal>".to_string(), Value::String(msg.clone()));
+                if first_err.is_none() {
+                    first_err = Some(AgentError::AgentFailed(msg));
+                }
+            }
+        }
+    }
+    if per_account.is_empty() {
+        return Err(first_err.unwrap_or_else(|| {
+            AgentError::AgentFailed("github fan-out: no account configured".into())
+        }));
+    }
+    let mut merged = nagent_github::merge_tagged(per_account, sort_key);
+    merged.truncate(limit.max(1));
+    Ok((merged, account_errors, account_meta))
+}
+
 /// Shared confirmation reason for every `github_*` tool. The
-/// reason names the tool so the approval card is specific.
+/// reason names the tool and the resolved account(s) so the
+/// approval card is specific — never the token.
 pub(crate) fn confirm_reason(tool: &str) -> ConfirmationDecision {
+    confirm_reason_for(tool, None)
+}
+
+/// Confirmation reason naming the account selection (`Some` =
+/// explicit name or `"all"`).
+pub(crate) fn confirm_reason_for(tool: &str, account: Option<&str>) -> ConfirmationDecision {
+    let target = match account {
+        None => "the default GitHub account".to_string(),
+        Some(nagent_github::ALL_ACCOUNTS) => "every configured GitHub account".to_string(),
+        Some(name) => format!("the GitHub account `{name}`"),
+    };
     ConfirmationDecision::NeedsConfirmation {
         reason: format!(
-            "`{tool}` reads the user's GitHub account through the GitHub API with their \
-             personal access token. The user must explicitly confirm in chat before this \
-             call runs. Wait for the user to click \"Autoriser\" in the chat UI; the tool \
-             will execute on their next message and you will see its result then.",
+            "`{tool}` reads the user's GitHub data ({target}) through the GitHub API with \
+             their personal access token. The user must explicitly confirm in chat before \
+             this call runs. Wait for the user to click \"Autoriser\" in the chat UI; the \
+             tool will execute on their next message and you will see its result then.",
         ),
     }
 }
@@ -429,6 +649,20 @@ mod loopback {
                 }]})),
             );
         }
+        if path == "/repos/octo/hello" {
+            // Repo-exists route used by the repo→account resolution.
+            return (
+                200,
+                "OK",
+                vec![],
+                json(json!({
+                    "full_name": "octo/hello",
+                    "private": false,
+                    "default_branch": "main",
+                    "html_url": "https://github.com/octo/hello"
+                })),
+            );
+        }
         if path.starts_with("/repos/octo/hello/contents/README.md") {
             let content = base64::engine::general_purpose::STANDARD.encode("# Hello\n\nworld\n");
             return (
@@ -493,6 +727,14 @@ mod loopback {
             cache_ttl_secs: 60,
             allowlist: vec!["127.0.0.1".to_string()],
             base_url,
+            ..Default::default()
+        }
+    }
+
+    fn default_account() -> Account {
+        Account {
+            name: nagent_github::DEFAULT_ACCOUNT_NAME.to_string(),
+            token: secrecy::SecretString::from(TEST_TOKEN),
         }
     }
 
@@ -571,13 +813,14 @@ mod loopback {
         let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
         let ctx = test_ctx();
         let args = json!({"limit": 10});
+        let account = default_account();
         let first = run(
             &client,
             &ctx,
+            &account,
             "github_list_repos",
             &args,
-            "/user/repos",
-            vec![],
+            ("/user/repos", vec![]),
             |raw, _| raw.clone(),
         )
         .await
@@ -585,10 +828,10 @@ mod loopback {
         let second = run(
             &client,
             &ctx,
+            &account,
             "github_list_repos",
             &args,
-            "/user/repos",
-            vec![],
+            ("/user/repos", vec![]),
             |raw, _| raw.clone(),
         )
         .await
@@ -603,16 +846,20 @@ mod loopback {
         let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
         let ctx = test_ctx();
         let args = json!({"query": "author:@me is:open", "limit": 5});
+        let account = default_account();
         let out = run(
             &client,
             &ctx,
+            &account,
             "github_search_issues",
             &args,
-            "/search/issues",
-            vec![
-                ("q".to_string(), "author:@me is:open".to_string()),
-                ("per_page".to_string(), "5".to_string()),
-            ],
+            (
+                "/search/issues",
+                vec![
+                    ("q".to_string(), "author:@me is:open".to_string()),
+                    ("per_page".to_string(), "5".to_string()),
+                ],
+            ),
             |raw, _| json!({"total": raw.get("total_count"), "items": raw.get("items")}),
         )
         .await
@@ -685,5 +932,377 @@ mod loopback {
         assert_eq!(issue["number"], 1);
         assert_eq!(issue["labels"], json!(["bug"]));
         assert!(issue["body"].as_str().unwrap().ends_with("…[truncated]"));
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-account loopback (plan 1795793328177 §8): a fixture that
+    // answers differently per `Authorization` header, so each token
+    // maps to its own persona. Asserts the fan-out hits each account
+    // with its own token, per-account 401s land in `account_errors`
+    // without failing the call, merged results are tagged + deduped,
+    // and repo→account resolution caches (one 404 per account per
+    // repo).
+    // ------------------------------------------------------------------
+
+    const TOKEN_A: &str = "ghp_fanout_token_a_aaaaaaaaaaaa";
+    const TOKEN_BAD: &str = "ghp_fanout_token_bad_cccccccccc";
+
+    /// `SecretSource` with a default PAT + two named accounts
+    /// (one of them a bad token that the fixture 401s).
+    struct MultiSecrets;
+
+    #[async_trait::async_trait]
+    impl SecretSource for MultiSecrets {
+        async fn fetch(
+            &self,
+            _user_id: uuid::Uuid,
+            service: &str,
+            field: &str,
+        ) -> Result<Option<secrecy::SecretString>, AgentError> {
+            if service != "github" {
+                return Ok(None);
+            }
+            let v = match field {
+                "personal_access_token" => Some(TEST_TOKEN.to_string()),
+                "accounts" => Some(format!(
+                    "[{{\"name\":\"client-a\",\"token\":\"{TOKEN_A}\",\"username\":\"alice\",\"scopes\":\"repo\"}},\
+                      {{\"name\":\"client-bad\",\"token\":\"{TOKEN_BAD}\"}}]"
+                )),
+                _ => None,
+            };
+            Ok(v.map(secrecy::SecretString::from))
+        }
+    }
+
+    /// Loopback fixture routing on the `Authorization` header:
+    /// - `Bearer {TEST_TOKEN}` (default) → user "octo", repos
+    ///   [shared(id 1), own-only(id 2)];
+    /// - `Bearer {TOKEN_A}` (client-a) → user "alice", repos
+    ///   [shared(id 1, different push date), client-only(id 3)];
+    /// - `Bearer {TOKEN_BAD}` → 401;
+    /// - repo `org-x/secret` is readable ONLY by client-a (default
+    ///   and bad tokens get 404/401).
+    struct MultiFixture {
+        addr: SocketAddr,
+        requests: Arc<Mutex<Vec<(String, String)>>>,
+        _task: tokio::task::JoinHandle<()>,
+    }
+
+    impl MultiFixture {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            let req_clone = requests.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let req_clone = req_clone.clone();
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let mut chunk = [0u8; 4096];
+                        loop {
+                            match sock.read(&mut chunk).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    buf.extend_from_slice(&chunk[..n]);
+                                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&buf).into_owned();
+                        let request_line = text.lines().next().unwrap_or("").to_string();
+                        let auth = text
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                            .map(|l| {
+                                l.split_once(':')
+                                    .map(|(_, v)| v.trim().to_string())
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
+                        req_clone
+                            .lock()
+                            .unwrap()
+                            .push((request_line.clone(), auth.clone()));
+                        let path = request_line
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("/")
+                            .to_string();
+                        let (status, reason, body) = multi_route(&path, &auth);
+                        let resp = format!(
+                            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        let _ = sock.shutdown().await;
+                    });
+                }
+            });
+            Self {
+                addr,
+                requests,
+                _task: task,
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        fn requests(&self) -> Vec<(String, String)> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn multi_route(path: &str, auth: &str) -> (u16, &'static str, String) {
+        let json = |v: Value| v.to_string();
+        // Bad token → 401 on everything.
+        if auth == format!("Bearer {TOKEN_BAD}") {
+            return (
+                401,
+                "Unauthorized",
+                json(json!({"message": "Bad credentials"})),
+            );
+        }
+        let (login, repos): (&str, Value) = if auth == format!("Bearer {TOKEN_A}") {
+            (
+                "alice",
+                json!([
+                    {"id": 1, "full_name": "shared/repo", "pushed_at": "2026-02-01T00:00:00Z", "html_url": "https://github.com/shared/repo"},
+                    {"id": 3, "full_name": "org-x/client-only", "pushed_at": "2026-02-15T00:00:00Z", "html_url": "https://github.com/org-x/client-only"}
+                ]),
+            )
+        } else {
+            (
+                "octo",
+                json!([
+                    {"id": 1, "full_name": "shared/repo", "pushed_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/shared/repo"},
+                    {"id": 2, "full_name": "octo/own-only", "pushed_at": "2026-03-01T00:00:00Z", "html_url": "https://github.com/octo/own-only"}
+                ]),
+            )
+        };
+        if path == "/user" {
+            return (
+                200,
+                "OK",
+                json(json!({"login": login, "plan": {"name": "free"}})),
+            );
+        }
+        if path.starts_with("/user/repos") {
+            return (200, "OK", json(repos));
+        }
+        if path == "/repos/org-x/secret" {
+            // Only client-a can read it.
+            return if auth == format!("Bearer {TOKEN_A}") {
+                (
+                    200,
+                    "OK",
+                    json(json!({"full_name": "org-x/secret", "private": true})),
+                )
+            } else {
+                (404, "Not Found", json(json!({"message": "Not Found"})))
+            };
+        }
+        (404, "Not Found", json(json!({"message": "Not Found"})))
+    }
+
+    fn multi_ctx() -> UserContext {
+        UserContext::new(
+            uuid::Uuid::new_v4(),
+            Arc::new(ServiceRegistry::empty()),
+            Arc::new(MultiSecrets),
+        )
+    }
+
+    #[tokio::test]
+    async fn fanout_all_hits_each_account_with_its_own_token_and_merges() {
+        let fx = MultiFixture::start().await;
+        let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = multi_ctx();
+        let agent = super::list_repos::ListReposAgent::new(client);
+        let out = agent
+            .invoke(&ctx, json!({"account": "all", "limit": 30}))
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["ok"], true);
+        let repos = parsed["data"]["repos"].as_array().unwrap();
+        // 3 unique ids (1 shared deduped, 2, 3) — sorted by pushed_at desc.
+        assert_eq!(repos.len(), 3, "dedupe by upstream id: {repos:?}");
+        assert_eq!(repos[0]["full_name"], "octo/own-only");
+        assert_eq!(repos[0]["account"], "default");
+        assert_eq!(repos[1]["full_name"], "org-x/client-only");
+        assert_eq!(repos[1]["account"], "client-a");
+        assert_eq!(repos[2]["full_name"], "shared/repo");
+        // shared/repo keeps the FIRST account occurrence (default).
+        assert_eq!(repos[2]["account"], "default");
+        assert_eq!(repos[2]["pushed_at"], "2026-01-01T00:00:00Z");
+        // The bad account's 401 landed in account_errors, not a failure.
+        let errs = parsed["data"]["account_errors"].as_object().unwrap();
+        assert!(errs.contains_key("client-bad"), "got {errs:?}");
+        assert!(
+            !out.contains(TOKEN_BAD) && !out.contains(TOKEN_A) && !out.contains(TEST_TOKEN),
+            "AGENTS.md §6: no token may appear in the response; got {out}"
+        );
+        // Each account was called with its own token.
+        let reqs = fx.requests();
+        let auths: Vec<&String> = reqs.iter().map(|(_, a)| a).collect();
+        assert!(auths.contains(&&format!("Bearer {TEST_TOKEN}")));
+        assert!(auths.contains(&&format!("Bearer {TOKEN_A}")));
+        assert!(auths.contains(&&format!("Bearer {TOKEN_BAD}")));
+    }
+
+    #[tokio::test]
+    async fn fanout_all_fails_only_when_every_account_fails() {
+        struct OnlyBad;
+        #[async_trait::async_trait]
+        impl SecretSource for OnlyBad {
+            async fn fetch(
+                &self,
+                _u: uuid::Uuid,
+                service: &str,
+                field: &str,
+            ) -> Result<Option<secrecy::SecretString>, AgentError> {
+                if service == "github" && field == "personal_access_token" {
+                    Ok(Some(secrecy::SecretString::from(TOKEN_BAD)))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let fx = MultiFixture::start().await;
+        let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = UserContext::new(
+            uuid::Uuid::new_v4(),
+            Arc::new(ServiceRegistry::empty()),
+            Arc::new(OnlyBad),
+        );
+        let agent = super::list_repos::ListReposAgent::new(client);
+        let err = agent
+            .invoke(&ctx, json!({"account": "all"}))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("401"),
+            "expected the 401 to surface, got {msg}"
+        );
+        assert!(
+            !msg.contains(TOKEN_BAD),
+            "AGENTS.md §6: the token must not appear in the error; got {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn me_all_returns_one_row_per_account_with_scopes() {
+        let fx = MultiFixture::start().await;
+        let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = multi_ctx();
+        let agent = super::me::MeAgent::new(client);
+        let out = agent.invoke(&ctx, json!({"account": "all"})).await.unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let accounts = parsed["data"]["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 2, "bad account 401s into account_errors");
+        let names: Vec<&str> = accounts
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"default") && names.contains(&"client-a"));
+        let client_a = accounts.iter().find(|a| a["name"] == "client-a").unwrap();
+        assert_eq!(client_a["user"], "alice");
+        assert_eq!(client_a["scopes"], "repo");
+        assert!(parsed["data"]["account_errors"].get("client-bad").is_some());
+        assert!(!out.contains(TOKEN_A) && !out.contains(TOKEN_BAD) && !out.contains(TEST_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn repo_account_resolution_tries_accounts_and_caches() {
+        let fx = MultiFixture::start().await;
+        let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = multi_ctx();
+        let agent = super::get_repo::GetRepoAgent::new(client);
+        // `org-x/secret` is only visible to client-a: the default
+        // account 404s once, then client-a wins and is cached.
+        let out = agent
+            .invoke(&ctx, json!({"repo": "org-x/secret"}))
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["data"]["account"], "client-a");
+        assert_eq!(parsed["data"]["full_name"], "org-x/secret");
+        // Second call must hit the resolution cache: no new
+        // /repos/org-x/secret probe from the default account.
+        let before = fx
+            .requests()
+            .iter()
+            .filter(|(p, _)| p.starts_with("GET /repos/org-x/secret"))
+            .count();
+        let out2 = agent
+            .invoke(&ctx, json!({"repo": "org-x/secret"}))
+            .await
+            .unwrap();
+        let after = fx
+            .requests()
+            .iter()
+            .filter(|(p, _)| p.starts_with("GET /repos/org-x/secret"))
+            .count();
+        // default 404 + client-a 200 (resolution) + client-a 200 (the
+        // tool's own fetch) = 3; the second invoke is fully cached.
+        assert_eq!(before, 3, "default 404 + client-a resolution + tool fetch");
+        assert_eq!(
+            after, 3,
+            "resolution + response cached; second call adds nothing"
+        );
+        let parsed2: Value = serde_json::from_str(&out2).unwrap();
+        assert_eq!(parsed2["data"]["account"], "client-a");
+        assert!(!out.contains(TOKEN_A) && !out.contains(TEST_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn repo_not_readable_by_any_account_lists_names_not_tokens() {
+        let fx = MultiFixture::start().await;
+        let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = multi_ctx();
+        let agent = super::get_repo::GetRepoAgent::new(client);
+        let err = agent
+            .invoke(&ctx, json!({"repo": "nope/missing"}))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("404"), "got {msg}");
+        assert!(
+            msg.contains("client-a") && msg.contains("default"),
+            "names listed: {msg}"
+        );
+        assert!(
+            !msg.contains(TOKEN_A) && !msg.contains(TOKEN_BAD) && !msg.contains(TEST_TOKEN),
+            "AGENTS.md §6: no token in the error; got {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_account_call_uses_that_accounts_token() {
+        let fx = MultiFixture::start().await;
+        let client = GithubClient::new(test_cfg(fx.base_url()), reqwest::Client::new());
+        let ctx = multi_ctx();
+        let agent = super::me::MeAgent::new(client);
+        let out = agent
+            .invoke(&ctx, json!({"account": "client-a"}))
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["data"]["account"], "client-a");
+        assert_eq!(parsed["data"]["login"], "alice");
+        let reqs = fx.requests();
+        let last = reqs.last().unwrap();
+        assert_eq!(last.1, format!("Bearer {TOKEN_A}"));
     }
 }

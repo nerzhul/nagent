@@ -474,7 +474,6 @@ const MODAL_SUBTITLES = {
     "Connect your Shortcut (app.shortcut.com) workspace so the assistant can read your backlog, stories, epics, teams and iterations, and create new stories in your default team when you ask in chat. Use \"Connect with Shortcut\" (OAuth) when offered; an API token also works as a fallback.",
 };
 
-const PROBE_TEAMS_PATH = "/api/integrations/shortcut/probe-teams";
 const SHORTCUT_OAUTH_START = "/api/auth/login/shortcut/start";
 const SHORTCUT_OAUTH_DISCONNECT = "/api/auth/login/shortcut/disconnect";
 
@@ -575,149 +574,71 @@ function showShortcutOauthResultBanner() {
   anchor.parentElement.insertBefore(banner, anchor);
 }
 
-async function fetchShortcutTeamsFromVault() {
-  const resp = await fetch("/api/integrations/shortcut/teams", {
-    credentials: "same-origin",
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const body = await resp.json();
-  return body?.data?.teams || [];
-}
-
-async function fetchShortcutTeamsWithTypedToken(apiToken, accessToken) {
-  const resp = await fetch(PROBE_TEAMS_PATH, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: {
-      "content-type": "application/json",
-      ...(csrfHeaders() || {}),
-    },
-    body: JSON.stringify(
-      accessToken ? { access_token: accessToken } : { api_token: apiToken },
-    ),
-  });
-  if (!resp.ok) {
-    let msg = `HTTP ${resp.status}`;
-    try {
-      const body = await resp.json();
-      if (body && typeof body.error === "string") msg = body.error;
-    } catch {
-      /* keep the status code message */
-    }
-    throw new Error(msg);
-  }
-  const body = await resp.json();
-  return body?.teams || [];
-}
-
-async function loadShortcutTeams(form) {
-  try {
-    return await fetchShortcutTeamsFromVault();
-  } catch {
-    const apiToken = form.querySelector('[data-key="api_token"]')?.value.trim();
-    if (apiToken) return await fetchShortcutTeamsWithTypedToken(apiToken, null);
-    throw new Error("no saved or typed API token");
-  }
-}
-
-function savedTeamId(value) {
+function savedJson(value) {
   try {
     const parsed = JSON.parse(value || "{}");
-    return parsed && typeof parsed.id === "string" ? parsed.id : "";
+    return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
-    return "";
+    return null;
   }
 }
 
-function renderShortcutTeamSelect(form, teams) {
-  const field = form.querySelector('[data-key="default_team"]');
-  if (!field) return;
-  const currentValue = field.value || "";
-  const select =
-    field.tagName === "SELECT"
-      ? field
-      : (() => {
-          const s = document.createElement("select");
-          s.name = field.name;
-          s.dataset.key = field.dataset.key;
-          s.autocomplete = "off";
-          field.replaceWith(s);
-          return s;
-        })();
-  select.disabled = false;
-  select.innerHTML = "";
-  const blank = document.createElement("option");
-  blank.value = "";
-  blank.textContent = "— no default team —";
-  select.appendChild(blank);
-  for (const t of teams) {
-    const o = document.createElement("option");
-    o.value = JSON.stringify({ id: t.id, name: t.name });
-    o.textContent = t.mention_name
-      ? `${t.name} (@${t.mention_name})`
-      : String(t.name ?? t.id);
-    select.appendChild(o);
-  }
-  const id = savedTeamId(currentValue);
-  const match = teams.find((t) => t.id === id);
-  if (match) {
-    select.value = JSON.stringify({ id: match.id, name: match.name });
-    blank.remove();
-  } else {
-    select.value = "";
-  }
-}
+// "Default group & project" picker: a single "Choose group & project…"
+// button opening a two-pane modal on the GitHub "Choose repositories…"
+// pattern — groups (Shortcut "teams", UUID ids used as `group_id`) in
+// the left pane, the selected group's open projects as a radio list
+// in the right pane (shortcut-project-picker.js).
+// Both `default_team` and `default_project` stay hidden inputs in
+// the form so the generic submit persists them through the normal PUT.
+function attachShortcutTeamProjectPicker(form) {
+  const teamField = form.querySelector('[data-key="default_team"]');
+  const projectField = form.querySelector('[data-key="default_project"]');
+  if (!teamField || !projectField) return;
+  teamField.type = "hidden";
+  projectField.type = "hidden";
 
-function renderShortcutTeamSelectDisabled(form, hint) {
-  const field = form.querySelector('[data-key="default_team"]');
-  if (!field) return;
-  let select = field.tagName === "SELECT" ? field : null;
-  if (!select) {
-    select = document.createElement("select");
-    select.name = field.name;
-    select.dataset.key = field.dataset.key;
-    select.autocomplete = "off";
-    field.replaceWith(select);
-  }
-  select.disabled = true;
-  select.innerHTML = "";
-  const o = document.createElement("option");
-  o.value = "";
-  o.textContent = hint;
-  select.appendChild(o);
-  select.value = "";
-}
+  const wrap = projectField.closest(".chat-integration-field") || projectField.parentElement;
+  const row = document.createElement("div");
+  row.className = "sc-project-picker-row";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ghost";
+  btn.textContent = "Choose group & project…";
+  const label = document.createElement("span");
+  label.className = "sc-project-picker-label";
+  row.appendChild(btn);
+  row.appendChild(label);
+  if (wrap && wrap.parentElement) wrap.after(row);
+  else form.appendChild(row);
 
-function attachShortcutTeamPicker(form) {
-  const field = form.querySelector('[data-key="default_team"]');
-  if (!field) return;
-  loadShortcutTeams(form)
-    .then((teams) => {
-      if (teams.length) renderShortcutTeamSelect(form, teams);
-      else
-        renderShortcutTeamSelectDisabled(
-          form,
-          "— no teams returned by the workspace —",
-        );
-    })
-    .catch(() => {
-      renderShortcutTeamSelectDisabled(
-        form,
-        "— save the API token first to list teams —",
-      );
+  const renderLabel = () => {
+    const team = savedJson(teamField.value);
+    const proj = savedJson(projectField.value);
+    if (team && typeof team.id === "string" && team.name) {
+      const projOk = proj && typeof proj.id === "number" && proj.team_id === team.id;
+      label.textContent = projOk
+        ? `${team.name} · ${proj.name || `#${proj.id}`}`
+        : `${team.name} · no default project`;
+      // `team` here is the saved group object {id: <uuid>, name: …}.
+    } else {
+      label.textContent = "— no default group —";
+    }
+  };
+
+  btn.addEventListener("click", () => {
+    globalThis.__nagentShortcutProjectPicker?.open({
+      currentTeam: teamField.value,
+      currentProject: projectField.value,
+      getTypedToken: () => form.querySelector('[data-key="api_token"]')?.value.trim() || "",
+      onPick: (picked) => {
+        teamField.value = picked.team || "";
+        projectField.value = picked.project || "";
+        renderLabel();
+      },
     });
-  const tokenField = form.querySelector('[data-key="api_token"]');
-  let timer = null;
-  tokenField?.addEventListener("input", () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      loadShortcutTeams(form)
-        .then((teams) => {
-          if (teams.length) renderShortcutTeamSelect(form, teams);
-        })
-        .catch(() => {});
-    }, 500);
   });
+
+  renderLabel();
 }
 
 function attachShortcutTemplatesEditor(form) {
@@ -1221,6 +1142,280 @@ function attachGithubReposPickerButton(form) {
   }
 }
 
+// Plan 1795793328177 — the GitHub `accounts` vault field is a
+// multi-token JSON blob managed ONLY through the dedicated endpoints
+// below (GET/POST /api/integrations/github/accounts, DELETE
+// …/accounts/:name). The generic form submit never carries the blob
+// (`accounts` is in `managed_fields`), and tokens are write-only in
+// this UI: never pre-filled, never echoed back (AGENTS.md §6).
+const GITHUB_ACCOUNTS_PATH = "/api/integrations/github/accounts";
+
+async function githubAccountsApi(path, options) {
+  const resp = await fetch(path, {
+    credentials: "same-origin",
+    ...options,
+    headers: {
+      ...(options && options.body ? { "content-type": "application/json" } : {}),
+      ...(csrfHeaders() || {}),
+      ...((options && options.headers) || {}),
+    },
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const body = await resp.json();
+      if (body && typeof body.error === "string") msg = body.error;
+    } catch {
+      try {
+        msg = `${msg}: ${await resp.text()}`;
+      } catch {
+        /* fall through */
+      }
+    }
+    throw new Error(msg);
+  }
+  if (resp.status === 204) return null;
+  return await resp.json();
+}
+
+async function fetchGithubAccounts() {
+  return await githubAccountsApi(GITHUB_ACCOUNTS_PATH, { method: "GET" });
+}
+
+// Renders the "Connected accounts" section of the GitHub editor:
+// the account list (name, @login, scopes, default badge) with
+// add / edit-token / remove per account, plus the "Default account"
+// selector. The selector replaces the plain `default_account` text
+// input inside the form so the generic submit persists it through
+// the normal PUT; everything token-shaped goes through the dedicated
+// endpoints above.
+function attachGithubAccountsSection(form, actions, _svc) {
+  // Swap the rendered `default_account` text input for a <select>
+  // fed by the accounts endpoint. The submit handler walks every
+  // form control with a data-key, so the select keeps that key and
+  // rides the generic PUT.
+  const defaultInput = form.querySelector('[data-key="default_account"]');
+  const defaultSelect = document.createElement("select");
+  defaultSelect.name = "default_account";
+  defaultSelect.dataset.key = "default_account";
+  defaultSelect.autocomplete = "off";
+  if (defaultInput && defaultInput.closest(".chat-integration-field")) {
+    defaultInput.replaceWith(defaultSelect);
+    if (!defaultInput.value) {
+      // Unset: pre-select "default" once options arrive.
+    } else {
+      defaultSelect.dataset.saved = defaultInput.value;
+    }
+  } else {
+    // Field missing from the ServiceDef (older server): still render
+    // the section, just without the selector swap.
+    form.appendChild(defaultSelect);
+  }
+
+  const section = document.createElement("div");
+  section.className = "chat-integration-field gh-accounts-section";
+  const heading = document.createElement("span");
+  heading.textContent = "Connected accounts (extra tokens)";
+  section.appendChild(heading);
+  const hint = document.createElement("small");
+  hint.textContent =
+    "Extra GitHub tokens (e.g. client orgs) live here as named accounts. " +
+    "Tokens are write-only and never displayed again.";
+  section.appendChild(hint);
+  const list = document.createElement("ul");
+  list.className = "gh-accounts-list";
+  section.appendChild(list);
+
+  // Add-account row: name + write-only token input.
+  const addRow = document.createElement("div");
+  addRow.className = "gh-accounts-add";
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "account name (e.g. client-a)";
+  nameInput.autocomplete = "off";
+  nameInput.pattern = "[a-z0-9][a-z0-9-_]{0,31}";
+  nameInput.title = "Lowercase letters, digits, dashes, underscores; max 32 chars; \"default\" is reserved";
+  const tokenInput = document.createElement("input");
+  tokenInput.type = "password";
+  tokenInput.placeholder = "ghp_… personal access token";
+  tokenInput.autocomplete = "new-password";
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "ghost";
+  addBtn.textContent = "Add account";
+  addRow.appendChild(nameInput);
+  addRow.appendChild(tokenInput);
+  addRow.appendChild(addBtn);
+  section.appendChild(addRow);
+
+  const status = document.createElement("p");
+  status.className = "prs-status";
+  status.setAttribute("role", "status");
+  section.appendChild(status);
+
+  function setStatus(message, state) {
+    status.textContent = message || "";
+    status.dataset.state = state || "";
+  }
+
+  function renderDefaultSelect(data) {
+    const accounts = (data && data.accounts) || [];
+    const saved = defaultSelect.dataset.saved || (data && data.default_account) || "default";
+    defaultSelect.replaceChildren();
+    for (const acc of accounts) {
+      const opt = document.createElement("option");
+      opt.value = acc.name;
+      opt.textContent = acc.name === "default" ? "default (personal token)" : acc.name;
+      defaultSelect.appendChild(opt);
+    }
+    defaultSelect.value = accounts.some((a) => a.name === saved) ? saved : "default";
+    delete defaultSelect.dataset.saved;
+  }
+
+  async function renderAccounts() {
+    try {
+      const data = await fetchGithubAccounts();
+      renderDefaultSelect(data);
+      const accounts = (data && data.accounts) || [];
+      list.replaceChildren();
+      for (const acc of accounts) {
+        const li = document.createElement("li");
+        li.className = "gh-accounts-row";
+        const top = document.createElement("div");
+        top.className = "gh-accounts-row-top";
+        const label = document.createElement("span");
+        label.className = "gh-accounts-label";
+        const nameStrong = document.createElement("strong");
+        nameStrong.textContent = acc.name;
+        label.appendChild(nameStrong);
+        if (acc.username) {
+          const at = document.createElement("span");
+          at.textContent = ` @${acc.username}`;
+          label.appendChild(at);
+        }
+        if (acc.scopes) {
+          const scopes = document.createElement("code");
+          scopes.textContent = ` ${acc.scopes}`;
+          label.appendChild(scopes);
+        }
+        if (acc.is_default) {
+          const badge = document.createElement("span");
+          badge.className = "prs-state";
+          badge.dataset.state = "default";
+          badge.textContent = "default";
+          label.appendChild(badge);
+        }
+        top.appendChild(label);
+        li.appendChild(top);
+
+        const controls = document.createElement("div");
+        controls.className = "gh-accounts-row-controls";
+        if (acc.name === "default") {
+          // The "default" account IS the personal access token
+          // field above; the accounts endpoint refuses to
+          // overwrite it, so no token input here.
+          const note = document.createElement("span");
+          note.className = "gh-accounts-note";
+          note.textContent = "Token = the personal access token field above.";
+          controls.appendChild(note);
+        } else {
+          // Edit = replace the token for this account (write-only).
+          const editToken = document.createElement("input");
+          editToken.type = "password";
+          editToken.placeholder = "new token (write-only)";
+          editToken.autocomplete = "new-password";
+          editToken.className = "gh-accounts-token";
+          const saveBtn = document.createElement("button");
+          saveBtn.type = "button";
+          saveBtn.className = "ghost";
+          saveBtn.textContent = "Update token";
+          saveBtn.addEventListener("click", async () => {
+            if (!editToken.value) {
+              setStatus("Enter a new token first.", "error");
+              return;
+            }
+            saveBtn.disabled = true;
+            try {
+              await githubAccountsApi(GITHUB_ACCOUNTS_PATH, {
+                method: "POST",
+                body: JSON.stringify({ name: acc.name, token: editToken.value }),
+              });
+              editToken.value = "";
+              setStatus(`Updated token for \`${acc.name}\`.`, "ok");
+              await renderAccounts();
+            } catch (e) {
+              setStatus(e.message, "error");
+            } finally {
+              saveBtn.disabled = false;
+            }
+          });
+          controls.appendChild(editToken);
+          controls.appendChild(saveBtn);
+
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "danger";
+          removeBtn.textContent = "Remove";
+          removeBtn.addEventListener("click", async () => {
+            if (!confirm(`Remove the GitHub account \`${acc.name}\`?`)) return;
+            removeBtn.disabled = true;
+            try {
+              await githubAccountsApi(
+                `${GITHUB_ACCOUNTS_PATH}/${encodeURIComponent(acc.name)}`,
+                { method: "DELETE" },
+              );
+              setStatus(`Removed \`${acc.name}\`.`, "ok");
+              await renderAccounts();
+            } catch (e) {
+              setStatus(e.message, "error");
+              removeBtn.disabled = false;
+            }
+          });
+          controls.appendChild(removeBtn);
+        }
+        li.appendChild(controls);
+        list.appendChild(li);
+      }
+      if (!accounts.length) {
+        const li = document.createElement("li");
+        li.textContent = "No accounts yet.";
+        list.appendChild(li);
+      }
+    } catch (e) {
+      // The accounts endpoint is only mounted with the github-agent
+      // feature; on older servers the section just shows the error.
+      setStatus(e.message, "error");
+    }
+  }
+
+  addBtn.addEventListener("click", async () => {
+    const name = nameInput.value.trim();
+    const token = tokenInput.value;
+    if (!name || !token) {
+      setStatus("Both an account name and a token are required.", "error");
+      return;
+    }
+    addBtn.disabled = true;
+    try {
+      await githubAccountsApi(GITHUB_ACCOUNTS_PATH, {
+        method: "POST",
+        body: JSON.stringify({ name, token }),
+      });
+      nameInput.value = "";
+      tokenInput.value = "";
+      setStatus(`Added \`${name}\`.`, "ok");
+      await renderAccounts();
+    } catch (e) {
+      setStatus(e.message, "error");
+    } finally {
+      addBtn.disabled = false;
+    }
+  });
+
+  form.insertBefore(section, actions);
+  renderAccounts();
+}
+
 async function probeShortcut(apiToken, username, accessToken) {
   const resp = await fetch(PROBE_PATH_SHORTCUT, {
     method: "POST",
@@ -1589,11 +1784,15 @@ function openEditor(svc) {
     // Plan 1795686864347: the PRs dashboard repo list is chosen in the
     // dedicated repo picker (orgs + checkbox list), not typed by hand.
     attachGithubReposPickerButton(form);
+    // Plan 1795793328177: named extra GitHub accounts (multi-PAT) are
+    // managed through the dedicated accounts endpoints; the section
+    // also hosts the "Default account" selector.
+    attachGithubAccountsSection(form, actions, svc);
   }
   if (svc.id === SHORTCUT_SERVICE_ID) {
     const probe = attachShortcutTestButton(form, actions);
     loadShortcutIdentity(form, actions, svc, probe);
-    attachShortcutTeamPicker(form);
+    attachShortcutTeamProjectPicker(form);
     attachShortcutTemplatesEditor(form);
     attachShortcutOauthButtons(form, actions, svc);
   }

@@ -107,6 +107,12 @@ pub struct OwnerReposQuery {
     /// hides them unless its "show archived" box is ticked).
     #[serde(default)]
     pub include_archived: Option<bool>,
+    /// `account` selector (plan 1795793328177): a configured account
+    /// name or `"default"` (the default — the saved
+    /// `default_account` when set); `"all"` merges the lists across
+    /// every configured account, deduped.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 /// Query string for the PR list.
@@ -133,6 +139,12 @@ pub struct ListPrsQuery {
     /// just-merged PR disappears immediately.
     #[serde(default)]
     pub refresh: Option<bool>,
+    /// `account` selector (plan 1795793328177): a configured account
+    /// name or `"default"`; `"all"` (the default when absent)
+    /// aggregates across every configured account, each repo
+    /// resolved to the account that can read it.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -160,38 +172,28 @@ fn write_api_audit(store: &nagent_db::Db, user_id: Uuid, call: &str, outcome: Pr
     });
 }
 
-/// Read + decrypt the caller's `github.personal_access_token`
-/// vault row. The plaintext only lives in the returned
-/// `SecretString` and is handed to `GithubClient::get`, which puts
-/// it in the `Authorization` header — never in an error path
-/// (AGENTS.md §6).
-// `Response` is axum's error carrier and is large by design; boxing would
-// ripple through every handler's `Ok(resp)` arm for no runtime gain on a
-// cold error path.
+/// Read + decrypt one raw `github` vault field. Shared by every
+/// helper below.
+// See `vault_field` for why the `Response` error variant is not boxed.
 #[allow(clippy::result_large_err)]
-async fn vault_token(state: &GithubApiState, user_id: Uuid) -> Result<SecretString, Response> {
-    let row = state
+async fn vault_field(
+    state: &GithubApiState,
+    user_id: Uuid,
+    field: &str,
+) -> Result<Option<SecretString>, Response> {
+    let Ok(row) = state
         .store
         .for_user(user_id)
         .credentials()
-        .fetch("github", "personal_access_token")
+        .fetch("github", field)
         .await
-        .map_err(|e| {
-            tracing::warn!(user = %user_id, error = %e, "github api: vault read failed");
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to read the GitHub credentials from the vault".into(),
-            )
-        })?
-        .ok_or_else(|| {
-            error_response(
-                StatusCode::BAD_REQUEST,
-                "the GitHub integration is not configured; save a personal access token in \
-                 Settings → Integrations → GitHub first"
-                    .into(),
-            )
-        })?;
-    decrypt(
+    else {
+        return Ok(None);
+    };
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let plaintext = decrypt(
         &state.key,
         &EncryptedSecret {
             nonce: row.nonce,
@@ -199,14 +201,108 @@ async fn vault_token(state: &GithubApiState, user_id: Uuid) -> Result<SecretStri
         },
     )
     .map_err(|e| {
-        tracing::warn!(user = %user_id, error = %e, "github api: vault decrypt failed");
+        tracing::warn!(user = %user_id, field, error = %e, "github api: vault decrypt failed");
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to decrypt the GitHub token (the credentials key may have been \
-             rotated); re-save the token in Settings → Integrations"
-                .into(),
+            format!("failed to decrypt the GitHub `{field}` field; re-save it in Settings → Integrations"),
         )
-    })
+    })?;
+    Ok(Some(plaintext))
+}
+
+/// Every configured account as `(name, token)`, default first
+/// (plan 1795793328177): `personal_access_token` as `"default"`,
+/// then the parsed `github.accounts` blob (cap `max_accounts`).
+/// Errors when neither exists (400 — integration not configured).
+// See `vault_field` for why the `Response` error variant is not boxed.
+#[allow(clippy::result_large_err)]
+async fn vault_accounts(
+    state: &GithubApiState,
+    user_id: Uuid,
+) -> Result<Vec<(String, SecretString)>, Response> {
+    use secrecy::ExposeSecret;
+    let mut out: Vec<(String, SecretString)> = Vec::new();
+    if let Some(pat) = vault_field(state, user_id, "personal_access_token").await? {
+        out.push((nagent_github::DEFAULT_ACCOUNT_NAME.to_string(), pat));
+    }
+    if let Some(blob) = vault_field(state, user_id, "accounts").await? {
+        let defs =
+            nagent_github::parse_accounts(blob.expose_secret(), state.client.cfg.max_accounts)
+                .map_err(|e| error_response(StatusCode::BAD_REQUEST, e.to_string()))?;
+        for def in defs {
+            out.push((def.name, def.token));
+        }
+    }
+    if out.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "the GitHub integration is not configured; save a personal access token in \
+             Settings → Integrations → GitHub first"
+                .into(),
+        ));
+    }
+    Ok(out)
+}
+
+/// The caller's `github.default_account` vault field, defaulting to
+/// `"default"`. Names only — never a token.
+async fn vault_default_account_name(state: &GithubApiState, user_id: Uuid) -> String {
+    use secrecy::ExposeSecret;
+    match vault_field(state, user_id, "default_account").await {
+        Ok(Some(v)) => {
+            let s = v.expose_secret().trim().to_string();
+            if s.is_empty() {
+                nagent_github::DEFAULT_ACCOUNT_NAME.to_string()
+            } else {
+                s
+            }
+        }
+        _ => nagent_github::DEFAULT_ACCOUNT_NAME.to_string(),
+    }
+}
+
+/// Resolve one account by name (or `"default"`); 400 when unknown.
+/// The error lists the configured account **names** only — never
+/// tokens (AGENTS.md §6).
+// See `vault_field` for why the `Response` error variant is not boxed.
+#[allow(clippy::result_large_err)]
+async fn vault_account_by_name(
+    state: &GithubApiState,
+    user_id: Uuid,
+    name: &str,
+) -> Result<(String, SecretString), Response> {
+    let accounts = vault_accounts(state, user_id).await?;
+    let known = accounts
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    accounts
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::BAD_REQUEST,
+                format!("unknown GitHub account `{name}` (configured accounts: {known})"),
+            )
+        })
+}
+
+/// The persisted `github.repo_accounts` map
+/// (`"owner/repo" → account name`), parsed leniently (a corrupt blob
+/// yields an empty map — live resolution re-derives it).
+async fn vault_repo_accounts_map(
+    state: &GithubApiState,
+    user_id: Uuid,
+) -> std::collections::HashMap<String, String> {
+    use secrecy::ExposeSecret;
+    match vault_field(state, user_id, "repo_accounts").await {
+        Ok(Some(blob)) => {
+            serde_json::from_str::<std::collections::HashMap<String, String>>(blob.expose_secret())
+                .unwrap_or_default()
+        }
+        _ => std::collections::HashMap::new(),
+    }
 }
 
 /// Read + decrypt + parse the caller's `github.dashboard_repos`
@@ -216,7 +312,7 @@ async fn vault_token(state: &GithubApiState, user_id: Uuid) -> Result<SecretStri
 /// capped at [`nagent_github::MAX_DASHBOARD_REPOS`]. A missing or
 /// unparsable field yields an empty list (the dashboard then shows
 /// an empty table, not an error).
-// See `vault_token` for why the `Response` error variant is not boxed.
+// See `vault_field` for why the `Response` error variant is not boxed.
 #[allow(clippy::result_large_err)]
 async fn vault_repos(state: &GithubApiState, user_id: Uuid) -> Result<Vec<String>, Response> {
     let Ok(Some(row)) = state
@@ -300,19 +396,19 @@ fn audit_outcome(e: &GithubError) -> ProbeOutcome {
     }
 }
 
-/// `GET /api/integrations/github/prs?repo=&state=open&limit=&enrich=&refresh=`
+/// `GET /api/integrations/github/prs?repo=&state=open&limit=&enrich=&refresh=&account=`
+///
+/// `?account=` (plan 1795793328177): absent or `all` aggregates
+/// across every configured account (each `dashboard_repos` entry
+/// resolved to the account that can read it via the persisted
+/// `repo_accounts` map, else live resolution; rows tagged
+/// `"account"`); a name or `"default"` restricts the list to that
+/// one account.
 pub async fn list_prs(
     State(state): State<GithubApiState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Query(q): Query<ListPrsQuery>,
 ) -> Result<Response, AuthError> {
-    let token = match vault_token(&state, user.id).await {
-        Ok(t) => t,
-        Err(resp) => {
-            write_api_audit(&state.store, user.id, "prs", ProbeOutcome::BadRequest);
-            return Ok(resp);
-        }
-    };
     let repos = match vault_repos(&state, user.id).await {
         Ok(r) => r,
         Err(resp) => {
@@ -354,41 +450,110 @@ pub async fn list_prs(
             Some(r)
         }
     };
-    let query = nagent_github::DashboardPrsQuery {
-        repos: &repos,
-        filter,
-        state: &state_param,
-        limit: q.limit.unwrap_or(50),
-        enrich: q.enrich.unwrap_or(false),
-        refresh: q.refresh.unwrap_or(false),
-    };
-    match nagent_github::list_dashboard_prs(&state.client, &token, user.id, &query).await {
-        Ok(data) => {
-            write_api_audit(&state.store, user.id, "prs", ProbeOutcome::Ok);
-            Ok(Json(serde_json::json!({ "data": data })).into_response())
+    let account_param = q
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match account_param {
+        // `all` (or absent) — cross-account aggregation.
+        None | Some(nagent_github::ALL_ACCOUNTS) => {
+            let accounts = match vault_accounts(&state, user.id).await {
+                Ok(a) => a,
+                Err(resp) => {
+                    write_api_audit(&state.store, user.id, "prs", ProbeOutcome::BadRequest);
+                    return Ok(resp);
+                }
+            };
+            let repo_accounts = vault_repo_accounts_map(&state, user.id).await;
+            let refs: Vec<nagent_github::AccountToken<'_>> = accounts
+                .iter()
+                .map(|(name, token)| nagent_github::AccountToken { name, token })
+                .collect();
+            let query = nagent_github::MultiDashboardPrsQuery {
+                repos: &repos,
+                filter,
+                state: &state_param,
+                limit: q.limit.unwrap_or(50),
+                enrich: q.enrich.unwrap_or(false),
+                refresh: q.refresh.unwrap_or(false),
+                repo_accounts: Some(&repo_accounts),
+            };
+            match nagent_github::list_dashboard_prs_multi(&state.client, &refs, user.id, &query)
+                .await
+            {
+                Ok(mut data) => {
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert(
+                            "account".into(),
+                            serde_json::json!(nagent_github::ALL_ACCOUNTS),
+                        );
+                    }
+                    write_api_audit(&state.store, user.id, "prs", ProbeOutcome::Ok);
+                    Ok(Json(serde_json::json!({ "data": data })).into_response())
+                }
+                Err(e) => {
+                    let outcome = audit_outcome(&e);
+                    write_api_audit(&state.store, user.id, "prs", outcome);
+                    Ok(map_github_error(e))
+                }
+            }
         }
-        Err(e) => {
-            let outcome = audit_outcome(&e);
-            write_api_audit(&state.store, user.id, "prs", outcome);
-            Ok(map_github_error(e))
+        // One named account.
+        Some(name) => {
+            let (account_name, token) = match vault_account_by_name(&state, user.id, name).await {
+                Ok(a) => a,
+                Err(resp) => {
+                    write_api_audit(&state.store, user.id, "prs", ProbeOutcome::BadRequest);
+                    return Ok(resp);
+                }
+            };
+            let query = nagent_github::DashboardPrsQuery {
+                repos: &repos,
+                filter,
+                state: &state_param,
+                limit: q.limit.unwrap_or(50),
+                enrich: q.enrich.unwrap_or(false),
+                refresh: q.refresh.unwrap_or(false),
+            };
+            match nagent_github::list_dashboard_prs(
+                &state.client,
+                &token,
+                user.id,
+                &account_name,
+                &query,
+            )
+            .await
+            {
+                Ok(mut data) => {
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert("account".into(), serde_json::json!(account_name));
+                    }
+                    write_api_audit(&state.store, user.id, "prs", ProbeOutcome::Ok);
+                    Ok(Json(serde_json::json!({ "data": data })).into_response())
+                }
+                Err(e) => {
+                    let outcome = audit_outcome(&e);
+                    write_api_audit(&state.store, user.id, "prs", outcome);
+                    Ok(map_github_error(e))
+                }
+            }
         }
     }
 }
 
 /// `GET /api/integrations/github/prs/:owner/:repo/:number`
+///
+/// The repo is resolved to the account that can read it (persisted
+/// `repo_accounts` map, else live probing across accounts — plan
+/// 1795793328177), and the response carries the resolved
+/// `"account"` name.
 pub async fn get_pr(
     State(state): State<GithubApiState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Path((owner, repo, number)): Path<(String, String, u64)>,
 ) -> Result<Response, AuthError> {
     let full = format!("{owner}/{repo}");
-    let token = match vault_token(&state, user.id).await {
-        Ok(t) => t,
-        Err(resp) => {
-            write_api_audit(&state.store, user.id, "pr", ProbeOutcome::BadRequest);
-            return Ok(resp);
-        }
-    };
     if nagent_github::valid_repo_full_name(&full).is_none() {
         write_api_audit(&state.store, user.id, "pr", ProbeOutcome::BadRequest);
         return Ok(error_response(
@@ -410,7 +575,45 @@ pub async fn get_pr(
             format!("`{full}` is not in your configured dashboard repositories"),
         ));
     }
-    match nagent_github::get_pr_detail(&state.client, &token, user.id, &owner, &repo, number).await
+    // Resolve repo → account across every configured account.
+    let accounts = match vault_accounts(&state, user.id).await {
+        Ok(a) => a,
+        Err(resp) => {
+            write_api_audit(&state.store, user.id, "pr", ProbeOutcome::BadRequest);
+            return Ok(resp);
+        }
+    };
+    let persisted = vault_repo_accounts_map(&state, user.id).await;
+    let refs: Vec<nagent_github::AccountToken<'_>> = accounts
+        .iter()
+        .map(|(name, token)| nagent_github::AccountToken { name, token })
+        .collect();
+    let (account_name, token) = match nagent_github::resolve_repo_account(
+        &state.client,
+        &refs,
+        user.id,
+        &full,
+        Some(&persisted),
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            let outcome = audit_outcome(&e);
+            write_api_audit(&state.store, user.id, "pr", outcome);
+            return Ok(map_github_error(e));
+        }
+    };
+    match nagent_github::get_pr_detail(
+        &state.client,
+        &token,
+        user.id,
+        &account_name,
+        &owner,
+        &repo,
+        number,
+    )
+    .await
     {
         Ok(mut data) => {
             // The dashboard detail is not LLM-facing, but cap the
@@ -421,6 +624,9 @@ pub async fn get_pr(
                 if let Some(obj) = data.as_object_mut() {
                     obj.insert("body".into(), serde_json::Value::String(capped));
                 }
+            }
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("account".into(), serde_json::json!(account_name));
             }
             write_api_audit(&state.store, user.id, "pr", ProbeOutcome::Ok);
             Ok(Json(serde_json::json!({ "data": { "pr": data } })).into_response())
@@ -433,29 +639,97 @@ pub async fn get_pr(
     }
 }
 
-/// `GET /api/integrations/github/owners` — user login + orgs,
-/// backing the repo picker's owner list.
+/// `GET /api/integrations/github/owners?account=` — user login +
+/// orgs, backing the repo picker's owner list. `?account=` (plan
+/// 1795793328177): a name or `"default"` (the default — the saved
+/// `default_account` when set); `"all"` merges the owner lists
+/// across every configured account, deduped by login.
 pub async fn list_owners(
     State(state): State<GithubApiState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    Query(q): Query<OwnerReposQuery>,
 ) -> Result<Response, AuthError> {
-    let token = match vault_token(&state, user.id).await {
-        Ok(t) => t,
+    let account_param = q
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let accounts = match vault_accounts(&state, user.id).await {
+        Ok(a) => a,
         Err(resp) => {
             write_api_audit(&state.store, user.id, "owners", ProbeOutcome::BadRequest);
             return Ok(resp);
         }
     };
-    match nagent_github::list_owners(&state.client, &token, user.id).await {
-        Ok(data) => {
-            write_api_audit(&state.store, user.id, "owners", ProbeOutcome::Ok);
-            Ok(Json(serde_json::json!({ "data": data })).into_response())
+    // Which accounts to query.
+    let selected: Vec<(String, SecretString)> = match account_param {
+        Some(nagent_github::ALL_ACCOUNTS) => accounts,
+        Some(name) => match accounts.iter().find(|(n, _)| n.as_str() == name).cloned() {
+            Some(a) => vec![a],
+            None => {
+                let known = accounts
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write_api_audit(&state.store, user.id, "owners", ProbeOutcome::BadRequest);
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown GitHub account `{name}` (configured accounts: {known})"),
+                ));
+            }
+        },
+        None => {
+            // Default: the saved `default_account`, else `"default"`.
+            let name = vault_default_account_name(&state, user.id).await;
+            match accounts.iter().find(|(n, _)| n == &name).cloned() {
+                Some(a) => vec![a],
+                None => {
+                    write_api_audit(&state.store, user.id, "owners", ProbeOutcome::BadRequest);
+                    return Ok(error_response(
+                        StatusCode::BAD_REQUEST,
+                        format!("the default GitHub account `{name}` is not configured"),
+                    ));
+                }
+            }
         }
-        Err(e) => {
+    };
+    if selected.len() == 1 {
+        let (name, token) = &selected[0];
+        match nagent_github::list_owners(&state.client, token, user.id, name).await {
+            Ok(data) => {
+                write_api_audit(&state.store, user.id, "owners", ProbeOutcome::Ok);
+                Ok(Json(serde_json::json!({ "data": data })).into_response())
+            }
+            Err(e) => {
+                let outcome = audit_outcome(&e);
+                write_api_audit(&state.store, user.id, "owners", outcome);
+                Ok(map_github_error(e))
+            }
+        }
+    } else {
+        // `all`: fan out and merge, deduped by login.
+        let mut payloads = Vec::new();
+        let mut first_err: Option<GithubError> = None;
+        for (name, token) in &selected {
+            match nagent_github::list_owners(&state.client, token, user.id, name).await {
+                Ok(v) => payloads.push(v),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        if payloads.is_empty() {
+            let e = first_err.expect("at least one account was selected");
             let outcome = audit_outcome(&e);
             write_api_audit(&state.store, user.id, "owners", outcome);
-            Ok(map_github_error(e))
+            return Ok(map_github_error(e));
         }
+        let data = nagent_github::merge_owners(payloads);
+        write_api_audit(&state.store, user.id, "owners", ProbeOutcome::Ok);
+        Ok(Json(serde_json::json!({ "data": data })).into_response())
     }
 }
 
@@ -480,8 +754,15 @@ pub async fn list_owner_repos(
             format!("invalid owner name `{owner}`"),
         ));
     }
-    let token = match vault_token(&state, user.id).await {
-        Ok(t) => t,
+    // `?account=`: name / `"default"` (saved `default_account` when
+    // set) / `"all"` (merge across accounts, deduped by full_name).
+    let account_param = q
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let accounts = match vault_accounts(&state, user.id).await {
+        Ok(a) => a,
         Err(resp) => {
             write_api_audit(
                 &state.store,
@@ -492,25 +773,107 @@ pub async fn list_owner_repos(
             return Ok(resp);
         }
     };
+    let selected: Vec<(String, SecretString)> = match account_param {
+        Some(nagent_github::ALL_ACCOUNTS) => accounts,
+        Some(name) => match accounts.iter().find(|(n, _)| n.as_str() == name).cloned() {
+            Some(a) => vec![a],
+            None => {
+                let known = accounts
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write_api_audit(
+                    &state.store,
+                    user.id,
+                    "owner_repos",
+                    ProbeOutcome::BadRequest,
+                );
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown GitHub account `{name}` (configured accounts: {known})"),
+                ));
+            }
+        },
+        None => {
+            let name = vault_default_account_name(&state, user.id).await;
+            match accounts.iter().find(|(n, _)| n == &name).cloned() {
+                Some(a) => vec![a],
+                None => {
+                    write_api_audit(
+                        &state.store,
+                        user.id,
+                        "owner_repos",
+                        ProbeOutcome::BadRequest,
+                    );
+                    return Ok(error_response(
+                        StatusCode::BAD_REQUEST,
+                        format!("the default GitHub account `{name}` is not configured"),
+                    ));
+                }
+            }
+        }
+    };
     // Single access-scoped source (`/user/repos?visibility=all&affiliation=…`,
     // paginated up to 10 pages, filtered by owner) — covers own repos,
     // org-member repos and
     // outside-collaborator private repos of orgs the user is not a
     // visible member of. An owner the PAT cannot see yields an empty
     // list (GitHub enforces visibility upstream).
-    match nagent_github::list_owner_repos(&state.client, &token, user.id, &owner, include_archived)
+    if selected.len() == 1 {
+        let (name, token) = &selected[0];
+        return match nagent_github::list_owner_repos(
+            &state.client,
+            token,
+            user.id,
+            name,
+            &owner,
+            include_archived,
+        )
         .await
-    {
-        Ok(data) => {
-            write_api_audit(&state.store, user.id, "owner_repos", ProbeOutcome::Ok);
-            Ok(Json(serde_json::json!({ "data": data })).into_response())
-        }
-        Err(e) => {
-            let outcome = audit_outcome(&e);
-            write_api_audit(&state.store, user.id, "owner_repos", outcome);
-            Ok(map_github_error(e))
+        {
+            Ok(data) => {
+                write_api_audit(&state.store, user.id, "owner_repos", ProbeOutcome::Ok);
+                Ok(Json(serde_json::json!({ "data": data })).into_response())
+            }
+            Err(e) => {
+                let outcome = audit_outcome(&e);
+                write_api_audit(&state.store, user.id, "owner_repos", outcome);
+                Ok(map_github_error(e))
+            }
+        };
+    }
+    // `all`: fan out and merge, deduped by full_name.
+    let mut payloads = Vec::new();
+    let mut first_err: Option<GithubError> = None;
+    for (name, token) in &selected {
+        match nagent_github::list_owner_repos(
+            &state.client,
+            token,
+            user.id,
+            name,
+            &owner,
+            include_archived,
+        )
+        .await
+        {
+            Ok(v) => payloads.push(v),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
         }
     }
+    if payloads.is_empty() {
+        let e = first_err.expect("at least one account was selected");
+        let outcome = audit_outcome(&e);
+        write_api_audit(&state.store, user.id, "owner_repos", outcome);
+        return Ok(map_github_error(e));
+    }
+    let data = nagent_github::merge_owner_repos(payloads, &owner);
+    write_api_audit(&state.store, user.id, "owner_repos", ProbeOutcome::Ok);
+    Ok(Json(serde_json::json!({ "data": data })).into_response())
 }
 
 /// Build the GitHub dashboard router subtree. Feature-gated on

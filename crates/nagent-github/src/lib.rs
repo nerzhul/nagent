@@ -41,14 +41,20 @@
 //! surface (truncated); the request that carried the credential
 //! is not.
 
+pub mod accounts;
 pub mod client;
 pub mod project;
 
+pub use accounts::{
+    account_meta, merge_owner_repos, merge_owners, merge_tagged, parse_accounts,
+    serialize_accounts, valid_account_name, AccountDef, ALL_ACCOUNTS, DEFAULT_ACCOUNT_NAME,
+};
 pub use client::{
-    build_url, ci_status, get_pr_detail, get_repo, list_dashboard_prs, list_owner_repos,
-    list_owners, list_prs_for_repo, redact_authorization, truncate, valid_owner_name,
-    valid_repo_full_name, DashboardPrsQuery, GithubClient, RepoPrsQuery, GITHUB_API_VERSION,
-    MAX_DASHBOARD_REPOS, MAX_RAW_RESPONSE_BYTES,
+    build_url, ci_status, get_pr_detail, get_repo, list_dashboard_prs, list_dashboard_prs_multi,
+    list_owner_repos, list_owners, list_prs_for_repo, redact_authorization, resolve_repo_account,
+    truncate, valid_owner_name, valid_repo_full_name, AccountToken, DashboardPrsQuery,
+    GithubClient, MultiDashboardPrsQuery, RepoPrsQuery, GITHUB_API_VERSION, MAX_DASHBOARD_REPOS,
+    MAX_RAW_RESPONSE_BYTES,
 };
 pub use project::{project_pr_detail, project_pr_row, project_repo_summary};
 
@@ -120,6 +126,13 @@ pub struct GithubConfig {
     /// tests against a loopback fixture and for GHES. Defaults to
     /// `https://api.github.com`.
     pub base_url: String,
+    /// Cap on the number of named accounts stored in the per-user
+    /// `github.accounts` vault field (the `"default"` account backed
+    /// by `personal_access_token` is not counted). Default 8.
+    pub max_accounts: usize,
+    /// Bound on the concurrent fan-out of an `account: "all"`
+    /// aggregation (chat tools + dashboard). Default 4.
+    pub aggregate_concurrency: usize,
 }
 
 impl Default for GithubConfig {
@@ -131,6 +144,8 @@ impl Default for GithubConfig {
             cache_ttl_secs: 60,
             allowlist: vec!["api.github.com".to_string()],
             base_url: "https://api.github.com".to_string(),
+            max_accounts: 8,
+            aggregate_concurrency: 4,
         }
     }
 }

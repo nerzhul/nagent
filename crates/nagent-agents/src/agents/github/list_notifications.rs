@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::client::GithubClient;
-use super::{confirm_reason, parse_limit, run};
+use super::{account_prop, confirm_reason_for, parse_account_arg, parse_limit, run, run_all};
 use crate::agents::{Agent, AgentError, UserContext};
 
 pub struct ListNotificationsAgent {
@@ -19,6 +19,7 @@ impl ListNotificationsAgent {
 
 fn project_notification(n: &Value) -> Value {
     json!({
+        // `id` feeds the `account: "all"` dedupe (merge_tagged).
         "id": n.get("id"),
         "reason": n.get("reason"),
         "unread": n.get("unread"),
@@ -40,7 +41,9 @@ impl Agent for ListNotificationsAgent {
         "List the authenticated user's GitHub notifications (`GET /notifications`): inbox \
          items for mentions, reviews, assignments, etc., each with reason, unread flag, \
          subject title/type, repository, and update date. Args: `unread_only?` (default \
-         false — pass true to see only unread), `limit?` (default 30, server cap 100). \
+         false — pass true to see only unread), `limit?` (default 30, server cap 100), \
+         `account?` (a name from `github_list_accounts`, `\"default\"`, or `\"all\"` to \
+         merge every configured account's notifications, each tagged with its `account`). \
          Read-only."
     }
 
@@ -59,6 +62,7 @@ impl Agent for ListNotificationsAgent {
                     "maximum": 100,
                     "default": 30,
                 },
+                "account": account_prop(true),
             },
             "additionalProperties": false,
         })
@@ -79,9 +83,9 @@ impl Agent for ListNotificationsAgent {
     fn requires_confirmation(
         &self,
         _ctx: &UserContext,
-        _args: &Value,
+        args: &Value,
     ) -> crate::agents::ConfirmationDecision {
-        confirm_reason(self.name())
+        confirm_reason_for(self.name(), parse_account_arg(args).as_deref())
     }
 
     fn untrusted_output(&self) -> bool {
@@ -101,14 +105,23 @@ impl Agent for ListNotificationsAgent {
             // the caller wants everything.
             query.push(("all".to_string(), "true".to_string()));
         }
+        let account_arg = parse_account_arg(&args);
+        if account_arg.as_deref() == Some(nagent_github::ALL_ACCOUNTS) {
+            return self.invoke_all(ctx, &args, query, limit, unread_only).await;
+        }
+        let account = self
+            .client
+            .resolve_account(ctx, account_arg.as_deref())
+            .await?;
+        let name = account.name.clone();
         run(
             &self.client,
             ctx,
+            &account,
             self.name(),
             &args,
-            "/notifications",
-            query,
-            |raw, _cfg| {
+            ("/notifications", query),
+            move |raw, _cfg| {
                 let notifications: Vec<Value> = raw
                     .as_array()
                     .map(|arr| arr.iter().map(project_notification).collect())
@@ -116,6 +129,7 @@ impl Agent for ListNotificationsAgent {
                 json!({
                     "ok": true,
                     "data": {
+                        "account": name,
                         "unread_only": unread_only,
                         "count": notifications.len(),
                         "notifications": notifications,
@@ -124,6 +138,67 @@ impl Agent for ListNotificationsAgent {
             },
         )
         .await
+    }
+}
+
+impl ListNotificationsAgent {
+    /// `account: "all"` — merged notification list across every
+    /// configured account: items tagged `"account"`, deduped by
+    /// upstream `id`, sorted by `updated_at` desc; per-account
+    /// failures collected in `account_errors`.
+    async fn invoke_all(
+        &self,
+        ctx: &UserContext,
+        args: &Value,
+        query: Vec<(String, String)>,
+        limit: usize,
+        unread_only: bool,
+    ) -> Result<String, AgentError> {
+        let client = self.client.clone();
+        let call = move |acc: super::Account| {
+            let client = client.clone();
+            let query = query.clone();
+            async move {
+                let raw = client
+                    .get_with_account(&acc, "/notifications", &query)
+                    .await?;
+                let items: Vec<Value> = raw
+                    .as_array()
+                    .map(|arr| arr.iter().map(project_notification).collect())
+                    .unwrap_or_default();
+                Ok((items, Value::Null))
+            }
+        };
+        let (merged, account_errors, _meta) = run_all(
+            &self.client,
+            ctx,
+            self.name(),
+            args,
+            limit,
+            "updated_at",
+            call,
+        )
+        .await?;
+        let out = json!({
+            "ok": true,
+            "data": {
+                "account": "all",
+                "unread_only": unread_only,
+                "count": merged.len(),
+                "notifications": merged,
+                "account_errors": Value::Object(account_errors),
+            }
+        });
+        let encoded = serde_json::to_string(&out)
+            .map_err(|e| AgentError::AgentFailed(format!("github encode: {e}")))?;
+        self.client.cache_put(
+            ctx.user_id(),
+            nagent_github::ALL_ACCOUNTS,
+            self.name(),
+            args,
+            encoded.clone(),
+        );
+        Ok(encoded)
     }
 }
 

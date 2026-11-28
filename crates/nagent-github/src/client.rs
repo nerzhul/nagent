@@ -76,8 +76,17 @@ pub const MAX_DASHBOARD_REPOS: usize = 50;
 /// One cached response: `(fetched_at, payload)`.
 type CacheEntry = (DateTime<Utc>, String);
 
-/// Cache map keyed by `(user_id, tool_name, canonical_args_json)`.
-type CacheMap = std::collections::HashMap<(uuid::Uuid, String, String), CacheEntry>;
+/// Cache map keyed by
+/// `(user_id, account_name, tool_name, canonical_args_json)` — the
+/// account is part of the key so the same tool called through two
+/// different tokens never shares a cache entry (plan
+/// 1795793328177 §1.3).
+type CacheMap = std::collections::HashMap<(uuid::Uuid, String, String, String), CacheEntry>;
+
+/// Repo → account resolution cache entry: `(account_name_or_None_for_negative, fetched_at)`.
+/// `None` means "every account answered 404" — negative results are
+/// cached too because 404s count against the rate limit.
+type RepoAccountEntry = (Option<String>, DateTime<Utc>);
 
 /// Shared client behind every GitHub API call. `Clone` is
 /// cheap: the cache is an `Arc<Mutex<…>>` and the HTTP client is
@@ -87,10 +96,15 @@ pub struct GithubClient {
     pub cfg: GithubConfig,
     http: reqwest::Client,
     /// In-process response cache keyed by
-    /// `(user_id, tool_name, canonical_args_json)`. The `Mutex`
-    /// is short-held (read or write one entry), same pattern as
-    /// `x_timeline` / `shortcut`.
+    /// `(user_id, account, tool_name, canonical_args_json)`. The
+    /// `Mutex` is short-held (read or write one entry), same pattern
+    /// as `x_timeline` / `shortcut`.
     cache: Arc<Mutex<CacheMap>>,
+    /// In-memory `(user_id, "owner/repo") → account` map used by the
+    /// repo-scoped tools and the dashboard to avoid re-probing which
+    /// token can read a repo. Populated by successful repo-scoped
+    /// calls and by the probe-repo endpoint; TTL = `cache_ttl_secs`.
+    repo_accounts: Arc<Mutex<std::collections::HashMap<(uuid::Uuid, String), RepoAccountEntry>>>,
 }
 
 impl std::fmt::Debug for GithubClient {
@@ -115,6 +129,7 @@ impl GithubClient {
             cfg,
             http,
             cache: Arc::new(Mutex::new(CacheMap::new())),
+            repo_accounts: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -131,13 +146,19 @@ impl GithubClient {
         })
     }
 
-    /// Read the cached payload for `(user_id, tool, args)` when it
-    /// is still fresh. `cache_ttl_secs = 0` always misses.
-    pub fn cache_get(&self, user_id: uuid::Uuid, tool: &str, args: &Value) -> Option<String> {
+    /// Read the cached payload for `(user_id, account, tool, args)`
+    /// when it is still fresh. `cache_ttl_secs = 0` always misses.
+    pub fn cache_get(
+        &self,
+        user_id: uuid::Uuid,
+        account: &str,
+        tool: &str,
+        args: &Value,
+    ) -> Option<String> {
         if self.cfg.cache_ttl_secs == 0 {
             return None;
         }
-        let key = cache_key(user_id, tool, args);
+        let key = cache_key(user_id, account, tool, args);
         let Ok(g) = self.cache.lock() else {
             return None;
         };
@@ -149,14 +170,51 @@ impl GithubClient {
         Some(payload.clone())
     }
 
-    /// Store `payload` under `(user_id, tool, args)`.
-    pub fn cache_put(&self, user_id: uuid::Uuid, tool: &str, args: &Value, payload: String) {
+    /// Store `payload` under `(user_id, account, tool, args)`.
+    pub fn cache_put(
+        &self,
+        user_id: uuid::Uuid,
+        account: &str,
+        tool: &str,
+        args: &Value,
+        payload: String,
+    ) {
         if self.cfg.cache_ttl_secs == 0 {
             return;
         }
-        let key = cache_key(user_id, tool, args);
+        let key = cache_key(user_id, account, tool, args);
         if let Ok(mut g) = self.cache.lock() {
             g.insert(key, (Utc::now(), payload));
+        }
+    }
+
+    /// Read the cached repo → account resolution for
+    /// `(user_id, "owner/repo")`. Returns `Some(Some(account))` on
+    /// a positive hit, `Some(None)` on a cached negative (all
+    /// accounts 404'd), `None` on miss / expired.
+    pub fn repo_account_get(&self, user_id: uuid::Uuid, repo: &str) -> Option<Option<String>> {
+        if self.cfg.cache_ttl_secs == 0 {
+            return None;
+        }
+        let Ok(g) = self.repo_accounts.lock() else {
+            return None;
+        };
+        let (account, fetched_at) = g.get(&(user_id, repo.to_string()))?;
+        let age = Utc::now().signed_duration_since(*fetched_at).num_seconds();
+        if age < 0 || age >= self.cfg.cache_ttl_secs as i64 {
+            return None;
+        }
+        Some(account.clone())
+    }
+
+    /// Cache the repo → account resolution (positive `Some(account)`
+    /// or negative `None`).
+    pub fn repo_account_put(&self, user_id: uuid::Uuid, repo: &str, account: Option<String>) {
+        if self.cfg.cache_ttl_secs == 0 {
+            return;
+        }
+        if let Ok(mut g) = self.repo_accounts.lock() {
+            g.insert((user_id, repo.to_string()), (account, Utc::now()));
         }
     }
 
@@ -172,6 +230,18 @@ impl GithubClient {
         path: &str,
         query: &[(String, String)],
     ) -> Result<Value, GithubError> {
+        self.get_raw(token, path, query).await.map(|(v, _)| v)
+    }
+
+    /// Like [`GithubClient::get`] but also returns the response
+    /// headers — used by the account probe to read
+    /// `X-OAuth-Scopes` (safe to display; the token is not).
+    pub async fn get_raw(
+        &self,
+        token: &SecretString,
+        path: &str,
+        query: &[(String, String)],
+    ) -> Result<(Value, reqwest::header::HeaderMap), GithubError> {
         let url = build_url(&self.cfg.base_url, path, query);
 
         // SSRF pre-flight + hostname allow-list, same posture as
@@ -232,15 +302,38 @@ impl GithubClient {
                 body: truncate(&body, ERROR_BODY_CAP),
             });
         }
-        serde_json::from_str(&body)
-            .map_err(|e| GithubError::Transport(format!("github parse (HTTP {status}): {e}")))
+        let parsed = serde_json::from_str(&body)
+            .map_err(|e| GithubError::Transport(format!("github parse (HTTP {status}): {e}")))?;
+        Ok((parsed, headers))
+    }
+
+    /// `GET /user` returning the profile plus the `X-OAuth-Scopes`
+    /// header (the scopes are safe to display per AGENTS.md §6; the
+    /// token is not). Used by the account add/update endpoint to
+    /// capture `login` + scopes when a token is probed.
+    pub async fn get_user(
+        &self,
+        token: &SecretString,
+    ) -> Result<(Value, Option<String>), GithubError> {
+        let (v, headers) = self.get_raw(token, "/user", &[]).await?;
+        let scopes = headers
+            .get("x-oauth-scopes")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Ok((v, scopes))
     }
 }
 
-/// Canonical cache key: `(user_id, tool, args-as-json)`.
-fn cache_key(user_id: uuid::Uuid, tool: &str, args: &Value) -> (uuid::Uuid, String, String) {
+/// Canonical cache key: `(user_id, account, tool, args-as-json)`.
+fn cache_key(
+    user_id: uuid::Uuid,
+    account: &str,
+    tool: &str,
+    args: &Value,
+) -> (uuid::Uuid, String, String, String) {
     let canonical = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
-    (user_id, tool.to_string(), canonical)
+    (user_id, account.to_string(), tool.to_string(), canonical)
 }
 
 /// `true` when the response headers say the primary rate limit is
@@ -434,11 +527,12 @@ pub async fn get_repo(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
     owner: &str,
     repo: &str,
 ) -> Result<Value, GithubError> {
     let args = serde_json::json!({ "repo": format!("{owner}/{repo}") });
-    if let Some(cached) = client.cache_get(user_id, API_PROBE_REPO_TOOL, &args) {
+    if let Some(cached) = client.cache_get(user_id, account, API_PROBE_REPO_TOOL, &args) {
         tracing::debug!(user_id = %user_id, "github api cache hit");
         return serde_json::from_str(&cached)
             .map_err(|e| GithubError::Transport(format!("github cache decode: {e}")));
@@ -449,7 +543,13 @@ pub async fn get_repo(
     let out = crate::project::project_repo_summary(&raw);
     let encoded = serde_json::to_string(&out)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))?;
-    client.cache_put(user_id, API_PROBE_REPO_TOOL, &args, encoded.clone());
+    client.cache_put(
+        user_id,
+        account,
+        API_PROBE_REPO_TOOL,
+        &args,
+        encoded.clone(),
+    );
     serde_json::from_str(&encoded)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))
 }
@@ -476,6 +576,7 @@ pub async fn list_prs_for_repo(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
     q: &RepoPrsQuery<'_>,
 ) -> Result<Vec<Value>, GithubError> {
     let owner = q.owner;
@@ -487,7 +588,7 @@ pub async fn list_prs_for_repo(
         "per_page": per_page,
     });
     if !q.refresh {
-        if let Some(cached) = client.cache_get(user_id, API_LIST_PRS_TOOL, &args) {
+        if let Some(cached) = client.cache_get(user_id, account, API_LIST_PRS_TOOL, &args) {
             tracing::debug!(user_id = %user_id, "github api cache hit");
             return serde_json::from_str(&cached)
                 .map_err(|e| GithubError::Transport(format!("github cache decode: {e}")));
@@ -511,7 +612,7 @@ pub async fn list_prs_for_repo(
         .unwrap_or_default();
     let encoded = serde_json::to_string(&prs)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))?;
-    client.cache_put(user_id, API_LIST_PRS_TOOL, &args, encoded.clone());
+    client.cache_put(user_id, account, API_LIST_PRS_TOOL, &args, encoded.clone());
     serde_json::from_str(&encoded)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))
 }
@@ -525,6 +626,7 @@ pub async fn get_pr_detail(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
     owner: &str,
     repo: &str,
     number: u64,
@@ -538,7 +640,7 @@ pub async fn get_pr_detail(
         "repo": format!("{owner}/{repo}"),
         "number": number,
     });
-    if let Some(cached) = client.cache_get(user_id, API_PR_DETAIL_TOOL, &args) {
+    if let Some(cached) = client.cache_get(user_id, account, API_PR_DETAIL_TOOL, &args) {
         tracing::debug!(user_id = %user_id, "github api cache hit");
         return serde_json::from_str(&cached)
             .map_err(|e| GithubError::Transport(format!("github cache decode: {e}")));
@@ -549,7 +651,7 @@ pub async fn get_pr_detail(
     let out = crate::project::project_pr_detail(&format!("{owner}/{repo}"), &raw);
     let encoded = serde_json::to_string(&out)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))?;
-    client.cache_put(user_id, API_PR_DETAIL_TOOL, &args, encoded.clone());
+    client.cache_put(user_id, account, API_PR_DETAIL_TOOL, &args, encoded.clone());
     serde_json::from_str(&encoded)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))
 }
@@ -589,9 +691,10 @@ async fn accessible_repos(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
 ) -> Result<Vec<Value>, GithubError> {
     let args = serde_json::json!({});
-    if let Some(cached) = client.cache_get(user_id, API_USER_REPOS_TOOL, &args) {
+    if let Some(cached) = client.cache_get(user_id, account, API_USER_REPOS_TOOL, &args) {
         tracing::debug!(user_id = %user_id, "github api cache hit");
         return serde_json::from_str::<Value>(&cached)
             .map(|v| v.as_array().cloned().unwrap_or_default())
@@ -614,7 +717,7 @@ async fn accessible_repos(
     }
     let encoded = serde_json::to_string(&all)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))?;
-    client.cache_put(user_id, API_USER_REPOS_TOOL, &args, encoded);
+    client.cache_put(user_id, account, API_USER_REPOS_TOOL, &args, encoded);
     Ok(all)
 }
 
@@ -633,9 +736,10 @@ pub async fn list_owners(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
 ) -> Result<Value, GithubError> {
     let args = serde_json::json!({});
-    if let Some(cached) = client.cache_get(user_id, API_OWNERS_TOOL, &args) {
+    if let Some(cached) = client.cache_get(user_id, account, API_OWNERS_TOOL, &args) {
         tracing::debug!(user_id = %user_id, "github api cache hit");
         return serde_json::from_str(&cached)
             .map_err(|e| GithubError::Transport(format!("github cache decode: {e}")));
@@ -668,7 +772,7 @@ pub async fn list_owners(
     // Owners that only appear through accessible repos (private org
     // membership, outside collaborator) — the whole point of the
     // `/user/repos` pass.
-    for repo in accessible_repos(client, token, user_id).await? {
+    for repo in accessible_repos(client, token, user_id, account).await? {
         if let Some(l) = repo
             .get("owner")
             .and_then(|o| o.get("login"))
@@ -689,7 +793,7 @@ pub async fn list_owners(
     });
     let encoded = serde_json::to_string(&out)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))?;
-    client.cache_put(user_id, API_OWNERS_TOOL, &args, encoded.clone());
+    client.cache_put(user_id, account, API_OWNERS_TOOL, &args, encoded.clone());
     serde_json::from_str(&encoded)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))
 }
@@ -712,6 +816,7 @@ pub async fn list_owner_repos(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
     owner: &str,
     include_archived: bool,
 ) -> Result<Value, GithubError> {
@@ -721,12 +826,12 @@ pub async fn list_owner_repos(
         )));
     }
     let args = serde_json::json!({ "owner": owner, "include_archived": include_archived });
-    if let Some(cached) = client.cache_get(user_id, API_OWNER_REPOS_TOOL, &args) {
+    if let Some(cached) = client.cache_get(user_id, account, API_OWNER_REPOS_TOOL, &args) {
         tracing::debug!(user_id = %user_id, "github api cache hit");
         return serde_json::from_str(&cached)
             .map_err(|e| GithubError::Transport(format!("github cache decode: {e}")));
     }
-    let repos: Vec<Value> = accessible_repos(client, token, user_id)
+    let repos: Vec<Value> = accessible_repos(client, token, user_id, account)
         .await?
         .into_iter()
         .filter(|r| {
@@ -749,7 +854,13 @@ pub async fn list_owner_repos(
     });
     let encoded = serde_json::to_string(&out)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))?;
-    client.cache_put(user_id, API_OWNER_REPOS_TOOL, &args, encoded.clone());
+    client.cache_put(
+        user_id,
+        account,
+        API_OWNER_REPOS_TOOL,
+        &args,
+        encoded.clone(),
+    );
     serde_json::from_str(&encoded)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))
 }
@@ -826,13 +937,14 @@ pub async fn ci_status(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
     repo: &str,
     sha: &str,
     refresh: bool,
 ) -> Result<Value, GithubError> {
     let args = serde_json::json!({ "repo": repo, "sha": sha });
     if !refresh {
-        if let Some(cached) = client.cache_get(user_id, API_CI_TOOL, &args) {
+        if let Some(cached) = client.cache_get(user_id, account, API_CI_TOOL, &args) {
             tracing::debug!(user_id = %user_id, "github api cache hit");
             return serde_json::from_str(&cached)
                 .map_err(|e| GithubError::Transport(format!("github cache decode: {e}")));
@@ -896,7 +1008,7 @@ pub async fn ci_status(
     };
     let encoded = serde_json::to_string(&out)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))?;
-    client.cache_put(user_id, API_CI_TOOL, &args, encoded.clone());
+    client.cache_put(user_id, account, API_CI_TOOL, &args, encoded.clone());
     serde_json::from_str(&encoded)
         .map_err(|e| GithubError::Transport(format!("github encode: {e}")))
 }
@@ -943,6 +1055,7 @@ pub async fn list_dashboard_prs(
     client: &GithubClient,
     token: &SecretString,
     user_id: uuid::Uuid,
+    account: &str,
     q: &DashboardPrsQuery<'_>,
 ) -> Result<Value, GithubError> {
     let limit = q.limit.clamp(1, client.cfg.max_items.max(1));
@@ -967,8 +1080,18 @@ pub async fn list_dashboard_prs(
             per_page: 100,
             refresh: q.refresh,
         };
-        match list_prs_for_repo(client, token, user_id, &repo_q).await {
-            Ok(rows) => prs.extend(rows),
+        match list_prs_for_repo(client, token, user_id, account, &repo_q).await {
+            Ok(mut rows) => {
+                for row in &mut rows {
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.insert(
+                            "account".into(),
+                            serde_json::Value::String(account.to_string()),
+                        );
+                    }
+                }
+                prs.extend(rows);
+            }
             Err(e @ GithubError::Unauthorized(_))
             | Err(e @ GithubError::RateLimited { .. })
             | Err(e @ GithubError::Transport(_))
@@ -980,11 +1103,11 @@ pub async fn list_dashboard_prs(
                 } else {
                     format!("HTTP {status}: {body}")
                 };
-                repo_errors
-                    .push(serde_json::json!({ "repo": repo, "status": status, "error": msg }));
+                repo_errors.push(serde_json::json!({ "repo": repo, "account": account, "status": status, "error": msg }));
             }
             Err(GithubError::InvalidArguments(msg)) => {
-                repo_errors.push(serde_json::json!({ "repo": repo, "error": msg }));
+                repo_errors
+                    .push(serde_json::json!({ "repo": repo, "account": account, "error": msg }));
             }
         }
     }
@@ -1007,10 +1130,333 @@ pub async fn list_dashboard_prs(
         for pr in &mut prs {
             let repo = pr.get("repo").and_then(|r| r.as_str()).unwrap_or("");
             let sha = pr.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
-            let mut ci = match ci_status(client, token, user_id, repo, sha, q.refresh).await {
-                Ok(v) => v,
-                Err(_) => serde_json::json!({ "state": "unknown", "detail": "unavailable" }),
+            let mut ci =
+                match ci_status(client, token, user_id, account, repo, sha, q.refresh).await {
+                    Ok(v) => v,
+                    Err(_) => serde_json::json!({ "state": "unknown", "detail": "unavailable" }),
+                };
+            if let Some(obj) = ci.as_object_mut() {
+                if let Some(html) = pr.get("html_url").and_then(|u| u.as_str()) {
+                    obj.insert(
+                        "url".into(),
+                        serde_json::Value::String(format!("{html}/checks")),
+                    );
+                }
+            }
+            if let Some(obj) = pr.as_object_mut() {
+                obj.insert("ci".into(), ci);
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "repos": q.repos,
+        "filter": q.filter,
+        "state": q.state,
+        "total": total,
+        "count": prs.len(),
+        "prs": prs,
+        "repo_errors": repo_errors,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Multi-account fan-out (plan 1795793328177): named accounts, repo →
+// account resolution, and the cross-account dashboard aggregation.
+// ---------------------------------------------------------------------------
+
+/// One resolved `(name, token)` pair for the fan-out helpers.
+pub struct AccountToken<'a> {
+    pub name: &'a str,
+    pub token: &'a SecretString,
+}
+
+/// Resolve which account can read `"owner/repo"` (plan
+/// 1795793328177 §2.3):
+///
+/// 1. the client's in-memory `(user_id, repo) → account` map (fed by
+///    the probe-repo endpoint and by previous successful calls);
+/// 2. `persisted` — the `github.repo_accounts` vault map
+///    (`"owner/repo" → account`), seeded into the in-memory map;
+/// 3. otherwise try every account in order (default first), first
+///    non-404 wins; the result (positive AND negative) is cached in
+///    memory for `cache_ttl_secs` because 404s count against the
+///    rate limit.
+///
+/// On total miss returns `GithubError::Upstream { status: 404 }`
+/// whose body lists the account **names** tried — never tokens.
+pub async fn resolve_repo_account(
+    client: &GithubClient,
+    accounts: &[AccountToken<'_>],
+    user_id: uuid::Uuid,
+    repo: &str,
+    persisted: Option<&std::collections::HashMap<String, String>>,
+) -> Result<(String, SecretString), GithubError> {
+    if let Some(hit) = client.repo_account_get(user_id, repo) {
+        return match hit {
+            Some(name) => find_account(accounts, &name).map_err(|_| {
+                GithubError::InvalidArguments(format!(
+                    "repo `{repo}` is mapped to account `{name}` which no longer exists"
+                ))
+            }),
+            None => Err(GithubError::Upstream {
+                status: 404,
+                body: format!(
+                    "no configured account can read `{repo}` (tried: {})",
+                    accounts
+                        .iter()
+                        .map(|a| a.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }),
+        };
+    }
+    if let Some(map) = persisted {
+        if let Some(name) = map.get(repo) {
+            client.repo_account_put(user_id, repo, Some(name.clone()));
+            return find_account(accounts, name).map_err(|_| {
+                GithubError::InvalidArguments(format!(
+                    "repo `{repo}` is mapped to account `{name}` which no longer exists"
+                ))
+            });
+        }
+    }
+    let Some((owner, name)) = valid_repo_full_name(repo) else {
+        return Err(GithubError::InvalidArguments(format!(
+            "invalid owner/repo `{repo}`"
+        )));
+    };
+    // First non-404 account that can read the repo wins. 404 means
+    // "cannot read"; 401/403 (revoked / forbidden token) also count
+    // as "cannot read" for this account so one dead token does not
+    // hide a repo another account can see — the first non-404
+    // *error* is remembered and surfaced when NO account succeeds.
+    let mut saw_404 = false;
+    let mut first_non_404_err: Option<GithubError> = None;
+    for acc in accounts {
+        match client
+            .get(acc.token, &format!("/repos/{owner}/{name}"), &[])
+            .await
+        {
+            Ok(_) => {
+                client.repo_account_put(user_id, repo, Some(acc.name.to_string()));
+                return Ok((acc.name.to_string(), acc.token.clone()));
+            }
+            Err(GithubError::Upstream { status: 404, .. }) => {
+                saw_404 = true;
+                continue;
+            }
+            // 401 (revoked token → `Unauthorized`) and 403 count as
+            // "this account cannot read the repo" — one dead token
+            // must not hide a repo another account can see.
+            Err(e @ GithubError::Unauthorized(_))
+            | Err(e @ GithubError::Upstream { status: 403, .. }) => {
+                if first_non_404_err.is_none() {
+                    first_non_404_err = Some(e);
+                }
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Negative result is cached too (404s burn quota).
+    client.repo_account_put(user_id, repo, None);
+    // When at least one account answered 404 the repo is genuinely
+    // invisible → the 404 listing the account names wins; when no
+    // account 404'd (e.g. every token revoked) the credential error
+    // is the useful signal.
+    if !saw_404 {
+        if let Some(e) = first_non_404_err {
+            return Err(e);
+        }
+    }
+    Err(GithubError::Upstream {
+        status: 404,
+        body: format!(
+            "no configured account can read `{repo}` (tried: {})",
+            accounts
+                .iter()
+                .map(|a| a.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// Find an account by name in the fan-out slice.
+fn find_account(
+    accounts: &[AccountToken<'_>],
+    name: &str,
+) -> Result<(String, SecretString), GithubError> {
+    accounts
+        .iter()
+        .find(|a| a.name == name)
+        .map(|a| (a.name.to_string(), a.token.clone()))
+        .ok_or_else(|| {
+            GithubError::InvalidArguments(format!(
+                "unknown GitHub account `{name}` (configured: {})",
+                accounts
+                    .iter()
+                    .map(|a| a.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })
+}
+
+/// Parameters for [`list_dashboard_prs_multi`] — same as
+/// [`DashboardPrsQuery`] plus the persisted repo → account map.
+pub struct MultiDashboardPrsQuery<'a> {
+    /// The configured `dashboard_repos` entries.
+    pub repos: &'a [String],
+    /// Optional `"owner/repo"` filter (already validated by the
+    /// caller against `repos`).
+    pub filter: Option<&'a str>,
+    /// `open` / `closed` / `all`.
+    pub state: &'a str,
+    /// Row cap after the merge (clamped to `[1, cfg.max_items]`).
+    pub limit: usize,
+    /// Attach a per-row `ci` object — costs up to one extra cached
+    /// call per returned row, so opt-in.
+    pub enrich: bool,
+    /// Skip the response-cache reads for this call.
+    pub refresh: bool,
+    /// The persisted `github.repo_accounts` map
+    /// (`"owner/repo" → account name`), when present.
+    pub repo_accounts: Option<&'a std::collections::HashMap<String, String>>,
+}
+
+/// Cross-account aggregation of the dashboard PR list (plan
+/// 1795793328177 §3): every configured repo is resolved to the
+/// account that can read it (via the persisted `repo_accounts` map,
+/// else live resolution — see [`resolve_repo_account`]), fetched
+/// with that account's token, and the rows are tagged
+/// `"account": "<name>"`, merged by `updated_at` desc and truncated
+/// to `limit`. Per-repo failures land in `repo_errors` (each entry
+/// carries the `account` that failed); token-level failures of the
+/// *resolving* account propagate. A repo visible through two
+/// accounts appears once (deduped by `repo` + `number`, first
+/// account in the list wins).
+pub async fn list_dashboard_prs_multi(
+    client: &GithubClient,
+    accounts: &[AccountToken<'_>],
+    user_id: uuid::Uuid,
+    q: &MultiDashboardPrsQuery<'_>,
+) -> Result<Value, GithubError> {
+    let limit = q.limit.clamp(1, client.cfg.max_items.max(1));
+    let selected: Vec<&String> = match q.filter {
+        Some(f) => q.repos.iter().filter(|r| r.as_str() == f).collect(),
+        None => q.repos.iter().collect(),
+    };
+    let mut prs: Vec<Value> = Vec::new();
+    let mut repo_errors: Vec<Value> = Vec::new();
+    for repo in selected {
+        let Some((owner, name)) = valid_repo_full_name(repo) else {
+            repo_errors.push(serde_json::json!({
+                "repo": repo,
+                "error": "invalid owner/repo entry in the saved dashboard list",
+            }));
+            continue;
+        };
+        // Resolve the account that can read this repo, then fetch
+        // the PRs with that account's token.
+        let (account, token) =
+            match resolve_repo_account(client, accounts, user_id, repo, q.repo_accounts).await {
+                Ok(pair) => pair,
+                Err(GithubError::Upstream { status: 404, body }) => {
+                    repo_errors.push(serde_json::json!({
+                        "repo": repo,
+                        "status": 404,
+                        "error": body,
+                    }));
+                    continue;
+                }
+                Err(e) => return Err(e),
             };
+        let repo_q = RepoPrsQuery {
+            owner,
+            repo: name,
+            state: q.state,
+            per_page: 100,
+            refresh: q.refresh,
+        };
+        match list_prs_for_repo(client, &token, user_id, &account, &repo_q).await {
+            Ok(mut rows) => {
+                for row in &mut rows {
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.insert("account".into(), serde_json::Value::String(account.clone()));
+                    }
+                }
+                prs.extend(rows);
+            }
+            Err(e @ GithubError::Unauthorized(_))
+            | Err(e @ GithubError::RateLimited { .. })
+            | Err(e @ GithubError::Transport(_))
+            | Err(e @ GithubError::SandboxDenied(_))
+            | Err(e @ GithubError::ResponseExceeded { .. }) => return Err(e),
+            Err(GithubError::Upstream { status, body }) => {
+                let msg = if status == 404 || status == 403 {
+                    "no access to this repo with this account's token (or it does not exist)"
+                        .to_string()
+                } else {
+                    format!("HTTP {status}: {body}")
+                };
+                repo_errors.push(serde_json::json!({
+                    "repo": repo,
+                    "account": account,
+                    "status": status,
+                    "error": msg,
+                }));
+            }
+            Err(GithubError::InvalidArguments(msg)) => {
+                repo_errors
+                    .push(serde_json::json!({ "repo": repo, "account": account, "error": msg }));
+            }
+        }
+    }
+    if q.state == "open" {
+        prs.retain(|p| !p.get("merged").and_then(|m| m.as_bool()).unwrap_or(false));
+    }
+    // Dedupe by (repo, number): the same repo reachable through two
+    // accounts appears once — first account in the list wins.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    prs.retain(|p| {
+        let key = format!(
+            "{}:{}",
+            p.get("repo").and_then(|r| r.as_str()).unwrap_or(""),
+            p.get("number").map(|n| n.to_string()).unwrap_or_default()
+        );
+        seen.insert(key)
+    });
+    prs.sort_by(|a, b| {
+        let ka = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        let kb = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        kb.cmp(ka)
+    });
+    let total = prs.len();
+    prs.truncate(limit);
+    if q.enrich {
+        for pr in &mut prs {
+            let repo = pr.get("repo").and_then(|r| r.as_str()).unwrap_or("");
+            let sha = pr.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
+            let account = pr.get("account").and_then(|a| a.as_str()).unwrap_or("");
+            let token = match find_account(accounts, account) {
+                Ok((_, t)) => t,
+                Err(_) => {
+                    pr.as_object_mut().map(|obj| {
+                        obj.insert(
+                            "ci".into(),
+                            serde_json::json!({"state": "unknown", "detail": "account gone"}),
+                        )
+                    });
+                    continue;
+                }
+            };
+            let mut ci =
+                match ci_status(client, &token, user_id, account, repo, sha, q.refresh).await {
+                    Ok(v) => v,
+                    Err(_) => serde_json::json!({ "state": "unknown", "detail": "unavailable" }),
+                };
             if let Some(obj) = ci.as_object_mut() {
                 if let Some(html) = pr.get("html_url").and_then(|u| u.as_str()) {
                     obj.insert(
@@ -1204,19 +1650,41 @@ mod tests {
         let client = GithubClient::new(GithubConfig::default(), reqwest::Client::new());
         let user = uuid::Uuid::new_v4();
         let args = serde_json::json!({"limit": 10});
-        assert!(client.cache_get(user, "tool", &args).is_none());
-        client.cache_put(user, "tool", &args, "payload".to_string());
+        assert!(client.cache_get(user, "default", "tool", &args).is_none());
+        client.cache_put(user, "default", "tool", &args, "payload".to_string());
         assert_eq!(
-            client.cache_get(user, "tool", &args).as_deref(),
+            client.cache_get(user, "default", "tool", &args).as_deref(),
             Some("payload")
         );
+        // The account is part of the cache key: the same tool+args
+        // under another account misses.
+        assert!(client.cache_get(user, "client-a", "tool", &args).is_none());
         // A zero TTL disables the cache entirely.
         let cfg = GithubConfig {
             cache_ttl_secs: 0,
             ..GithubConfig::default()
         };
         let client = GithubClient::new(cfg, reqwest::Client::new());
-        client.cache_put(user, "tool", &args, "payload".to_string());
-        assert!(client.cache_get(user, "tool", &args).is_none());
+        client.cache_put(user, "default", "tool", &args, "payload".to_string());
+        assert!(client.cache_get(user, "default", "tool", &args).is_none());
+    }
+
+    #[test]
+    fn repo_account_cache_roundtrip_positive_and_negative() {
+        let client = GithubClient::new(GithubConfig::default(), reqwest::Client::new());
+        let user = uuid::Uuid::new_v4();
+        assert!(client.repo_account_get(user, "octo/hello").is_none());
+        client.repo_account_put(user, "octo/hello", Some("client-a".to_string()));
+        assert_eq!(
+            client.repo_account_get(user, "octo/hello"),
+            Some(Some("client-a".to_string()))
+        );
+        // A negative (all accounts 404) is cached too.
+        client.repo_account_put(user, "octo/gone", None);
+        assert_eq!(client.repo_account_get(user, "octo/gone"), Some(None));
+        // Another user / repo misses.
+        assert!(client
+            .repo_account_get(uuid::Uuid::new_v4(), "octo/hello")
+            .is_none());
     }
 }

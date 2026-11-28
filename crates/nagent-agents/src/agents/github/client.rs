@@ -7,10 +7,13 @@
 //! depending on the agent machinery. This module only adds the
 //! two things the chat tools need on top:
 //!
-//! - [`GithubClient::token`] — resolve the per-user PAT from the
-//!   vault via `UserContext::secret`;
+//! - [`GithubClient::resolve_account`] — resolve a named account
+//!   (or the default) from the vault via `UserContext::secret`
+//!   (plan 1795793328177 §1.2);
 //! - [`GithubClient::get`] — the `ctx`-flavoured GET the ten
-//!   `github_*` tools call (resolve token → delegate);
+//!   `github_*` tools call (resolve the default account →
+//!   delegate); [`GithubClient::get_as`] takes an explicit
+//!   resolved account;
 //! - `From<GithubError> for AgentError` — map the wire client's
 //!   error type onto the agent error type.
 //!
@@ -39,7 +42,10 @@ pub use nagent_github::{
 };
 
 /// Wrapper around [`nagent_github::GithubClient`] that resolves
-/// the PAT from the [`UserContext`].
+/// the PAT from the [`UserContext`]. `Clone` shares the inner
+/// client (cache + reqwest pool) — needed by the `account: "all"`
+/// fan-out, which clones one handle per spawned task.
+#[derive(Clone)]
 pub struct GithubClient {
     inner: nagent_github::GithubClient,
 }
@@ -65,9 +71,10 @@ impl GithubClient {
         }
     }
 
-    /// Resolve the per-user personal access token. Missing field
-    /// surfaces as `CredentialsMissing` so the chat UI prompts the
-    /// user to connect GitHub.
+    /// Resolve the per-user personal access token as the
+    /// `"default"` account. Missing field surfaces as
+    /// `CredentialsMissing` so the chat UI prompts the user to
+    /// connect GitHub.
     pub async fn token(&self, ctx: &UserContext) -> Result<SecretString, AgentError> {
         ctx.secret("github", "personal_access_token")
             .await?
@@ -77,18 +84,51 @@ impl GithubClient {
             })
     }
 
-    /// Authenticated GET with the token resolved from `ctx`.
-    /// This shadows the inner client's token-taking `get` — the
-    /// tool implementations keep their `client.get(ctx, …)` shape.
+    /// Resolve one account (plan 1795793328177 §1.2): explicit
+    /// `account` arg → `github.default_account` field → `"default"`.
+    pub async fn resolve_account(
+        &self,
+        ctx: &UserContext,
+        account_arg: Option<&str>,
+    ) -> Result<super::accounts::Account, AgentError> {
+        super::accounts::resolve_account(ctx, &self.cfg, account_arg).await
+    }
+
+    /// Every configured account, default first (for the
+    /// `account: "all"` fan-out).
+    pub async fn all_accounts(
+        &self,
+        ctx: &UserContext,
+    ) -> Result<Vec<super::accounts::Account>, AgentError> {
+        super::accounts::all_accounts(ctx, &self.cfg).await
+    }
+
+    /// Authenticated GET with the default account resolved from
+    /// `ctx`. This shadows the inner client's token-taking `get` —
+    /// the tool implementations keep their `client.get(ctx, …)`
+    /// shape.
     pub async fn get(
         &self,
         ctx: &UserContext,
         path: &str,
         query: &[(String, String)],
     ) -> Result<Value, AgentError> {
-        let token = self.token(ctx).await?;
+        let account = self.resolve_account(ctx, None).await?;
+        self.get_with_account(&account, path, query).await
+    }
+
+    /// Authenticated GET with an explicitly resolved account. Takes
+    /// no `ctx` so fan-out tasks can call it from spawned tasks. The
+    /// account name only ever tags cache entries and error
+    /// messages — never the token.
+    pub async fn get_with_account(
+        &self,
+        account: &super::accounts::Account,
+        path: &str,
+        query: &[(String, String)],
+    ) -> Result<Value, AgentError> {
         self.inner
-            .get(&token, path, query)
+            .get(&account.token, path, query)
             .await
             .map_err(AgentError::from)
     }

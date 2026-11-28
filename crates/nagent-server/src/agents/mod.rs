@@ -943,6 +943,8 @@ impl From<crate::config::agents::GithubConfig> for nagent_agents::GithubAgentCon
             cache_ttl_secs: c.cache_ttl_secs,
             allowlist: c.allowlist,
             base_url: c.base_url,
+            max_accounts: c.max_accounts,
+            aggregate_concurrency: c.aggregate_concurrency,
         }
     }
 }

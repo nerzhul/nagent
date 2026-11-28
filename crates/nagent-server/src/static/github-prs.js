@@ -17,10 +17,14 @@
 
   const LIST_PATH = "/api/integrations/github/prs";
   const INTEGRATION_PATH = "/api/integrations/github";
+  // Plan 1795793328177: the named GitHub accounts behind the
+  // cross-account `?account=` filter dropdown.
+  const ACCOUNTS_PATH = "/api/integrations/github/accounts";
 
   const els = {
     tbody: document.getElementById("prs-list"),
     status: document.getElementById("prs-status"),
+    account: document.getElementById("prs-account-filter"),
     filter: document.getElementById("prs-repo-filter"),
     state: document.getElementById("prs-state"),
     enrich: document.getElementById("prs-enrich"),
@@ -35,6 +39,9 @@
   // Refresh button re-runs the same query.
   let currentRepo = "";
   let currentState = "open";
+  // `?account=` filter: "all" (cross-account aggregation, the
+  // server default) or one named account.
+  let currentAccount = "all";
   // Whether to attach CI status (?enrich=true): one extra cached call
   // per PR, so opt-in.
   let enrichCi = false;
@@ -184,6 +191,10 @@
     const repoTd = cell(pr.repo);
     tr.appendChild(repoTd);
 
+    // Account facet (plan 1795793328177): every row is tagged with
+    // the account whose token fetched it.
+    tr.appendChild(cell(pr.account));
+
     const numTd = document.createElement("td");
     const link = prLink(pr);
     numTd.appendChild(link || document.createTextNode(`#${pr.number ?? ""}`));
@@ -259,7 +270,7 @@
     els.tbody.replaceChildren();
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 10;
+    td.colSpan = 11;
     td.className = "prs-loader-cell";
     td.appendChild(loaderEl(label));
     tr.appendChild(td);
@@ -276,7 +287,7 @@
     els.tbody.replaceChildren();
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 10;
+    td.colSpan = 11;
     td.className = "prs-empty prs-error";
     td.textContent = message;
     tr.appendChild(td);
@@ -291,7 +302,7 @@
     if (!rows.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 10;
+      td.colSpan = 11;
       td.className = "prs-empty";
       td.textContent = "No pull requests to show.";
       tr.appendChild(td);
@@ -321,6 +332,44 @@
     currentRepo = els.filter.value;
   }
 
+  // Populate the account filter from GET …/accounts ("all" plus one
+  // option per configured account name). Tokens are never part of
+  // that response (AGENTS.md §6).
+  async function renderAccountFilter() {
+    if (!els.account) return;
+    const previous = currentAccount || "all";
+    try {
+      const body = await apiFetch(ACCOUNTS_PATH);
+      const accounts = (body && body.accounts) || [];
+      els.account.replaceChildren();
+      const all = document.createElement("option");
+      all.value = "all";
+      all.textContent = "All accounts";
+      els.account.appendChild(all);
+      for (const acc of accounts) {
+        const opt = document.createElement("option");
+        opt.value = acc.name;
+        opt.textContent = acc.is_default ? `${acc.name} (default)` : acc.name;
+        els.account.appendChild(opt);
+      }
+      els.account.value = accounts.some((a) => a.name === previous) || previous === "all"
+        ? previous
+        : "all";
+      currentAccount = els.account.value;
+    } catch {
+      // Endpoint absent (older server / feature off): keep the
+      // single "all" option already in the markup.
+      if (!els.account.options.length) {
+        const all = document.createElement("option");
+        all.value = "all";
+        all.textContent = "All accounts";
+        els.account.appendChild(all);
+      }
+      els.account.value = "all";
+      currentAccount = "all";
+    }
+  }
+
   // --- List ---------------------------------------------------------------
 
   async function loadList(refresh) {
@@ -332,6 +381,9 @@
       if (currentRepo) q.set("repo", currentRepo);
       q.set("state", currentState || "open");
       q.set("limit", "50");
+      // Cross-account aggregation is the server default; send the
+      // filter explicitly so a named account narrows the list.
+      q.set("account", currentAccount || "all");
       if (enrichCi) q.set("enrich", "true");
       // Refresh bypasses the server-side response cache so a
       // just-merged PR disappears immediately.
@@ -343,7 +395,9 @@
       renderTable(data);
       const errs = data.repo_errors || [];
       const errNote = errs.length
-        ? ` · ${errs.length} repo(s) unreachable (${errs.map((e) => e.repo).join(", ")})`
+        ? ` · ${errs.length} repo(s) unreachable (${errs
+            .map((e) => (e.account ? `${e.repo} via ${e.account}` : e.repo))
+            .join(", ")})`
         : "";
       setStatus(`${data.count || 0} of ${data.total ?? data.count ?? 0} pull requests${errNote}`, "ok");
     } catch (e) {
@@ -393,7 +447,8 @@
     document.addEventListener("integrationsupdated", (e) => {
       refreshTabVisibility();
       if (tabVisible && (!e.detail || !e.detail.service || e.detail.service === "github")) {
-        loadList();
+        // Account add/remove changes the filter options too.
+        renderAccountFilter().then(() => loadList());
       }
     });
 
@@ -408,6 +463,13 @@
     if (els.filter) {
       els.filter.addEventListener("change", () => {
         currentRepo = els.filter.value;
+        sortSpec = null;
+        loadList();
+      });
+    }
+    if (els.account) {
+      els.account.addEventListener("change", () => {
+        currentAccount = els.account.value || "all";
         sortSpec = null;
         loadList();
       });
@@ -433,6 +495,7 @@
     }
 
     refreshTabVisibility();
+    renderAccountFilter();
   }
 
   if (document.readyState === "loading") {

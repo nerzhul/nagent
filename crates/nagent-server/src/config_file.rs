@@ -588,6 +588,12 @@ pub struct TomlGithubConfig {
     pub cache_ttl_secs: Option<u64>,
     pub allowlist: Option<Vec<String>>,
     pub base_url: Option<String>,
+    /// Cap on named accounts in `github.accounts` (plan
+    /// 1795793328177). Env `GITHUB_AGENT_MAX_ACCOUNTS`.
+    pub max_accounts: Option<usize>,
+    /// Bound on the `account: "all"` fan-out. Env
+    /// `GITHUB_AGENT_AGGREGATE_CONCURRENCY`.
+    pub aggregate_concurrency: Option<usize>,
 }
 
 /// Knobs for the ten read-only `shortcut_*` agents (plan
@@ -1143,6 +1149,8 @@ fn merge_toml_github(
             cache_ttl_secs: l.cache_ttl_secs.or(e.cache_ttl_secs),
             allowlist: l.allowlist.clone().or_else(|| e.allowlist.clone()),
             base_url: l.base_url.clone().or_else(|| e.base_url.clone()),
+            max_accounts: l.max_accounts.or(e.max_accounts),
+            aggregate_concurrency: l.aggregate_concurrency.or(e.aggregate_concurrency),
         }),
     }
 }

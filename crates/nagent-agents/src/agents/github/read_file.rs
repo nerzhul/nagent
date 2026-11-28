@@ -9,7 +9,9 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use super::client::{truncate, GithubClient};
-use super::{confirm_reason, parse_repo, run};
+use super::{
+    account_prop, confirm_reason_for, parse_account_arg, parse_repo, resolve_repo_account, run,
+};
 use crate::agents::{Agent, AgentError, UserContext};
 
 pub struct ReadFileAgent {
@@ -46,7 +48,9 @@ impl Agent for ReadFileAgent {
          (`GET /repos/{owner}/{repo}/contents/{path}`). The base64 body is decoded \
          server-side and capped at [agents.github].max_body_bytes. Args: `repo` \
          (`\"owner/repo\"`), `path` (repo-relative, e.g. `src/main.rs` or `README.md`), \
-         `ref?` (branch / tag / commit SHA, default the repo's default branch). \
+         `ref?` (branch / tag / commit SHA, default the repo's default branch), `account?` \
+         (a name from `github_list_accounts` or `\"default\"`; omit to auto-resolve the \
+         account that can read the repo). \
          Returns path, sha, size, encoding, truncation flag, and the text content. \
          Read-only."
     }
@@ -67,6 +71,7 @@ impl Agent for ReadFileAgent {
                     "type": "string",
                     "description": "Optional branch, tag, or commit SHA to read from. Defaults to the repo's default branch.",
                 },
+                "account": account_prop(false),
             },
             "required": ["repo", "path"],
             "additionalProperties": false,
@@ -82,9 +87,9 @@ impl Agent for ReadFileAgent {
     fn requires_confirmation(
         &self,
         _ctx: &UserContext,
-        _args: &Value,
+        args: &Value,
     ) -> crate::agents::ConfirmationDecision {
-        confirm_reason(self.name())
+        confirm_reason_for(self.name(), parse_account_arg(args).as_deref())
     }
 
     fn untrusted_output(&self) -> bool {
@@ -95,6 +100,15 @@ impl Agent for ReadFileAgent {
 
     async fn invoke(&self, ctx: &UserContext, args: Value) -> Result<String, AgentError> {
         let (owner, repo) = parse_repo(&args)?;
+        let full = format!("{owner}/{repo}");
+        let account = resolve_repo_account(
+            &self.client,
+            ctx,
+            &full,
+            parse_account_arg(&args).as_deref(),
+        )
+        .await?;
+        let account_name = account.name.clone();
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -117,7 +131,7 @@ impl Agent for ReadFileAgent {
         if let Some(r) = &git_ref {
             query.push(("ref".to_string(), r.clone()));
         }
-        run(&self.client, ctx, self.name(), &args, &api_path, query, move |raw, cfg| {
+        run(&self.client, ctx, &account, self.name(), &args, (api_path.as_str(), query), move |raw, cfg| {
             let content_type = raw.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if content_type != "file" {
                 return json!({
@@ -133,7 +147,8 @@ impl Agent for ReadFileAgent {
                     json!({
                         "ok": true,
                         "data": {
-                            "repo": format!("{owner}/{repo}"),
+                            "account": account_name,
+                            "repo": full,
                             "path": raw.get("path"),
                             "name": raw.get("name"),
                             "sha": raw.get("sha"),

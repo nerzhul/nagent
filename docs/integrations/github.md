@@ -72,19 +72,20 @@ goes through the LLM; the server reads the caller's
 GitHub API through the shared `nagent-github` crate:
 
 ```
-GET /api/integrations/github/prs?repo=&state=open&limit=&enrich=
+GET /api/integrations/github/prs?repo=&state=open&limit=&enrich=&account=
 → 200 {"data": {"repos": ["octocat/hello", …],   // configured dashboard_repos
                 "filter": null | "owner/repo",
                 "state": "open",
+                "account": "all" | "<name>",      // which account(s) answered
                 "total": 12, "count": 12,
-                "prs": [{repo, number, title, state, draft, user, avatar_url,
+                "prs": [{repo, number, account, title, state, draft, user, avatar_url,
                          labels: [{name, color}], head_ref, head_sha, base_ref,
                          created_at, updated_at, merged_at, html_url,
                          ci?: {state: success|failure|pending|none|unknown,
                                detail, url}}],   // ci only with ?enrich=true
-                "repo_errors": [{"repo": "…", "status": 404, "error": "…"}]}}
+                "repo_errors": [{"repo": "…", "account": "…", "status": 404, "error": "…"}]}}
 GET /api/integrations/github/prs/{owner}/{repo}/{number}
-→ 200 {"data": {"pr": {…row…, additions, deletions, changed_files,
+→ 200 {"data": {"pr": {…row…, account, additions, deletions, changed_files,
                        comments, body (capped at max_body_bytes)}}}
 ```
 
@@ -92,6 +93,13 @@ GET /api/integrations/github/prs/{owner}/{repo}/{number}
   `limit` defaults to 50 and is clamped to `[1, max_items]`. Each
   configured repo is queried with `per_page=100` (first page),
   rows are merged sorted by `updated_at` desc, then truncated.
+- `?account=` (plan 1795793328177) selects which GitHub account(s)
+  answer: `all` (the default — every configured account, each
+  `dashboard_repos` entry resolved to the account that can read it
+  via the persisted `github.repo_accounts` map, else by probing
+  accounts in order; rows are tagged `"account"` and deduped by
+  `repo` + `number`), a named account, or `"default"`. An unknown
+  name is a 400 listing the configured account names (never tokens).
 - `?repo=` filters to one repo and must be one of the configured
   `dashboard_repos` entries (400 otherwise).
 - `?refresh=true` skips the response-cache **reads** for this call
@@ -137,13 +145,15 @@ owner's repos as a checkbox list; repos already in
 pure-API endpoints (vault PAT, never the LLM):
 
 ```
-GET /api/integrations/github/owners
+GET /api/integrations/github/owners?account=          # default | "all" | <name>
 → 200 {"data": {"user": "octocat",
                 "owners": [{"login": "octocat", "via": "self"},
                            {"login": "acme", "via": "org", "avatar_url": "…"},
                            {"login": "secretcorp", "via": "repo"}]}}
+                          // with ?account=all the lists of every account are
+                          // merged and deduped by login
 
-GET /api/integrations/github/owners/{owner}/repos
+GET /api/integrations/github/owners/{owner}/repos?account=
 → 200 {"data": {"owner": "secretcorp", "count": 1,
                 "repos": [{full_name, description, private, archived,
                            default_branch, pushed_at, html_url}]}}
@@ -210,31 +220,120 @@ Every probe call writes one `auth_events` row of kind
 `github_probe_repo_<outcome>` (plus a `_host:<host>` companion);
 the token never lands on the audit row.
 
+## Multiple accounts (several PATs per user)
+
+Plan 1795793328177. One nagent user can connect **several GitHub
+tokens** — e.g. a personal account plus one token per client org —
+and aggregate data across them.
+
+**Vault model** (no DB migration; the vault is `(user, service,
+field)` key-value):
+
+- `github.personal_access_token` stays the implicit account
+  `"default"` (option (a) of the plan: it remains `required` in the
+  `ServiceDef`, `github.accounts` holds only the *extra* tokens).
+- `github.accounts` — JSON array (cap `[agents.github].max_accounts`,
+  default 8) of `{"name": "client-a", "token": "ghp_…", "username":
+  "octocat", "scopes": "repo, read:user"}`. Name charset
+  `[a-z0-9][a-z0-9-_]{0,31}`; `"default"` is reserved. Stored
+  AES-256-GCM like every vault row. This is a **multi-credential
+  field** under AGENTS.md §6: `echo_on_edit = false`, listed in
+  `managed_fields` (never rendered or submitted by the generic
+  integration form), never logged, never formatted into an error
+  string (parse errors name the key/index at fault, not the blob),
+  never shown in audit rows (which carry account **names** only).
+- `github.default_account` — name of the account the `github_*`
+  tools use when no explicit `account` argument is given
+  (default `"default"`; echoed on edit — an account name is not a
+  secret).
+- `github.repo_accounts` — JSON map `"owner/repo" → "<account>"`
+  recording which account can read each dashboard repo (written by
+  `probe-repo`, read by the repo-scoped tools and the dashboard).
+
+**Dedicated endpoints** (all behind `RequireAuth`; POST/DELETE
+CSRF-protected; the token in the POST body is only ever placed in the
+`Authorization` header of the probe call and never echoed back):
+
+```
+GET    /api/integrations/github/accounts
+→ 200 {"accounts": [{"name": "default", "username": "octocat",
+                     "scopes": null, "is_default": true},
+                    {"name": "client-a", "username": "clientbot",
+                     "scopes": "repo", "is_default": false}],
+       "default_account": "default"}          # tokens absent (AGENTS.md §6)
+
+POST   /api/integrations/github/accounts     {"name": "client-a", "token": "ghp_…"}
+→ 200 {"ok": true, "updated": false,
+       "account": {"name": "client-a", "username": "clientbot", "scopes": "repo",
+                   "is_default": false}}
+   Probes GET /user with the token, captures login + X-OAuth-Scopes,
+   upserts (duplicate name = update; cap enforced → 400). 401 from
+   upstream → 401 with the reconnect hint. Audit:
+   github_account_add_<outcome> / github_account_update_<outcome>.
+
+DELETE /api/integrations/github/accounts/:name
+→ 204. Refuses "default" (400) and the current default_account
+   (400 — repoint first). Audit: github_account_delete_<outcome>.
+```
+
+The integrations UI renders these as the **Connected accounts** field
+block inside the GitHub editor form (one card per account with
+add / update-token / remove; token inputs are write-only, and the
+`default` account shows a note instead — its token is the personal
+access token field above), plus a **Default account** dropdown fed by
+the GET.
+
+**Chat tools.** All eleven `github_*` tools take an optional
+`account` argument: a name, `"default"`, or `"all"`. On the four
+account-scoped tools (`github_me`, `github_list_repos`,
+`github_list_notifications`, `github_search_issues`) `account: "all"`
+fans out concurrently (bounded by
+`[agents.github].aggregate_concurrency`, default 4) and merges:
+items tagged `"account"`, sorted by `updated_at`/`pushed_at` desc,
+deduped by upstream `id`; per-account failures land in
+`account_errors` instead of failing the call (the call fails only if
+every account fails). `github_list_accounts` lists the accounts
+(token-free) so the LLM can discover them. Repo-scoped tools
+resolve the repo → account via `github.repo_accounts`, else by
+probing accounts in order (default first; first non-404 wins;
+negative results cached in-memory for `cache_ttl_secs`); if every
+account 404s the error lists the accounts tried (names only).
+
+**Dashboard.** `GET /api/integrations/github/prs` aggregates across
+accounts by default (`?account=all`); `/owners` and
+`/owners/{owner}/repos` take `?account=` too (`all` merges and
+dedupes by login/name). The PRs tab shows an account column and an
+account filter dropdown.
+
 ## Configuration
 
 ### `[agents.github]` (operator, optional)
 
 ```toml
 [agents.github]
-timeout_ms     = 10_000
-max_items      = 100        # hard cap on `limit` for every list tool
-max_body_bytes = 65_536     # cap on issue/PR/file bodies the LLM sees
-cache_ttl_secs = 60         # 0 disables the in-process cache
-allowlist      = ["api.github.com"]
-base_url       = "https://api.github.com"   # overridable for tests / GHES
+timeout_ms             = 10_000
+max_items              = 100        # hard cap on `limit` for every list tool
+max_body_bytes         = 65_536     # cap on issue/PR/file bodies the LLM sees
+cache_ttl_secs         = 60         # 0 disables the in-process cache
+allowlist              = ["api.github.com"]
+base_url               = "https://api.github.com"   # overridable for tests / GHES
+max_accounts           = 8          # cap on the github.accounts blob
+aggregate_concurrency  = 4          # max parallel accounts for account:"all"
 ```
 
 Env equivalents (matching the existing `env > TOML > default`
 precedence):
 
-| TOML field                     | Env var                     |
-| ---                            | ---                         |
-| `agents.github.timeout_ms`     | `GITHUB_AGENT_TIMEOUT_MS`   |
-| `agents.github.max_items`      | `GITHUB_AGENT_MAX_ITEMS`    |
-| `agents.github.max_body_bytes` | `GITHUB_AGENT_MAX_BODY_BYTES` |
-| `agents.github.cache_ttl_secs` | `GITHUB_AGENT_CACHE_TTL_SECS` |
-| `agents.github.allowlist`      | `GITHUB_AGENT_ALLOWLIST`    |
-| `agents.github.base_url`       | `GITHUB_AGENT_BASE_URL`     |
+| TOML field                     | Env var                          |
+| ---                            | ---                              |
+| `agents.github.timeout_ms`     | `GITHUB_AGENT_TIMEOUT_MS`        |
+| `agents.github.max_items`      | `GITHUB_AGENT_MAX_ITEMS`         |
+| `agents.github.max_body_bytes` | `GITHUB_AGENT_MAX_BODY_BYTES`    |
+| `agents.github.cache_ttl_secs` | `GITHUB_AGENT_CACHE_TTL_SECS`    |
+| `agents.github.allowlist`      | `GITHUB_AGENT_ALLOWLIST`         |
+| `agents.github.base_url`       | `GITHUB_AGENT_BASE_URL`          |
+| `agents.github.max_accounts`   | `GITHUB_AGENT_MAX_ACCOUNTS`      |
+| `agents.github.aggregate_concurrency` | `GITHUB_AGENT_AGGREGATE_CONCURRENCY` |
 
 ### GitHub Enterprise Server (GHES)
 
@@ -261,9 +360,11 @@ allowlist = ["ghes.example.com"]
   any other non-2xx → upstream error with the body truncated to
   2 KiB.
 - **Cache** — responses are cached in-process per
-  `(user_id, tool, args)` for `cache_ttl_secs` (default 60 s).
-  GitHub PAT quota is 5 000 req/h, so repeated "what's open?"
-  questions stay cheap. `cache_ttl_secs = 0` disables it.
+  `(user_id, account, tool, args)` for `cache_ttl_secs` (default
+  60 s), so the same call against two different accounts never
+  shares a cache entry. GitHub PAT quota is 5 000 req/h **per
+  token**, so repeated "what's open?" questions stay cheap.
+  `cache_ttl_secs = 0` disables it.
 - **Body cap** — issue/PR bodies and file contents are truncated
   at `max_body_bytes` (default 64 KiB) with a `…[truncated]`
   marker before the LLM sees them.

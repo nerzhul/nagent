@@ -241,6 +241,18 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `github_list_notifications` | `github-agent` | Per-user GitHub `GET /notifications`. Read-only. Confirm-on-read. |
 | `github_search_issues` | `github-agent` | Per-user GitHub `GET /search/issues` (query passthrough). Read-only. Confirm-on-read. |
 | `github_read_file` | `github-agent` | Per-user GitHub `GET /repos/{owner}/{repo}/contents/{path}` — base64-decoded, capped. Read-only. Confirm-on-read. |
+| `github_list_accounts` | `github-agent` | Lists the configured GitHub accounts (name, username, scopes, is_default) — never the tokens. Read-only. Confirm-on-read. Plan 1795793328177. |
+
+All eleven `github_*` tools take an optional `account` string argument
+(plan 1795793328177): a named account, `"default"` (the
+`personal_access_token`), or `"all"` on the account-scoped tools
+(`github_me`, `github_list_repos`, `github_list_notifications`,
+`github_search_issues`) to fan out across every configured account and
+merge the results (items tagged `"account"`, deduped by upstream `id`,
+per-account failures collected in `account_errors`). Repo-scoped tools
+resolve the repo to the account that can read it via the persisted
+`github.repo_accounts` map (written by `probe-repo`), else by probing
+accounts in order. The response cache key includes the account name.
 | `shortcut_me` | `shortcut-agent` | Per-user Shortcut `GET /members` (member matched by mention name; the v3 API has no `/members/me`). Read-only. Confirm-on-read. Plan 1795597719369. |
 | `shortcut_list_workflows` | `shortcut-agent` | Per-user Shortcut `GET /workflows` (state id → name/category map). Read-only. Confirm-on-read. |
 | `shortcut_list_projects` | `shortcut-agent` | Per-user Shortcut `GET /projects`. Read-only. Confirm-on-read. |
@@ -251,9 +263,9 @@ File: `crates/nagent-agents/src/agents/*.rs`.
 | `shortcut_list_backlog` | `shortcut-agent` | Per-user Shortcut story search with the configured `[agents.shortcut].backlog_query`. Read-only. Confirm-on-read. |
 | `shortcut_get_story` | `shortcut-agent` | Per-user Shortcut `GET /stories/{id}` + `/comments` (description/comments capped). Read-only. Confirm-on-read. |
 | `shortcut_list_labels` | `shortcut-agent` | Per-user Shortcut `GET /labels`. Read-only. Confirm-on-read. |
-| `shortcut_list_teams` | `shortcut-agent` | Per-user Shortcut `GET /teams` (UUID / name / mention name per team). Read-only. Confirm-on-read. |
+| `shortcut_list_teams` | `shortcut-agent` | Per-user Shortcut `GET /groups` (fallback `GET /teams`; UUID / name / mention name per group). Read-only. Confirm-on-read. |
 | `shortcut_list_templates` | `shortcut-agent` | Local read of the per-user `story_templates` vault field (the saved story shortcuts). No network call: no confirmation, trusted output (like `get_datetime`). |
-| `shortcut_create_story` | `shortcut-agent` | Per-user Shortcut `POST /stories` — the first Shortcut **write** tool. Resolves `template` (per-user `story_templates`), `team` (arg or saved `default_team` → `group_id`), `owner_ids` (caller's member from the saved `username`), and auto-classifies the epic with a local BM25 over open epics (`auto_epic`, default true). Confirm-on-write; session override allowed. |
+| `shortcut_create_story` | `shortcut-agent` | Per-user Shortcut `POST /stories` — the first Shortcut **write** tool. Resolves `template` (per-user `story_templates`), `team` (arg or saved `default_team` → `group_id`), `project_id` (arg or saved `default_project`), `owner_ids` (caller's member from the saved `username`), and auto-classifies the epic with a local BM25 over open epics (`auto_epic`, default true). Confirm-on-write; session override allowed. |
 
 The Shortcut plugin also ships **pure-API dashboard endpoints**
 that never go through the LLM (the story list / detail is proxied
@@ -262,8 +274,13 @@ saved, API token otherwise — via `nagent-shortcut`):
 `GET /api/integrations/shortcut/stories?query=&limit=`,
 `GET /api/integrations/shortcut/stories/{id}`,
 `GET /api/integrations/shortcut/me`, and
-`GET /api/integrations/shortcut/teams` (backs the integrations UI's
-"Default team" picker, saved into the `default_team` vault field).
+`GET /api/integrations/shortcut/teams` (proxies `GET /groups`) and
+`GET /api/integrations/shortcut/projects?team_id=` (they back the
+integrations UI's "Choose group & project…" modal — groups pane +
+projects radio pane, on the GitHub repo-picker pattern — saved into
+the `default_team` / `default_project` vault fields; the group UUID
+is sent as `group_id` and the project id as `project_id` by
+`shortcut_create_story`).
 The stories endpoints back the "Stories" top-menu tab, which
 appears when the integration's `show_dashboard` checkbox is ticked.
 See `docs/integrations/shortcut.md`.
@@ -360,34 +377,51 @@ an arbitrary envelope sender. See
 `docs/integrations/email.md` for the operator-facing guide.
 
 When the `github-agent` cargo feature is on, the registry also
-contains the `github` `ServiceDef` (id `"github"`, four fields:
-`personal_access_token` (Password), `username` (Text, filled by
-the probe), `show_dashboard` (Checkbox) and `dashboard_repos`
-(Text, JSON array of `"owner/repo"`, the per-user confidential
-repo list of the PRs dashboard)). The ten read-only `github_*`
-agents read the PAT through
-`UserContext::secret("github", "personal_access_token")` and call
-`api.github.com` through the shared egress pool with the
+contains the `github` `ServiceDef` (id `"github"`, seven fields:
+`personal_access_token` (Password, the implicit `"default"` account),
+`username` (Text, filled by the probe), `show_dashboard` (Checkbox),
+`dashboard_repos` (Text, JSON array of `"owner/repo"`, the per-user
+confidential repo list of the PRs dashboard), `default_account`
+(Text, which named account the tools use when no `account` argument
+is given), and the two out-of-band `managed_fields` `accounts`
+(JSON array of extra named tokens `{name, token, username, scopes}`,
+capped by `[agents.github].max_accounts`) and `repo_accounts`
+(JSON map `"owner/repo" → account name`) — both `echo_on_edit =
+false` and never rendered or submitted by the generic integration
+form). The eleven read-only `github_*` agents resolve the account
+through `resolve_account` (explicit `account` arg → saved
+`default_account` → `"default"` PAT) and call `api.github.com`
+through the shared egress pool with the
 `[agents.github].allowlist` (default `["api.github.com"]`). Two
 setup-only HTTP endpoints — `POST /api/integrations/github/probe`
 (validates the PAT against `GET /user` before the user saves it)
-and `POST /api/integrations/github/probe-repo` (reads the vault
-PAT and checks `GET /repos/{owner}/{repo}` before a repo is
-appended to `dashboard_repos`) — write `github_probe_<outcome>` /
+and `POST /api/integrations/github/probe-repo` (tries **all**
+accounts against `GET /repos/{owner}/{repo}` and records the winner
+in `github.repo_accounts`) — write `github_probe_<outcome>` /
 `github_probe_repo_<outcome>` audit rows (the token never lands
-on an audit row). Write tools (create issue / PR / comment) are
+on an audit row). Named accounts are managed exclusively through
+`GET/POST /api/integrations/github/accounts` and
+`DELETE /api/integrations/github/accounts/:name` (audit kinds
+`github_account_{add,update,delete}_<outcome>`), which probe each
+token with `GET /user` and capture `login` + `X-OAuth-Scopes`
+(plan 1795793328177). Write tools (create issue / PR / comment) are
 deliberately not registered in v1.
 
 The GitHub plugin also ships **pure-API dashboard endpoints**
 that never go through the LLM — the PR list is proxied straight
 from the caller's vault token + `dashboard_repos` via
-`nagent-github`: `GET /api/integrations/github/prs?repo=&state=&limit=`,
+`nagent-github`: `GET /api/integrations/github/prs?repo=&state=&limit=&account=`,
 `GET /api/integrations/github/prs/{owner}/{repo}/{number}`, plus the
-repo-picker reads `GET /api/integrations/github/owners` and
-`GET /api/integrations/github/owners/{owner}/repos` (access-scoped
-owner/repo listing used to tick dashboard repos). They back the
+repo-picker reads `GET /api/integrations/github/owners?account=` and
+`GET /api/integrations/github/owners/{owner}/repos?account=`
+(access-scoped owner/repo listing used to tick dashboard repos).
+`?account=` is `"all"` (the default on `/prs` — cross-account
+aggregation, rows tagged `"account"`, merged by `updated_at` desc,
+per-repo errors isolated in `repo_errors`), a named account, or
+`"default"`. They back the
 "PRs" top-menu tab, which appears when the integration's
-`show_dashboard` checkbox is ticked (plan 1795686864347). See
+`show_dashboard` checkbox is ticked (plans 1795686864347,
+1795793328177). See
 `docs/integrations/github.md`.
 
 When the `shortcut-agent` cargo feature is on, the registry also
@@ -401,8 +435,13 @@ audit rows; the callback **merges** its rows so a saved
 `api_token` survives) are preferred when present, and the classic
 `api_token` (Password, fallback) is used otherwise. The remaining
 fields are `username` (Text, filled by the probe), `show_dashboard`
-(Checkbox), `default_team` (Text, JSON `{"id","name"}` picked from
-`GET /api/integrations/shortcut/teams`), and `story_templates` (Text,
+(Checkbox), `default_team` (Text, JSON `{"id","name"}`) and
+`default_project` (Text, JSON `{"id","name","team_id"}`) — both
+picked through the "Choose group & project…" modal fed by
+`GET /api/integrations/shortcut/teams` (proxies `GET /groups`) +
+`GET /api/integrations/shortcut/projects?team_id=` (the modal's left
+pane lists the groups, the right pane the chosen group's open
+projects as radio buttons), and `story_templates` (Text,
 JSON array of story shortcuts). The six OAuth rows are
 `managed_fields` on the `ServiceDef` — written by the callback
 redirect, hidden from the integrations form (the form shows the
@@ -421,7 +460,7 @@ refresh-in-the-agent pattern as `x_timeline`. Two setup-only HTTP
 endpoints — `POST /api/integrations/shortcut/probe` and
 `POST /api/integrations/shortcut/probe-teams` — accept either
 `api_token` or `access_token` in the body, validate against
-`GET /members` / `GET /teams` before the user saves anything, and
+`GET /members` / `GET /groups` before the user saves anything, and
 write `shortcut_probe_<outcome>` / `shortcut_probe_teams_<outcome>`
 audit rows (the credential never lands on an audit row).
 `shortcut_create_story` is the first registered **write** tool

@@ -3,7 +3,7 @@
 //! Focused on the cross-cutting concerns the unit tests in
 //! `nagent-agents` cannot exercise:
 //!
-//! 1. `GET /v1/agents` lists exactly the ten `github_*` tools when
+//! 1. `GET /v1/agents` lists exactly the eleven `github_*` tools when
 //!    the `github-agent` feature is on.
 //! 2. The `github` `ServiceDef` shape (PAT password field +
 //!    probe-filled `username`, both never echoed on edit).
@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 const TEST_TOKEN: &str = "ghp_e2e_token_0123456789abcdef";
 
-/// The ten tool names registered by the `github-agent` feature.
+/// The eleven tool names registered by the `github-agent` feature.
 const GITHUB_TOOLS: &[&str] = &[
     "github_me",
     "github_list_repos",
@@ -40,6 +40,7 @@ const GITHUB_TOOLS: &[&str] = &[
     "github_list_notifications",
     "github_search_issues",
     "github_read_file",
+    "github_list_accounts",
 ];
 
 async fn connect_db(cfg: &nagent_server::config::AuthConfig) -> nagent_db::Db {
@@ -197,14 +198,14 @@ fn route(path: &str) -> (u16, &'static str, String) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn agent_registry_contains_exactly_ten_github_tools() {
+fn agent_registry_contains_exactly_eleven_github_tools() {
     use nagent_agents::config::AgentConfigs;
     use nagent_agents::egress::EgressPool;
     use nagent_agents::AgentRegistry;
     let registry = AgentRegistry::from_config(&AgentConfigs::default(), true, &EgressPool::new());
     let names: Vec<String> = registry.iter().map(|a| a.name().to_string()).collect();
     let github: Vec<&String> = names.iter().filter(|n| n.starts_with("github_")).collect();
-    assert_eq!(github.len(), 10, "expected exactly ten github_* tools");
+    assert_eq!(github.len(), 11, "expected exactly eleven github_* tools");
     for tool in GITHUB_TOOLS {
         assert!(
             names.iter().any(|n| n == tool),
@@ -227,7 +228,8 @@ fn github_service_def_shape() {
     let reg = ServiceRegistry::new(&[GITHUB_SERVICE]);
     let svc = reg.get("github").expect("github service registered");
     // Plan 1795686864347: PAT + username + the two dashboard fields.
-    assert_eq!(svc.fields.len(), 4);
+    // Plan 1795793328177: + default_account + accounts + repo_accounts.
+    assert_eq!(svc.fields.len(), 7);
     let pat = &svc.fields[0];
     assert_eq!(pat.key, "personal_access_token");
     assert_eq!(pat.kind, FieldKind::Password);
@@ -248,6 +250,29 @@ fn github_service_def_shape() {
     assert_eq!(repos.kind, FieldKind::Text);
     assert!(!repos.required);
     assert!(repos.echo_on_edit, "repo list is not a secret; it echoes");
+    let default_account = &svc.fields[4];
+    assert_eq!(default_account.key, "default_account");
+    assert_eq!(default_account.kind, FieldKind::Text);
+    assert!(!default_account.required);
+    assert!(
+        default_account.echo_on_edit,
+        "the account name is not a secret; it echoes"
+    );
+    let accounts = &svc.fields[5];
+    assert_eq!(accounts.key, "accounts");
+    assert!(!accounts.required);
+    assert!(
+        !accounts.echo_on_edit,
+        "the accounts blob holds tokens — never echoed (AGENTS.md §6)"
+    );
+    let repo_accounts = &svc.fields[6];
+    assert_eq!(repo_accounts.key, "repo_accounts");
+    assert!(!repo_accounts.required);
+    assert!(!repo_accounts.echo_on_edit);
+    // The two multi-token / out-of-band fields are managed exclusively
+    // through the dedicated endpoints, never the generic form submit.
+    assert!(svc.managed_fields.contains(&"accounts"));
+    assert!(svc.managed_fields.contains(&"repo_accounts"));
 }
 
 #[test]
@@ -466,7 +491,7 @@ async fn put_probe_invoke_list_flow_against_loopback() {
         "probe + invoke both hit the fixture"
     );
 
-    // 4. GET /v1/agents lists the ten github tools.
+    // 4. GET /v1/agents lists the eleven github tools.
     let resp = app
         .clone()
         .oneshot(
@@ -492,8 +517,8 @@ async fn put_probe_invoke_list_flow_against_loopback() {
         .collect();
     assert_eq!(
         names.len(),
-        10,
-        "GET /v1/agents must list the ten github tools"
+        11,
+        "GET /v1/agents must list the eleven github tools"
     );
     for tool in GITHUB_TOOLS {
         assert!(names.contains(tool), "missing `{tool}` in /v1/agents");

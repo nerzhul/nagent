@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::client::GithubClient;
-use super::{confirm_reason, parse_repo, run};
+use super::{
+    account_prop, confirm_reason_for, parse_account_arg, parse_repo, resolve_repo_account, run,
+};
 use crate::agents::{Agent, AgentError, UserContext};
 
 pub struct GetRepoAgent {
@@ -27,7 +29,9 @@ impl Agent for GetRepoAgent {
         "Fetch a single GitHub repository's details (`GET /repos/{owner}/{repo}`): \
          description, visibility, default branch, language, stars, watchers, open issues, \
          topics, created/updated/pushed dates, homepage, license. Args: `owner` and `repo` \
-         as separate fields (or `repo` as `\"owner/repo\"`). Read-only."
+         as separate fields (or `repo` as `\"owner/repo\"`), `account?` (a name from \
+         `github_list_accounts` or `\"default\"`; omit to auto-resolve the account that \
+         can read the repo). Read-only."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -42,6 +46,7 @@ impl Agent for GetRepoAgent {
                     "type": "string",
                     "description": "Repository name, or `\"owner/repo\"`. When it contains a slash, `owner` is optional.",
                 },
+                "account": account_prop(false),
             },
             "required": ["repo"],
             "additionalProperties": false,
@@ -63,9 +68,9 @@ impl Agent for GetRepoAgent {
     fn requires_confirmation(
         &self,
         _ctx: &UserContext,
-        _args: &Value,
+        args: &Value,
     ) -> crate::agents::ConfirmationDecision {
-        confirm_reason(self.name())
+        confirm_reason_for(self.name(), parse_account_arg(args).as_deref())
     }
 
     fn untrusted_output(&self) -> bool {
@@ -92,18 +97,28 @@ impl Agent for GetRepoAgent {
                 (owner.to_string(), repo.to_string())
             }
         };
+        let full = format!("{owner}/{repo}");
+        let account = resolve_repo_account(
+            &self.client,
+            ctx,
+            &full,
+            parse_account_arg(&args).as_deref(),
+        )
+        .await?;
+        let account_name = account.name.clone();
         let path = format!("/repos/{owner}/{repo}");
         run(
             &self.client,
             ctx,
+            &account,
             self.name(),
             &args,
-            &path,
-            Vec::new(),
-            |raw, _cfg| {
+            (path.as_str(), Vec::new()),
+            move |raw, _cfg| {
                 json!({
                     "ok": true,
                     "data": {
+                        "account": account_name,
                         "full_name": raw.get("full_name"),
                         "description": raw.get("description"),
                         "private": raw.get("private"),

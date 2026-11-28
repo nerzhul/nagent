@@ -885,6 +885,9 @@
       <header class="prs-header">
         <h2>My GitHub pull requests</h2>
         <div class="prs-header-actions">
+          <select id="prs-account-filter" aria-label="Filter by account">
+            <option value="all" selected>All accounts</option>
+          </select>
           <select id="prs-repo-filter" aria-label="Filter by repository">
             <option value="">All repositories</option>
           </select>
@@ -907,6 +910,7 @@
           <thead>
             <tr>
               <th data-sort="repo" scope="col">Repo</th>
+              <th data-sort="account" scope="col">Account</th>
               <th data-sort="number" scope="col">#</th>
               <th data-sort="title" scope="col">Title</th>
               <th data-sort="author" scope="col">Author</th>
@@ -932,6 +936,7 @@
   <script src="/static/shortcut-stories.js" defer></script>
   <script src="/static/github-prs.js" defer></script>
   <script src="/static/github-repo-picker.js" defer></script>
+  <script src="/static/shortcut-project-picker.js" defer></script>
   <script type="module" src="/static/chat.js"></script>
   <script type="module" src="/static/app.js"></script>
 

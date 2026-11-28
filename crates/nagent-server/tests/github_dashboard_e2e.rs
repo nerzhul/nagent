@@ -601,7 +601,14 @@ async fn probe_repo_ok_404_400_and_missing_token() {
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = body_json(resp).await;
-    assert!(body["error"].as_str().unwrap().contains("no access"));
+    // Plan 1795793328177: the all-accounts-404 message names the
+    // accounts tried — never a token (AGENTS.md §6).
+    let err = body["error"].as_str().unwrap();
+    assert!(
+        err.contains("can read") && err.contains("default"),
+        "404 lists the accounts tried: {err}"
+    );
+    assert!(!err.contains(TEST_TOKEN), "no token in the 404 body");
 
     // Malformed repo → 400 before any network call.
     let before = fx.requests().len();

@@ -103,11 +103,14 @@ pub struct ProbeRepoBody {
     pub repo: String,
 }
 
-/// JSON shape returned by the probe on success.
+/// JSON shape returned by the probe on success. `account` is the
+/// name of the configured account that could read the repo (plan
+/// 1795793328177) — a name, never a token.
 #[derive(Debug, Serialize)]
 pub struct ProbeRepoResponse {
     pub ok: bool,
     pub repo: serde_json::Value,
+    pub account: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,41 +151,32 @@ fn base_url_host(cfg: &GithubConfig) -> String {
         .unwrap_or_default()
 }
 
-/// Read + decrypt the caller's `github.personal_access_token`
-/// vault row. The plaintext only lives in the returned
-/// `SecretString` and is handed to `GithubClient::get` — never in
-/// an error path (AGENTS.md §6).
-// `Response` is axum's error carrier and is large by design; boxing would
-// ripple through every handler's `Ok(resp)` arm for no runtime gain on a
-// cold error path.
+/// Read + decrypt one raw `github` vault field.
+// See below for why the `Response` error variant is not boxed.
 #[allow(clippy::result_large_err)]
-async fn vault_token(
+async fn vault_field(
     state: &GithubProbeRepoState,
     user_id: uuid::Uuid,
-) -> Result<SecretString, Response> {
+    field: &str,
+) -> Result<Option<SecretString>, Response> {
     let row = state
         .probe
         .store
         .for_user(user_id)
         .credentials()
-        .fetch("github", "personal_access_token")
+        .fetch("github", field)
         .await
         .map_err(|e| {
-            tracing::warn!(user = %user_id, error = %e, "github probe-repo: vault read failed");
+            tracing::warn!(user = %user_id, field, error = %e, "github probe-repo: vault read failed");
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to read the GitHub credentials from the vault".into(),
             )
-        })?
-        .ok_or_else(|| {
-            error_response(
-                StatusCode::BAD_REQUEST,
-                "the GitHub integration is not configured; save a personal access token in \
-                 Settings → Integrations → GitHub first"
-                    .into(),
-            )
         })?;
-    decrypt(
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let plaintext = decrypt(
         &state.key,
         &EncryptedSecret {
             nonce: row.nonce,
@@ -190,17 +184,129 @@ async fn vault_token(
         },
     )
     .map_err(|e| {
-        tracing::warn!(user = %user_id, error = %e, "github probe-repo: vault decrypt failed");
+        tracing::warn!(user = %user_id, field, error = %e, "github probe-repo: vault decrypt failed");
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to decrypt the GitHub token (the credentials key may have been \
+            "failed to decrypt the GitHub credentials (the credentials key may have been \
              rotated); re-save the token in Settings → Integrations"
                 .into(),
         )
-    })
+    })?;
+    Ok(Some(plaintext))
 }
 
-/// Handler: verify the saved PAT has access to `body.repo`.
+/// Every configured account as `(name, token)`, default first
+/// (plan 1795793328177): `personal_access_token` as `"default"`,
+/// then the parsed `github.accounts` blob.
+// See `vault_field` for why the `Response` error variant is not boxed.
+#[allow(clippy::result_large_err)]
+async fn vault_accounts(
+    state: &GithubProbeRepoState,
+    user_id: uuid::Uuid,
+) -> Result<Vec<(String, SecretString)>, Response> {
+    use secrecy::ExposeSecret;
+    let mut out: Vec<(String, SecretString)> = Vec::new();
+    if let Some(pat) = vault_field(state, user_id, "personal_access_token").await? {
+        out.push((nagent_github::DEFAULT_ACCOUNT_NAME.to_string(), pat));
+    }
+    if let Some(blob) = vault_field(state, user_id, "accounts").await? {
+        let defs =
+            nagent_github::parse_accounts(blob.expose_secret(), state.client.cfg.max_accounts)
+                .map_err(|e| error_response(StatusCode::BAD_REQUEST, e.to_string()))?;
+        for def in defs {
+            out.push((def.name, def.token));
+        }
+    }
+    if out.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "the GitHub integration is not configured; save a personal access token in \
+             Settings → Integrations → GitHub first"
+                .into(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Persist one `github` vault field, carrying every other field's
+/// ciphertext over verbatim (the DB upsert replaces all rows of
+/// the service, so a partial write must re-supply them — same
+/// rule as `PUT /api/integrations/:id/credentials`).
+// See `vault_field` for why the `Response` error variant is not boxed.
+#[allow(clippy::result_large_err)]
+async fn write_vault_field(
+    state: &GithubProbeRepoState,
+    user_id: uuid::Uuid,
+    field: &str,
+    plaintext: &str,
+) -> Result<(), Response> {
+    let creds = state.probe.store.for_user(user_id).credentials();
+    let keys = creds.list_field_keys("github").await.map_err(|e| {
+        tracing::warn!(user = %user_id, error = %e, "github probe-repo: list_field_keys failed");
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read the GitHub credentials from the vault".into(),
+        )
+    })?;
+    let mut rows: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::with_capacity(keys.len());
+    for key in keys {
+        if key == field {
+            continue;
+        }
+        if let Ok(Some(row)) = creds.fetch("github", &key).await {
+            rows.push((key, row.nonce, row.ciphertext));
+        }
+    }
+    let sealed = crate::credentials::crypto::encrypt(&state.key, plaintext).map_err(|e| {
+        tracing::warn!(user = %user_id, error = %e, "github probe-repo: encrypt failed");
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encrypt the repo→account map".into(),
+        )
+    })?;
+    rows.push((field.to_string(), sealed.nonce, sealed.ciphertext));
+    creds.upsert("github", &rows).await.map_err(|e| {
+        tracing::warn!(user = %user_id, error = %e, "github probe-repo: upsert failed");
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to persist the repo→account map".into(),
+        )
+    })?;
+    Ok(())
+}
+
+/// Record `repo → account` in the `github.repo_accounts` vault map
+/// so the dashboard and the repo-scoped tools resolve instantly.
+/// Best-effort: a failure here never fails the probe.
+async fn record_repo_account(
+    state: &GithubProbeRepoState,
+    user_id: uuid::Uuid,
+    repo: &str,
+    account: &str,
+) {
+    use secrecy::ExposeSecret;
+    let mut map: std::collections::HashMap<String, String> =
+        match vault_field(state, user_id, "repo_accounts").await {
+            Ok(Some(blob)) => serde_json::from_str(blob.expose_secret()).unwrap_or_default(),
+            _ => std::collections::HashMap::new(),
+        };
+    map.insert(repo.to_string(), account.to_string());
+    let blob = serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string());
+    if let Err(resp) = write_vault_field(state, user_id, "repo_accounts", &blob).await {
+        tracing::warn!(
+            user = %user_id,
+            repo,
+            account,
+            "github probe-repo: could not persist repo→account map"
+        );
+        let _ = resp;
+    }
+}
+
+/// Handler: verify that at least one configured account has access
+/// to `body.repo` (plan 1795793328177 — every account is tried,
+/// default first) and record the winning account in the
+/// `github.repo_accounts` vault map.
 pub async fn probe_repo(
     State(state): State<GithubProbeRepoState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -220,72 +326,118 @@ pub async fn probe_repo(
             ),
         ));
     };
-    let token = match vault_token(&state, user.id).await {
-        Ok(t) => t,
+    let accounts = match vault_accounts(&state, user.id).await {
+        Ok(a) => a,
         Err(resp) => {
             write_probe_audit(&state.probe, user.id, &host, ProbeOutcome::BadRequest);
             return Ok(resp);
         }
     };
-    match nagent_github::get_repo(&state.client, &token, user.id, owner, repo).await {
-        Ok(summary) => {
-            write_probe_audit(&state.probe, user.id, &host, ProbeOutcome::Ok);
-            Ok((
-                StatusCode::OK,
-                Json(ProbeRepoResponse {
-                    ok: true,
-                    repo: summary,
-                }),
-            )
-                .into_response())
+    let full = format!("{owner}/{repo}");
+    // Try every account, default first; first success wins.
+    let mut first_auth_err: Option<GithubError> = None;
+    let mut saw_404 = false;
+    for (name, token) in &accounts {
+        match nagent_github::get_repo(&state.client, token, user.id, name, owner, repo).await {
+            Ok(summary) => {
+                // Record which account can read the repo so the
+                // dashboard and repo-scoped tools skip re-probing.
+                record_repo_account(&state, user.id, &full, name).await;
+                write_probe_audit(&state.probe, user.id, &host, ProbeOutcome::Ok);
+                return Ok((
+                    StatusCode::OK,
+                    Json(ProbeRepoResponse {
+                        ok: true,
+                        repo: summary,
+                        account: name.clone(),
+                    }),
+                )
+                    .into_response());
+            }
+            Err(GithubError::Upstream { status: 404, .. }) => {
+                saw_404 = true;
+            }
+            Err(e @ GithubError::Unauthorized(_)) => {
+                if first_auth_err.is_none() {
+                    first_auth_err = Some(e);
+                }
+            }
+            Err(e) => {
+                let (outcome, resp) = probe_err_to_response(&e);
+                write_probe_audit(&state.probe, user.id, &host, outcome);
+                return Ok(resp);
+            }
         }
-        Err(e) => {
-            let (outcome, resp) = match &e {
-                GithubError::Unauthorized(msg) => (
-                    ProbeOutcome::AuthRejected,
-                    error_response(StatusCode::UNAUTHORIZED, msg.clone()),
-                ),
-                GithubError::RateLimited { hint } => (
-                    ProbeOutcome::UpstreamError,
-                    error_response(StatusCode::TOO_MANY_REQUESTS, hint.clone()),
-                ),
-                GithubError::Upstream { status, body } if *status == 404 => (
-                    ProbeOutcome::UpstreamError,
-                    error_response(
-                        StatusCode::NOT_FOUND,
-                        "no access to this repo with the saved token (or it does not exist)".into(),
-                    ),
-                ),
-                GithubError::Upstream { status, body } => (
-                    ProbeOutcome::UpstreamError,
-                    error_response(
-                        StatusCode::BAD_GATEWAY,
-                        format!("GitHub returned HTTP {status}: {body}"),
-                    ),
-                ),
-                GithubError::SandboxDenied(msg) => (
-                    ProbeOutcome::ValidationFailed,
-                    error_response(StatusCode::FORBIDDEN, msg.clone()),
-                ),
-                GithubError::InvalidArguments(msg) => (
-                    ProbeOutcome::BadRequest,
-                    error_response(StatusCode::BAD_REQUEST, msg.clone()),
-                ),
-                GithubError::ResponseExceeded { budget } => (
-                    ProbeOutcome::UpstreamError,
-                    error_response(
-                        StatusCode::BAD_GATEWAY,
-                        format!("GitHub response exceeded the {budget}-byte budget"),
-                    ),
-                ),
-                GithubError::Transport(msg) => (
-                    ProbeOutcome::TransportError,
-                    error_response(StatusCode::BAD_GATEWAY, msg.clone()),
-                ),
-            };
+    }
+    // No account could read it: 404 when at least one answered 404
+    // (genuinely invisible), else the first credential error (e.g.
+    // every token revoked → 401).
+    if !saw_404 {
+        if let Some(e) = first_auth_err {
+            let (outcome, resp) = probe_err_to_response(&e);
             write_probe_audit(&state.probe, user.id, &host, outcome);
-            Ok(resp)
+            return Ok(resp);
         }
+    }
+    write_probe_audit(&state.probe, user.id, &host, ProbeOutcome::UpstreamError);
+    Ok(error_response(
+        StatusCode::NOT_FOUND,
+        format!(
+            "no configured GitHub account can read `{full}` (tried: {})",
+            accounts
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ))
+}
+
+/// Map one wire error onto `(audit outcome, HTTP response)` for the
+/// probe. Messages never carry a token (AGENTS.md §6).
+fn probe_err_to_response(e: &GithubError) -> (ProbeOutcome, Response) {
+    match e {
+        GithubError::Unauthorized(msg) => (
+            ProbeOutcome::AuthRejected,
+            error_response(StatusCode::UNAUTHORIZED, msg.clone()),
+        ),
+        GithubError::RateLimited { hint } => (
+            ProbeOutcome::UpstreamError,
+            error_response(StatusCode::TOO_MANY_REQUESTS, hint.clone()),
+        ),
+        GithubError::Upstream { status, body } if *status == 404 => (
+            ProbeOutcome::UpstreamError,
+            error_response(
+                StatusCode::NOT_FOUND,
+                "no access to this repo with the saved token (or it does not exist)".into(),
+            ),
+        ),
+        GithubError::Upstream { status, body } => (
+            ProbeOutcome::UpstreamError,
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("GitHub returned HTTP {status}: {body}"),
+            ),
+        ),
+        GithubError::SandboxDenied(msg) => (
+            ProbeOutcome::ValidationFailed,
+            error_response(StatusCode::FORBIDDEN, msg.clone()),
+        ),
+        GithubError::InvalidArguments(msg) => (
+            ProbeOutcome::BadRequest,
+            error_response(StatusCode::BAD_REQUEST, msg.clone()),
+        ),
+        GithubError::ResponseExceeded { budget } => (
+            ProbeOutcome::UpstreamError,
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("GitHub response exceeded the {budget}-byte budget"),
+            ),
+        ),
+        GithubError::Transport(msg) => (
+            ProbeOutcome::TransportError,
+            error_response(StatusCode::BAD_GATEWAY, msg.clone()),
+        ),
     }
 }
 
